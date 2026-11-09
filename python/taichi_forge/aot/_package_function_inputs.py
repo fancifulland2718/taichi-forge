@@ -273,6 +273,7 @@ def discover(sources, imported, *, preparation_receivers=None, resource_inventor
         # A rebinding invalidates an earlier owner fact. Nested definitions have
         # their own lexical scope and cannot lend assignments to this call.
         nodes = []
+        condition_value = None
 
         def walk(statement):
             if isinstance(statement, ast.Lambda):
@@ -295,6 +296,14 @@ def discover(sources, imported, *, preparation_receivers=None, resource_inventor
             if isinstance(statement, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
                 return
             nodes.append(statement)
+            if condition_value is not None and isinstance(statement, (ast.If, ast.IfExp)):
+                choice = condition_value(statement.test)
+                if choice is not None:
+                    walk(statement.test)
+                    selected = statement.body if choice else statement.orelse
+                    for child in selected if isinstance(selected, list) else [selected]:
+                        walk(child)
+                    return
             for child in ast.iter_child_nodes(statement):
                 walk(child)
 
@@ -700,6 +709,40 @@ def discover(sources, imported, *, preparation_receivers=None, resource_inventor
             result = source_callable(expression, namespace)
             return (result, None) if inspect.isfunction(result) else (None, None)
 
+        def proven_condition(expression):
+            fact = value(expression)
+            if isinstance(fact, _Literal) and type(fact.value) in (bool, int, float, str, type(None)):
+                return bool(fact.value)
+            if isinstance(expression, ast.UnaryOp) and isinstance(expression.op, ast.Not):
+                answer = proven_condition(expression.operand)
+                return None if answer is None else not answer
+            if isinstance(expression, ast.BoolOp):
+                answers = [proven_condition(item) for item in expression.values]
+                if isinstance(expression.op, ast.And):
+                    return False if False in answers else True if all(answer is True for answer in answers) else None
+                return True if True in answers else False if all(answer is False for answer in answers) else None
+            if (isinstance(expression, ast.Compare) and len(expression.ops) == 1
+                    and isinstance(expression.ops[0], (ast.Is, ast.IsNot))):
+                left, right = value(expression.left), value(expression.comparators[0])
+                if isinstance(left, _Literal) and left.value is None:
+                    left, right = right, left
+                if isinstance(right, _Literal) and right.value is None:
+                    if isinstance(left, _Literal):
+                        absent = left.value is None
+                    elif isinstance(left, _Owner) or isinstance(left, _Resource) and not left.optional:
+                        absent = False
+                    else:
+                        return None
+                    return absent if isinstance(expression.ops[0], ast.Is) else not absent
+            return None
+
+        # Keep the original conservative rebinding/escape facts above.
+        # Inventory and signature discovery must agree on reachable calls;
+        # unknown or rebound optional inputs still contribute both paths.
+        condition_value = proven_condition
+        nodes = []
+        for statement in node.body:
+            walk(statement)
         return value, call_target, nodes, module
 
     while pending:
@@ -895,6 +938,13 @@ def discover(sources, imported, *, preparation_receivers=None, resource_inventor
             if callee in kernels:
                 record(callee, bound.arguments, call)
             elif any(item is not None for item in bound.arguments.values()):
+                for name, parameter in signature.parameters.items():
+                    if name not in bound.arguments and parameter.default is not inspect.Parameter.empty:
+                        try:
+                            static_key(parameter.default)
+                            bound.arguments[name] = _Literal(parameter.default)
+                        except ValueError:
+                            pass
                 inputs = {
                     key: _Mapping(tuple(item.items())) if isinstance(item, dict) else item
                     for key, item in bound.arguments.items()

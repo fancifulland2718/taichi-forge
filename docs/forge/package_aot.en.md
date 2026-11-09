@@ -1187,6 +1187,18 @@ to the new owner. Local CPU/CUDA checks cover new sizes, different write sets,
 independent backups and source-free bit-exact copies. This is a shared mechanism
 check, not qualification of the full rigid capacity checkpoint.
 
+Preparation may pass that query result or a proven immutable Field tuple as an
+ordinary constructor argument to the backup owner. The backup need not retain
+the entire source owner. Existing declared call sites establish the input domain;
+mutable lists, rebound parameters and unproven Field sources reject. The normal
+Host preparation still performs the query, without a second manual Field list.
+Source analysis preserves literal Host defaults: a proven `None` branch does not
+require an absent Field, while present inputs retain source validation. Unknown
+or rebound inputs cannot be treated as defaults. Local CPU/CUDA checks cover
+constructor/preparation forwarding, source-free consumption at new sizes,
+optional Field save/restore and unknown-source rejection. This does not admit
+arbitrary Python sequences.
+
 Version 41 also admits borrowing an entire declared flat StructField through
 `scope.borrow(..., source_scope=True)`. Member bindings retain the original
 allocation namespace and native layout; the record is not an independent array.

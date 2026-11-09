@@ -2317,6 +2317,76 @@ def test_package_checkpoint_sequence_rejects_unproven_sources(tmp_path, monkeypa
 
 
 @test_utils.test(arch=[ti.cpu, ti.cuda], offline_cache=False)
+@pytest.mark.parametrize('present', [False, True])
+def test_package_write_inventory_optional_host_input(tmp_path, monkeypatch, present):
+    source = CYCLIC_WRITE_INVENTORY_SOURCE.replace('''def append_step(solver, builder):
+    builder.dispatch(solver.step)''', '''def append_step(solver, builder, extra=None):
+    if solver.n > 0 and extra is not None:
+        builder.dispatch(solver.write_optional, template_args={'extra': extra})
+    builder.dispatch(solver.step)''')
+    source = source.replace('    def record_unrelated(self, builder):\n        builder.dispatch(self.unrelated)', '''    @ti.kernel
+    def write_optional(self, extra: ti.template()):
+        for i in extra:
+            extra[i] += 2
+    def record_unrelated(self, builder):
+        append_step(self, builder, self.unused)''')
+    if present:
+        source = source.replace('append_step(self, builder)\n', 'append_step(self, builder, self.unused)\n')
+    source += '''
+    def update_optional(self):
+        self.write_optional(self.unused)
+    def graph(self):
+        builder = ti.graph.GraphBuilder()
+        self.record(builder)
+        return builder.compile()
+'''
+    package = _source_package(tmp_path, monkeypatch, source)
+    before = ti.lang.impl.get_runtime().get_num_compiled_functions()
+    assert ti.aot.check_package(package)['declaration_check'] == 'passed'
+    assert package.model.constructors == 0
+    assert ti.lang.impl.get_runtime().get_num_compiled_functions() == before
+    manifest = ti.aot.export_package(package, tmp_path / 'sdk')
+    with Runtime(manifest['target']) as runtime, load_package(runtime, tmp_path / 'sdk') as code:
+        model = code.host.Model(7)
+        assert len(model.checkpoint.copies) == (2 if present else 1)
+        graph = model.graph()
+        graph.run({})
+        for backup in model.checkpoint.copies:
+            backup.save()
+        graph.run({})
+        for backup in model.checkpoint.copies:
+            backup.restore()
+        np.testing.assert_array_equal(model.values.to_numpy(), np.ones(7))
+        np.testing.assert_array_equal(model.unused.to_numpy(), np.full(7, 2 if present else 0))
+
+
+@test_utils.test(arch=ti.cpu, offline_cache=False)
+@pytest.mark.parametrize('rebound', [False, True])
+def test_package_write_inventory_does_not_assume_unknown_input_absent(tmp_path, monkeypatch, rebound):
+    source = CYCLIC_WRITE_INVENTORY_SOURCE.replace('''def append_step(solver, builder):
+    builder.dispatch(solver.step)''', '''def append_step(solver, builder, extra=None):
+    if extra is not None:
+        builder.dispatch(solver.write_optional, template_args={'extra': extra})
+    builder.dispatch(solver.step)''')
+    source = source.replace('    def record_unrelated(self, builder):', '''    @ti.kernel
+    def write_optional(self, extra: ti.template()):
+        for i in extra:
+            extra[i] += 2
+    def record_unrelated(self, builder):''')
+    if rebound:
+        source = source.replace('def append_step(solver, builder, extra=None):',
+                                'def append_step(solver, builder, extra=None):\n    extra = solver.unknown')
+    else:
+        source = source.replace('append_step(self, builder)\n', 'append_step(self, builder, self.unknown)\n')
+    package = _source_package(tmp_path, monkeypatch, source)
+    before = ti.lang.impl.get_runtime().get_num_compiled_functions()
+    with pytest.raises(ValueError, match='unproven template inputs: extra'):
+        ti.aot.check_package(package)
+    assert package.model.constructors == 0
+    assert ti.lang.impl.get_runtime().get_num_compiled_functions() == before
+
+
+@test_utils.test(arch=[ti.cpu, ti.cuda], offline_cache=False)
 def test_package_write_inventory_keeps_nested_and_conditional_resources(tmp_path, monkeypatch):
     state = '''
 @ti.data_oriented
