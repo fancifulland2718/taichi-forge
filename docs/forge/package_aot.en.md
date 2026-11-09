@@ -1780,6 +1780,14 @@ new instances and sizes, wrong members/dimensions/packages, and retained Graphs.
 This source-scope contract still names a declared allocation role; independent
 caller allocations use the existing typed `external=True` borrow instead.
 
+Frozen binding factories may return a record or `None`, including a local
+factory call inside preparation. Definition analysis retains the possible
+allocation members and still rejects conflicting source contracts. Constant
+string member prefixes and ordinary readers that distinguish a declared owner
+from `collections.abc.Mapping` are supported. This does not execute the factory
+at export, specialize code by boundary combination, or add runtime checks.
+Local CPU/CUDA checks cover absent/rebound records and source-free consumption.
+
 Preparation declarations may also borrow a `self` Field assigned in another ordinary
 binding method. There must be one direct assignment source, with its original
 allocation contract determined by consistent proven sources; initial `None` in the constructor is

@@ -9,6 +9,7 @@ import builtins
 import copy
 import functools
 from collections import deque
+from collections.abc import Mapping
 from dataclasses import dataclass, fields, is_dataclass, MISSING
 import inspect
 import importlib.util
@@ -896,7 +897,7 @@ def discover(sources, imported, *, preparation_receivers=None, resource_inventor
                 expression.value is None or type(expression.value) in (bool, int, float, str)
             ):
                 return _Literal(expression.value)
-            if resource_inventory is not None and isinstance(expression, ast.BinOp) and isinstance(expression.op, ast.Add):
+            if isinstance(expression, ast.BinOp) and isinstance(expression.op, ast.Add):
                 left, right = child(expression.left), child(expression.right)
                 if isinstance(left, _Literal) and isinstance(right, _Literal) and type(left.value) is type(right.value) is str:
                     return _Literal(left.value + right.value)
@@ -1029,7 +1030,7 @@ def discover(sources, imported, *, preparation_receivers=None, resource_inventor
                 ):
                     item = child(expression.args[0])
                     cls = source(expression.args[1])
-                    if inspect.isclass(cls) and type(cls) is type:
+                    if inspect.isclass(cls) and (type(cls) is type or cls is Mapping):
                         def classify(item):
                             if isinstance(item, _Choice):
                                 answers = tuple(classify(arm) for arm in item.alternatives)
@@ -1125,9 +1126,18 @@ def discover(sources, imported, *, preparation_receivers=None, resource_inventor
                     if return_key not in return_cache:
                         evaluate, _, returned_nodes, _, _ = build_context(callee, return_inputs, (*return_chain, callee))
                         results = [evaluate(part.value) for part in returned_nodes if isinstance(part, ast.Return)]
-                        return_cache[return_key] = (
-                            results[0] if results and all(item == results[0] for item in results) else None
-                        )
+                        if results and all(item == results[0] for item in results):
+                            returned = results[0]
+                        elif (any(isinstance(item, _Record) for item in results)
+                              and all(isinstance(item, _Record)
+                                      or isinstance(item, _Literal) and item.value is None for item in results)):
+                            # An optional frozen binding retains each member's
+                            # allocation source. Presence stays a Host choice;
+                            # distinct source contracts are still checked below.
+                            returned = _Choice(('record_return', return_key), tuple(dict.fromkeys(results)))
+                        else:
+                            returned = None
+                        return_cache[return_key] = returned
                     if return_cache[return_key] is not None and (
                             resource_inventory is None or _complete_fact(return_cache[return_key])):
                         return return_cache[return_key]
@@ -1233,12 +1243,17 @@ def discover(sources, imported, *, preparation_receivers=None, resource_inventor
             if not isinstance(receiver, _Owner) or receiver.identity != owner:
                 continue
             fact = value(expression)
-            if isinstance(fact, _Resource) and (not fact.optional or item.get("optional_input")):
-                source = owners[fact.owner.identity].get(fact.path[0], {})
-                if source.get("kind") == "dense_field" and (
-                    len(fact.path) == 1 or source.get("struct_field") and len(fact.path) == 2
-                ):
-                    binding_domains.setdefault((owner, name), set()).add((fact.owner.identity, fact.path))
+            alternatives = [fact]
+            while alternatives:
+                candidate = alternatives.pop()
+                if isinstance(candidate, _Choice):
+                    alternatives.extend(candidate.alternatives)
+                elif isinstance(candidate, _Resource) and (not candidate.optional or item.get("optional_input")):
+                    source = owners[candidate.owner.identity].get(candidate.path[0], {})
+                    if source.get("kind") == "dense_field" and (
+                        len(candidate.path) == 1 or source.get("struct_field") and len(candidate.path) == 2
+                    ):
+                        binding_domains.setdefault((owner, name), set()).add((candidate.owner.identity, candidate.path))
         if preparation_receivers is not None and function in preparation_receivers:
             receivers = [(key, item.identity) for key, item in arguments.items() if isinstance(item, _Owner)]
             if not receivers:

@@ -5504,7 +5504,7 @@ def test_package_prepared_inputs_accept_late_callers_with_known_contract(tmp_pat
     assert "LATE_INPUT_SOURCE_FREE_OK" in result.stdout
 
 
-@pytest.mark.parametrize("alias", [False, True, "explicit", "cross_method"])
+@pytest.mark.parametrize("alias", [False, True, "explicit", "cross_method", "mapping_reader", "optional_reader", "local_optional_reader"])
 @test_utils.test(arch=[ti.cpu, ti.cuda], offline_cache=False)
 def test_package_prepared_inputs_follow_record_factory_sources(tmp_path, monkeypatch, alias):
     source = _prepared_input_source()
@@ -5512,6 +5512,31 @@ def test_package_prepared_inputs_follow_record_factory_sources(tmp_path, monkeyp
         source = _prepared_field_alias_source(cross_method=alias == "cross_method")
     elif alias == "explicit":
         source = source.replace("self.consumer.prepare(binding)", "Model.prepare(self.consumer, binding)")
+    elif alias in ("mapping_reader", "optional_reader", "local_optional_reader"):
+        source = "from collections.abc import Mapping\n" + source
+        source = source.replace(
+            "return Binding(source.n, source.storage)",
+            "return Binding(read_member(source, 'n'), read_member(source, 'storage'))",
+        )
+        source += "\ndef read_member(owner, name):\n    if isinstance(owner, Mapping):\n        return owner.get(name)\n    return getattr(owner, name)\n"
+        if alias in ("optional_reader", "local_optional_reader"):
+            source = source.replace(
+                "def make_binding(source):\n    return Binding(read_member(source, 'n'), read_member(source, 'storage'))",
+                "def make_binding(source, prefix='stor', enabled=True):\n"
+                "    if not enabled:\n        return None\n"
+                "    return Binding(read_member(source, 'n'), read_member(source, prefix + 'age'))",
+            ).replace("binding = make_binding(self.source)", "binding = make_binding(self.source, enabled=self.enabled)")
+            source = source.replace("class Harness:\n    def __init__(self, n):", "class Harness:\n    def __init__(self, n):\n        self.enabled = True")
+            source = source.replace("        self.n = binding.n", "        if binding is not None:\n            self.n = binding.n")
+        if alias == "local_optional_reader":
+            start = source.index("    def prepare(self, binding):")
+            end = source.index("    @ti.kernel", start)
+            body = source[start:end].replace("binding", "selected")
+            body = body.replace("def prepare(self, selected):", "def prepare(self, binding):\n        selected = select_binding(binding)")
+            # Preserve the public record attribute while its local source is optional.
+            body = body.replace("scope.record('selected'", "scope.record('binding'")
+            source = source[:start] + body + source[end:]
+            source += "\ndef select_binding(binding):\n    if binding is None:\n        return None\n    if binding.n < 0:\n        return None\n    return binding\n"
     package, _ = _resource_context_fixture(tmp_path, monkeypatch, model=source)
     module = sys.modules["definition_fixture.model"]
     manifest = ti.aot.export_package(package, tmp_path / "sdk")
@@ -5571,6 +5596,15 @@ def test_package_prepared_inputs_follow_record_factory_sources(tmp_path, monkeyp
                 a.consumer.prepare(host.Binding(13, other_source.storage))
             assert set(runtime._resources) == resources
             assert getattr(a.consumer, contract["source_path"][0]) is b.source
+        if alias in ("optional_reader", "local_optional_reader"):
+            a.enabled = False
+            a.prepare()
+            a.consumer.step(17)
+            np.testing.assert_array_equal(a.consumer.output.to_numpy(), -1)
+            a.enabled = True
+            a.prepare()
+            a.consumer.step(17)
+            np.testing.assert_array_equal(a.consumer.output.to_numpy(), np.arange(7) + 17)
     probe = tmp_path / "consume_prepared_input.py"
     probe.write_text(
         textwrap.dedent("""
@@ -5634,13 +5668,19 @@ def test_package_cross_method_inputs_require_unique_proven_binding(tmp_path, mon
     assert sys.modules["definition_fixture.model"].constructors == 0
 
 
-@pytest.mark.parametrize("change", ["two_sources", "unreachable", "mutable"])
+@pytest.mark.parametrize("change", ["two_sources", "conditional_sources", "unreachable", "mutable"])
 @pytest.mark.parametrize("free_preparation", [False, True])
 @test_utils.test(arch=ti.cpu, offline_cache=False)
 def test_package_prepared_inputs_require_one_source_contract(tmp_path, monkeypatch, change, free_preparation):
     source = _prepared_input_source()
     if change == "two_sources":
         source += "\n    def other(self):\n        self.consumer.prepare(Binding(self.source.n, self.source.other))\n"
+    elif change == "conditional_sources":
+        source = source.replace(
+            "def make_binding(source):\n    return Binding(source.n, source.storage)",
+            "def make_binding(source):\n    if source.use_other:\n"
+            "        return Binding(source.n, source.other)\n    return Binding(source.n, source.storage)",
+        )
     elif change == "unreachable":
         source = source.replace("        self.consumer.prepare(binding)", "        pass")
     else:
