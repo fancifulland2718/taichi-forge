@@ -12962,6 +12962,33 @@ class Model:
 """
 
 
+@pytest.mark.parametrize("forwarded", [False, True])
+@test_utils.test(arch=[ti.cpu, ti.cuda], offline_cache=False)
+def test_package_scope_values_reuse_local_type_declarations(tmp_path, monkeypatch, forwarded):
+    source = SCOPE_VALUES_SOURCE.replace(
+        "        scope.value('shift', ti.types.vector(2, ti.f32))",
+        "        vector_type = ti.types.vector(2, ti.f32)\n"
+        "        scope.value('shift', vector_type)",
+    ).replace(
+        "        scope.value('transform', ti.types.matrix(2, 2, ti.f32))",
+        "        matrix_type = ti.types.matrix(2, 2, ti.f32)\n"
+        "        scope.value('transform', matrix_type)",
+    )
+    if forwarded:
+        source = source.replace("scope.value('shift', vector_type)", "declare_shift(scope, vector_type)")
+        source += "\ndef declare_shift(scope, dtype):\n    scope.value('shift', dtype)\n"
+    package = _source_package(tmp_path, monkeypatch, source)
+    manifest = ti.aot.export_package(package, tmp_path / "sdk")
+    assert sys.modules["definition_fixture.model"].constructors == 0
+    normal = package.Model(2.0, ti.Vector([1.0, 3.0]), ti.Matrix([[2.0, 1.0], [0.0, 4.0]]))
+    expected = normal.compute(3.0)
+    with Runtime(manifest["target"]) as runtime, load_package(runtime, tmp_path / "sdk") as code:
+        model = code.host.Model(2.0, [1.0, 3.0], [[2.0, 1.0], [0.0, 4.0]])
+        assert model.compute(3.0) == expected == 20.0
+        model.shift = [5.0, 7.0]
+        assert model.compute(3.0) == 28.0
+
+
 @pytest.mark.parametrize("host_tensor", [False, True])
 @pytest.mark.parametrize("scope_form", ["assigned", "inline", "factory_inline"])
 @test_utils.test(arch=[ti.cpu, ti.cuda, ti.vulkan], offline_cache=False)

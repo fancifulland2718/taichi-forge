@@ -1702,13 +1702,17 @@ def scope_declarations(
             ):
                 fail(module, statement, "ResourceScope.value requires a literal attribute name and fixed type")
             allowed.add(id(call.func.value))
+            try:
+                dtype = expand_local_type(args["dtype"], local_types, kind)
+            except ValueError as error:
+                fail(module, call, str(error))
             add(
                 member(scope, name.value),
                 member_spec(
                     scope,
                     name.value,
                     kind="value",
-                    type_node=args["dtype"],
+                    type_node=dtype,
                     **({"conditions": dict(conditions)} if conditions else {}),
                     **({"affects_plan": True} if plan_option.value else {}),
                     value_declaration=[statement.lineno, statement.col_offset],
