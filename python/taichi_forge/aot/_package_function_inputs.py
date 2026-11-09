@@ -786,9 +786,12 @@ def discover(sources, imported, *, preparation_receivers=None, resource_inventor
                 if isinstance(part.func, ast.Name) and isinstance(arguments.get(part.func.id), _Kernel):
                     known = True
                 pure_mapping_use = isinstance(part.func, ast.Attribute) and (
-                    (part.func.attr == "dispatch" and graph_source(part.func.value))
+                    (part.func.attr in ("dispatch", "private_scalar") and graph_source(part.func.value))
                     or (part.func.attr == "items" and not part.args and not part.keywords)
                 )
+                # A proven Graph private_scalar consumes a Python numeric value;
+                # reading a frozen record member here cannot mutate the record.
+                # An unrelated object's method with this name is still opaque.
                 if not pure_mapping_use and not getattr(part, "_package_resource_metadata", False):
                     exposed = [*part.args, *(k.value for k in part.keywords)]
                     if isinstance(part.func, ast.Attribute):

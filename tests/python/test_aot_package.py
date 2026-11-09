@@ -2467,6 +2467,49 @@ def append_step(solver, builder):
 '''
 
 
+@test_utils.test(arch=[ti.cpu, ti.cuda], offline_cache=False)
+def test_package_write_inventory_record_scalar_keeps_receiver(tmp_path, monkeypatch):
+    recipe = '''from dataclasses import dataclass
+@dataclass(frozen=True, slots=True)
+class Directed:
+    owner: object
+    kernel: object
+    gain: int
+    def record(self, builder):
+        region = builder.create_sequential(private_scope=True)
+        self.owner.dispatch(region, self.kernel,
+            region.private_scalar('gain', ti.i32, self.gain))
+        builder.append(region)
+
+def append_step(solver, builder):
+    Directed(solver, solver.step, 1).record(builder)
+    Directed(solver, solver.step, 3).record(builder)
+'''
+    source = CYCLIC_WRITE_INVENTORY_SOURCE.replace(
+        'def append_step(solver, builder):\n    builder.dispatch(solver.step)', recipe)
+    source = source.replace('    def step(self):', '    def step(self, gain: ti.i32):')
+    source = source.replace('            self.update(i)', '            self.values[i] += gain')
+    source = source.replace('    def record(self, builder):\n        append_step(self, builder)', '''    def record(self, builder):
+        append_step(self, builder)
+    def dispatch(self, builder, kernel, gain):
+        builder.dispatch(kernel, gain, template_args={'self': self})
+    def graph(self):
+        builder = ti.graph.GraphBuilder()
+        self.record(builder)
+        return builder.compile()''')
+    package = _source_package(tmp_path, monkeypatch, source)
+    manifest = ti.aot.export_package(package, tmp_path / 'sdk')
+    with Runtime(manifest['target']) as runtime, load_package(runtime, tmp_path / 'sdk') as code:
+        for n in (5, 19):
+            normal, loaded = package.Model(n), code.host.Model(n)
+            assert len(loaded.checkpoint.copies) == 1
+            assert loaded.checkpoint.copies[0].source is loaded.values
+            normal.graph().run({})
+            loaded.graph().run({})
+            np.testing.assert_array_equal(loaded.values.to_numpy(), normal.values.to_numpy())
+            np.testing.assert_array_equal(loaded.values.to_numpy(), np.full(n, 4))
+
+
 @test_utils.test(arch=ti.cpu, offline_cache=False)
 @pytest.mark.parametrize('recipe_kind', ['factory', 'mixed', 'filtered', 'forwarded', 'forwarded_many', 'direct_choice'])
 def test_package_write_inventory_resolves_optional_record_recipes(tmp_path, monkeypatch, recipe_kind):
