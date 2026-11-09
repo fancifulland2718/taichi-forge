@@ -403,7 +403,7 @@ class _ModuleBinding:
         member = self.package.manifest["owners"][owner_key][name]
         if "dtype_policy" in member:
             policy = member["dtype_policy"]
-            enabled = getattr(owner, policy["condition"])
+            enabled = path_value(owner, policy.get("condition_path", [policy["condition"]]))
             if type(enabled) is not bool:
                 raise ValueError("Field dtype selection requires its declared boolean configuration")
             member = {**member, "element": {**member["element"], "dtype": policy["if_true" if enabled else "if_false"]}}
@@ -532,8 +532,11 @@ class _ModuleBinding:
             self.package._arrays.append(value)
             allocated.append(value)
             values[attribute] = value
+        condition_paths = {policy["condition"]: tuple(policy["condition_path"])
+                           for policy in contract.get("dtypes", {}).values() if "condition_path" in policy}
+        member_selection = {condition_paths.get(name, name): value for name, value in selection.items()}
         for attribute in declared_members:
-            owner._forge_package_member_layouts[attribute] = selection
+            owner._forge_package_member_layouts[attribute] = member_selection
         if member.get("struct_field"):
             result = StructField(values)
             result._forge_package_field_source = (owner, (name,))
@@ -1597,7 +1600,7 @@ class entry:
                 item.get("layout_member", item["name"]), {}
             ).items():
                 declaration = schema.get(name, {})
-                actual = path_value(allocated_owner, declaration.get("path", (name,)))
+                actual = path_value(allocated_owner, name if isinstance(name, tuple) else declaration.get("path", (name,)))
                 if declaration.get("kind") == "record" and declaration.get("optional"):
                     actual = actual is not None
                 if actual is not value:
@@ -1742,6 +1745,7 @@ class LoadedPackage:
                 73,
                 74,
                 75,
+                76,
             )
             or self.manifest.get("kind") != "forge_definition_package_prototype"
         ):
@@ -1763,6 +1767,11 @@ class LoadedPackage:
             member.get("source_policy") for owner in self.manifest["owners"].values() for member in owner.values()
         ):
             raise ValueError("Borrow source selection requires definition package format 73")
+        if self.manifest["version"] < 76 and any(
+            "condition_path" in policy for contract in self.manifest.get("field_groups", {}).values()
+            for policy in contract.get("dtypes", {}).values()
+        ):
+            raise ValueError("field_like dtype selection requires definition package format 76")
         if self.manifest["version"] < 70 and any(
             contract.get("shapes") for contract in self.manifest.get("field_groups", {}).values()
         ):

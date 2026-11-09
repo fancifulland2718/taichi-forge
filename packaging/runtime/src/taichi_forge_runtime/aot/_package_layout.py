@@ -11,8 +11,14 @@ def layout_selection(contract, owner):
     names.update(policy["condition"] for policy in contract.get("shapes", {}).values())
     names.update(policy["condition"] for policy in contract.get("dtypes", {}).values())
     presence = contract.get("record_presence", {})
+    paths = {}
+    for policy in contract.get("dtypes", {}).values():
+        name, path = policy["condition"], policy.get("condition_path", [policy["condition"]])
+        if name in paths and paths[name] != path:
+            raise ValueError("Field dtype policies disagree on their declared source")
+        paths[name] = path
     selected = {
-        name: path_value(owner, presence[name]) is not None if name in presence else getattr(owner, name)
+        name: path_value(owner, presence[name]) is not None if name in presence else path_value(owner, paths.get(name, [name]))
         for name in names
     }
     if any(type(value) is not bool for value in selected.values()):

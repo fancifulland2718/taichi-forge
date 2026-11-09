@@ -93,7 +93,7 @@ class OwnerGuard:
                 selections = getattr(allocated, "_forge_package_member_layouts", {}).get(
                     spec.get("layout_member", spec["name"]), {})
                 for name in selections:
-                    path((*prefix, *schema.get(name, {}).get("path", (name,))))
+                    path((*prefix, *(name if isinstance(name, tuple) else schema.get(name, {}).get("path", (name,)))))
         # Selection is a guard too: a previously selected variant cannot hide
         # a changed static option or concrete receiver contract.
         candidates = [entry, selected]

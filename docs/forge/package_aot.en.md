@@ -2036,11 +2036,18 @@ or static condition retain type/layout variants; unrelated entries still share
 code. Construction selects the native type and the SNode compiler recomputes
 alignment and offsets. Model capacities do not create code copies. Focused
 CPU/CUDA checks include nested owners, borrowing, JIT equivalence and source-free
-dual instances. Only scalar elements are supported; `field_like` cloning across
-this selection is not supported yet.
+dual instances. Only scalar elements are supported.
 Allocating another scalar Field from a declared Field's `.dtype` propagates the
 same policy, including to entries that use only the derived Field. Tensor/Struct
 allocations derived from a conditional type currently reject explicitly.
+Format 76 propagates that same policy through `field_like`, including a source
+borrowed from a proven owner input. The clone owns independent storage while
+sharing the source's boolean type condition, without another configuration axis.
+Condition paths use the existing preparation and call reuse machinery; changing
+the source layout option after construction still rejects. Focused CPU/CUDA
+checks cover u32/u64, new sizes, independent instances, save/restore, Graph,
+ordinary JIT comparison and consumers without numerical source. Cloning across
+shape choices remains outside this scope.
 
 Format 73 supports `scope.borrow('view', self.b if self.choice else self.a, source_scope=True)`.
 An unconditional boolean static selects between two declared Fields on the same

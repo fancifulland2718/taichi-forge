@@ -1857,7 +1857,8 @@ def export_package(package, output, *, arch=None, caps=None, source_root=None):
                     }
                     if dtypes:
                         manifest["field_groups"][key]["dtypes"] = dtypes
-                        manifest["version"] = max(72, manifest["version"])
+                        manifest["version"] = max(76 if any("condition_path" in p for p in dtypes.values()) else 72,
+                                                  manifest["version"])
                     conditions = {
                         attribute: member_schemas[attribute]["conditions"]
                         for attribute in members

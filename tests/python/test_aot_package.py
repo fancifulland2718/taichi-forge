@@ -13824,6 +13824,107 @@ FIELD_DTYPE_CHOICE_SOURCE = (
 )
 
 
+@test_utils.test(arch=[ti.cpu, ti.cuda], offline_cache=False)
+def test_package_field_like_borrowed_dtype_policy(tmp_path, monkeypatch):
+    source = '''
+import taichi_forge as ti
+@ti.data_oriented
+class Copy:
+    def __init__(self, values):
+        scope = ti.experimental.ResourceScope(self)
+        scope.borrow('source', values, source_scope=True)
+        scope.backup = scope.field_like(self.source, initialization='zero')
+    @ti.kernel
+    def save(self):
+        for i in self.source:
+            self.backup[i] = self.source[i]
+    @ti.kernel
+    def restore(self):
+        for i in self.source:
+            self.source[i] = self.backup[i]
+
+@ti.data_oriented
+class Model:
+    def __init__(self, n, wide):
+        self.n, self.wide = n, wide
+        scope = ti.experimental.ResourceScope(self)
+        scope.static('wide', choices=(False, True))
+        scope.values = scope.field(ti.u64 if scope.wide else ti.u32, shape=scope.dim('n'), initialization='zero')
+        scope.local_backup = scope.field_like(self.values, initialization='zero')
+        scope.copy = Copy(self.values)
+    @ti.kernel
+    def fill(self, value: ti.u64):
+        for i in self.values:
+            self.values[i] = value + i
+    @ti.kernel
+    def save_local(self):
+        for i in self.values:
+            self.local_backup[i] = self.values[i]
+    def graph(self):
+        builder = ti.graph.GraphBuilder()
+        builder.dispatch(self.copy.restore, template_args={'self': self.copy})
+        return builder.compile()
+'''
+    package = _source_package(tmp_path, monkeypatch, source)
+    manifest = ti.aot.export_package(package, tmp_path / 'sdk')
+    assert manifest['version'] == 76
+    for method in ('Copy.save', 'Copy.restore'):
+        assert sum('definition_fixture.model.' + method in entry['definitions']
+                   for entry in manifest['entries'].values()) == 2
+    with Runtime(manifest['target']) as runtime, load_package(runtime, tmp_path / 'sdk') as code:
+        for n in (3, 19):
+            models = [code.host.Model(n, wide) for wide in (False, True)]
+            for wide, model in zip((False, True), models):
+                normal = package.Model(n, wide)
+                for obj in (model, normal):
+                    obj.fill(2**40 + 9)
+                    obj.copy.save()
+                    obj.save_local()
+                    obj.fill(77)
+                    obj.graph().run({})
+                np.testing.assert_array_equal(model.values.to_numpy(), normal.values.to_numpy())
+                np.testing.assert_array_equal(model.local_backup.to_numpy(), model.values.to_numpy())
+                assert model.values.dtype == model.copy.backup.dtype == ('u64' if wide else 'u32')
+            models[0].fill(2)
+            models[1].copy.restore()
+            np.testing.assert_array_equal(models[1].values.to_numpy(), 2**40 + 9 + np.arange(n))
+            models[1].wide = False
+            with pytest.raises(ValueError, match='layout configuration changed'):
+                models[1].copy.restore()
+    probe = tmp_path / 'consume_like_dtype.py'
+    probe.write_text('''
+import importlib.abc, sys
+import numpy as np
+class Block(importlib.abc.MetaPathFinder):
+    def find_spec(self, fullname, path=None, target=None):
+        if fullname.split('.')[0] in ('taichi', 'taichi_forge', 'definition_fixture'):
+            raise AssertionError(fullname)
+sys.meta_path.insert(0, Block())
+from taichi_forge_runtime.aot import Runtime, load_package
+with Runtime(sys.argv[2]) as runtime, load_package(runtime, sys.argv[1]) as code:
+    for wide in (False, True):
+        model = code.host.Model(23, wide)
+        model.fill(2**40 + 9)
+        model.copy.save()
+        model.fill(0)
+        model.graph().run({})
+        np.testing.assert_array_equal(model.values.to_numpy(), (2**40 if wide else 0) + 9 + np.arange(23))
+print('FIELD_LIKE_DTYPE_SOURCE_FREE_OK')
+''', encoding='utf8')
+    result = subprocess.run(
+        [sys.executable, '-B', str(probe), str(tmp_path / 'sdk'), manifest['target']],
+        cwd=tmp_path, capture_output=True, text=True, timeout=90,
+        env=dict(os.environ, PYTHONDONTWRITEBYTECODE='1',
+                 PYTHONPATH=str(Path(__file__).resolve().parents[2] / 'packaging/runtime/src'),
+                 TAICHI_NATIVE_RUNTIME_DIR=str(Path(utils._loaded_native_runtime_path).parent),
+                 TAICHI_RUNTIME_DIR=utils._runtime_bitcode_dir()))
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert 'FIELD_LIKE_DTYPE_SOURCE_FREE_OK' in result.stdout
+    (tmp_path / 'sdk/package.json').write_text(json.dumps({**manifest, 'version': 75}), encoding='utf8')
+    with Runtime(manifest['target']) as runtime, pytest.raises(ValueError, match='format 76'):
+        load_package(runtime, tmp_path / 'sdk')
+
+
 @pytest.mark.parametrize("declaration", ["local", "inline", "derived"])
 @test_utils.test(arch=[ti.cpu, ti.cuda], offline_cache=False)
 def test_package_field_dtype_choices_share_unaffected_code(tmp_path, monkeypatch, declaration):

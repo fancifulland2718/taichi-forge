@@ -198,6 +198,7 @@ def construct_fields(owner, schema, namespace, module, *, imported_modules=None)
             raise ValueError("Field dtype selection requires scalar element alternatives")
         return {
             "condition": policy["condition"],
+            **({"condition_path": policy["condition_path"]} if "condition_path" in policy else {}),
             **{key: element["dtype"] for key, element in alternatives.items()},
             # Reuse native primitive serialization, never a second enum table.
             "native_ids": {key: dtype.__getstate__()[0] for key, dtype in types.items()},
@@ -420,7 +421,7 @@ def construct_fields(owner, schema, namespace, module, *, imported_modules=None)
         setattr(owner, name, value)
 
         def field_declaration(element, spec):
-            guards = {**item.get("conditions", {}), **item.get("shape_guards", {})}
+            guards = {**item.get("conditions", {}), **item.get("shape_guards", {}), **item.get("dtype_guards", {})}
             if spec.get("model_tensor"):
                 if guards:
                     return _ConditionalModelTensorField(

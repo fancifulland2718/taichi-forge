@@ -87,6 +87,29 @@ class OwnerGraph:
             for key, item in schema.items()
             if item["kind"] == "static"
         }
+
+        def layout_static(policy):
+            if "condition_path" not in policy:
+                return static_values[policy["condition"]]
+            remaining = tuple(policy["condition_path"])
+            source = original
+            while True:
+                member = next((item for key, item in source.items()
+                               if tuple(item.get("path", (key,))) == remaining), None)
+                if member is not None:
+                    if member["kind"] != "static":
+                        raise ValueError("field_like dtype selection requires a declared static source")
+                    return (choices or {}).get((*path, *policy["condition_path"]),
+                                               read_static_key(member["choices"][0]))
+                child = next(((tuple(item.get("path", (key,))), item) for key, item in source.items()
+                              if item["kind"] in ("owner", "owner_input")
+                              and remaining[:len(item.get("path", (key,)))] == tuple(item.get("path", (key,)))), None)
+                if child is None:
+                    raise ValueError("field_like dtype selection has no declared source path")
+                prefix, item = child
+                remaining = remaining[len(prefix):]
+                source = self.definitions[item["owner_type"]][2]
+
         for attribute, item in schema.items():
             if "source_policy" in item:
                 policy = item["source_policy"]
@@ -102,7 +125,7 @@ class OwnerGraph:
                 item["source_guards"] = {policy["condition"]: selected}
             if "dtype_policy" in item:
                 policy = item["dtype_policy"]
-                selected = static_values[policy["condition"]]
+                selected = layout_static(policy)
                 item["type_node"] = policy["if_true" if selected else "if_false"]
                 item["dtype_guards"] = {policy["condition"]: selected}
             if "shape_policy" in item:
@@ -346,6 +369,8 @@ def _compose(environment, schema, children):
                 transformed["dtype_policy"] = {
                     **item["dtype_policy"],
                     "condition": names[item["dtype_policy"]["condition"]],
+                    **({"condition_path": [attribute, *item["dtype_policy"]["condition_path"]]}
+                       if "condition_path" in item["dtype_policy"] else {}),
                 }
                 transformed["dtype_guards"] = {names[n]: expected for n, expected in item["dtype_guards"].items()}
             if "owner_alternatives" in item:
