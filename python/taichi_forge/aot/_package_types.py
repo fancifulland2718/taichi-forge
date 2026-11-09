@@ -21,6 +21,22 @@ def producer_static(value):
     return value
 
 
+def resolve_scalar_dtype_policy(policy, namespace, module, *, owner_dtype=None):
+    """Resolve one declared scalar ABI choice for Fields and owned arrays."""
+    if "native_ids" in policy:
+        return dict(policy)
+    types = {key: resolve_type(policy[key], namespace, owner_dtype=owner_dtype) for key in ("if_true", "if_false")}
+    alternatives = {key: type_spec(dtype, module) for key, dtype in types.items()}
+    if any(element["kind"] != "scalar" for element in alternatives.values()):
+        raise ValueError("Field dtype selection requires scalar element alternatives")
+    return {
+        "condition": policy["condition"],
+        **({"condition_path": policy["condition_path"]} if "condition_path" in policy else {}),
+        **{key: element["dtype"] for key, element in alternatives.items()},
+        "native_ids": {key: dtype.__getstate__()[0] for key, dtype in types.items()},
+    }
+
+
 def qualified_kind(node, kind):
     if getattr(node, "_package_role", None) is not None:
         return node._package_role

@@ -232,16 +232,22 @@ class OwnerGraph:
                 declarations[attribute] = StaticValue()
                 value = read_static_key(item["value"])
             elif item["kind"] == "ndarray":
-                dtype = resolve_type(item.pop("type_node"), vars(self.imported[item.get("declaration_module", name)]))
+                namespace = vars(self.imported[item.get("declaration_module", name)])
+                if "dtype_policy" in item:
+                    from ._package_types import resolve_scalar_dtype_policy
+
+                    item["dtype_policy"] = resolve_scalar_dtype_policy(item["dtype_policy"], namespace, self.module)
+                dtype = resolve_type(item.pop("type_node"), namespace)
                 item["element"] = type_spec(dtype, self.module)
                 if item.get("external") and item["element"]["kind"] not in ("scalar", "tensor"):
                     raise ValueError("Typed external borrow requires scalar/vector/matrix elements")
+                conditions = {**item.get("conditions", {}), **item.get("dtype_guards", {})}
                 declarations[attribute] = (
                     _OptionalArray(dtype, item["ndim"], presence=item["input_presence_attribute"])
                     if item.get("external") and item.get("optional_input")
                     else (
-                        _ConditionalArray(dtype, item["ndim"], conditions=tuple(item["conditions"].items()))
-                        if item.get("conditions")
+                        _ConditionalArray(dtype, item["ndim"], conditions=tuple(conditions.items()))
+                        if conditions
                         else Array(dtype, item["ndim"])
                     )
                 )

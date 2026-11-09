@@ -1379,6 +1379,11 @@ CPU/CUDA 局部检查包含嵌套 owner、借用、JIT 对照和无源码双实�
 CPU/CUDA 局部检查覆盖 u32/u64、1D/2D、不同尺寸、独立实例、保存/恢复、Graph、普通 JIT
 对照及无数值源码消费。源布局本身仍须属于上述已支持的声明范围。
 
+格式 77 将同一标量 dtype 选择用于 `scope.ndarray`：原声明的布尔静态条件决定
+f32/u32 等必要 ABI，尺寸仍由运行时数据决定；普通 Host 分支可把数组传给对应的
+类型化 Kernel。CPU/CUDA 局部检查覆盖两种类型、缺失数组、不同尺寸和 JIT 对照。
+这不把每种模型尺寸变成一套数值实现，也不新增每步扫描或诊断。
+
 格式 73 支持 `scope.borrow('view', self.b if self.choice else self.a, source_scope=True)`：
 同一 owner 中两个已声明 Field 可由无条件布尔 static 选择，来源的存在守卫必须匹配。
 它只选择原分配及租约，不复制缓冲区；仅访问该视图的入口保留必要选择，无关入口共享代码。

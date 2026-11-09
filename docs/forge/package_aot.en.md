@@ -2058,6 +2058,12 @@ checks cover u32/u64, 1D/2D, new sizes, independent instances, save/restore, Gra
 ordinary JIT comparison and consumers without numerical source. The source layout
 must itself belong to the supported declaration scope described above.
 
+Format 77 applies the same scalar dtype choice to `scope.ndarray`. The original
+declared boolean static selects the necessary ABI, such as f32/u32, while extents
+remain runtime data. Ordinary Host branches may pass the array to the corresponding
+typed Kernel. Focused CPU/CUDA checks cover both types, absent arrays, different
+sizes and JIT equivalence. This adds no model-size code copies or per-step diagnostics.
+
 Format 73 supports `scope.borrow('view', self.b if self.choice else self.a, source_scope=True)`.
 An unconditional boolean static selects between two declared Fields on the same
 owner; their presence guards must match. The view retains the original allocation

@@ -13247,6 +13247,62 @@ class Model:
 """
 
 
+@test_utils.test(arch=[ti.cpu, ti.cuda], offline_cache=False)
+def test_package_scoped_array_dtype_uses_original_static_choice(tmp_path, monkeypatch):
+    source = """
+import taichi_forge as ti
+@ti.data_oriented
+class Model:
+    def __init__(self, n, active, unsigned):
+        self.n, self.active, self.unsigned = n, active, unsigned
+        scope = ti.experimental.ResourceScope(self)
+        scope.static('active', choices=(False, True))
+        scope.static('unsigned', choices=(False, True))
+        if self.active:
+            scope.keys = scope.ndarray(ti.u32 if self.unsigned else ti.f32,
+                                       shape=scope.dim('n'), initialization='zero')
+    def fill(self, offset):
+        if self.active:
+            if self.unsigned:
+                self.fill_u32(self.keys, offset)
+            else:
+                self.fill_f32(self.keys, offset)
+    @ti.kernel
+    def fill_u32(self, keys: ti.types.ndarray(ti.u32, 1), offset: ti.i32):
+        for i in range(keys.shape[0]):
+            keys[i] = i + offset
+    @ti.kernel
+    def fill_f32(self, keys: ti.types.ndarray(ti.f32, 1), offset: ti.i32):
+        for i in range(keys.shape[0]):
+            keys[i] = i + offset
+    @ti.kernel
+    def independent(self, value: ti.i32) -> ti.i32:
+        return value + 1
+"""
+    package = _source_package(tmp_path, monkeypatch, source)
+    manifest = ti.aot.export_package(package, tmp_path / "sdk")
+    assert manifest["version"] == 77
+    assert sum(entry["definition"].endswith(".independent") for entry in manifest["entries"].values()) == 1
+    with Runtime(manifest["target"]) as runtime, load_package(runtime, tmp_path / "sdk") as code:
+        for n, active, unsigned in ((7, True, False), (19, True, True), (11, False, True)):
+            normal, loaded = package.Model(n, active, unsigned), code.host.Model(n, active, unsigned)
+            for model in (normal, loaded):
+                assert model.independent(5) == 6
+                model.fill(3)
+                if active:
+                    np.testing.assert_array_equal(model.keys.to_numpy(), np.arange(n) + 3)
+                    assert model.keys.to_numpy().dtype == np.dtype('uint32' if unsigned else 'float32')
+                model.fill(5)
+                if active:
+                    np.testing.assert_array_equal(model.keys.to_numpy(), np.arange(n) + 5)
+            if active:
+                np.testing.assert_array_equal(loaded.keys.to_numpy(), normal.keys.to_numpy())
+    manifest["version"] = 76
+    (tmp_path / "sdk/package.json").write_text(json.dumps(manifest), encoding="utf8")
+    with Runtime(manifest["target"]) as runtime, pytest.raises(ValueError, match="format 77"):
+        load_package(runtime, tmp_path / "sdk")
+
+
 @test_utils.test(arch=[ti.cpu, ti.cuda, ti.vulkan], offline_cache=False)
 @pytest.mark.parametrize("preparation", [False, True])
 def test_package_scoped_arrays_keep_dynamic_extents_and_instance_ownership(tmp_path, monkeypatch, preparation):

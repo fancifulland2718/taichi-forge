@@ -244,7 +244,12 @@ class _ModuleBinding:
             self.extent(item.expression, owner) if isinstance(item, Extent) else operator.index(item) for item in shape
         )
         expected = tuple(self.extent(expression, owner) for expression in member["array_extents"])
-        if actual != expected or self.element_spec(dtype) != member["element"]:
+        element = member["element"]
+        if "dtype_policy" in member:
+            policy = member["dtype_policy"]
+            selected = path_value(owner, policy.get("condition_path", [policy["condition"]]))
+            element = {**element, "dtype": policy["if_true" if selected else "if_false"]}
+        if actual != expected or self.element_spec(dtype) != element:
             raise ValueError("Scoped array type or shape changed before allocation")
         value = self.ndarray(dtype, actual)
         # LLVM's allocation path already zeroes fresh storage. Vulkan's generic
@@ -1745,6 +1750,7 @@ class LoadedPackage:
                 74,
                 75,
                 76,
+                77,
             )
             or self.manifest.get("kind") != "forge_definition_package_prototype"
         ):
@@ -1771,6 +1777,11 @@ class LoadedPackage:
             for kind in ("shapes", "dtypes") for policy in contract.get(kind, {}).values()
         ):
             raise ValueError("field_like layout selection requires definition package format 76")
+        if self.manifest["version"] < 77 and any(
+            member["kind"] == "ndarray" and member.get("dtype_policy")
+            for owner in self.manifest["owners"].values() for member in owner.values()
+        ):
+            raise ValueError("Scoped array dtype selection requires definition package format 77")
         if self.manifest["version"] < 70 and any(
             contract.get("shapes") for contract in self.manifest.get("field_groups", {}).values()
         ):

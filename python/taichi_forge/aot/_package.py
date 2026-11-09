@@ -1766,6 +1766,8 @@ def export_package(package, output, *, arch=None, caps=None, source_root=None):
                 manifest["version"] = max(56, manifest["version"])
             if any(item.get("source_policy") for item in schema.values()):
                 manifest["version"] = max(73, manifest["version"])
+            if any(item["kind"] == "ndarray" and item.get("dtype_policy") for item in schema.values()):
+                manifest["version"] = max(77, manifest["version"])
             if any(item.get("input_presence_attribute") for item in schema.values()):
                 manifest["version"] = max(57, manifest["version"])
             if any(item["kind"] == "dimension" and item.get("expression") for item in schema.values()):

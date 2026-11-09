@@ -2233,7 +2233,7 @@ def scope_declarations(
                         identity = test.attr
                 declaration = declarations.get(identity, (earlier or {}).get(identity, {}))
                 if not (
-                    method == "field"
+                    method in ("field", "ndarray")
                     and declaration.get("kind") == "static"
                     and {tuple(value) for value in declaration["choices"]} == {("bool", False), ("bool", True)}
                     and not declaration.get("kernel_only")
@@ -2323,6 +2323,7 @@ def scope_declarations(
                     dict(
                         kind="ndarray",
                         type_node=dtype,
+                        **({"dtype_policy": dtype_policy} if dtype_policy else {}),
                         ndim=len(shape),
                         array_extents=[extent.expression for extent in shape],
                         initialization=policy.value,

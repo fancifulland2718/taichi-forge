@@ -188,21 +188,9 @@ def construct_fields(owner, schema, namespace, module, *, imported_modules=None)
         return producer_static(read_static_key(spec["choices"][0]))
 
     def resolved_dtype_policy(policy, type_namespace):
-        if "native_ids" in policy:
-            return dict(policy)
-        types = {
-            key: resolve_type(policy[key], type_namespace, owner_dtype=owner_dtype) for key in ("if_true", "if_false")
-        }
-        alternatives = {key: type_spec(dtype, module) for key, dtype in types.items()}
-        if any(element["kind"] != "scalar" for element in alternatives.values()):
-            raise ValueError("Field dtype selection requires scalar element alternatives")
-        return {
-            "condition": policy["condition"],
-            **({"condition_path": policy["condition_path"]} if "condition_path" in policy else {}),
-            **{key: element["dtype"] for key, element in alternatives.items()},
-            # Reuse native primitive serialization, never a second enum table.
-            "native_ids": {key: dtype.__getstate__()[0] for key, dtype in types.items()},
-        }
+        from ._package_types import resolve_scalar_dtype_policy
+
+        return resolve_scalar_dtype_policy(policy, type_namespace, module, owner_dtype=owner_dtype)
 
     dtype_sources = []
 
