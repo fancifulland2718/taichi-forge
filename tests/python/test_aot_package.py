@@ -1234,6 +1234,31 @@ print('GROUP_COPIES_SOURCE_FREE_OK')
 
 
 @test_utils.test(arch=ti.cpu, offline_cache=False)
+def test_package_conditional_field_locations_survive_owner_input_resolution(tmp_path, monkeypatch):
+    source = TYPED_FIELD_INPUT_SOURCE.replace(
+        "        columns = scope.dim('width')",
+        "        self.has_optional = n > 5\n"
+        "        scope.static('has_optional', choices=(False, True))\n"
+        "        scope.optional = scope.field(ti.i32, shape=scope.dim('n')) if self.has_optional else None\n"
+        "        columns = scope.dim('width')",
+    )
+    package = _source_package(tmp_path, monkeypatch, source)
+    manifest = ti.aot.export_package(package, tmp_path / "sdk")
+    assert sys.modules["definition_fixture.model"].constructors == 0
+    with Runtime(manifest["target"]) as runtime, load_package(runtime, tmp_path / "sdk") as code:
+        a, b = code.host.Model(3, 2), code.host.Model(11, 7)
+        assert a.storage.optional is None
+        assert b.storage.optional.shape == (11,)
+        for model in (a, b):
+            expected = np.arange(model.storage.n, dtype=np.float32)
+            model.storage.scalar.from_numpy(expected)
+            model.graph().run({})
+            model.storage.scalar.from_numpy(expected * 0)
+            model.first.restore()
+            np.testing.assert_array_equal(model.storage.scalar.to_numpy(), expected)
+
+
+@test_utils.test(arch=ti.cpu, offline_cache=False)
 def test_package_field_like_rejects_finalized_builder(tmp_path, monkeypatch):
     source = TYPED_FIELD_INPUT_SOURCE.replace(
         "        scope = ti.experimental.ResourceScope(self)\n        scope.borrow('source', values, source_scope=True)",

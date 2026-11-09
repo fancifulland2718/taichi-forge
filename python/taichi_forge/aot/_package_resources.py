@@ -456,7 +456,9 @@ def _normalize_field_loops(module, constructor, kind, fail, namespace):
                 )
             return result
 
-    Declarations().visit(constructor)
+    # Later owner/input passes revisit the same normalized tree. Synthesized
+    # absent-record calls need locations too, not only their enclosing Expr.
+    ast.fix_missing_locations(Declarations().visit(constructor))
 
 
 def scope_declarations(
