@@ -12607,6 +12607,127 @@ class Model:
 """
 
 
+@test_utils.test(arch=[ti.cpu, ti.cuda], offline_cache=False)
+def test_package_free_preparation_connects_child_constructor_input(tmp_path, monkeypatch):
+    source = """
+import taichi_forge as ti
+preparations = 0
+@ti.data_oriented
+class Child:
+    def __init__(self, source, fail=False):
+        fields = ti.FieldsBuilder()
+        scope = ti.experimental.ResourceScope(self, builder=fields)
+        scope.owner_reference('source', source)
+        scope.work = scope.field(ti.i32, shape=scope.owner_dim('source', 'n'), initialization='zero')
+        self.tree = fields.finalize()
+        if fail:
+            raise ValueError('child preparation failure')
+    @ti.kernel
+    def step(self, delta: ti.i32):
+        for i in self.source.values:
+            self.source.values[i] += delta
+            self.work[i] += delta * 2
+    def graph(self):
+        builder = ti.graph.GraphBuilder()
+        delta = ti.graph.Arg(ti.graph.ArgKind.SCALAR, 'delta', ti.i32)
+        builder.dispatch(self.step, delta)
+        return builder.compile()
+@ti.data_oriented
+class Model:
+    def __init__(self, n: int):
+        self.n = n
+        scope = ti.experimental.ResourceScope(self)
+        scope.values = scope.field(ti.i32, shape=scope.dim('n'), initialization='zero')
+    def prepare(self, fail=False):
+        if getattr(self, 'child', None) is None:
+            allocate_child(self, fail)
+        return self.child
+def allocate_child(owner, fail=False):
+    global preparations
+    preparations += 1
+    scope = ti.experimental.ResourceScope(owner)
+    scope.child = Child(owner, fail)
+"""
+    package = _source_package(tmp_path, monkeypatch, source)
+    manifest = ti.aot.export_package(package, tmp_path / "sdk")
+    assert sys.modules["definition_fixture.model"].preparations == 0
+    original = package.Model(3)
+    original.values.fill(0)
+    original.prepare().step(7)
+    with Runtime(manifest["target"]) as runtime, load_package(runtime, tmp_path / "sdk") as code:
+        a, b = code.host.Model(3), code.host.Model(19)
+        registered = set(runtime._resources)
+        with pytest.raises(ValueError, match="child preparation failure"):
+            a.prepare(fail=True)
+        assert not hasattr(a, "child") and set(runtime._resources) == registered
+        child = a.prepare()
+        assert a.prepare() is child and child.source is a
+        child.step(7)
+        b.prepare().step(11)
+        np.testing.assert_array_equal(a.values.to_numpy(), original.values.to_numpy())
+        np.testing.assert_array_equal(b.values.to_numpy(), 11)
+        call = child.graph().bind({"delta": 3})
+        call.run()
+        np.testing.assert_array_equal(child.work.to_numpy(), 20)
+        call.close()
+        child.tree.destroy()
+        b.child.step(1)
+        np.testing.assert_array_equal(b.child.work.to_numpy(), 24)
+    probe = tmp_path / "consume_prepared_child.py"
+    probe.write_text(
+        textwrap.dedent("""
+        import importlib.abc, sys
+        import numpy as np
+        class NoSource(importlib.abc.MetaPathFinder):
+            def find_spec(self, fullname, path=None, target=None):
+                if fullname.split('.')[0] in ('taichi', 'taichi_forge', 'definition_fixture'):
+                    raise AssertionError(fullname)
+        sys.meta_path.insert(0, NoSource())
+        from taichi_forge_runtime.aot import Runtime, load_package
+        with Runtime(sys.argv[2]) as runtime, load_package(runtime, sys.argv[1]) as code:
+            a, b = code.host.Model(13), code.host.Model(67)
+            registered = set(runtime._resources)
+            try:
+                a.prepare(fail=True)
+            except ValueError as error:
+                assert str(error) == 'child preparation failure'
+            else:
+                raise AssertionError('failed preparation accepted')
+            assert not hasattr(a, 'child') and set(runtime._resources) == registered
+            child = a.prepare()
+            assert a.prepare() is child and child.source is a
+            call = child.graph().bind({'delta': 5})
+            call.run()
+            b.prepare().step(9)
+            np.testing.assert_array_equal(a.values.to_numpy(), 5)
+            np.testing.assert_array_equal(child.work.to_numpy(), 10)
+            np.testing.assert_array_equal(b.child.work.to_numpy(), 18)
+            call.close()
+            child.tree.destroy()
+            b.child.step(1)
+            np.testing.assert_array_equal(b.child.work.to_numpy(), 20)
+        print('PREPARED_CHILD_SOURCE_FREE_OK')
+        """),
+        encoding="utf8",
+    )
+    env = dict(
+        os.environ,
+        PYTHONDONTWRITEBYTECODE="1",
+        PYTHONPATH=str(Path(__file__).resolve().parents[2] / "packaging/runtime/src"),
+        TAICHI_NATIVE_RUNTIME_DIR=str(Path(utils._loaded_native_runtime_path).parent),
+        TAICHI_RUNTIME_DIR=utils._runtime_bitcode_dir(),
+    )
+    result = subprocess.run(
+        [sys.executable, "-B", str(probe), str(tmp_path / "sdk"), manifest["target"]],
+        env=env,
+        capture_output=True,
+        text=True,
+        timeout=90,
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert "PREPARED_CHILD_SOURCE_FREE_OK" in result.stdout
+
+
 PREPARATION_DOMAIN_SOURCE = """
 import taichi_forge as ti
 from resource_contexts import resource_group

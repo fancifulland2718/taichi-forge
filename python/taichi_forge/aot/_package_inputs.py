@@ -39,7 +39,7 @@ def default_owner_call(constructor, parameter, before):
     return None
 
 
-def resolve_inputs(sources, imported):
+def resolve_inputs(sources, imported, *, partial=False):
     from ._package_factories import _source_value
     from ._package_input_families import source_class, split_constructor_inputs
     from ._package_owner_sequences import constructor_items
@@ -136,7 +136,7 @@ def resolve_inputs(sources, imported):
             if not isinstance(node, ast.Call) or (name, node.lineno, node.col_offset) in declared_sites:
                 continue
             constructor = _source_value(node.func, vars(imported[name]))
-            if inspect.isclass(constructor) and classes.get(constructor) in untyped_targets:
+            if not partial and inspect.isclass(constructor) and classes.get(constructor) in untyped_targets:
                 raise ValueError(
                     "Unscoped constructor input requires declared source provenance: " + classes[constructor]
                 )
@@ -296,7 +296,7 @@ def resolve_inputs(sources, imported):
                 changed = True
         for sites in calls.values():
             if any(expand_write_inventory(*site) for site in sites):
-                return resolve_inputs(sources, imported)
+                return resolve_inputs(sources, imported, partial=partial)
         for (owner, name), item in inputs.items():
             observed_all = {
                 identity
@@ -311,7 +311,7 @@ def resolve_inputs(sources, imported):
                 raise ValueError(f"Owner input {owner}.{name} contradicts its declared source type")
             if len(observed) > 1:
                 split_constructor_inputs(sources, owner, inputs, calls.get(owner, ()), input_types)
-                return resolve_inputs(sources, imported)
+                return resolve_inputs(sources, imported, partial=partial)
             if observed and origin(item) is None:
                 source_type, source_member = observed.pop()
                 if item["kind"] == "owner_input":
@@ -325,6 +325,12 @@ def resolve_inputs(sources, imported):
                 changed = True
         if not changed:
             break
+    # Preparation functions may declare additional child constructors. Their
+    # receiver discovery needs the input facts already provable from ordinary
+    # construction, but admission must wait until those declarations are added.
+    # The caller always runs complete resolution before compiling or exporting.
+    if partial:
+        return
     for (owner, name), item in aliases.items():
         if "owner_type" not in item:
             raise ValueError(f"Owner reference {owner}.{name} requires a resolved declared owner path")

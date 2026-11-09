@@ -1593,9 +1593,20 @@ context releases its new group and restores the previous field bindings. This
 does not roll back arbitrary Host changes made outside that context. Focused
 CPU/CUDA checks cover no allocation before preparation, new sizes, independent
 instances, retained Graph calls and source-free consumption. Deferred raw/default
-root allocations, child owners and conditional method-parameter inputs remain
+root allocations and conditional method-parameter inputs remain
 outside this slice; recursive/concurrent preparation of the same instance group
 is rejected.
+
+An ordinary preparation helper can also assign a declared child constructor,
+such as `scope.child = Child(owner)`, with source-proven owner inputs. Discovery
+first propagates construction input facts, then includes the preparation's child
+declarations before complete input admission. No preparation runs during export.
+The child retains its existing managed construction and allocation rollback;
+the parent need not allocate it in `__init__`. A Host cache guard can retain the
+child across calls. CPU/CUDA checks cover parent references, independent sizes,
+child-construction failure without leaked storage, Graph use, independent release,
+and a new consumer process without the producer sources. This does not make
+arbitrary Host mutations transactional or admit unknown constructor inputs.
 
 Version 54 retains optional plain records declared by `scope.record(...,
 optional=True)`. Member declarations under a proven `is not None` guard use the

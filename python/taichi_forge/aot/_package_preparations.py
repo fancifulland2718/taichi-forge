@@ -66,6 +66,12 @@ def _declares_values(node, namespace):
                 )
             )
             for part in ast.walk(node)
+        ) or any(
+            isinstance(part, ast.Attribute)
+            and isinstance(part.ctx, ast.Store)
+            and isinstance(part.value, ast.Name)
+            and part.value.id == scope
+            for part in ast.walk(node)
         ):
             return True
     return False

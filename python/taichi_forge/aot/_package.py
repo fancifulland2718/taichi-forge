@@ -136,6 +136,8 @@ def _owner_schema(
                 declaration["declaration_owner"] = node.name
             if getattr(function, "_package_preparation_method", False) and declaration.get("external"):
                 declaration["binding_phase"] = "preparation"
+            if getattr(function, "_package_preparation_method", False) and declaration["kind"] == "owner":
+                declaration["binding_phase"] = "preparation"
             if getattr(function, "_package_preparation_method", False) and declaration["kind"] == "borrowed_field":
                 if "input_parameter" in declaration:
                     _fail(module, function, "Prepared Field inputs require a definition-proven allocation path")
@@ -147,13 +149,12 @@ def _owner_schema(
             ):
                 _fail(module, function, "Preparation resource allocations require explicit group contexts")
             if getattr(function, "_package_preparation_method", False) and (
-                "presence_parameter" in declaration
-                or declaration["kind"] in ("owner", "owner_input", "host_owner_sequence")
+                "presence_parameter" in declaration or declaration["kind"] in ("owner_input", "host_owner_sequence")
             ):
                 _fail(
                     module,
                     function,
-                    "Preparation groups currently require declared fields, not conditional inputs or child owners",
+                    "Preparation groups do not support conditional constructor inputs or Host owner sequences",
                 )
             if name in schema and schema[name]["kind"] != "value":
                 previous = schema[name]
@@ -1379,7 +1380,7 @@ def _preflight_package(package, *, arch=None, source_root=None):
     resolve_sequences(sources, imported_modules)
     from ._package_inputs import resolve_inputs
 
-    resolve_inputs(sources, imported_modules)
+    resolve_inputs(sources, imported_modules, partial=True)
     from ._package_preparations import resolve as resolve_preparations
 
     try:
@@ -1392,6 +1393,7 @@ def _preflight_package(package, *, arch=None, source_root=None):
         )
     except ValueError as error:
         raise PackageExportError(str(error)) from error
+    resolve_inputs(sources, imported_modules)
     from ._package_function_inputs import discover as discover_function_inputs
 
     try:
