@@ -46,3 +46,39 @@ def test_value_encoding_rejects_range_members_and_malformed_offsets():
             structure(C.create_string_buffer(1), value)
     with pytest.raises(ValueError, match="offsets"):
         _encoder(leaf("f32", 0, (2,), component_offsets=(0, 2)), 8)
+
+
+def test_value_encoding_accepts_numpy_views_with_compiled_padding():
+    import numpy as np
+
+    source = np.arange(24, dtype=np.float32).reshape(4, 6)
+    for value in (source[0, ::2], source.T[::2, ::-2]):
+        count = value.size
+        offsets = tuple(range(0, count * 8, 8))
+        encode = _encoder(leaf("f32", 0, value.shape, component_offsets=offsets), count * 8)
+        buffer = C.create_string_buffer(count * 8)
+        encode(buffer, value)
+        expected = bytearray(count * 8)
+        for offset, component in zip(offsets, value.flat):
+            struct.pack_into("=f", expected, offset, component)
+        assert buffer.raw == expected
+        # Encoded values are snapshots, not aliases to the caller's array.
+        value.fill(-17)
+        assert buffer.raw == expected
+        with pytest.raises(ValueError, match="shape"):
+            encode(buffer, np.zeros((count, 1), dtype=np.float32))
+        with pytest.raises(ValueError, match="shape"):
+            encode(buffer, np.array(1.0))
+
+
+def test_value_encoding_keeps_numpy_scalar_conversion_rules():
+    import numpy as np
+
+    encode = _encoder(leaf("i8", 0, (2,)), 2)
+    buffer = C.create_string_buffer(2)
+    encode(buffer, np.array([-128, 127], dtype=np.int64))
+    assert buffer.raw == struct.pack("=bb", -128, 127)
+    with pytest.raises(ValueError, match="range"):
+        encode(buffer, np.array([0, 128], dtype=np.int64))
+    with pytest.raises(TypeError):
+        encode(buffer, np.array([0.0, 1.0], dtype=np.float32))

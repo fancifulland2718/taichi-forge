@@ -7,6 +7,7 @@ import math
 import numbers
 import operator
 import struct
+import sys
 
 from . import _c_api as abi
 
@@ -130,8 +131,16 @@ def _encoder(node, buffer_size):
     def values(value, dimensions):
         if not dimensions:
             return (convert(value),)
-        if isinstance(value, (str, bytes, bytearray)) or not isinstance(value, Sequence):
+        if isinstance(value, (str, bytes, bytearray)):
             raise TypeError("Tensor arguments require nested sequences matching their shape")
+        if not isinstance(value, Sequence):
+            # ndarray deliberately does not register as Sequence. Accept actual
+            # NumPy values without requiring NumPy for ordinary Runtime users.
+            numpy = sys.modules.get("numpy")
+            if numpy is None or not isinstance(value, numpy.ndarray):
+                raise TypeError("Tensor arguments require nested sequences matching their shape")
+            if value.shape != dimensions:
+                raise ValueError("Tensor argument shape does not match the exported type")
         if len(value) != dimensions[0]:
             raise ValueError("Tensor argument shape does not match the exported type")
         return tuple(item for child in value for item in values(child, dimensions[1:]))
