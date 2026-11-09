@@ -609,6 +609,11 @@ def logical_not(a):
     Returns:
         `1` iff `a=0`, otherwise `0`.
     """
+    # Preserve Python truth scalars in static expressions. NumPy's bool_ is
+    # not a numbers.Real, so feeding it into a model-uniform and/or would lose
+    # the immutable-expression proof while the device operands stay unchanged.
+    if isinstance(a, (bool, np.bool_)):
+        return not a
     return _unary_operation(_ti_core.expr_logic_not, np.logical_not, a)
 
 

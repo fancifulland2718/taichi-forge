@@ -19927,10 +19927,10 @@ class Model:
             if ti.static(self.motion):
                 self.translation[i] = i + 10
                 self.out[i] += self.translation[i]
-                if ti.static(self.rigid):
+                if ti.static(self.rigid and not False):
                     self.rotation[i] = i + 20
                     self.out[i] += self.rotation[i]
-                    if ti.static(self.response):
+                    if ti.static(self.response and (not False or self.rigid)):
                         self.inertia[i] = i + 30
                         self.out[i] += self.inertia[i]
     @ti.kernel
