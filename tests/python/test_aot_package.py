@@ -7117,7 +7117,15 @@ class Holder:
         }
 
 
-@pytest.mark.parametrize("helper, padding", ((False, 0), (True, 2)))
+@pytest.mark.parametrize(
+    "helper, padding",
+    (
+        (False, 0),
+        (True, 2),
+        pytest.param("record", 0, id="record_helper"),
+        pytest.param("invalid_record", 0, id="invalid_record_helper"),
+    ),
+)
 @test_utils.test(arch=[ti.cpu, ti.cuda], offline_cache=False)
 def test_package_optional_record_borrows_caller_arrays(tmp_path, monkeypatch, helper, padding):
     source = """
@@ -7164,7 +7172,24 @@ class Model:
             "record.parent_dim('n'), record.dim('count'), when", "record.parent_dim('n') + 2, record.dim('count'), when"
         )
         source = source.replace("range(self.packet.count)", "range(self.packet.count - 2)")
-    if helper:
+    if helper in ("record", "invalid_record"):
+        start = source.index("        record = s.record")
+        end = source.index("    @ti.real_func", start)
+        body = textwrap.dedent(source[start:end])
+        if helper == "invalid_record":
+            body = body.replace("if packet is not None:", "if packet.gain is not None:")
+        (tmp_path / "port_declarations.py").write_text(
+            "import taichi_forge as ti\ndef declare_packet(s, packet):\n" + textwrap.indent(body, "    "),
+            encoding="utf8",
+        )
+        monkeypatch.delitem(sys.modules, "port_declarations", raising=False)
+        source = (
+            "from port_declarations import declare_packet\n"
+            + source[:start]
+            + "        declare_packet(s, packet)\n"
+            + source[end:]
+        )
+    elif helper:
         start = source.index("            record.borrow")
         end = source.index("    @ti.real_func", start)
         body = textwrap.dedent(source[start:end]).replace("ti.", "dsl.")
@@ -7176,8 +7201,13 @@ class Model:
         source = source[:start] + "            declare_packet(record, packet)\n" + source[end:]
         source = "from port_declarations import declare_packet\n" + source
     package = _source_package(tmp_path, monkeypatch, source)
+    if helper == "invalid_record":
+        with pytest.raises(ti.aot.PackageExportError, match="declared boolean"):
+            ti.aot.export_package(package, tmp_path / "sdk")
+        assert not (tmp_path / "sdk").exists()
+        return
     manifest = ti.aot.export_package(package, tmp_path / "sdk")
-    assert manifest["version"] == 64 and not manifest["entry_families"]
+    assert manifest["version"] >= 64 and not manifest["entry_families"]
     with ti.aot.borrow_runtime() as runtime, load_package(runtime, tmp_path / "sdk") as code:
         for n in (5, 17):
             offsets = ti.field(ti.i32, shape=n + padding + 1)
@@ -7211,14 +7241,14 @@ class Model:
             previous.close()
             for array in imported:
                 array.close()
-    if not helper:
+    if not helper or helper == "record":
         probe = tmp_path / "consume_optional_record.py"
         probe.write_text(
             textwrap.dedent("""
             import importlib.abc, sys, numpy as np
             class NoSource(importlib.abc.MetaPathFinder):
                 def find_spec(self, fullname, path=None, target=None):
-                    if fullname.split('.')[0] in ('taichi', 'taichi_forge', 'definition_fixture'):
+                    if fullname.split('.')[0] in ('taichi', 'taichi_forge', 'definition_fixture', 'port_declarations'):
                         raise AssertionError(fullname)
             sys.meta_path.insert(0, NoSource())
             from taichi_forge_runtime.aot import Runtime, load_package

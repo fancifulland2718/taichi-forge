@@ -258,6 +258,11 @@ record presence, new sizes, constraint rejection and old Graph input snapshots.
 Ordinary helpers may forward these declarations and fixed Forge scalar/vector/matrix
 type references without executing the helper during discovery or adding export-only
 wrappers. Preparation methods containing only record inputs are also retained.
+An ordinary helper may declare the complete optional record and guard its member
+declarations with `is None` / `is not None` on that same input. A preparation
+method that only forwards to this helper still exposes its input contract through
+definition analysis. Presence remains a preparation binding, without numerical
+copies for presence combinations; unrelated member predicates do not prove record presence.
 
 Format 63 binds typed `optional=True` port presence as an i32 preparation argument.
 Explicit checks such as `ti.static(self.values is not None)` use one numerical

@@ -227,12 +227,24 @@ def expand_declarations(function, statement, scopes, *, namespace, shadowed=(), 
                     break
             return value
         if isinstance(node, ast.Compare) and len(node.ops) == 1:
-            left, right = literal(expression(node.left)), literal(expression(node.comparators[0]))
+            left_node, right_node = expression(node.left), expression(node.comparators[0])
             op = node.ops[0]
+            if (
+                isinstance(op, (ast.Is, ast.IsNot))
+                and isinstance(right_node, ast.Constant)
+                and right_node.value is None
+            ):
+                try:
+                    left = literal(left_node)
+                except _Unproven:
+                    # Preserve optional-record presence and its source alias.
+                    # The resource projector still proves that this predicate
+                    # guards the record declared from the same Host input.
+                    return ast.Compare(left_node, [op], [right_node])
+                return ast.Constant(left is None if isinstance(op, ast.Is) else left is not None)
+            left, right = literal(left_node), literal(right_node)
             if isinstance(op, (ast.Eq, ast.NotEq)):
                 return ast.Constant(left == right if isinstance(op, ast.Eq) else left != right)
-            if isinstance(op, (ast.Is, ast.IsNot)) and right is None:
-                return ast.Constant(left is None if isinstance(op, ast.Is) else left is not None)
         if isinstance(node, ast.Call):
             root = node.func
             while isinstance(root, ast.Attribute):

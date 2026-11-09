@@ -310,16 +310,36 @@ def discover_construction_methods(tree, namespace, module, fail, kind):
                     fail(module, part, f"Preparation resource context is unproven: {error}")
                 if recipe is not None:
                     contexts.append(part)
-            input_declarations = any(
-                isinstance(call, ast.Call)
-                and isinstance(call.func, ast.Attribute)
-                and (
-                    call.func.attr == "record"
-                    or call.func.attr == "borrow"
-                    and {keyword.arg for keyword in call.keywords} >= {"external", "dtype", "shape"}
+
+            def has_input_declarations(function):
+                return any(
+                    isinstance(call, ast.Call)
+                    and isinstance(call.func, ast.Attribute)
+                    and (
+                        call.func.attr == "record"
+                        or call.func.attr == "borrow"
+                        and {keyword.arg for keyword in call.keywords} >= {"external", "dtype", "shape"}
+                    )
+                    for call in ast.walk(function)
                 )
-                for call in ast.walk(method)
-            )
+
+            input_declarations = has_input_declarations(method)
+            if not contexts and not input_declarations:
+                from ._package_preparations import _declares_values
+                from ._package_factories import normalize_factories
+
+                if _declares_values(method, namespace):
+                    # A normal helper may own the complete optional record,
+                    # not just its leaves. Reuse declaration normalization on
+                    # a copy to prove the input port before admitting a late
+                    # preparation method; never run it or infer it from a model.
+                    probe = copy.deepcopy(method)
+                    probe._package_preparation_method = True
+                    holder = copy.copy(cls)
+                    holder.body = [probe]
+                    probe_tree = ast.Module(body=[holder], type_ignores=[])
+                    normalize_factories(probe_tree, namespace, module, fail, kind)
+                    input_declarations = has_input_declarations(probe_tree)
             # Typed ports bind caller storage without allocating a group. The
             # record may forward its members through a declaration helper. The
             # normal declaration parser below still proves the scope and types.
