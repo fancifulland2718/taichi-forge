@@ -19996,9 +19996,10 @@ class Model:
             load_package(runtime, tmp_path / "sdk")
 
 
+@pytest.mark.parametrize("shaped", [False, True])
 @pytest.mark.parametrize("alternative", [False, True])
 @test_utils.test(arch=[ti.cpu, ti.cuda], offline_cache=False)
-def test_package_child_back_reference_shares_static_selection(tmp_path, monkeypatch, alternative):
+def test_package_child_back_reference_shares_static_selection(tmp_path, monkeypatch, alternative, shaped):
     source = '''
 import taichi_forge as ti
 @ti.data_oriented
@@ -20031,6 +20032,8 @@ class Model:
             else:
                 self.out[i] += 1
 '''
+    if shaped:
+        source = source.replace("shape=n, initialization='zero'", "shape=n if self.enabled else n * 2, initialization='zero'")
     if alternative:
         source = source.replace('@ti.data_oriented\nclass Model:', '''@ti.data_oriented
 class Alternate(Child):

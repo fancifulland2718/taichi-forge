@@ -196,11 +196,33 @@ class OwnerGraph:
         children, child_values = {}, {}
         for attribute, item in schema.items():
             if item["kind"] in ("owner", "owner_input"):
+                child_choices = dict(choices or {})
+                child_schema = self.definitions[item["owner_type"]][2]
+                inputs = [
+                    (tuple(child_schema[member].get("path", (member,))), target,
+                     child_schema[member]["owner_type"])
+                    for member, target in item.get("input_references", {}).items()
+                ]
+                if item["kind"] == "owner_input" and "reference_path" in item:
+                    inputs.append(((), item["reference_path"], item["owner_type"]))
+                for member, target, source_type in inputs:
+                    source_path = (*path, *target)
+                    input_path = (*path, attribute, *member)
+                    # A borrowed view of the same instance must materialize
+                    # the same layout before numerical variant exploration.
+                    # Include default static values as well as explicit choices.
+                    for key, source in self.definitions[source_type][2].items():
+                        if source["kind"] == "static":
+                            child_choices[(*input_path, key)] = (choices or {}).get(
+                                (*source_path, key), read_static_key(source["choices"][0]))
+                    for selected_path, value in (choices or {}).items():
+                        if selected_path[:len(source_path)] == source_path:
+                            child_choices[(*input_path, *selected_path[len(source_path):])] = value
                 value, _, child, expanded = self.construct(
                     item["owner_type"],
                     resource_only=resource_only or item["kind"] == "owner_input",
                     references=references,
-                    choices=choices,
+                    choices=child_choices,
                     path=(*path, attribute),
                     resource_paths=source_children.get(attribute)
                     or ((tuple(schema[item["field_input"]]["source_member"]),) if "field_input" in item else None),

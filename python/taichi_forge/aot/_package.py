@@ -1868,6 +1868,14 @@ def export_package(package, output, *, arch=None, caps=None, source_root=None):
                     }
                     if shapes:
                         manifest["field_groups"][key]["shapes"] = shapes
+                        # The generated Host allocation supplies dimensions for
+                        # both legal layouts. Selection projects this union to
+                        # the chosen native schema; the first witness is not
+                        # the complete allocation contract.
+                        manifest["field_groups"][key]["dimensions"] = sorted(set(dimensions) | {
+                            axis for policy in shapes.values() for branch in ("if_true", "if_false")
+                            for axis in policy[branch] if isinstance(axis, str)
+                        })
                         manifest["version"] = max(76 if any("condition_path" in p for p in shapes.values()) else 70,
                                                   manifest["version"])
                     dtypes = {

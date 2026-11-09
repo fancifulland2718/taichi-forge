@@ -8,24 +8,8 @@ from ._component import _DefinitionMissingResource
 from ._package_types import producer_static
 
 
-def compile_static_variants(environment, entry, arguments, owner, schema, *, template_args=None, fixed=None):
-    """Cover a kernel's finite declaration domain without multiplying owners.
-
-    A compiled contract covers every assignment of unread configuration values.
-    Neighboring assignments vary only values read by that compilation. When a
-    different branch reads another value, that compiler result extends coverage.
-    No application constructor, Host recording or numerical execution is used.
-    """
-    domains = {
-        name: tuple(read_static_key(value) for value in item["choices"])
-        for name, item in schema.items()
-        if item["kind"] == "static" and not item.get("dynamic_storage_condition")
-    }
-    # Constants are fixed definition dependencies, not consumer configuration
-    # axes. Include their one value in the existing coverage/guard machinery.
-    domains.update(
-        (name, (read_static_key(item["value"]),)) for name, item in schema.items() if item["kind"] == "constant"
-    )
+def _static_reference_aliases(schema, domains):
+    """Canonical axes proven by normal owner references, including layout use."""
     paths = {tuple(item.get("path", (name,))): name for name, item in schema.items()}
     aliases = {}
     for reference, item in schema.items():
@@ -48,6 +32,28 @@ def compile_static_variants(environment, entry, arguments, owner, schema, *, tem
             visited.add(canonical)
             canonical = aliases[canonical]
         aliases[name] = canonical
+    return aliases
+
+
+def compile_static_variants(environment, entry, arguments, owner, schema, *, template_args=None, fixed=None):
+    """Cover a kernel's finite declaration domain without multiplying owners.
+
+    A compiled contract covers every assignment of unread configuration values.
+    Neighboring assignments vary only values read by that compilation. When a
+    different branch reads another value, that compiler result extends coverage.
+    No application constructor, Host recording or numerical execution is used.
+    """
+    domains = {
+        name: tuple(read_static_key(value) for value in item["choices"])
+        for name, item in schema.items()
+        if item["kind"] == "static" and not item.get("dynamic_storage_condition")
+    }
+    # Constants are fixed definition dependencies, not consumer configuration
+    # axes. Include their one value in the existing coverage/guard machinery.
+    domains.update(
+        (name, (read_static_key(item["value"]),)) for name, item in schema.items() if item["kind"] == "constant"
+    )
+    aliases = _static_reference_aliases(schema, domains)
     for name, value in (fixed or {}).items():
         name = aliases.get(name, name)
         if name not in domains or static_key(value) not in tuple(static_key(v) for v in domains[name]):
@@ -154,6 +160,10 @@ def compile_owner_variants(graph, identity, entry, arguments, *, template_args=N
     while pending:
         selection = pending.popleft()
         owner, _, environment, schema = graph.context(identity, selection)
+        aliases = _static_reference_aliases(schema, {
+            name: tuple(read_static_key(value) for value in item["choices"])
+            for name, item in schema.items() if item["kind"] == "static"
+        })
         choices = {name: item for name, item in schema.items() if item.get("owner_alternatives")}
         shape_choices = {name: item for name, item in schema.items() if item.get("shape_policy")}
         dtype_choices = {name: item for name, item in schema.items() if item.get("dtype_policy")}
@@ -206,7 +216,7 @@ def compile_owner_variants(graph, identity, entry, arguments, *, template_args=N
                 guard = policy["condition"]
                 if name in code.used or guard in code.static:
                     for value in (False, True):
-                        schedule({**selection, tuple(environment._paths[guard]): value})
+                        schedule({**selection, tuple(environment._paths[aliases.get(guard, guard)]): value})
             for name, item in choices.items():
                 # A parent method can also read the same configuration without
                 # touching the child. Its own static branches remain complete.
@@ -214,7 +224,7 @@ def compile_owner_variants(graph, identity, entry, arguments, *, template_args=N
                     continue
                 for alternative in item["owner_alternatives"]:
                     guards = {
-                        tuple(environment._paths[flag]): value
+                        tuple(environment._paths[aliases.get(flag, flag)]): value
                         for flag, value in alternative.get("conditions", {}).items()
                         if flag not in item.get("conditions", {})
                     }

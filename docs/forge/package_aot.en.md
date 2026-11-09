@@ -2144,6 +2144,11 @@ independent. This reuses source-proven constructor arguments and the existing
 prepare-time reference check. It neither infers aliases from matching types nor
 adds a per-step check. Focused CPU/CUDA checks cover both selections, different
 model sizes and rejection of a foreign parent with matching configuration.
+Host-selected child implementations retain that call site's reference proof.
+Layout choices through the reference use the parent's same condition instead of
+queuing contradictory parent/child layouts. Conditional shape contracts retain
+the dimensions needed by both legal branches; preparation still projects them
+to the selected native layout.
 
 Integer values declared with `value(..., ti.i32, affects_plan=True)` may participate
 in the same model-expression lowering as dimensions, including existing `ti.static`
