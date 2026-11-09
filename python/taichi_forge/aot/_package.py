@@ -28,6 +28,7 @@ from ._package_resources import scope_declarations
 from ._package_targets import BACKEND_NAMES, backend_constant, backend_query, select_target_branches
 from ._package_records import dimension_relations
 from ._package_constants import resolve_constants
+from ._package_contexts import resource_context_group
 from ._package_construction import (
     construction_functions,
     discover_construction_methods,
@@ -797,7 +798,7 @@ def _host_projection(
             recipe = getattr(node, "_package_resource_context", None)
             if recipe is not None:
                 call = node.items[0].context_expr
-                group = module + "." + self.owner + f":context_{node.lineno}_{node.col_offset}"
+                group = module + "." + self.owner + ":" + resource_context_group(node)
                 helper_module, helper_name = recipe["definition"].rsplit(".", 1)
                 deferred = getattr(node, "_package_deferred_context", False)
                 node.items[0].context_expr = ast.copy_location(
@@ -908,7 +909,7 @@ def _host_projection(
                     try:
                         groups = (
                             [
-                                module + "." + self.owner + f":context_{part.lineno}_{part.col_offset}"
+                                module + "." + self.owner + ":" + resource_context_group(part)
                                 for part in ast.walk(node)
                                 if getattr(part, "_package_resource_context", None) is not None
                                 and getattr(part, "_package_deferred_context", False)

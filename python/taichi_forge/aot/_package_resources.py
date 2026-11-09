@@ -7,7 +7,7 @@ import hashlib
 from taichi_forge_runtime._dimensions import Extent, extent_dependencies, evaluate_extent
 from ._package_types import qualified_kind, project_tensor_axes, expand_local_type
 from ._package_fields import field_type_shape, field_order
-
+from ._package_contexts import resource_context_group
 
 def _normalize_scope_aliases(constructor, kind):
     """Distinguish sequential local handles without changing their resources.
@@ -565,7 +565,7 @@ def scope_declarations(
         # still owns finalization, exception handling and external bookkeeping.
         call.lineno, call.col_offset = statement.lineno, statement.col_offset
         allocation = ast.copy_location(ast.Assign([statement.items[0].optional_vars], call), statement)
-        group = f"context_{statement.lineno}_{statement.col_offset}"
+        group = resource_context_group(statement)
         scopes[scope], scope_groups[scope] = allocation, group
         builders[group] = dict(
             allocation=[statement.lineno, statement.col_offset],

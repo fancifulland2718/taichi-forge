@@ -194,6 +194,9 @@ def _normalize(function, original, module, kind, receiver, fail):
 
     facts += normalize_allocation_helpers(wrapper, namespace, kind, module, fail)
     facts += normalize_type_member_factories(wrapper, namespace, kind, module, fail)
+    for statement in ast.walk(normalized):
+        if getattr(statement, "_package_resource_context", None) is not None:
+            statement._package_group_definition = module + "." + original.name
     return owner, normalized, facts
 
 

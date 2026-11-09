@@ -1906,6 +1906,11 @@ owners, fixed-name loops, source-free dual instances with new sizes, wrong sourc
 missing guards and older-format rejection. Model-value conditions, arbitrary source
 expressions and undeclared fields are outside this support.
 
+Resource groups in free preparation functions also distinguish their module and
+function definition. Matching function names and source positions do not merge
+allocations. Focused CPU/CUDA source-free checks cover independent group
+repreparation, dual instances and existing Graph bindings retaining their resources.
+
 Declared fixed integer constants may also be read through a resource scope for
 layout. Ordinary inherited constructors allocate against the concrete receiver's
 contract, including subclass constant widths. Instance dimensions remain dynamic;

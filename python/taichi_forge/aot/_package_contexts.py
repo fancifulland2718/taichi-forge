@@ -15,6 +15,15 @@ import textwrap
 from ._package_factories import _literal, _source_value, _Unproven, prove_factory
 
 
+def resource_context_group(statement):
+    """Keep independently defined preparation allocations in separate groups."""
+    local = f"context_{statement.lineno}_{statement.col_offset}"
+    definition = getattr(statement, "_package_group_definition", None)
+    if definition is None:
+        return local
+    return "prepare_" + hashlib.sha256(definition.encode("utf8")).hexdigest() + "_" + local
+
+
 def _generator_context(function):
     if not inspect.isfunction(function):
         return None

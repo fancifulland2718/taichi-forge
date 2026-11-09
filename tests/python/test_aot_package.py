@@ -13267,6 +13267,100 @@ def _resource_context_fixture(
     return package, source
 
 
+@test_utils.test(arch=[ti.cpu, ti.cuda], offline_cache=False)
+def test_package_preparation_groups_distinguish_module_definitions(tmp_path, monkeypatch):
+    helper = """
+import taichi_forge as ti
+from resource_contexts import resource_group
+def prepare(owner):
+    with resource_group(owner, 'workspace', initialization='zero') as scope:
+        scope.MEMBER = scope.field(ti.i32, shape=scope.dim('n'))
+"""
+    model = """
+import taichi_forge as ti
+from .first import prepare as first
+from .second import prepare as second
+@ti.data_oriented
+class Model:
+    def __init__(self, n: int):
+        self.n = n
+        first(self)
+        second(self)
+    def replace_first(self):
+        first(self)
+    @ti.kernel
+    def step(self, delta: ti.i32):
+        for i in self.a:
+            self.a[i] += delta
+            self.b[i] += 2 * delta
+    def graph(self):
+        builder = ti.graph.GraphBuilder()
+        delta = ti.graph.Arg(ti.graph.ArgKind.SCALAR, 'delta', ti.i32)
+        builder.dispatch(self.step, delta)
+        return builder.compile()
+"""
+    package, _ = _resource_context_fixture(
+        tmp_path,
+        monkeypatch,
+        model=model,
+        extra_modules={"first": helper.replace("MEMBER", "a"), "second": helper.replace("MEMBER", "b")},
+    )
+    manifest = ti.aot.export_package(package, tmp_path / "sdk")
+    schema = manifest["owners"]["definition_fixture.model.Model"]
+    assert schema["a"]["field_group"] != schema["b"]["field_group"]
+    original = package.Model(7)
+    original.step(3)
+    np.testing.assert_array_equal(original.a.to_numpy(), 3)
+    np.testing.assert_array_equal(original.b.to_numpy(), 6)
+    probe = tmp_path / "consume_preparation_groups.py"
+    probe.write_text(
+        textwrap.dedent("""
+        import importlib.abc, sys
+        import numpy as np
+        class Block(importlib.abc.MetaPathFinder):
+            def find_spec(self, fullname, path=None, target=None):
+                if fullname.split('.')[0] in ('taichi', 'taichi_forge', 'definition_fixture', 'resource_contexts'):
+                    raise AssertionError(fullname)
+        sys.meta_path.insert(0, Block())
+        from taichi_forge_runtime.aot import Runtime, load_package
+        with Runtime(sys.argv[2]) as runtime, load_package(runtime, sys.argv[1]) as code:
+            a, b = code.host.Model(7), code.host.Model(19)
+            a.step(3)
+            b.step(2)
+            old_a, same_b = a.a, a.b
+            graph = a.graph().bind({'delta': 4})
+            a.replace_first()
+            assert a.a is not old_a and a.b is same_b
+            a.step(1)
+            graph.run()
+            np.testing.assert_array_equal(old_a.to_numpy(), 7)
+            np.testing.assert_array_equal(a.a.to_numpy(), 1)
+            np.testing.assert_array_equal(a.b.to_numpy(), 16)
+            np.testing.assert_array_equal(b.a.to_numpy(), 2)
+            np.testing.assert_array_equal(b.b.to_numpy(), 4)
+            graph.close()
+        print('PREPARATION_GROUPS_OK')
+    """),
+        encoding="utf8",
+    )
+    result = subprocess.run(
+        [sys.executable, "-B", str(probe), str(tmp_path / "sdk"), manifest["target"]],
+        cwd=tmp_path,
+        env=dict(
+            os.environ,
+            PYTHONDONTWRITEBYTECODE="1",
+            PYTHONPATH=str(Path(__file__).resolve().parents[2] / "packaging/runtime/src"),
+            TAICHI_NATIVE_RUNTIME_DIR=str(Path(utils._loaded_native_runtime_path).parent),
+            TAICHI_RUNTIME_DIR=utils._runtime_bitcode_dir(),
+        ),
+        capture_output=True,
+        text=True,
+        timeout=90,
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert "PREPARATION_GROUPS_OK" in result.stdout
+
+
 PREPARATION_FIELDS_SOURCE = """
 import taichi_forge as ti
 from resource_contexts import resource_group, read_events
