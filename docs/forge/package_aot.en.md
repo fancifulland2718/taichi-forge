@@ -1207,6 +1207,16 @@ writes, without expanding parent configuration combinations. Local CPU/CUDA
 checks cover distinct child layouts and inherited methods. Mismatched receivers
 and alternatives with missing methods still reject.
 
+Ordinary recording functions may iterate Kernel sources declared by immutable
+tuples or restricted generators. The existing source-sequence projection covers
+`yield`, `yield from`, branches and repeated sources inside model-dependent
+`range` loops without executing the generator or expanding numerical code by
+iteration count. Literal `getattr` and explicit keyword forwarding retain their
+source. A loop index cannot itself establish a Kernel. Side effects, rebound
+inputs, unknown methods and unproven cached/closure sequences still reject with
+their source chain. Local CPU/CUDA source-free checks pass; the complete TGS
+time recipe is not yet qualified.
+
 Version 41 also admits borrowing an entire declared flat StructField through
 `scope.borrow(..., source_scope=True)`. Member bindings retain the original
 allocation namespace and native layout; the record is not an independent array.

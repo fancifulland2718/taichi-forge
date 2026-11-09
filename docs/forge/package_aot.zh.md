@@ -696,6 +696,12 @@ Host owner 序列也可从已有 `ti.aot.written_resources(owner, owner.record)`
 类型来源，正常准备仍选择实际写集合；不展开父对象配置组合。CPU/CUDA 局部检查覆盖
 两种不同字段布局及继承方法；错误的接收者和缺失方法的分支仍拒绝。
 
+普通录图函数也可遍历由不可变 tuple 或受限生成器声明的 Kernel 来源。来源投影复用
+字段序列分析，支持 `yield`、`yield from`、条件分支以及模型 `range` 内的相同来源，
+不执行生成器，也不按迭代次数展开数值代码。字面量 `getattr` 和显式命名参数保留来源；
+循环索引本身不能成为 Kernel。副作用、输入重绑定、未知方法和未证明的缓存/闭包序列
+仍拒绝，并报告来源链。CPU/CUDA 局部无源码检查通过；完整 TGS 时间配方尚未通过。
+
 版本 41 允许通过 `scope.borrow(..., source_scope=True)` 借用整个已声明的扁平
 StructField，成员绑定保留原分配命名空间和原生布局，不将记录当作独立数组。
 该输入可以供 `field_like` 使用，包括含模型向量成员的 SOA 备份。Dense 遍历为

@@ -2208,9 +2208,28 @@ class Model:
 
 
 @test_utils.test(arch=[ti.cpu, ti.cuda], offline_cache=False)
-@pytest.mark.parametrize('source_form', ['direct', 'mapping', 'prepared', 'preparation', 'tuple'])
+@pytest.mark.parametrize('source_form', ['direct', 'mapping', 'prepared', 'preparation', 'tuple', 'generator'])
 def test_package_write_inventory_resolves_before_its_own_checkpoint(tmp_path, monkeypatch, source_form):
     source = CYCLIC_WRITE_INVENTORY_SOURCE
+    if source_form == 'generator':
+        source = source.replace('def append_step(solver, builder):\n    builder.dispatch(solver.step)', '''
+def single(solver):
+    return (('step', getattr(solver, 'step')),)
+
+def prefix(solver, include):
+    if include and getattr(solver, 'n', 0) > 0:
+        yield from single(solver=solver)
+
+def operations(solver):
+    yield from prefix(solver, include=True)
+    for iteration in range(solver.n):
+        if solver.n > 0:
+            yield 'step', solver.step
+
+def append_step(solver, builder):
+    for name, operation in operations(solver):
+        builder.dispatch(operation)
+''')
     if source_form in ('prepared', 'preparation', 'tuple'):
         source = source.replace('''def __init__(self, solver):
         scope = ti.experimental.ResourceScope(self)
@@ -2294,6 +2313,34 @@ def append_step(solver, builder):
                  TAICHI_RUNTIME_DIR=utils._runtime_bitcode_dir()))
     assert result.returncode == 0, result.stdout + result.stderr
     assert 'CHECKPOINT_INVENTORY_SOURCE_FREE_OK' in result.stdout
+
+
+@test_utils.test(arch=ti.cpu, offline_cache=False)
+@pytest.mark.parametrize('change', ['unknown', 'effect', 'rebound', 'index', 'input_rebound', 'import_rebound'])
+def test_package_write_inventory_rejects_unproven_iteration(tmp_path, monkeypatch, change):
+    operation = 'solver.missing' if change == 'unknown' else 'index' if change == 'index' else 'solver.step'
+    effect = "    print('must not execute')\n" if change == 'effect' else ''
+    rebind = '        operation = solver.unrelated\n' if change == 'rebound' else ''
+    replacement = f'''def operations(solver):
+{effect}    for index in range(solver.n):
+        yield 'step', {operation}
+
+def append_step(solver, builder):
+    for name, operation in operations(solver):
+{rebind}        builder.dispatch(operation)
+'''
+    source = CYCLIC_WRITE_INVENTORY_SOURCE.replace(
+        'def append_step(solver, builder):\n    builder.dispatch(solver.step)', replacement)
+    if change == 'input_rebound':
+        source = source.replace('for index in range(solver.n):', 'for solver in range(solver.n):')
+    elif change == 'import_rebound':
+        source = source.replace('def operations(solver):', 'def operations(solver):\n    import builtins as solver')
+    package = _source_package(tmp_path, monkeypatch, source)
+    before = ti.lang.impl.get_runtime().get_num_compiled_functions()
+    with pytest.raises(ValueError, match='write inventory dispatch has no proven Kernel'):
+        ti.aot.check_package(package)
+    assert package.model.constructors == 0
+    assert ti.lang.impl.get_runtime().get_num_compiled_functions() == before
 
 
 @test_utils.test(arch=ti.cpu, offline_cache=False)

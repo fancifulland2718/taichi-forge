@@ -6,6 +6,7 @@ constructors, Host branches or numerical definitions to discover input types.
 
 import ast
 import builtins
+import copy
 from collections import deque
 from dataclasses import dataclass, fields, is_dataclass, MISSING
 import inspect
@@ -230,6 +231,8 @@ def discover(sources, imported, *, preparation_receivers=None, resource_inventor
         return result
 
     namespaces = {}
+    sequence_projector = None
+    iteration_failures = {}
 
     def function_namespace(function):
         if function in namespaces:
@@ -319,6 +322,7 @@ def discover(sources, imported, *, preparation_receivers=None, resource_inventor
         return None
 
     def build_context(function, arguments, return_chain):
+        nonlocal sequence_projector
         module, node = functions[function]
         namespace = function_namespace(function)
         # A rebinding invalidates an earlier owner fact. Nested definitions have
@@ -327,6 +331,7 @@ def discover(sources, imported, *, preparation_receivers=None, resource_inventor
         condition_value = None
 
         def walk(statement):
+            nonlocal sequence_projector
             if isinstance(statement, ast.Lambda):
                 parameters = statement.args
                 if not (
@@ -346,6 +351,51 @@ def discover(sources, imported, *, preparation_receivers=None, resource_inventor
                 return
             if isinstance(statement, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
                 return
+            if (resource_inventory is not None and condition_value is not None
+                    and isinstance(statement, ast.For)):
+                from ._package_source_sequences import SourceSequences, UnprovenSourceSequence
+
+                if sequence_projector is None:
+                    sequence_projector = SourceSequences(sources, imported)
+                    for callee, (definition, _) in list(sequence_projector.functions.items()):
+                        if callee in functions:
+                            sequence_projector.functions[callee] = (definition, function_namespace(callee))
+                try:
+                    environment = {name: ast.Name(name, ast.Load()) for name in arguments}
+                    environment.update({name: expression for name, expression in aliases.items()
+                                        if stores.get(name) == 1})
+                    sequence = sequence_projector.value(statement.iter, environment, namespace)
+                    if not sequence_projector.immutable(sequence):
+                        raise UnprovenSourceSequence('Iteration requires an immutable source sequence')
+                    names = {part.id for part in ast.walk(statement.target) if isinstance(part, ast.Name)}
+                    if any(isinstance(part, ast.Name) and part.id in names and not isinstance(part.ctx, ast.Load)
+                           for body in statement.body for part in ast.walk(body)):
+                        raise UnprovenSourceSequence('Iteration source is rebound in the loop body')
+                except (UnprovenSourceSequence, TypeError) as error:
+                    if (isinstance(statement.iter, ast.Call)
+                            and source_callable(statement.iter.func, namespace) in sequence_projector.functions):
+                        iteration_failures.setdefault(function, set()).add(str(error))
+                else:
+                    for item in sequence.values:
+                        bindings = {}
+                        sequence_projector.bind(statement.target, item, bindings)
+
+                        class BindIteration(ast.NodeTransformer):
+                            def visit_Name(self, part):
+                                if isinstance(part.ctx, ast.Load) and part.id in bindings:
+                                    return ast.copy_location(sequence_projector.syntax(bindings[part.id]), part)
+                                return part
+
+                            def visit_FunctionDef(self, part):
+                                return part
+
+                            visit_AsyncFunctionDef = visit_ClassDef = visit_FunctionDef
+
+                        for body in statement.body:
+                            walk(BindIteration().visit(copy.deepcopy(body)))
+                    for body in statement.orelse:
+                        walk(body)
+                    return
             nodes.append(statement)
             if condition_value is not None and isinstance(statement, (ast.If, ast.IfExp)):
                 choice = condition_value(statement.test)
@@ -518,6 +568,8 @@ def discover(sources, imported, *, preparation_receivers=None, resource_inventor
                         pending_taints.append(dependency)
 
         def value(expression, visiting=(), bindings=None):
+            if getattr(expression, '_package_unknown_iteration', False):
+                return None
             bindings = bindings or {}
 
             def child(item):
@@ -917,7 +969,9 @@ def discover(sources, imported, *, preparation_receivers=None, resource_inventor
                     if not isinstance(kernel, _Kernel):
                         if resource_inventory is not None:
                             route = ' -> '.join(item.__qualname__ for item in chain)
-                            failures.append(f"{module}:{call.lineno}: write inventory dispatch has no proven Kernel via {route}")
+                            reasons = sorted({reason for item in chain for reason in iteration_failures.get(item, ())})
+                            detail = '; iteration source: ' + '; '.join(reasons) if reasons else ''
+                            failures.append(f"{module}:{call.lineno}: write inventory dispatch has no proven Kernel via {route}{detail}")
                         continue
                     parameters = kernels[kernel.function][2]
                     mapping = dict(inputs.items) if isinstance(inputs, _Mapping) else {}

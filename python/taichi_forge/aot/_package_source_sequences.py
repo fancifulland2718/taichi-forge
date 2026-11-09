@@ -6,6 +6,7 @@ Original Host code still chooses the collection and executes its control flow.
 """
 
 import ast
+import builtins
 import copy
 import inspect
 import operator
@@ -110,9 +111,21 @@ class SourceSequences:
                 source = copy.deepcopy(owner)
                 source._package_written_resource_inventory = record.attr
                 return Sequence([source])
+            if isinstance(node.func, ast.Name) and node.func.id == 'getattr' and len(node.args) in (2, 3):
+                self.unshadowed(node.func, environment)
+                supplied = namespace.get('__builtins__', vars(builtins))
+                supplied = supplied if isinstance(supplied, dict) else vars(supplied)
+                if (namespace.get('getattr', builtins.getattr) is not builtins.getattr
+                        or supplied.get('getattr') is not builtins.getattr):
+                    raise UnprovenSourceSequence('Inventory getattr must retain its original binding')
+                parent = self.scalar(self.value(node.args[0], environment, namespace, active))
+                name = self.value(node.args[1], environment, namespace, active)
+                if not isinstance(name, ast.Constant) or type(name.value) is not str:
+                    raise UnprovenSourceSequence('Inventory getattr requires a literal member name')
+                if len(node.args) == 3:
+                    self.scalar(self.value(node.args[2], environment, namespace, active))
+                return ast.Attribute(parent, name.value, ast.Load())
             if isinstance(node.func, ast.Name) and node.func.id in ("tuple", "zip"):
-                import builtins
-
                 builtin = getattr(builtins, node.func.id)
                 supplied = namespace.get("__builtins__", vars(builtins))
                 supplied = supplied if isinstance(supplied, dict) else vars(supplied)
@@ -146,18 +159,30 @@ class SourceSequences:
                     for part in name.value.split("."):
                         result = ast.Attribute(result, part, ast.Load())
                     return result
+        if isinstance(node, ast.Call):
             self.unshadowed(node.func, environment)
             target = _source_value(node.func, namespace)
             if inspect.isfunction(target) and target in self.functions:
                 if target in active:
                     raise UnprovenSourceSequence("Recursive source inventories are not finite declarations")
+                definition, child_namespace = self.functions[target]
+                generator = inspect.isgeneratorfunction(target)
+                if any(k.arg is None for k in node.keywords):
+                    raise UnprovenSourceSequence("Inventory helpers require explicit keyword arguments")
                 arguments = [self.value(arg, environment, namespace, active) for arg in node.args]
-                bound = inspect.signature(target).bind(*arguments)
+                bound = inspect.signature(target).bind(
+                    *arguments, **{k.arg: self.value(k.value, environment, namespace, active) for k in node.keywords})
                 # Defaults cannot silently introduce runtime objects into the proof.
                 if len(bound.arguments) != len(inspect.signature(target).parameters):
                     raise UnprovenSourceSequence("Inventory helpers require explicit arguments")
-                definition, child_namespace = self.functions[target]
-                result = self.body(definition.body, dict(bound.arguments), child_namespace, (*active, target))
+                try:
+                    if generator:
+                        result = self.generator_body(
+                            definition.body, dict(bound.arguments), child_namespace, (*active, target))
+                    else:
+                        result = self.body(definition.body, dict(bound.arguments), child_namespace, (*active, target))
+                except UnprovenSourceSequence as error:
+                    raise UnprovenSourceSequence(target.__qualname__ + ": " + str(error)) from error
                 if not self.immutable(result):
                     raise UnprovenSourceSequence("Inventory helpers must return an immutable source tuple")
                 return result
@@ -254,7 +279,65 @@ class SourceSequences:
                     raise UnprovenSourceSequence("Inventory requires a final return")
                 return self.value(node.value, environment, namespace, active)
             else:
-                raise UnprovenSourceSequence("Inventory has an unproven statement or side effect")
+                raise UnprovenSourceSequence(
+                    f"Inventory has an unproven {type(node).__name__} or side effect at line {node.lineno}")
+
+    def generator_body(self, statements, environment, namespace, active):
+        """Project yielded sources, never the number of runtime iterations."""
+        result = []
+        for node in statements:
+            if isinstance(node, ast.Expr) and isinstance(node.value, (ast.Yield, ast.YieldFrom)):
+                value = self.value(node.value.value, environment, namespace, active)
+                result.extend(self.sequence(value).values if isinstance(node.value, ast.YieldFrom) else [value])
+            elif isinstance(node, ast.If):
+                self.scalar(self.value(node.test, environment, namespace, active))
+                for branch in (node.body, node.orelse):
+                    result.extend(self.generator_body(branch, dict(environment), namespace, active).values)
+            elif isinstance(node, ast.For) and not node.orelse:
+                if any(part.id in environment for part in ast.walk(node.target) if isinstance(part, ast.Name)):
+                    raise UnprovenSourceSequence('Generator iteration cannot rebind a forwarded input')
+                expression = node.iter
+                if (isinstance(expression, ast.Call) and isinstance(expression.func, ast.Name)
+                        and expression.func.id == 'range' and 'range' not in environment
+                        and namespace.get('range', builtins.range) is builtins.range
+                        and 1 <= len(expression.args) <= 3 and not expression.keywords):
+                    supplied = namespace.get('__builtins__', vars(builtins))
+                    supplied = supplied if isinstance(supplied, dict) else vars(supplied)
+                    if supplied.get('range') is not builtins.range:
+                        raise UnprovenSourceSequence('Generator range must retain its original binding')
+                    for argument in expression.args:
+                        self.scalar(self.value(argument, environment, namespace, active))
+                    # A loop index is not a constant or a resource source. It
+                    # may control Host branches, but cannot select a Kernel.
+                    unknown = ast.Name('_package_dynamic_iteration', ast.Load())
+                    unknown._package_unknown_iteration = True
+                    values = [unknown]
+                else:
+                    values = self.sequence(self.value(expression, environment, namespace, active)).values
+                for value in values:
+                    local = dict(environment)
+                    self.bind(node.target, value, local)
+                    result.extend(self.generator_body(node.body, local, namespace, active).values)
+            elif isinstance(node, ast.Return) and node.value is None:
+                break
+            elif isinstance(node, (ast.Import, ast.ImportFrom)):
+                names = (item.asname or (item.name if isinstance(node, ast.ImportFrom) else item.name.split('.')[0])
+                         for item in node.names)
+                if any(name in environment for name in names):
+                    raise UnprovenSourceSequence('Generator import cannot rebind a forwarded input')
+                continue  # Imports are resolved by the admitted source namespace.
+            elif isinstance(node, ast.Pass):
+                continue
+            elif isinstance(node, ast.Expr) and isinstance(node.value, ast.Constant) and isinstance(node.value.value, str):
+                continue
+            else:
+                raise UnprovenSourceSequence(
+                    f'Generator has an unproven {type(node).__name__} at line {node.lineno}')
+        # The source domain, not the repeated dispatch plan, is the proof input.
+        unique = {}
+        for value in result:
+            unique.setdefault(ast.dump(self.syntax(value)), value)
+        return Sequence(unique.values())
 
     def constructor_aliases(self, constructor, namespace):
         environment = {
