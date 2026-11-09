@@ -1897,6 +1897,15 @@ Allocating another scalar Field from a declared Field's `.dtype` propagates the
 same policy, including to entries that use only the derived Field. Tensor/Struct
 allocations derived from a conditional type currently reject explicitly.
 
+Format 73 supports `scope.borrow('view', self.b if self.choice else self.a, source_scope=True)`.
+An unconditional boolean static selects between two declared Fields on the same
+owner; their presence guards must match. The view retains the original allocation
+and lease without copying storage. Only entries using the view need the selection;
+unrelated entries share code. Focused CPU/CUDA checks cover ordinary JIT, nested
+owners, fixed-name loops, source-free dual instances with new sizes, wrong sources,
+missing guards and older-format rejection. Model-value conditions, arbitrary source
+expressions and undeclared fields are outside this support.
+
 Declared fixed integer constants may also be read through a resource scope for
 layout. Ordinary inherited constructors allocate against the concrete receiver's
 contract, including subclass constant widths. Instance dimensions remain dynamic;

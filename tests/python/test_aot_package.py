@@ -5890,6 +5890,160 @@ class Model:
 """
 
 
+BORROW_CHOICES_SOURCE = """
+import taichi_forge as ti
+constructors = 0
+@ti.data_oriented
+class Model:
+    def __init__(self, n: int, second: bool):
+        global constructors
+        constructors += 1
+        self.n, self.second = n, second
+        scope = ti.experimental.ResourceScope(self)
+        n = scope.dim('n')
+        scope.static('second', choices=(False, True))
+        scope.a = scope.field(ti.i32, shape=n, initialization='zero')
+        if self.second:
+            scope.b = scope.field(ti.i32, shape=n * 2, initialization='zero')
+        scope.out = scope.field(ti.i32, shape=n, initialization='zero')
+        scope.borrow('selected', self.b if self.second else self.a, source_scope=True)
+    @ti.kernel
+    def step(self, bias: ti.i32):
+        for i in self.selected:
+            self.selected[i] += i + bias
+    @ti.kernel
+    def independent(self):
+        for i in self.out:
+            self.out[i] += 1
+@ti.data_oriented
+class Parent:
+    def __init__(self, n: int, second: bool):
+        scope = ti.experimental.ResourceScope(self)
+        scope.child = Model(n, second)
+    @ti.kernel
+    def step(self, bias: ti.i32):
+        for i in self.child.selected:
+            self.child.selected[i] += bias
+"""
+
+
+@pytest.mark.parametrize("declaration", ["direct", "global_tuple", "preparation"])
+@test_utils.test(arch=[ti.cpu, ti.cuda], offline_cache=False)
+def test_package_borrow_choices_preserve_original_storage(tmp_path, monkeypatch, declaration):
+    source = BORROW_CHOICES_SOURCE
+    if declaration == "global_tuple":
+        source = source.replace("constructors = 0", "constructors = 0\nALIASES = ('selected',)")
+        source = source.replace(
+            "        scope.borrow('selected', self.b if self.second else self.a, source_scope=True)",
+            "        for name in ALIASES:\n"
+            "            scope.borrow(f'{name}', getattr(self, f'b') if self.second else getattr(self, f'a'), source_scope=True)",
+        )
+    elif declaration == "preparation":
+        source = source.replace(
+            "        scope.borrow('selected', self.b if self.second else self.a, source_scope=True)",
+            "        bind_view(self)",
+        )
+        source += """
+def bind_view(model):
+    scope = ti.experimental.ResourceScope(model)
+    scope.borrow('selected', model.b if model.second else model.a, source_scope=True)
+"""
+    package = _source_package(tmp_path, monkeypatch, source)
+    manifest = ti.aot.export_package(package, tmp_path / "sdk")
+    assert sys.modules["definition_fixture.model"].constructors == 0
+    assert manifest["version"] == 73
+    steps = [e for e in manifest["entries"].values() if "definition_fixture.model.Model.step" in e["definitions"]]
+    independent = [
+        e for e in manifest["entries"].values() if "definition_fixture.model.Model.independent" in e["definitions"]
+    ]
+    assert len(steps) == 2
+    assert len(independent) == 1
+    for second in (False, True):
+        original = package.Model(7, second)
+        original.step(3)
+        np.testing.assert_array_equal(original.selected.to_numpy(), np.arange(14 if second else 7) + 3)
+    probe = tmp_path / "consume_borrow_choices.py"
+    probe.write_text(
+        textwrap.dedent("""
+        import importlib.abc
+        import sys
+        import numpy as np
+        class NoPrivateSource(importlib.abc.MetaPathFinder):
+            def find_spec(self, fullname, path=None, target=None):
+                if fullname.split('.')[0] in ('taichi', 'taichi_forge', 'definition_fixture'):
+                    raise AssertionError(fullname)
+        sys.meta_path.insert(0, NoPrivateSource())
+        from taichi_forge_runtime.aot import Runtime, load_package
+        with Runtime(sys.argv[2]) as runtime, load_package(runtime, sys.argv[1]) as code:
+            a, b = code.host.Model(7, False), code.host.Model(19, True)
+            assert a.selected is a.a and b.selected is b.b
+            assert not hasattr(a, 'b')
+            a.step(3)
+            b.step(5)
+            np.testing.assert_array_equal(a.a.to_numpy(), np.arange(7) + 3)
+            np.testing.assert_array_equal(b.b.to_numpy(), np.arange(38) + 5)
+            np.testing.assert_array_equal(b.a.to_numpy(), 0)
+            a.independent()
+            np.testing.assert_array_equal(a.out.to_numpy(), 1)
+            np.testing.assert_array_equal(b.out.to_numpy(), 0)
+            nested = code.host.model.Parent(11, True)
+            nested.step(7)
+            np.testing.assert_array_equal(nested.child.b.to_numpy(), np.full(22, 7))
+            np.testing.assert_array_equal(nested.child.a.to_numpy(), 0)
+            b.selected = b.a
+            try:
+                b.step(1)
+            except ValueError:
+                pass
+            else:
+                raise AssertionError('Changed source binding accepted')
+        print('BORROW_CHOICES_SOURCE_FREE_OK')
+    """),
+        encoding="utf8",
+    )
+    env = dict(
+        os.environ,
+        PYTHONDONTWRITEBYTECODE="1",
+        PYTHONPATH=str(Path(__file__).resolve().parents[2] / "packaging/runtime/src"),
+        TAICHI_NATIVE_RUNTIME_DIR=str(Path(utils._loaded_native_runtime_path).parent),
+        TAICHI_RUNTIME_DIR=utils._runtime_bitcode_dir(),
+    )
+    result = subprocess.run(
+        [sys.executable, "-B", str(probe), str(tmp_path / "sdk"), manifest["target"]],
+        cwd=tmp_path,
+        env=env,
+        capture_output=True,
+        text=True,
+        timeout=90,
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert "BORROW_CHOICES_SOURCE_FREE_OK" in result.stdout
+    manifest["version"] = 72
+    (tmp_path / "sdk/package.json").write_text(json.dumps(manifest), encoding="utf8")
+    with Runtime(manifest["target"]) as runtime:
+        with pytest.raises(ValueError, match="format 73"):
+            load_package(runtime, tmp_path / "sdk")
+
+
+@pytest.mark.parametrize("change", ["kernel_only", "model_guard", "missing_source", "wrong_presence"])
+@test_utils.test(arch=ti.cpu, offline_cache=False)
+def test_package_borrow_choices_reject_unproven_sources(tmp_path, monkeypatch, change):
+    source = BORROW_CHOICES_SOURCE
+    if change == "kernel_only":
+        source = source.replace("choices=(False, True))", "choices=(False, True), kernel_only=True)")
+        source = source.replace("        if self.second:\n            scope.b", "        scope.b")
+    elif change == "model_guard":
+        source = source.replace("self.b if self.second", "self.b if self.n > 5")
+    elif change == "missing_source":
+        source = source.replace("self.b if self.second", "self.missing if self.second")
+    else:
+        source = source.replace("self.b if self.second else self.a", "self.a if self.second else self.b")
+    package = _source_package(tmp_path, monkeypatch, source)
+    with pytest.raises((ti.aot.PackageExportError, ValueError), match="Borrow source"):
+        ti.aot.export_package(package, tmp_path / "sdk")
+    assert sys.modules["definition_fixture.model"].constructors == 0
+
+
 CHILD_CHOICES_SOURCE = """
 import taichi_forge as ti
 constructors = 0

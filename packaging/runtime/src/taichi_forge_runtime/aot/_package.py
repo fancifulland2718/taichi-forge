@@ -635,6 +635,13 @@ class _ModuleBinding:
             raise ValueError("Borrowed Field requires its managed source-scope construction")
         owner_key = self.owner_contract(scope._root, owner_key)
         contract = self.package.manifest["owners"][owner_key].get(scope._identity(name), {})
+        if contract.get("source_policy"):
+            policy = contract["source_policy"]
+            guard = self.package.manifest["owners"][owner_key][policy["condition"]]
+            selected = path_value(scope._root, guard.get("path", (policy["condition"],)))
+            if type(selected) is not bool:
+                raise ValueError("Borrow source selection requires a boolean configuration")
+            contract = {**contract, "source_path": policy["if_true" if selected else "if_false"]}
         if (
             not (construction is not None and construction[0] is self.package and construction[2] is scope._root)
             and contract.get("binding_phase") != "preparation"
@@ -1696,6 +1703,7 @@ class LoadedPackage:
                 70,
                 71,
                 72,
+                73,
             )
             or self.manifest.get("kind") != "forge_definition_package_prototype"
         ):
@@ -1713,6 +1721,10 @@ class LoadedPackage:
             contract.get("dtypes") for contract in self.manifest.get("field_groups", {}).values()
         ):
             raise ValueError("Field dtype selection requires definition package format 72")
+        if self.manifest["version"] < 73 and any(
+            member.get("source_policy") for owner in self.manifest["owners"].values() for member in owner.values()
+        ):
+            raise ValueError("Borrow source selection requires definition package format 73")
         if self.manifest["version"] < 70 and any(
             contract.get("shapes") for contract in self.manifest.get("field_groups", {}).values()
         ):

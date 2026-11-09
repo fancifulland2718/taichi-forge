@@ -85,12 +85,42 @@ def declaration(call, scope_path, schema, dimension, fail, *, preparation=False,
         and (not isinstance(keywords["external"], ast.Constant) or keywords["external"].value is not False)
     ):
         fail(call, "Package borrow currently requires source_scope=True and its visible allocation")
-    path, node = [], call.args[1]
+    source_policy = None
+    expression = call.args[1]
+    if isinstance(expression, ast.IfExp):
+        from taichi_forge_runtime._static_values import read_static_key
+
+        test = expression.test
+        guard = schema.get(test.attr, {}) if isinstance(test, ast.Attribute) else {}
+        if not (
+            isinstance(test, ast.Attribute)
+            and isinstance(test.value, ast.Name)
+            and test.value.id == "self"
+            and guard.get("kind") == "static"
+            and not guard.get("conditions")
+            and not guard.get("kernel_only")
+            and {tuple(value) for value in guard.get("choices", ())} == {("bool", False), ("bool", True)}
+        ):
+            fail(expression, "Borrow source selection requires an unconditional declared boolean static")
+        sources = []
+        for branch in (expression.body, expression.orelse):
+            if not (
+                isinstance(branch, ast.Attribute)
+                and isinstance(branch.value, ast.Name)
+                and branch.value.id == "self"
+                and branch.attr.isidentifier()
+                and not branch.attr.startswith("__")
+            ):
+                fail(branch, "Borrow source alternatives require direct fields on the same owner")
+            sources.append([branch.attr])
+        source_policy = dict(condition=test.attr, if_true=sources[0], if_false=sources[1])
+        expression = expression.body if read_static_key(guard["choices"][0]) else expression.orelse
+    path, node = [], expression
     while isinstance(node, ast.Attribute):
         path.insert(0, node.attr)
         node = node.value
     parameter = node.id if isinstance(node, ast.Name) and node.id != "self" and not path else None
-    deferred = preparation and needs_source_proof(call.args[1], schema)
+    deferred = source_policy is None and preparation and needs_source_proof(expression, schema)
     if scope_path and parameter is not None and not deferred:
         fail(call, "Record borrowing requires a declared allocation path, not an untyped record input")
     if not deferred and parameter is None and (not isinstance(node, ast.Name) or node.id != "self" or not path):
@@ -98,6 +128,7 @@ def declaration(call, scope_path, schema, dimension, fail, *, preparation=False,
     source = schema.get(path[0], {}) if path else {}
     if (
         not deferred
+        and source_policy is None
         and parameter is None
         and source.get("kind") not in ("owner", "owner_input")
         and (
@@ -149,6 +180,7 @@ def declaration(call, scope_path, schema, dimension, fail, *, preparation=False,
         kind="borrowed_field",
         **({"path": [*scope_path, name]} if scope_path else {}),
         source_path=path,
+        **({"source_policy": source_policy} if source_policy is not None else {}),
         **(
             {"input_expression": call.args[1]}
             if deferred
@@ -212,7 +244,7 @@ def project(owner, environment, schema):
                 if item.get("conditions", {}).get(key) is not expected
             ]
         elif any(
-            item.get("conditions", {}).get(key) is not expected
+            {**item.get("conditions", {}), **item.get("source_guards", {})}.get(key) is not expected
             for key, expected in source.get("conditions", {}).items()
         ):
             raise ValueError("Borrowed Field requires its original allocation presence guards")
@@ -260,9 +292,10 @@ def project(owner, environment, schema):
                     if isinstance(original, _ModelTensorField)
                     else DenseField(original.dtype, original.shape, original.group)
                 )
-            if item.get("conditions"):
+            guards = {**item.get("conditions", {}), **item.get("source_guards", {})}
+            if guards:
                 original = declarations[alias_name]
-                conditions = tuple(sorted(item["conditions"].items()))
+                conditions = tuple(sorted(guards.items()))
                 declarations[alias_name] = (
                     _ConditionalModelTensorField(
                         original.dtype, original.shape, original.group, original.element_shape, conditions

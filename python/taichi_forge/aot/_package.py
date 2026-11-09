@@ -1734,6 +1734,8 @@ def export_package(package, output, *, arch=None, caps=None, source_root=None):
                 manifest["version"] = max(55, manifest["version"])
             if any(item.get("input_method") for item in schema.values()):
                 manifest["version"] = max(56, manifest["version"])
+            if any(item.get("source_policy") for item in schema.values()):
+                manifest["version"] = max(73, manifest["version"])
             if any(item.get("input_presence_attribute") for item in schema.values()):
                 manifest["version"] = max(57, manifest["version"])
             if any(item["kind"] == "dimension" and item.get("expression") for item in schema.values()):
@@ -1774,6 +1776,7 @@ def export_package(package, output, *, arch=None, caps=None, source_root=None):
                         "owner_alternatives",
                         "choice_guards",
                         "shape_guards",
+                        "source_guards",
                     )
                 }
                 for attribute, item in schema.items()
@@ -2059,7 +2062,10 @@ def export_package(package, output, *, arch=None, caps=None, source_root=None):
 
             try:
                 if "closure_environment" not in definition and any(
-                    item.get("owner_alternatives") or item.get("shape_policy") or item.get("dtype_policy")
+                    item.get("owner_alternatives")
+                    or item.get("shape_policy")
+                    or item.get("dtype_policy")
+                    or item.get("source_policy")
                     for item in compilation_schema.values()
                 ):
                     contexts = compile_owner_variants(

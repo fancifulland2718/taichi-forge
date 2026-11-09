@@ -88,6 +88,18 @@ class OwnerGraph:
             if item["kind"] == "static"
         }
         for attribute, item in schema.items():
+            if "source_policy" in item:
+                policy = item["source_policy"]
+                for branch, expected in (("if_true", True), ("if_false", False)):
+                    source = schema.get(policy[branch][0], {})
+                    guards = {**item.get("conditions", {}), policy["condition"]: expected}
+                    if source.get("kind") != "dense_field" or any(
+                        guards.get(key) is not value for key, value in source.get("conditions", {}).items()
+                    ):
+                        raise ValueError("Borrow source alternatives require original fields and their presence guards")
+                selected = static_values[policy["condition"]]
+                item["source_path"] = policy["if_true" if selected else "if_false"]
+                item["source_guards"] = {policy["condition"]: selected}
             if "dtype_policy" in item:
                 policy = item["dtype_policy"]
                 selected = static_values[policy["condition"]]
@@ -293,6 +305,14 @@ def _compose(environment, schema, children):
             transformed = {**item, "path": [attribute, *item.get("path", (key,))]}
             if "source_path" in item:
                 transformed["source_path"] = [attribute, *item["source_path"]]
+            if "source_policy" in item:
+                policy = item["source_policy"]
+                transformed["source_policy"] = {
+                    "condition": names[policy["condition"]],
+                    "if_true": [attribute, *policy["if_true"]],
+                    "if_false": [attribute, *policy["if_false"]],
+                }
+                transformed["source_guards"] = {names[n]: expected for n, expected in item["source_guards"].items()}
             if "input_presence_attribute" in item:
                 transformed["input_presence_attribute"] = names[item["input_presence_attribute"]]
             if "input_record" in item:

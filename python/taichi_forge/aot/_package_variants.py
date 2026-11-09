@@ -113,12 +113,14 @@ def compile_owner_variants(graph, identity, entry, arguments, *, template_args=N
         choices = {name: item for name, item in schema.items() if item.get("owner_alternatives")}
         shape_choices = {name: item for name, item in schema.items() if item.get("shape_policy")}
         dtype_choices = {name: item for name, item in schema.items() if item.get("dtype_policy")}
+        source_choices = {name: item for name, item in schema.items() if item.get("source_policy")}
         fixed = {}
-        for item in (*choices.values(), *shape_choices.values(), *dtype_choices.values()):
+        for item in (*choices.values(), *shape_choices.values(), *dtype_choices.values(), *source_choices.values()):
             for name, value in {
                 **item.get("choice_guards", {}),
                 **item.get("shape_guards", {}),
                 **item.get("dtype_guards", {}),
+                **item.get("source_guards", {}),
             }.items():
                 if name in fixed and fixed[name] is not value:
                     raise ValueError("Child implementation guards contradict one another")
@@ -155,6 +157,7 @@ def compile_owner_variants(graph, identity, entry, arguments, *, template_args=N
             for name, policy in (
                 *((name, item["shape_policy"]) for name, item in shape_choices.items()),
                 *((name, item["dtype_policy"]) for name, item in dtype_choices.items()),
+                *((name, item["source_policy"]) for name, item in source_choices.items()),
             ):
                 guard = policy["condition"]
                 if name in code.used or guard in code.static:

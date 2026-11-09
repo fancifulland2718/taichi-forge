@@ -1277,6 +1277,12 @@ CPU/CUDA 局部检查包含嵌套 owner、借用、JIT 对照和无源码双实�
 以已声明字段的 `.dtype` 分配另一个标量 Field 时，该类型依赖沿同一策略传递，
 只访问派生字段的入口也覆盖相应类型；派生张量/Struct 的类型选择目前明确拒绝。
 
+格式 73 支持 `scope.borrow('view', self.b if self.choice else self.a, source_scope=True)`：
+同一 owner 中两个已声明 Field 可由无条件布尔 static 选择，来源的存在守卫必须匹配。
+它只选择原分配及租约，不复制缓冲区；仅访问该视图的入口保留必要选择，无关入口共享代码。
+CPU/CUDA 定向检查覆盖 JIT 对照、嵌套 owner、固定名字循环、无源码不同尺寸双实例，以及
+错误来源、缺失守卫和旧格式拒绝。模型值条件、任意来源表达式和未声明字段不在该支持范围。
+
 复杂 SNode/Field 布局、上述继承限制、模板参数域/其余条件资源域、无类型或 Python 专用 `pyfunc`、梯度、任意 Python
 资源工厂、完整 Host 数组访问接口、完整 Graph/ExecutionPlan 和 provider 引用还没有接入。
 当前识别到不支持的声明或 Host 前端操作会拒绝导出，不借助样本运行或私有 JIT 回退。
