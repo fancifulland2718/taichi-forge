@@ -61,7 +61,7 @@ class OwnerGraph:
                 for choice in item.get("owner_alternatives", [item]):
                     self._validate(choice["owner_type"], (*ancestors, identity))
 
-    def construct(self, identity, *, resource_only=False, references=(), choices=None, path=()):
+    def construct(self, identity, *, resource_only=False, references=(), choices=None, path=(), resource_paths=None):
         import taichi_forge as ti
         from taichi_forge.lang.matrix import MatrixType
         from taichi_forge_runtime._static_values import read_static_key
@@ -82,6 +82,11 @@ class OwnerGraph:
 
         name, class_name, original = self.definitions[identity]
         schema = copy.deepcopy(original)
+        source_children = {}
+        if resource_paths is not None:
+            from ._package_resource_slice import allocation_schema
+
+            schema, source_children = allocation_schema(schema, resource_paths)
         static_values = {
             key: (choices or {}).get((*path, key), read_static_key(item["choices"][0]))
             for key, item in schema.items()
@@ -94,20 +99,28 @@ class OwnerGraph:
             remaining = tuple(policy["condition_path"])
             source = original
             while True:
-                member = next((item for key, item in source.items()
-                               if tuple(item.get("path", (key,))) == remaining), None)
+                member = next(
+                    (item for key, item in source.items() if tuple(item.get("path", (key,))) == remaining), None
+                )
                 if member is not None:
                     if member["kind"] != "static":
                         raise ValueError("field_like layout selection requires a declared static source")
-                    return (choices or {}).get((*path, *policy["condition_path"]),
-                                               read_static_key(member["choices"][0]))
-                child = next(((tuple(item.get("path", (key,))), item) for key, item in source.items()
-                              if item["kind"] in ("owner", "owner_input")
-                              and remaining[:len(item.get("path", (key,)))] == tuple(item.get("path", (key,)))), None)
+                    return (choices or {}).get(
+                        (*path, *policy["condition_path"]), read_static_key(member["choices"][0])
+                    )
+                child = next(
+                    (
+                        (tuple(item.get("path", (key,))), item)
+                        for key, item in source.items()
+                        if item["kind"] in ("owner", "owner_input")
+                        and remaining[: len(item.get("path", (key,)))] == tuple(item.get("path", (key,)))
+                    ),
+                    None,
+                )
                 if child is None:
                     raise ValueError("field_like layout selection has no declared source path")
                 prefix, item = child
-                remaining = remaining[len(prefix):]
+                remaining = remaining[len(prefix) :]
                 source = self.definitions[item["owner_type"]][2]
 
         for attribute, item in schema.items():
@@ -156,10 +169,17 @@ class OwnerGraph:
         if resource_only:
             # An input borrows its existing allocation scope. It does not create
             # or recursively compile that scope's owned solver/workspace objects.
-            if identity in references:
-                raise ValueError("Cyclic input resource definitions require a resolved allocation path")
-            references = (*references, identity)
-            schema = {key: item for key, item in schema.items() if item["kind"] != "owner"}
+            token = identity, None if resource_paths is None else tuple(sorted(resource_paths))
+            if token in references:
+                raise ValueError(
+                    "Cyclic input resource definitions require a resolved allocation path: "
+                    + identity
+                    + " at "
+                    + ".".join(path)
+                )
+            references = (*references, token)
+            if resource_paths is None:
+                schema = {key: item for key, item in schema.items() if item["kind"] != "owner"}
         imported = self.imported[name]
         owner = object.__new__(getattr(imported, class_name))
         # Dimension relations may read a non-owning source before this owner's
@@ -174,6 +194,8 @@ class OwnerGraph:
                     references=references,
                     choices=choices,
                     path=(*path, attribute),
+                    resource_paths=source_children.get(attribute)
+                    or ((tuple(schema[item["field_input"]]["source_member"]),) if "field_input" in item else None),
                 )
                 children[attribute] = (child, expanded)
                 write_member(owner, attribute, value, schema)
@@ -189,7 +211,12 @@ class OwnerGraph:
                     declarations[attribute] = Record(optional=bool(item.get("conditions")))
                     continue
                 value, _, child, expanded = self.construct(
-                    item["owner_type"], references=references, choices=choices, path=(*path, attribute)
+                    item["owner_type"],
+                    references=references,
+                    choices=choices,
+                    path=(*path, attribute),
+                    resource_only=resource_only,
+                    resource_paths=source_children.get(attribute),
                 )
                 declarations[attribute] = (
                     _ChoiceRecord(item["choice_guards"].items(), optional=bool(item.get("conditions")))
@@ -363,16 +390,22 @@ def _compose(environment, schema, children):
                 transformed["shape_policy"] = {
                     **item["shape_policy"],
                     "condition": names[item["shape_policy"]["condition"]],
-                    **({"condition_path": [attribute, *item["shape_policy"]["condition_path"]]}
-                       if "condition_path" in item["shape_policy"] else {}),
+                    **(
+                        {"condition_path": [attribute, *item["shape_policy"]["condition_path"]]}
+                        if "condition_path" in item["shape_policy"]
+                        else {}
+                    ),
                 }
                 transformed["shape_guards"] = {names[n]: expected for n, expected in item["shape_guards"].items()}
             if "dtype_policy" in item:
                 transformed["dtype_policy"] = {
                     **item["dtype_policy"],
                     "condition": names[item["dtype_policy"]["condition"]],
-                    **({"condition_path": [attribute, *item["dtype_policy"]["condition_path"]]}
-                       if "condition_path" in item["dtype_policy"] else {}),
+                    **(
+                        {"condition_path": [attribute, *item["dtype_policy"]["condition_path"]]}
+                        if "condition_path" in item["dtype_policy"]
+                        else {}
+                    ),
                 }
                 transformed["dtype_guards"] = {names[n]: expected for n, expected in item["dtype_guards"].items()}
             if "owner_alternatives" in item:

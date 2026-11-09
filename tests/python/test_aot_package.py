@@ -5447,6 +5447,48 @@ def _free_prepared_input_source(source):
             "        prepare_external(self, binding)\n" + source[end:] + "\n" + preparation)
 
 
+@test_utils.test(arch=[ti.cpu, ti.cuda], offline_cache=False)
+def test_package_prepared_self_type_borrow_keeps_allocation_scope(tmp_path, monkeypatch):
+    source = RECORD_BORROW_SOURCE.replace(
+        "record.borrow('values', self.storage,", "record.borrow('values', binding.values,"
+    ).replace(
+        "        scope.storage = scope.field(ti.i32, shape=scope.dim('n'))",
+        "        scope.storage = scope.field(ti.i32, shape=scope.dim('n'))\n"
+        "        scope.sibling = scope.field(ti.f32, shape=scope.dim('n'))\n"
+        "    def initialize(self):\n"
+        "        self.prepare(make_binding(self))",
+    )
+    source += "\ndef make_binding(source):\n    return Binding(source.n, source.storage)\n"
+    source = source.replace("builder.dispatch(self.step, delta)",
+                            "builder.dispatch(self.step, delta, template_args={'self': self})")
+    source = _free_prepared_input_source(source)
+    package, _ = _resource_context_fixture(tmp_path, monkeypatch, model=source)
+    manifest = ti.aot.export_package(package, tmp_path / "sdk")
+    assert sys.modules["definition_fixture.model"].constructors == 0
+    with Runtime(manifest["target"]) as runtime, load_package(runtime, tmp_path / "sdk") as code:
+        for n in (3, 19):
+            for external in (False, True):
+                results = []
+                for host in (sys.modules["definition_fixture.model"], code.module("definition_fixture.model")):
+                    model, other = host.Model(n), host.Model(n)
+                    model.storage.from_numpy(np.arange(n, dtype=np.int32))
+                    other.storage.from_numpy(np.arange(n, dtype=np.int32) + 40)
+                    model.sibling.from_numpy(np.full(n, 7, dtype=np.float32))
+                    # Same declared source type does not mean the same instance.
+                    if external:
+                        model.prepare(host.make_binding(other))
+                    else:
+                        model.initialize()
+                    model.step(2)
+                    np.testing.assert_array_equal(model.output.to_numpy(), np.arange(n) + 2 + 40 * external)
+                    model.graph().run({"delta": -3})
+                    np.testing.assert_array_equal(model.output.to_numpy(), np.arange(n) - 3 + 40 * external)
+                    np.testing.assert_array_equal(model.storage.to_numpy(), np.arange(n))
+                    np.testing.assert_array_equal(model.sibling.to_numpy(), np.full(n, 7))
+                    results.append(model.output.to_numpy())
+                np.testing.assert_array_equal(*results)
+
+
 @pytest.mark.parametrize("preparation", ["method", "free", "module", "helper", "cross_method"])
 @test_utils.test(arch=[ti.cpu, ti.cuda], offline_cache=False)
 def test_package_prepared_inputs_accept_late_callers_with_known_contract(tmp_path, monkeypatch, preparation):

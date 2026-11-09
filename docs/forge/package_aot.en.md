@@ -1794,6 +1794,14 @@ new instances and sizes, wrong members/dimensions/packages, and retained Graphs.
 This source-scope contract still names a declared allocation role; independent
 caller allocations use the existing typed `external=True` borrow instead.
 
+The source may have the same type as the receiver. Export constructs its witness
+from the borrowed Field and declared layout dependencies, retaining every sibling
+in the original allocation group without recursively expanding unrelated inputs
+or algorithm objects. Actual bindings still select the caller's instance; equal
+types do not imply equal instances. Focused CPU/CUDA checks cover self/cross-instance
+record borrowing, group layouts, two sizes, and ordinary/Graph calls against JIT.
+No runtime diagnostics are added.
+
 Frozen binding factories may return a record or `None`, including a local
 factory call inside preparation. Definition analysis retains the possible
 allocation members and still rejects conflicting source contracts. Constant
