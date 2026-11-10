@@ -149,7 +149,7 @@ def compile_owner_variants(graph, identity, entry, arguments, *, template_args=N
     from ._package_owner_graph import owner_bindings
     from types import SimpleNamespace
 
-    pending, scheduled, emitted, results = deque([{}]), {()}, set(), []
+    pending, scheduled, visited, emitted, results = deque([{}]), {()}, set(), set(), []
 
     def schedule(selection):
         key = tuple(sorted(selection.items()))
@@ -179,6 +179,20 @@ def compile_owner_variants(graph, identity, entry, arguments, *, template_args=N
                 if name in fixed and fixed[name] is not value:
                     raise ValueError("Child implementation guards contradict one another")
                 fixed[name] = value
+        # An omitted layout choice already selected its declared default while
+        # constructing this witness. Record that effective selection before
+        # scheduling neighbors, so an explicit visit to the same default does
+        # not compile the entire static domain again. Keep every independent
+        # layout/child axis: nondefault combinations still need their own ABI.
+        selection = {
+            **selection,
+            **{tuple(environment._paths[aliases.get(name, name)]): value for name, value in fixed.items()},
+        }
+        selected_key = tuple(sorted(selection.items()))
+        if selected_key in visited:
+            continue
+        visited.add(selected_key)
+        scheduled.add(selected_key)
         selected_entry = (
             SimpleNamespace(_primal=entry._primal, _kernel_owner=owner)
             if getattr(entry, "_kernel_owner", None) is not None

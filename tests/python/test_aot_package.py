@@ -14135,6 +14135,74 @@ def test_package_field_shape_choices_share_unaffected_code(tmp_path, monkeypatch
         load_package(runtime, tmp_path / "sdk")
 
 
+@pytest.mark.parametrize('kind', ['shape', 'dtype', 'source', 'child', 'two_axes'])
+@test_utils.test(arch=[ti.cpu, ti.cuda], offline_cache=False)
+def test_package_layout_choices_visit_default_once(tmp_path, monkeypatch, kind):
+    from taichi_forge.aot import _package_variants
+
+    source = {
+        'shape': FIELD_SHAPE_CHOICE_SOURCE,
+        'dtype': FIELD_DTYPE_CHOICE_SOURCE,
+        'source': BORROW_CHOICES_SOURCE,
+        'child': CHILD_CHOICES_SOURCE,
+        'two_axes': FIELD_SHAPE_CHOICE_SOURCE,
+    }[kind]
+    if kind == 'two_axes':
+        source = source.replace('packed: bool):', 'packed: bool, wide: bool = False):')
+        source = source.replace('self.n, self.width, self.packed = n, width, packed',
+                                'self.n, self.width, self.packed, self.wide = n, width, packed, wide')
+        source = source.replace("scope.static('packed', choices=(False, True))",
+                                "scope.static('packed', choices=(False, True))\n"
+                                "        scope.static('wide', choices=(False, True))")
+        source = source.replace('scope.values = scope.field(ti.f32,',
+                                'scope.values = scope.field(ti.f32 if self.wide else ti.i32,')
+    package = _source_package(tmp_path, monkeypatch, source)
+    original = _package_variants.compile_static_variants
+    visits = []
+    method = 'step' if kind in ('source', 'child') else 'fill'
+
+    def observe(environment, entry, arguments, owner, schema, **kwargs):
+        if type(owner).__name__ == 'Model' and entry._primal.func.__name__ == method:
+            visits.append(dict(kwargs.get('fixed', {})))
+        return original(environment, entry, arguments, owner, schema, **kwargs)
+
+    monkeypatch.setattr(_package_variants, 'compile_static_variants', observe)
+    manifest = ti.aot.export_package(package, tmp_path / 'sdk')
+    assert len(visits) == (4 if kind == 'two_axes' else 2), visits
+    assert package.model.constructors == 0
+    # Different layouts and new model sizes remain consumable; avoiding a
+    # duplicate default witness must not omit any nondefault combination.
+    with Runtime(manifest['target']) as runtime, load_package(runtime, tmp_path / 'sdk') as code:
+        for n in (3, 11):
+            for selected in (False, True):
+                for wide in ((False, True) if kind == 'two_axes' else (False,)):
+                    args = ((n, selected) if kind in ('source', 'child') else
+                            (n, 2, selected, wide) if kind == 'two_axes' else (n, 2, selected))
+                    normal, loaded = package.Model(*args), code.host.Model(*args)
+                    if kind == 'child':
+                        normal.step()
+                        loaded.step()
+                        expected = 2 * np.arange(n) - 5 if selected else np.arange(n) + 3
+                        np.testing.assert_array_equal(loaded.out.to_numpy(), expected)
+                        np.testing.assert_array_equal(normal.out.to_numpy(), expected)
+                    elif kind == 'source':
+                        normal.step(7)
+                        loaded.step(7)
+                        assert loaded.selected is (loaded.b if selected else loaded.a)
+                        expected = np.arange(n * (2 if selected else 1)) + 7
+                        np.testing.assert_array_equal(loaded.selected.to_numpy(), expected)
+                        np.testing.assert_array_equal(normal.selected.to_numpy(), expected)
+                    else:
+                        normal.fill(7)
+                        loaded.fill(7)
+                        normal.read()
+                        loaded.read()
+                        np.testing.assert_array_equal(loaded.result.to_numpy(), 7)
+                        np.testing.assert_array_equal(normal.result.to_numpy(), 7)
+                        normal.tree.destroy()
+                        loaded.tree.destroy()
+
+
 FIELD_DTYPE_CHOICE_SOURCE = (
     FIELD_SHAPE_CHOICE_SOURCE.replace("shape = (n,) if self.packed else (n, width)", "shape = (n,)")
     .replace("self.values[i, self.width - 1]", "self.values[i]")
