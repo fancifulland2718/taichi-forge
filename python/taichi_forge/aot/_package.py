@@ -1579,6 +1579,14 @@ def export_package(package, output, *, arch=None, caps=None, source_root=None):
     Multiple roots share one compiler and source closure, not separate exports.
     Selects ``arch`` on a cold Runtime or validates the active backend.
     """
+    from ._package_compilation import PackageCompilation
+
+    with PackageCompilation() as compilation:
+        return _export_package(package, output, arch=arch, caps=caps, source_root=source_root,
+                               compilation=compilation)
+
+
+def _export_package(package, output, *, arch, caps, source_root, compilation):
     import taichi_forge as ti
     from taichi_forge.aot._component import Component
     from taichi_forge_runtime._static_values import static_key, read_static_key
@@ -1600,6 +1608,7 @@ def export_package(package, output, *, arch=None, caps=None, source_root=None):
     ) = _preflight_package(package, arch=arch, source_root=source_root)
     package = packages[0]
     module = Module(caps=caps)
+    compilation.module = module
     from ._package_owner_graph import OwnerGraph, owner_bindings, layout_owner
 
     owner_graph = OwnerGraph(sources, imported_modules, module)
@@ -2051,6 +2060,8 @@ def export_package(package, output, *, arch=None, caps=None, source_root=None):
             kernel = getattr(entry, "_primal", None)
             if kernel is None:
                 _fail(name, node, "decorated definition did not resolve to a Forge kernel")
+            entry = compilation.entry(entry)
+            kernel = entry._primal
             arguments = (
                 [
                     argument
@@ -2128,7 +2139,8 @@ def export_package(package, output, *, arch=None, caps=None, source_root=None):
                     for item in compilation_schema.values()
                 ):
                     contexts = compile_owner_variants(
-                        owner_graph, name + "." + owner_name, entry, values, template_args=template_arguments
+                        owner_graph, name + "." + owner_name, entry, values, template_args=template_arguments,
+                        on_compiled=compilation.compile,
                     )
                 else:
                     contexts = [
@@ -2140,6 +2152,7 @@ def export_package(package, output, *, arch=None, caps=None, source_root=None):
                             owner,
                             compilation_schema,
                             template_args=template_arguments(owner),
+                            on_compiled=compilation.compile,
                         )
                     ]
             except Exception as error:
@@ -2359,9 +2372,7 @@ def export_package(package, output, *, arch=None, caps=None, source_root=None):
                     # per-kernel compilation policy. Target and module options
                     # are common to this export; the decorator override is not.
                     compile_options = {"opt_level": code.kernel.opt_level}
-                    code_identity = json.dumps([code.semantic_key, compile_options], sort_keys=True).encode("utf8")
-                    symbol = "definition_" + hashlib.sha256(code_identity).hexdigest()
-                    code.export(module, symbol)
+                    symbol = compilation.symbol(code)
                     capture = [
                         {
                             "name": capture_name,
@@ -2426,7 +2437,8 @@ def export_package(package, output, *, arch=None, caps=None, source_root=None):
                     )
                     from ._resource_effects import package_effects
 
-                    entry_manifest["resource_effects"] = package_effects(code, argument_schema, capture)
+                    entry_manifest["resource_effects"] = package_effects(
+                        compilation.resource_effects[identity], argument_schema, capture)
                     if "function_kernel" in definition and code.resource_templates:
                         entry_manifest["template_resources"] = {
                             kernel.arguments[slot[0]].name: list(environment._paths[binding])

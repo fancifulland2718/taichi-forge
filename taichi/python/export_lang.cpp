@@ -5918,6 +5918,7 @@ void export_lang(py::module &m) {
       .def("add_field", &AotModuleBuilder::add_field)
       .def("add_ndarray_layout", &AotModuleBuilder::add_ndarray_layout)
       .def("add", &AotModuleBuilder::add)
+      .def("_seal_kernel_export", &AotModuleBuilder::seal_kernel_export)
       .def("_add_with_launch_abi", &AotModuleBuilder::add_with_launch_abi)
       .def("add_kernel_template", &AotModuleBuilder::add_kernel_template)
       .def("add_graph", [](AotModuleBuilder *builder, const std::string &name,

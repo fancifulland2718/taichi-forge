@@ -15,6 +15,13 @@ of the JIT `kernel_specialization_limit`. It keeps normal executable ownership a
 memory accounting; this does not promise a memory bound or remove duplicate code.
 The configured limit still applies to subsequent ordinary JIT cache misses.
 
+Export uses build-owned definitions. Each discovered implementation is passed
+to the existing native Module Builder immediately; compiled assets, contracts
+and dependency facts needed for reuse are retained, then the temporary frontend
+definition is released. Existing caller-owned JIT/Component caches are preserved.
+Ordinary Module/Graph exports keep their source leases. This build-time reclamation
+adds no consumer checks and does not bound total asset or metadata memory.
+
 Before numerical compilation, export collects independent input-signature gaps
 in recognized kernels alongside declaration errors. Diagnostics identify the
 module, source line, entry and parameter. Missing template type domains or array

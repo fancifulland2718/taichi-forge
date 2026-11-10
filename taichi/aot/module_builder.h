@@ -40,6 +40,10 @@ class AotModuleBuilder {
   }
 
   void add(const std::string &identifier, Kernel *kernel);
+  // Definition-package builds have finished with this source after export.
+  // Keep the compiled asset and reserved name, but relinquish its source lease.
+  // The sealed name cannot subsequently be rebound, even to the same source.
+  void seal_kernel_export(const std::string &identifier);
   // Internal selected-code export. Backends reject unsupported call contracts
   // before compiling or publishing an entry.
   void add_with_launch_abi(const std::string &identifier,

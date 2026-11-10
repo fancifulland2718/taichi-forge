@@ -17,6 +17,85 @@ from taichi_forge._lib import utils
 from tests import test_utils
 from taichi_forge_runtime.aot import Runtime, load_package
 
+
+@test_utils.test(arch=[ti.cpu, ti.cuda, ti.vulkan], offline_cache=False)
+def test_package_streams_private_definitions_and_preserves_caller_cache(tmp_path, monkeypatch):
+    from taichi_forge.aot._package_compilation import PackageCompilation
+
+    source = '''import taichi_forge as ti
+@ti.data_oriented
+class Model:
+    def __init__(self, n: int, first: bool, second: bool):
+        self.n, self.first, self.second = n, first, second
+        s = ti.experimental.ResourceScope(self)
+        s.dim('n')
+        s.static('first', choices=(False, True))
+        s.static('second', choices=(False, True))
+        s.out = s.field(ti.i32, shape=s.dim('n'))
+    @ti.kernel
+    def step(self, gain: ti.i32):
+        for i in self.out:
+            v = gain * i
+            if ti.static(self.first):
+                v += 3
+            if ti.static(self.second):
+                v -= 7
+            self.out[i] = v
+'''
+    package = _source_package(tmp_path, monkeypatch, source)
+    normal = package.model.Model(5, True, False)
+    normal.step(2)
+    component = ti.aot.Component.from_owner(normal)
+    captured = component.compile(normal.step, 2)
+    captured.run(component, normal, 2)
+    np.testing.assert_array_equal(normal.out.to_numpy(), 2*np.arange(5)+3)
+    original_kernel = normal.step._primal
+    original_cache = dict(original_kernel.compiled_kernels)
+    runtime = ti.lang.impl.get_runtime()
+    runtime.collect_unused_kernel_definitions(force=True)
+    baseline = runtime.prog._debug_kernel_definition_count()
+    compile_one = PackageCompilation.compile
+    observed = []
+
+    def observe(transaction, code):
+        assert code.kernel is not original_kernel
+        compile_one(transaction, code)
+        # Native source leases, not just the Python dictionary, are reclaimed
+        # before the next static combination is materialized.
+        observed.append(runtime.prog._debug_kernel_definition_count())
+        assert observed[-1] == baseline
+        assert original_kernel.compiled_kernels == original_cache
+
+    monkeypatch.setattr(PackageCompilation, 'compile', observe)
+    for attempt in range(2):
+        output = tmp_path / f'sdk{attempt}'
+        manifest = ti.aot.export_package(package, output)
+        assert len(manifest['entries']) == 5  # four step variants plus the fixture's unused kernel
+        assert sum(item['definition'].endswith('.Model.step') for item in manifest['entries'].values()) == 4
+        with Runtime(manifest['target']) as target, load_package(target, output) as code:
+            for n, first, second in ((3, False, False), (7, True, False), (2, False, True), (11, True, True)):
+                owner = code.host.Model(n, first, second)
+                owner.step(4)
+                np.testing.assert_array_equal(owner.out.to_numpy(), 4*np.arange(n)+3*first-7*second)
+        normal.step(4)
+        captured.run(component, normal, 6)
+        np.testing.assert_array_equal(normal.out.to_numpy(), 6*np.arange(5)+3)
+        assert original_kernel.compiled_kernels == original_cache
+    assert len(observed) == 10
+
+    def fail_after_export(transaction, code):
+        observe(transaction, code)
+        raise RuntimeError('injected export failure')
+
+    monkeypatch.setattr(PackageCompilation, 'compile', fail_after_export)
+    with pytest.raises(ValueError, match='injected export failure'):
+        ti.aot.export_package(package, tmp_path / 'failed')
+    assert not (tmp_path / 'failed').exists()
+    assert original_kernel.compiled_kernels == original_cache
+    assert runtime.prog._debug_kernel_definition_count() == baseline
+    captured.run(component, normal, 8)
+    np.testing.assert_array_equal(normal.out.to_numpy(), 8*np.arange(5)+3)
+
 OWNER_INPUT_SOURCE = """
 import taichi_forge as ti
 constructors = 0
@@ -1748,7 +1827,7 @@ def test_package_typed_owner_inputs_separate_type_admission_from_identical_code(
         )
     package = _source_package(tmp_path, monkeypatch, source)
     manifest = ti.aot.export_package(package, tmp_path / "sdk")
-    assert manifest["version"] == 47
+    assert manifest["version"] == 68  # constructor owner contracts are included in the package
     assert len(manifest["input_families"]["definition_fixture.model.Reader"]) == 2
     assert manifest["entry_bindings"]
     with zipfile.ZipFile(tmp_path / "sdk/code.tcm") as archive:
@@ -18773,7 +18852,7 @@ def test_package_specializes_only_observed_static_dependencies(tmp_path, monkeyp
     package = _source_package(tmp_path, monkeypatch, source, initializer="from .model import Model, Equivalent\n")
     manifest = ti.aot.export_package(package, tmp_path / "sdk")
     assert sys.modules["definition_fixture.model"].constructors == 0
-    assert manifest["version"] == 11
+    assert manifest["version"] == 68  # constructor owner contracts are included in the package
     families = manifest["entry_families"]
     assert sorted(len(f["variants"]) for f in families.values()) == [2, 2, 4, 4]
     assert len(manifest["entries"]) == 8  # 4 compute + 2 other + plain + unused public function
@@ -19133,7 +19212,7 @@ print('WHOLE_VIEW_SOURCE_FREE_OK')
 def test_package_free_kernel_receiver_preserves_shared_code_and_instance_binding(tmp_path, monkeypatch):
     package = _source_package(tmp_path, monkeypatch, FREE_RECEIVER_SOURCE)
     manifest = ti.aot.export_package(package, tmp_path / "sdk")
-    assert manifest["version"] == 50
+    assert manifest["version"] == 68  # constructor owner contracts are included in the package
     assert sys.modules["definition_fixture.model"].constructors == 0
     function = manifest["function_entries"]["definition_fixture.model.publish"]
     assert function["receiver"] == "solver" and function["parameters"] == ["gain", "solver"]

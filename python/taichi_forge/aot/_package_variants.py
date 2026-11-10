@@ -35,7 +35,8 @@ def _static_reference_aliases(schema, domains):
     return aliases
 
 
-def compile_static_variants(environment, entry, arguments, owner, schema, *, template_args=None, fixed=None):
+def compile_static_variants(environment, entry, arguments, owner, schema, *, template_args=None, fixed=None,
+                            on_compiled=None):
     """Cover a kernel's finite declaration domain without multiplying owners.
 
     A compiled contract covers every assignment of unread configuration values.
@@ -65,7 +66,10 @@ def compile_static_variants(environment, entry, arguments, owner, schema, *, tem
         if item["kind"] == "record" and item.get("optional") and not item.get("dynamic_input_record")
     }
     if not domains and not records:
-        return [environment.compile(entry, *arguments, owner=owner, template_args=template_args)]
+        code = environment.compile(entry, *arguments, owner=owner, template_args=template_args)
+        if on_compiled is not None:
+            on_compiled(code)
+        return [code]
     initial = {name: values[0] for name, values in domains.items()}
     initial.update((name, True) for name in records)
 
@@ -102,6 +106,8 @@ def compile_static_variants(environment, entry, arguments, owner, schema, *, tem
                 code = missing
             else:
                 codes.append(code)
+                if on_compiled is not None:
+                    on_compiled(code)
             if not code.static.keys() <= domains.keys():
                 raise ValueError("Kernel static dependencies are outside the declared package domain")
             # Missing required storage is also a proven branch result. Its
@@ -139,7 +145,7 @@ def compile_static_variants(environment, entry, arguments, owner, schema, *, tem
     return codes
 
 
-def compile_owner_variants(graph, identity, entry, arguments, *, template_args=None):
+def compile_owner_variants(graph, identity, entry, arguments, *, template_args=None, on_compiled=None):
     """Explore child implementations only after an entry actually uses them.
 
     The parent class/instance and Host constructor remain single definitions.
@@ -206,6 +212,7 @@ def compile_owner_variants(graph, identity, entry, arguments, *, template_args=N
             schema,
             template_args=template_args(owner) if template_args else None,
             fixed=fixed,
+            on_compiled=on_compiled,
         )
         for code in codes:
             bindings = owner_bindings(environment, schema, code.used)

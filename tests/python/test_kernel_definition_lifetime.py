@@ -4,10 +4,57 @@ import gc
 import weakref
 
 import numpy as np
+import pytest
 import taichi_forge as ti
 from taichi_forge._lib import core
 from taichi_forge.graph._graph import _CompiledCGraphNode, gen_cpp_kernel
 from tests import test_utils
+
+
+@test_utils.test(arch=[ti.cpu, ti.cuda, ti.vulkan], offline_cache=False)
+def test_sealed_aot_export_releases_source_and_reserves_name(tmp_path):
+    runtime = ti.lang.impl.get_runtime()
+    baseline = runtime.prog._debug_kernel_definition_count()
+    aot = runtime.prog.make_aot_module_builder(ti.lang.impl.current_cfg().arch, [])
+    arg = ti.graph.Arg(ti.graph.ArgKind.NDARRAY, "out", ti.i32, ndim=1)
+
+    def export():
+        @ti.kernel
+        def fill(out: ti.types.ndarray(ti.i32, ndim=1)):
+            for i in out:
+                out[i] = i + 9
+
+        native = gen_cpp_kernel(fill, [arg])
+        aot.add('fill', native)
+        aot._seal_kernel_export('fill')
+        aot._seal_kernel_export('fill')
+        return weakref.ref(fill._primal), weakref.ref(native)
+
+    source, native = export()
+    gc.collect()
+    assert source() is None
+    assert native() is None
+    runtime.collect_unused_kernel_definitions(force=True)
+    assert runtime.prog._debug_kernel_definition_count() == baseline
+    # The native builder must still own enough code/metadata to write a module.
+    aot.dump(str(tmp_path), '')
+
+    # Check rejection separately: exception tracebacks may retain call frames,
+    # which are legitimate source owners until the exception is released.
+    @ti.kernel
+    def other(out: ti.types.ndarray(ti.i32, ndim=1)):
+        for i in out:
+            out[i] = 2 * i
+
+    replacement = gen_cpp_kernel(other, [arg])
+    with pytest.raises(RuntimeError, match='sealed'):
+        aot.add('fill', replacement)
+    aot.add('other', replacement)
+    aot._seal_kernel_export('other')
+    with pytest.raises(RuntimeError, match='sealed'):
+        aot.add('other', replacement)
+    with pytest.raises(RuntimeError, match='unknown'):
+        aot._seal_kernel_export('missing')
 
 
 @test_utils.test(arch=[ti.cpu, ti.cuda, ti.vulkan], offline_cache=False)

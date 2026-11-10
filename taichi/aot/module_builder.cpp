@@ -50,6 +50,8 @@ bool AotModuleBuilder::needs_kernel_export(
   const auto found = kernel_exports_.find(name);
   if (found == kernel_exports_.end())
     return true;
+  TI_ERROR_IF(found->second.kernel == nullptr,
+              "AOT kernel name {} is sealed after definition export", name);
   TI_ERROR_IF(
       found->second.kernel != kernel || found->second.launch_abi != launch_abi,
       "AOT kernel name {} is already bound to another specialization or "
@@ -84,6 +86,19 @@ void AotModuleBuilder::add(const std::string &identifier, Kernel *kernel) {
   compile_options_frozen_ = true;
   add_per_backend(identifier, kernel);
   record_kernel_export(identifier, kernel, "ordinary");
+}
+
+void AotModuleBuilder::seal_kernel_export(const std::string &identifier) {
+  const auto found = kernel_exports_.find(identifier);
+  TI_ERROR_IF(found == kernel_exports_.end(),
+              "Cannot seal unknown AOT kernel {}", identifier);
+  auto &identity = found->second;
+  const auto ordinary = ordinary_export_names_.find(identity.kernel);
+  if (ordinary != ordinary_export_names_.end() &&
+      ordinary->second == identifier)
+    ordinary_export_names_.erase(ordinary);
+  identity.kernel = nullptr;
+  identity.definition_lease.reset();
 }
 
 void AotModuleBuilder::add_with_launch_abi(const std::string &identifier,

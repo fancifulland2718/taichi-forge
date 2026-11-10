@@ -1,14 +1,13 @@
 """Compiler-owned write facts for cold preparation, never numerical execution."""
 
 
-def package_effects(code, arguments, captures):
+def package_effects(metadata, arguments, captures):
     descriptors = [*arguments, *captures]
     resources = {
         index
         for index, item in enumerate(descriptors)
         if item["kind"] in ("ndarray", "dense_field", "model_tensor_field", "local_tensor_workspace")
     }
-    metadata = code.runtime.prog._kernel_resource_effects(code.kernel.compiled_kernels[code.key])
     proven = bool(metadata.get("available")) and not metadata.get("opaque", True)
     accesses = {index: "none" for index in resources}
     for effect in metadata.get("effects", ()):
