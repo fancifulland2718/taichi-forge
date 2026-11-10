@@ -20383,3 +20383,63 @@ class Model:
                 np.testing.assert_array_equal(normal.out.to_numpy(), np.full(n, expected))
                 np.testing.assert_array_equal(loaded.out.to_numpy(), normal.out.to_numpy())
                 assert hasattr(loaded, 'child') == enabled
+
+@test_utils.test(arch=ti.cuda, offline_cache=False)
+def test_package_nullable_workspace_retains_cooperative_launch_choice(tmp_path, monkeypatch):
+    source = '''
+import taichi_forge as ti
+from resource_contexts import resource_group
+@ti.data_oriented
+class Model:
+    def __init__(self, n: int, enabled: bool):
+        self.n, self.enabled, self.launch = n, enabled, enabled
+        scope = ti.experimental.ResourceScope(self)
+        scope.dim('n')
+        scope.static('enabled', choices=(False, True))
+        scope.static('launch', choices=(False, True), kernel_only=True)
+        with resource_group(self, 'output', initialization='zero') as fields:
+            fields.out = fields.field(ti.i32, shape=fields.dim('n'))
+        if self.enabled:
+            with resource_group(self, 'workspace', initialization='zero') as fields:
+                fields.scratch = fields.field(ti.i32, shape=fields.dim('n'))
+    @ti.func
+    def cooperative(self):
+        ti.loop_config(block_dim=32)
+        for i in range(self.n):
+            shared = ti.simt.block.SharedArray(32, ti.i32)
+            lane = i % 32
+            shared[lane] = i + 1
+            self.scratch[i] = 2 * i
+            ti.simt.block.sync()
+            self.out[i] = shared[lane] + self.scratch[i]
+    @ti.kernel
+    def step(self):
+        if ti.static(self.launch):
+            self.cooperative()
+        else:
+            for i in range(self.n):
+                self.out[i] = -i
+'''
+    package, _ = _resource_context_fixture(tmp_path, monkeypatch, model=source)
+    manifest = ti.aot.export_package(package, tmp_path / 'sdk')
+    schema = manifest['owners']['definition_fixture.model.Model']
+    assert schema['enabled']['dynamic_storage_condition']
+    assert not schema['launch'].get('dynamic_storage_condition')
+    assert sum('definition_fixture.model.Model.step' in entry['definitions']
+               for entry in manifest['entries'].values()) == 2
+    original = sys.modules['definition_fixture.model']
+    with Runtime(manifest['target']) as runtime, load_package(runtime, tmp_path / 'sdk') as code:
+        for n, enabled in ((64, False), (96, True), (128, True)):
+            normal = original.Model(n, enabled)
+            normal.step()
+            loaded = code.host.model.Model(n, enabled)
+            loaded.step()
+            expected = 3 * np.arange(n) + 1 if enabled else -np.arange(n)
+            np.testing.assert_array_equal(normal.out.to_numpy(), expected)
+            np.testing.assert_array_equal(loaded.out.to_numpy(), expected)
+            assert hasattr(loaded, 'scratch') == enabled
+            assert len(loaded._forge_package_field_groups) == 1 + int(enabled)
+            if not enabled:
+                loaded.launch = True
+                with pytest.raises(ValueError, match='presence|requires|input'):
+                    loaded.step()
