@@ -589,13 +589,13 @@ class ASTTransformer(Builder):
         func = node.func.ptr
         if ctx.deployment is not None:
             if func is impl.static:
-                from taichi_forge.aot._component import _FieldReference
+                from taichi_forge.aot._component import _FieldReference, _OptionalArrayReference
 
                 args = [ctx.deployment.static_operand(ctx, arg) for arg in args]
                 if (
                     len(args) == 1
                     and not keywords
-                    and (is_model_value(args[0]) or isinstance(args[0], _FieldReference))
+                    and (is_model_value(args[0]) or isinstance(args[0], (_FieldReference, _OptionalArrayReference)))
                 ):
                     node.ptr = args[0]
                     return node.ptr

@@ -2384,7 +2384,7 @@ class _Capture:
         normal intermediate Struct from captured member references. Fixed
         SNode records retain the original Field lowering and activation rules.
         """
-        if isinstance(value, _FieldReference):
+        if isinstance(value, (_FieldReference, _OptionalArrayReference)):
             return self.attribute(ctx, value.path[-1], prefix=value.path[:-1])
         if not isinstance(value, _RecordReference):
             return value

@@ -20347,6 +20347,86 @@ class Model:''')
         np.testing.assert_array_equal(second.out.to_numpy(), np.full(19, 30))
 
 
+@pytest.mark.parametrize("form", ["direct", "alias", "invalid_bool"])
+@test_utils.test(arch=[ti.cpu, ti.cuda, ti.vulkan], offline_cache=False)
+def test_package_static_optional_field_alias_keeps_presence(tmp_path, monkeypatch, form):
+    source = '''
+import taichi_forge as ti
+from resource_contexts import resource_group
+@ti.data_oriented
+class Model:
+    def __init__(self, n: int, enabled: bool):
+        self.n, self.enabled = n, enabled
+        scope = ti.experimental.ResourceScope(self)
+        scope.dim('n')
+        scope.static('enabled', choices=(False, True))
+        with resource_group(self, 'output', initialization='zero') as fields:
+            fields.out = fields.field(ti.f32, shape=fields.dim('n'))
+        if self.enabled:
+            with resource_group(self, 'optional', initialization='zero') as fields:
+                fields.current_a = fields.vector_field(3, ti.f32, shape=fields.dim('n'))
+                fields.current_b = fields.vector_field(3, ti.f32, shape=fields.dim('n'))
+                fields.previous_a = fields.vector_field(3, ti.f32, shape=fields.dim('n'))
+                fields.previous_b = fields.vector_field(3, ti.f32, shape=fields.dim('n'))
+    @ti.kernel
+    def fill(self):
+        if ti.static(self.enabled):
+            for i in range(self.n):
+                self.previous_a[i] = ti.Vector([i, 2*i, 3*i])
+                self.previous_b[i] = ti.Vector([4*i, 5*i, 6*i])
+    @ti.kernel
+    def step(self):
+        for i in range(self.n):
+            self.out[i] = 7
+            if ti.static(self.enabled):
+                for name in ti.static(('a', 'b')):
+                    ti.static(getattr(self, 'current_' + name))[i] = ti.static(getattr(self, 'previous_' + name))[i] + 1
+                    self.out[i] += ti.static(getattr(self, 'current_' + name))[i].sum()
+    @ti.kernel
+    def required(self) -> ti.f32:
+        return ti.static(getattr(self, 'current_a'))[0].sum()
+    def graph(self):
+        b = ti.graph.GraphBuilder()
+        b.dispatch(self.step)
+        return b.compile()
+'''
+    if form == 'alias':
+        source = source.replace(
+            "                    ti.static(getattr(self, 'current_' + name))[i] = ti.static(getattr(self, 'previous_' + name))[i] + 1",
+            "                    current = ti.static(getattr(self, 'current_' + name))\n"
+            "                    previous = ti.static(getattr(self, 'previous_' + name))\n"
+            "                    current[i] = previous[i] + 1",
+        )
+    elif form == 'invalid_bool':
+        source = source.replace('if ti.static(self.enabled):', "if ti.static(getattr(self, 'previous_a')):")
+    package, _ = _resource_context_fixture(tmp_path, monkeypatch, model=source)
+    if form == 'invalid_bool':
+        with pytest.raises(ti.aot.PackageExportError, match='explicit comparison with None'):
+            ti.aot.export_package(package, tmp_path / 'sdk')
+        return
+    manifest = ti.aot.export_package(package, tmp_path / 'sdk')
+    assert not manifest['entry_families']
+    with Runtime(manifest['target']) as runtime, load_package(runtime, tmp_path / 'sdk') as code:
+        for n, enabled in ((5, True), (11, False)):
+            normal = package.model.Model(n, enabled)
+            loaded = code.host.model.Model(n, enabled)
+            for model in (normal, loaded):
+                model.fill()
+                model.step()
+            expected = 21 * np.arange(n) + 13 if enabled else np.full(n, 7)
+            np.testing.assert_array_equal(normal.out.to_numpy(), expected)
+            np.testing.assert_array_equal(loaded.out.to_numpy(), expected)
+            with loaded.graph().bind({}) as call:
+                call.run()
+            np.testing.assert_array_equal(loaded.out.to_numpy(), expected)
+            if enabled:
+                assert loaded.required() == 3
+            else:
+                assert not hasattr(loaded, 'current_a')
+                with pytest.raises(ValueError, match='presence'):
+                    loaded.required()
+
+
 @pytest.mark.parametrize("prepared", [False, True])
 @pytest.mark.parametrize("membership", [False, True])
 @test_utils.test(arch=[ti.cpu, ti.cuda], offline_cache=False)
