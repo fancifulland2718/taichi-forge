@@ -14313,6 +14313,87 @@ FIELD_DTYPE_CHOICE_SOURCE = (
 )
 
 
+@test_utils.test(arch=[ti.cpu, ti.cuda], offline_cache=False)
+def test_package_borrowed_group_witness_reuse(tmp_path, monkeypatch):
+    from taichi_forge.aot._package_owner_graph import OwnerGraph
+
+    source = '''
+import taichi_forge as ti
+@ti.data_oriented
+class Copy:
+    def __init__(self, source, demand):
+        scope = ti.experimental.ResourceScope(self)
+        scope.borrow('source', source, source_scope=True)
+        scope.borrow('demand', demand, source_scope=True)
+        scope.backup = scope.field_like(self.source, initialization='zero')
+    @ti.kernel
+    def save(self):
+        for i in self.source:
+            self.backup[i] = self.source[i]
+    @ti.kernel
+    def restore(self):
+        for i in self.source:
+            if self.demand[0]:
+                self.source[i] = self.backup[i]
+@ti.data_oriented
+class Model:
+    def __init__(self, n):
+        self.n = n
+        scope = ti.experimental.ResourceScope(self)
+        scope.dim('n')
+        scope.a = scope.field(ti.i32, shape=self.n, initialization='zero')
+        scope.b = scope.field(ti.i32, shape=self.n, initialization='zero')
+        scope.demand = scope.field(ti.i32, shape=1, initialization='zero')
+        self.copies = tuple(Copy(field, self.demand) for field in (self.a, self.b))
+        scope.owner_sequence('copies', self.copies)
+    @ti.kernel
+    def fill(self, value: ti.i32, enabled: ti.i32):
+        for i in self.a:
+            self.a[i] = value + i
+            self.b[i] = value - i
+        self.demand[0] = enabled
+'''
+    package = _source_package(tmp_path, monkeypatch, source)
+    borrowed = []
+    construct = OwnerGraph.construct
+
+    def observed(self, identity, **kwargs):
+        result = construct(self, identity, **kwargs)
+        if identity == 'definition_fixture.model.Model' and kwargs.get('resource_paths'):
+            borrowed.append((kwargs['path'], tuple(sorted(kwargs['resource_paths'])), result))
+        return result
+
+    monkeypatch.setattr(OwnerGraph, 'construct', observed)
+    manifest = ti.aot.export_package(package, tmp_path / 'sdk')
+    # Different borrowed members of one group share its build witness. Distinct
+    # argument slots remain separate even though their source layouts coincide.
+    by_slot = {}
+    for slot, members, result in borrowed:
+        by_slot.setdefault(slot, []).append((members, result))
+    shared = [values for values in by_slot.values() if len({v[0] for v in values}) > 1]
+    assert shared
+    for values in shared:
+        assert len({id(result[0]) for _, result in values}) == 1
+    assert len({id(values[0][1][0]) for values in by_slot.values()}) == len(by_slot)
+    with Runtime(manifest['target']) as runtime, load_package(runtime, tmp_path / 'sdk') as code:
+        models = [code.host.Model(n) for n in (3, 7)]
+        for index, model in enumerate(models):
+            model.fill(10 + index, 1)
+            for checkpoint in model.copies:
+                checkpoint.save()
+            model.fill(90, 0)
+            for checkpoint in model.copies:
+                checkpoint.restore()
+            np.testing.assert_array_equal(model.a.to_numpy(), 90 + np.arange(model.n))
+            model.fill(90, 1)
+            for checkpoint in model.copies:
+                checkpoint.restore()
+            np.testing.assert_array_equal(model.a.to_numpy(), 10 + index + np.arange(model.n))
+            np.testing.assert_array_equal(model.b.to_numpy(), 10 + index - np.arange(model.n))
+        models[0].fill(100, 1)
+        np.testing.assert_array_equal(models[1].a.to_numpy(), 11 + np.arange(7))
+
+
 @pytest.mark.parametrize('policy', ['dtype', 'shape', 'derived_dtype'])
 @test_utils.test(arch=[ti.cpu, ti.cuda], offline_cache=False)
 def test_package_field_like_borrowed_layout_policy(tmp_path, monkeypatch, policy):

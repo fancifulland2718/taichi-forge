@@ -36,6 +36,7 @@ class OwnerGraph:
 
         self.imported, self.module = imported, module
         self._contexts = {}
+        self._resource_contexts = {}
         self.definitions = {
             name + "." + owner: (name, source_class(tree, owner), copy.deepcopy(schema))
             for name, _, _, _, tree, _, schemas, _ in sources
@@ -87,6 +88,40 @@ class OwnerGraph:
             from ._package_resource_slice import allocation_schema
 
             schema, source_children = allocation_schema(schema, resource_paths)
+        resource_key = None
+        if resource_only:
+            token = identity, None if resource_paths is None else tuple(sorted(resource_paths))
+            if token in references:
+                raise ValueError(
+                    "Cyclic input resource definitions require a resolved allocation path: "
+                    + identity
+                    + " at "
+                    + ".".join(path)
+                )
+            references = (*references, token)
+            if resource_paths is not None and len(references) == 1:
+                # Many input families borrow different members of one native
+                # allocation group. Reuse that complete build-only witness,
+                # not a new copy of every sibling Field for each member.
+                # Keep input slots distinct: two unrelated inputs in a single
+                # owner must never acquire a false allocation alias. Relative
+                # choices retain every layout/child selection of this source.
+                # Nested borrows still traverse their cycle guards normally.
+                resource_key = (
+                    identity,
+                    path,
+                    tuple(schema),
+                    tuple(sorted((child, tuple(sorted(paths))) for child, paths in source_children.items())),
+                    tuple(
+                        sorted(
+                            (key[len(path) :], value)
+                            for key, value in (choices or {}).items()
+                            if key[: len(path)] == path
+                        )
+                    ),
+                )
+                if resource_key in self._resource_contexts:
+                    return self._resource_contexts[resource_key]
         # The slice is read-only. Copy its retained declarations before any
         # per-witness selection, rather than cloning the entire source owner
         # once for each borrowed allocation.
@@ -177,15 +212,6 @@ class OwnerGraph:
         if resource_only:
             # An input borrows its existing allocation scope. It does not create
             # or recursively compile that scope's owned solver/workspace objects.
-            token = identity, None if resource_paths is None else tuple(sorted(resource_paths))
-            if token in references:
-                raise ValueError(
-                    "Cyclic input resource definitions require a resolved allocation path: "
-                    + identity
-                    + " at "
-                    + ".".join(path)
-                )
-            references = (*references, token)
             if resource_paths is None:
                 schema = {key: item for key, item in schema.items() if item["kind"] != "owner"}
         imported = self.imported[name]
@@ -321,7 +347,10 @@ class OwnerGraph:
 
         project_borrows(owner, environment, expanded)
         project_field_likes(environment, expanded)
-        return owner, schema, environment, expanded
+        result = owner, schema, environment, expanded
+        if resource_key is not None:
+            self._resource_contexts[resource_key] = result
+        return result
 
 
 def _compose(environment, schema, children):
