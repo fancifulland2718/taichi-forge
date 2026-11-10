@@ -27,6 +27,7 @@ class PackageCompilation:
         self.kernels = {}
         self.exported = {}
         self.resource_effects = {}
+        self._automatic_gc = None
 
     def __enter__(self):
         return self
@@ -34,6 +35,12 @@ class PackageCompilation:
     def attach(self, module):
         module._aot_builder._enable_streaming_exports()
         self.module = module
+        # Discovery has finished. Keep short-lived lowering cycles in the young
+        # generations until each private definition is sealed. Otherwise the
+        # automatic collector can promote them, requiring a scan of the entire
+        # live engine declaration graph for every exported binding.
+        self._automatic_gc = gc.isenabled()
+        gc.disable()
 
     def entry(self, entry):
         from taichi_forge.lang.kernel_impl import Kernel, TaichiCallableTemplateMapper
@@ -73,13 +80,23 @@ class PackageCompilation:
         code.kernel.kernel_cpp = None
         # Lowering contexts can form Python cycles through AST/Expr objects.
         # Release their reference-internal builder leases before native GC.
-        gc.collect()
+        gc.collect(1)
         code.runtime.collect_unused_kernel_definitions(force=True)
 
     def symbol(self, code):
         return self.exported[(code.kernel, code.key)]
 
     def __exit__(self, *exception):
+        try:
+            self._release()
+        finally:
+            if self._automatic_gc is not None:
+                if self._automatic_gc:
+                    gc.enable()
+                else:
+                    gc.disable()
+
+    def _release(self):
         from taichi_forge.lang import impl
 
         # Also release incomplete definitions after a failed build. This never

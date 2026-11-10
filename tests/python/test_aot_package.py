@@ -20,6 +20,7 @@ from taichi_forge_runtime.aot import Runtime, load_package
 
 @test_utils.test(arch=[ti.cpu, ti.cuda, ti.vulkan], offline_cache=False)
 def test_package_streams_private_definitions_and_preserves_caller_cache(tmp_path, monkeypatch):
+    import gc
     import weakref
     from taichi_forge.aot._package_compilation import PackageCompilation
 
@@ -56,10 +57,12 @@ class Model:
     runtime.collect_unused_kernel_definitions(force=True)
     baseline = runtime.prog._debug_kernel_definition_count()
     compile_one = PackageCompilation.compile
+    automatic_gc = gc.isenabled()
     observed = []
     build_stats = []
 
     def observe(transaction, code):
+        assert not gc.isenabled()
         assert code.kernel is not original_kernel
         source = weakref.ref(code.kernel.compiled_kernels[code.key])
         compile_one(transaction, code)
@@ -81,6 +84,7 @@ class Model:
         runtime.debug_kernel_executable_lifecycle_stats(True)
         output = tmp_path / f'sdk{attempt}'
         manifest = ti.aot.export_package(package, output)
+        assert gc.isenabled() == automatic_gc
         assert len(manifest['entries']) == 5  # four step variants plus the fixture's unused kernel
         assert sum(item['definition'].endswith('.Model.step') for item in manifest['entries'].values()) == 4
         # Write facts must come from those AOT assets, without another compile
@@ -110,11 +114,43 @@ class Model:
     monkeypatch.setattr(PackageCompilation, 'compile', fail_after_export)
     with pytest.raises(ValueError, match='injected export failure'):
         ti.aot.export_package(package, tmp_path / 'failed')
+    assert gc.isenabled() == automatic_gc
     assert not (tmp_path / 'failed').exists()
     assert original_kernel.compiled_kernels == original_cache
     assert runtime.prog._debug_kernel_definition_count() == baseline
     captured.run(component, normal, 8)
     np.testing.assert_array_equal(normal.out.to_numpy(), 8*np.arange(5)+3)
+
+
+@test_utils.test(arch=ti.cpu, offline_cache=False)
+def test_package_preserves_disabled_automatic_gc(tmp_path, monkeypatch):
+    import gc
+    from taichi_forge.aot._package_compilation import PackageCompilation
+
+    package = _source_package(tmp_path, monkeypatch, '''
+import taichi_forge as ti
+@ti.kernel
+def value() -> ti.i32:
+    return 5
+''', initializer='from .model import value\n')
+    automatic_gc = gc.isenabled()
+    try:
+        gc.disable()
+        manifest = ti.aot.export_package(package, tmp_path / 'sdk')
+        assert not gc.isenabled()
+        with Runtime(manifest['target']) as target, load_package(target, tmp_path / 'sdk') as code:
+            assert code.host.value() == 5
+
+        def fail(transaction, code):
+            raise RuntimeError('injected export failure')
+
+        monkeypatch.setattr(PackageCompilation, 'compile', fail)
+        with pytest.raises(ValueError, match='injected export failure'):
+            ti.aot.export_package(package, tmp_path / 'failed')
+        assert not gc.isenabled()
+    finally:
+        if automatic_gc:
+            gc.enable()
 
 OWNER_INPUT_SOURCE = """
 import taichi_forge as ti
