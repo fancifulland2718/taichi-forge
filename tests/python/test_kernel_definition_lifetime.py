@@ -64,6 +64,56 @@ def test_sealed_aot_export_releases_source_and_reserves_name(tmp_path):
         aot._kernel_resource_effects('missing')
 
 
+@test_utils.test(arch=[ti.cuda], offline_cache=False)
+def test_rejected_aot_export_does_not_publish_stale_effects():
+    runtime = ti.lang.impl.get_runtime()
+    aot = runtime.prog.make_aot_module_builder(ti.cuda, [])
+    arg = ti.graph.Arg(ti.graph.ArgKind.NDARRAY, "data", ti.i32, ndim=1)
+
+    @ti.kernel
+    def read(data: ti.types.ndarray(ti.i32, ndim=1)) -> ti.i32:
+        return data[0]
+
+    @ti.kernel
+    def write(data: ti.types.ndarray(ti.i32, ndim=1)):
+        for i in data:
+            data[i] = 9
+
+    with pytest.raises(RuntimeError, match="requires void"):
+        aot._add_with_launch_abi("retry", gen_cpp_kernel(read, [arg]), "cuda_graph_gate_v1")
+    with pytest.raises(RuntimeError, match="No compiled resource effects"):
+        aot._kernel_resource_effects("retry")
+    aot.add("retry", gen_cpp_kernel(write, [arg]))
+    effects = aot._kernel_resource_effects("retry")
+    assert effects["available"] and not effects["opaque"]
+    assert {(tuple(effect["arg_id"]), effect["access"]) for effect in effects["effects"]} == {((0,), "write")}
+
+
+@test_utils.test(arch=[ti.cpu, ti.cuda, ti.vulkan], offline_cache=False)
+def test_runtime_reset_releases_last_frontend_handle():
+    arch = ti.lang.impl.current_cfg().arch
+
+    @ti.kernel
+    def fill(out: ti.types.ndarray(ti.i32, ndim=1)):
+        for i in out:
+            out[i] = i + 4
+
+    out = ti.ndarray(ti.i32, 3)
+    fill(out)
+    source = weakref.ref(fill._primal.kernel_cpp)
+    assert source() is not None
+    ti.reset()
+    assert fill._primal.kernel_cpp is None
+    gc.collect()
+    assert source() is None
+    # The decorated callable survives reset; its previous Program handle must
+    # not survive or alias a new definition if native addresses are reused.
+    ti.init(arch=arch, enable_fallback=False, offline_cache=False)
+    fresh = ti.ndarray(ti.i32, 5)
+    fill(fresh)
+    np.testing.assert_array_equal(fresh.to_numpy(), np.arange(5) + 4)
+
+
 @test_utils.test(arch=[ti.cpu, ti.cuda, ti.vulkan], offline_cache=False)
 def test_temporary_definitions_are_reclaimed_on_materialization():
     runtime = ti.lang.impl.get_runtime()

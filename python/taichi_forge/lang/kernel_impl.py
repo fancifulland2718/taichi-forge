@@ -1418,6 +1418,9 @@ class Kernel:
     def reset(self):
         self.runtime = impl.get_runtime()
         self.compiled_kernels = {}
+        # Do not retain a pybind wrapper into the previous Program. Its native
+        # address can later be reused by an unrelated source definition.
+        self.kernel_cpp = None
         self._deployment_context = None
         self._component_candidates = []
         # Four weak-guarded entries cover common ping-pong and triple-buffer

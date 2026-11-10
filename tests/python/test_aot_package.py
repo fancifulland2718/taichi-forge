@@ -20,6 +20,7 @@ from taichi_forge_runtime.aot import Runtime, load_package
 
 @test_utils.test(arch=[ti.cpu, ti.cuda, ti.vulkan], offline_cache=False)
 def test_package_streams_private_definitions_and_preserves_caller_cache(tmp_path, monkeypatch):
+    import weakref
     from taichi_forge.aot._package_compilation import PackageCompilation
 
     source = '''import taichi_forge as ti
@@ -59,10 +60,12 @@ class Model:
 
     def observe(transaction, code):
         assert code.kernel is not original_kernel
+        source = weakref.ref(code.kernel.compiled_kernels[code.key])
         compile_one(transaction, code)
         # Native source leases, not just the Python dictionary, are reclaimed
         # before the next static combination is materialized.
         observed.append(runtime.prog._debug_kernel_definition_count())
+        assert source() is None
         assert observed[-1] == baseline
         assert original_kernel.compiled_kernels == original_cache
 

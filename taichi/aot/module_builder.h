@@ -93,7 +93,9 @@ class AotModuleBuilder {
  protected:
   void record_kernel_resource_effects(const std::string &identifier,
                                        const GraphKernelMetadata &metadata) {
-    kernel_resource_effects_.emplace(identifier, metadata);
+    // A rejected backend export has not reserved its public name. A later
+    // successful retry must replace facts recorded before that rejection.
+    kernel_resource_effects_.insert_or_assign(identifier, metadata);
   }
 
   /**
