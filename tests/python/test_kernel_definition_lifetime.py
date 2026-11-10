@@ -26,8 +26,10 @@ def test_sealed_aot_export_releases_source_and_reserves_name(tmp_path):
 
         native = gen_cpp_kernel(fill, [arg])
         aot.add('fill', native)
+        aot.add('alias', native)
         aot._seal_kernel_export('fill')
         aot._seal_kernel_export('fill')
+        aot._seal_kernel_export('alias')
         return weakref.ref(fill._primal), weakref.ref(native)
 
     source, native = export()
@@ -36,6 +38,9 @@ def test_sealed_aot_export_releases_source_and_reserves_name(tmp_path):
     assert native() is None
     runtime.collect_unused_kernel_definitions(force=True)
     assert runtime.prog._debug_kernel_definition_count() == baseline
+    effects = aot._kernel_resource_effects('fill')
+    assert effects['available'] and not effects['opaque']
+    assert effects == aot._kernel_resource_effects('alias')
     # The native builder must still own enough code/metadata to write a module.
     aot.dump(str(tmp_path), '')
 
@@ -55,6 +60,8 @@ def test_sealed_aot_export_releases_source_and_reserves_name(tmp_path):
         aot.add('other', replacement)
     with pytest.raises(RuntimeError, match='unknown'):
         aot._seal_kernel_export('missing')
+    with pytest.raises(RuntimeError, match='No compiled resource effects'):
+        aot._kernel_resource_effects('missing')
 
 
 @test_utils.test(arch=[ti.cpu, ti.cuda, ti.vulkan], offline_cache=False)

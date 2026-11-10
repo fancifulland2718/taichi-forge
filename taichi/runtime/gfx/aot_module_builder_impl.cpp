@@ -201,6 +201,7 @@ void AotModuleBuilderImpl::add_compiled_kernel(const std::string &identifier,
   const auto &ckd = compilation_manager_.load_or_compile(
       request, *kernel);
   const auto &spirv_ckd = dynamic_cast<const spirv::CompiledKernelData &>(ckd);
+  record_kernel_resource_effects(identifier, ckd.graph_metadata());
 
   const auto &compiled = spirv_ckd.get_internal_data();
   std::vector<uint32_t> range_tasks;

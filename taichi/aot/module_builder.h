@@ -17,6 +17,7 @@
 #include "taichi/aot/argument_origins.h"
 #include "taichi/program/storage_view.h"
 #include "taichi/program/kernel_compile_request.h"
+#include "taichi/analysis/graph_kernel_metadata.h"
 
 namespace taichi::lang {
 
@@ -44,6 +45,8 @@ class AotModuleBuilder {
   // Keep the compiled asset and reserved name, but relinquish its source lease.
   // The sealed name cannot subsequently be rebound, even to the same source.
   void seal_kernel_export(const std::string &identifier);
+  const GraphKernelMetadata &kernel_resource_effects(
+      const std::string &identifier) const;
   // Internal selected-code export. Backends reject unsupported call contracts
   // before compiling or publishing an entry.
   void add_with_launch_abi(const std::string &identifier,
@@ -88,6 +91,11 @@ class AotModuleBuilder {
       const std::vector<std::string> &entries) const;
 
  protected:
+  void record_kernel_resource_effects(const std::string &identifier,
+                                       const GraphKernelMetadata &metadata) {
+    kernel_resource_effects_.emplace(identifier, metadata);
+  }
+
   /**
    * Intended to be overridden by each backend's implementation.
    */
@@ -157,6 +165,7 @@ class AotModuleBuilder {
                             Kernel *kernel,
                             const std::string &launch_abi);
   std::unordered_map<std::string, ExportIdentity> kernel_exports_;
+  std::unordered_map<std::string, GraphKernelMetadata> kernel_resource_effects_;
   std::unordered_map<Kernel *, std::string> ordinary_export_names_;
 };
 

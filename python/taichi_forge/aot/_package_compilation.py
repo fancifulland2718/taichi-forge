@@ -57,8 +57,7 @@ class PackageCompilation:
             raise RuntimeError("Package compilation cannot retire a caller-owned kernel")
         symbol = definition_symbol(code)
         code.export(self.module, symbol)
-        self.resource_effects[identity] = code.runtime.prog._kernel_resource_effects(
-            code.kernel.compiled_kernels[code.key])
+        self.resource_effects[identity] = self.module._aot_builder._kernel_resource_effects(symbol)
         self.module._aot_builder._seal_kernel_export(symbol)
         self.exported[identity] = symbol
         # Definition packages finish with archive(), not an execution-plan

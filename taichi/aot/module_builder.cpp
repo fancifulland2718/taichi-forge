@@ -101,6 +101,15 @@ void AotModuleBuilder::seal_kernel_export(const std::string &identifier) {
   identity.definition_lease.reset();
 }
 
+const GraphKernelMetadata &AotModuleBuilder::kernel_resource_effects(
+    const std::string &identifier) const {
+  const auto found = kernel_resource_effects_.find(identifier);
+  TI_ERROR_IF(kernel_exports_.find(identifier) == kernel_exports_.end() ||
+                  found == kernel_resource_effects_.end(),
+              "No compiled resource effects for AOT kernel {}", identifier);
+  return found->second;
+}
+
 void AotModuleBuilder::add_with_launch_abi(const std::string &identifier,
                                            Kernel *kernel,
                                            const std::string &launch_abi) {

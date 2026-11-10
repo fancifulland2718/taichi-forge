@@ -311,6 +311,7 @@ void LlvmAotModuleBuilder::add_kernel_impl(const std::string &identifier,
                                          const std::string &launch_abi) {
   const auto &artifact = compile_kernel(kernel);
   const auto &source = artifact.get_internal_data();
+  record_kernel_resource_effects(identifier, artifact.graph_metadata());
   LLVMCompiledKernel projected;
   projected.tasks = source.compiled_data.tasks;
   projected.cuda_max_registers = source.compiled_data.cuda_max_registers;

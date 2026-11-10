@@ -21,6 +21,8 @@ and dependency facts needed for reuse are retained, then the temporary frontend
 definition is released. Existing caller-owned JIT/Component caches are preserved.
 Ordinary Module/Graph exports keep their source leases. This build-time reclamation
 adds no consumer checks and does not bound total asset or metadata memory.
+Resource access facts in the manifest come from the exported target code,
+without another compilation using the Producer's ordinary JIT configuration.
 
 Before numerical compilation, export collects independent input-signature gaps
 in recognized kernels alongside declaration errors. Diagnostics identify the

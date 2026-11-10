@@ -67,11 +67,19 @@ class Model:
         assert original_kernel.compiled_kernels == original_cache
 
     monkeypatch.setattr(PackageCompilation, 'compile', observe)
+    runtime.set_kernel_executable_lifecycle_telemetry_enabled(True)
     for attempt in range(2):
+        runtime.debug_kernel_executable_lifecycle_stats(True)
         output = tmp_path / f'sdk{attempt}'
         manifest = ti.aot.export_package(package, output)
         assert len(manifest['entries']) == 5  # four step variants plus the fixture's unused kernel
         assert sum(item['definition'].endswith('.Model.step') for item in manifest['entries'].values()) == 4
+        # Write facts must come from those AOT assets, without another compile
+        # using the producer JIT target/options just to inspect their effects.
+        assert runtime.debug_kernel_executable_lifecycle_stats()['compiler_invocations'] <= 5
+        for item in manifest['entries'].values():
+            if item['definition'].endswith('.Model.step'):
+                assert item['resource_effects'] == dict(precision='compiler_proven', arguments={'1': 'write'})
         with Runtime(manifest['target']) as target, load_package(target, output) as code:
             for n, first, second in ((3, False, False), (7, True, False), (2, False, True), (11, True, True)):
                 owner = code.host.Model(n, first, second)
