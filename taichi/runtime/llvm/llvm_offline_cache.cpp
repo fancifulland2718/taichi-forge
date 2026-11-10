@@ -339,8 +339,10 @@ void LlvmOfflineCacheFileWriter::dump(
       // Exporters can supply one private, transformed module at a time. Keep
       // metadata for the final index without retaining every cloned IR body.
       auto release_module = make_cleanup([&] {
-        if (prepare_module)
+        if (prepare_module) {
           v.compiled_data.module.reset();
+          v.compiled_data.module_context_owner.reset();
+        }
       });
       if (prepare_module)
         v.compiled_data.module = prepare_module(v);

@@ -17,11 +17,14 @@ class LlvmAotModuleBuilder : public AotModuleBuilder {
             const std::string &filename) const override;
 
   void set_artifact_format(const std::string &format) override;
+  void enable_streaming_exports() override;
+  std::map<std::string, std::uint64_t> streaming_export_statistics() override;
   std::map<int, int> exported_snode_tree_bindings() const override {
     return exported_tree_bindings_;
   }
 
  protected:
+  void seal_kernel_export_per_backend(const std::string &identifier) override;
   void add_per_backend(const std::string &identifier, Kernel *kernel) override;
   void add_with_launch_abi_per_backend(
       const std::string &identifier,
@@ -42,6 +45,9 @@ class LlvmAotModuleBuilder : public AotModuleBuilder {
                              int column_num) override;
 
  private:
+  std::unique_ptr<llvm::Module> load_kernel_module(
+      const std::string &name,
+      std::shared_ptr<llvm::LLVMContext> &context_owner) const;
   const LLVM::CompiledKernelData &compile_kernel(Kernel *kernel);
   void add_kernel_impl(const std::string &identifier,
                         Kernel *kernel,
@@ -54,6 +60,10 @@ class LlvmAotModuleBuilder : public AotModuleBuilder {
   std::map<std::string, std::string> kernel_identities_;
   std::map<std::string, std::vector<std::uint32_t>> range_selections_;
   KernelCompilationManager &compilation_manager_;
+  // Reuse the same compiler/cache implementation, with build-local ownership.
+  // Sealing never evicts a normal JIT/Graph/Component caller's cache entry.
+  std::unique_ptr<KernelCompilationManager> streaming_compilation_manager_;
+  std::map<std::string, std::string> sealed_bitcode_;
   const CompileConfig &compile_config_;
   LlvmProgramImpl *prog_ = nullptr;
   DeviceCapabilityConfig caps_;

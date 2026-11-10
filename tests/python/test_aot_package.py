@@ -57,6 +57,7 @@ class Model:
     baseline = runtime.prog._debug_kernel_definition_count()
     compile_one = PackageCompilation.compile
     observed = []
+    build_stats = []
 
     def observe(transaction, code):
         assert code.kernel is not original_kernel
@@ -68,6 +69,11 @@ class Model:
         assert source() is None
         assert observed[-1] == baseline
         assert original_kernel.compiled_kernels == original_cache
+        stats = transaction.module._aot_builder._streaming_export_statistics()
+        if stats:
+            assert stats['resident_ir_modules'] == stats['resident_templates'] == 0
+            assert stats['serialized_code_bytes'] > 0
+        build_stats.append(stats)
 
     monkeypatch.setattr(PackageCompilation, 'compile', observe)
     runtime.set_kernel_executable_lifecycle_telemetry_enabled(True)
@@ -80,6 +86,9 @@ class Model:
         # Write facts must come from those AOT assets, without another compile
         # using the producer JIT target/options just to inspect their effects.
         assert runtime.debug_kernel_executable_lifecycle_stats()['compiler_invocations'] <= 5
+        if build_stats[-1]:
+            assert build_stats[-1]['compiler_invocations'] <= 5
+            assert build_stats[-1]['physical_code_entries'] == 5
         for item in manifest['entries'].values():
             if item['definition'].endswith('.Model.step'):
                 assert item['resource_effects'] == dict(precision='compiler_proven', arguments={'1': 'write'})

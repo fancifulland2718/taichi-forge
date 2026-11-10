@@ -421,6 +421,26 @@ void KernelCompilationManager::dump() {
   updated_data_.clear();
 }
 
+void KernelCompilationManager::release_build_cache() {
+  std::lock_guard<std::mutex> guard(cache_mutex_);
+  TI_ASSERT(in_progress_keys_.empty());
+  for (auto it = caching_kernels_.begin(); it != caching_kernels_.end();) {
+    auto &kernel = it->second;
+    if (kernel.cache_mode == CacheData::MemAndDiskCache && kernel.size != 0) {
+      kernel.execution_handle.reset();
+      kernel.compiled_kernel_data.reset();
+      ++it;
+    } else {
+      it = caching_kernels_.erase(it);
+    }
+  }
+  for (auto &[_, kernel] : cached_data_.kernels) {
+    kernel.execution_handle.reset();
+    kernel.compiled_kernel_data.reset();
+  }
+  execution_handles_.prune();
+}
+
 void KernelCompilationManager::clear() {
   std::lock_guard<std::mutex> guard(cache_mutex_);
   std::uint64_t retired = caching_kernels_.size();
@@ -679,7 +699,10 @@ KernelCompilationManager::executable_lifecycle_statistics(bool reset) {
       read(executable_lifecycle_telemetry_.relocatable_template_reclaims);
   {
     std::lock_guard<std::mutex> guard(cache_mutex_);
-    result.resident_templates = caching_kernels_.size();
+    for (const auto &[_, kernel] : caching_kernels_) {
+      result.resident_templates +=
+          kernel.compiled_kernel_data != nullptr ? 1 : 0;
+    }
     for (const auto &[_, kernel] : cached_data_.kernels) {
       result.resident_templates +=
           kernel.compiled_kernel_data != nullptr ? 1 : 0;
@@ -797,7 +820,7 @@ KernelCompilationManager::try_load_cached_kernel_locked(
   {  // Find in memory-cache (caching_kernels_)
     auto &kernels = caching_kernels_;
     auto iter = kernels.find(kernel_key);
-    if (iter != kernels.end()) {
+    if (iter != kernels.end() && iter->second.compiled_kernel_data) {
       record_if_enabled(executable_lifecycle_telemetry_.enabled,
                         executable_lifecycle_telemetry_.memory_cache_hits);
       TI_DEBUG("Create kernel '{}' from in-memory cache (key='{}')",
@@ -857,10 +880,12 @@ KernelCompilationManager::install_compiled_kernel_locked(
   // `in_progress_keys_` and is NOT yet in caching_kernels_.
   TI_DEBUG_IF(cache_mode == CacheData::MemAndDiskCache,
               "Cache kernel (key='{}')", kernel_key);
-  // Another thread may have raced us to the cache while we held
-  // in_progress_keys_, but by contract only one thread owns any given
-  // kernel_key at a time, so this must still be absent.
-  TI_ASSERT(caching_kernels_.find(kernel_key) == caching_kernels_.end());
+  // Only this thread owns the in-progress key. A private producer can retain
+  // disk metadata here after releasing its IR; replace that empty record.
+  const auto prior = caching_kernels_.find(kernel_key);
+  TI_ASSERT(prior == caching_kernels_.end() ||
+            (prior->second.compiled_kernel_data == nullptr &&
+             prior->second.execution_handle == nullptr));
   compiled->set_kernel_identity(kernel_key);
   compiled->set_logical_kernel_identity(logical_kernel_key);
   compiled->set_optimization_spec_identity(optimization_spec_identity);

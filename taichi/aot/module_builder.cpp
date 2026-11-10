@@ -93,12 +93,20 @@ void AotModuleBuilder::seal_kernel_export(const std::string &identifier) {
   TI_ERROR_IF(found == kernel_exports_.end(),
               "Cannot seal unknown AOT kernel {}", identifier);
   auto &identity = found->second;
+  if (identity.kernel == nullptr)
+    return;
+  seal_kernel_export_per_backend(identifier);
   const auto ordinary = ordinary_export_names_.find(identity.kernel);
   if (ordinary != ordinary_export_names_.end() &&
       ordinary->second == identifier)
     ordinary_export_names_.erase(ordinary);
   identity.kernel = nullptr;
   identity.definition_lease.reset();
+}
+
+void AotModuleBuilder::enable_streaming_exports() {
+  TI_ERROR_IF(compile_options_frozen_,
+              "Streaming exports must be selected before exporting kernels");
 }
 
 const GraphKernelMetadata &AotModuleBuilder::kernel_resource_effects(

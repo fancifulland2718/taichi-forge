@@ -33,6 +33,14 @@ class AotModuleBuilder {
              format);
   }
 
+  // Definition-package producers may seal each export as soon as it is built.
+  // Backends with expensive in-memory IR can compact it without changing the
+  // archive format or the ordinary Program's executable caches.
+  virtual void enable_streaming_exports();
+  virtual std::map<std::string, std::uint64_t> streaming_export_statistics() {
+    return {};
+  }
+
   void set_compile_options(KernelCompileOptions options) {
     TI_ERROR_IF(
         compile_options_frozen_,
@@ -91,6 +99,8 @@ class AotModuleBuilder {
       const std::vector<std::string> &entries) const;
 
  protected:
+  virtual void seal_kernel_export_per_backend(const std::string &identifier) {
+  }
   void record_kernel_resource_effects(const std::string &identifier,
                                        const GraphKernelMetadata &metadata) {
     // A rejected backend export has not reserved its public name. A later

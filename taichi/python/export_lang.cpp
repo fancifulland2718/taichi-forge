@@ -5919,6 +5919,8 @@ void export_lang(py::module &m) {
       .def("add_ndarray_layout", &AotModuleBuilder::add_ndarray_layout)
       .def("add", &AotModuleBuilder::add)
       .def("_seal_kernel_export", &AotModuleBuilder::seal_kernel_export)
+      .def("_enable_streaming_exports", &AotModuleBuilder::enable_streaming_exports)
+      .def("_streaming_export_statistics", &AotModuleBuilder::streaming_export_statistics)
       .def("_kernel_resource_effects",
            [](AotModuleBuilder &builder, const std::string &name) {
              return graph_kernel_metadata_to_python(

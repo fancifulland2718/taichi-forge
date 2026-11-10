@@ -250,6 +250,7 @@ class ProgramImpl {
   }
 
   KernelCompilationManager &get_kernel_compilation_manager();
+  std::unique_ptr<KernelCompilationManager> make_kernel_compilation_manager();
 
   KernelLauncher &get_kernel_launcher();
 

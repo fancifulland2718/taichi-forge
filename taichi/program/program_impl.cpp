@@ -29,14 +29,18 @@ void ProgramImpl::dump_cache_data_to_disk() {
 
 KernelCompilationManager &ProgramImpl::get_kernel_compilation_manager() {
   std::call_once(kernel_com_mgr_once_, [this] {
-    KernelCompilationManager::Config cfg;
-    cfg.offline_cache_path = config->offline_cache_file_path;
-    cfg.kernel_compiler = make_kernel_compiler();
-    kernel_com_mgr_ =
-        std::make_unique<KernelCompilationManager>(std::move(cfg));
+    kernel_com_mgr_ = make_kernel_compilation_manager();
   });
   TI_ASSERT(kernel_com_mgr_ != nullptr);
   return *kernel_com_mgr_;
+}
+
+std::unique_ptr<KernelCompilationManager>
+ProgramImpl::make_kernel_compilation_manager() {
+  KernelCompilationManager::Config cfg;
+  cfg.offline_cache_path = config->offline_cache_file_path;
+  cfg.kernel_compiler = make_kernel_compiler();
+  return std::make_unique<KernelCompilationManager>(std::move(cfg));
 }
 
 KernelLauncher &ProgramImpl::get_kernel_launcher() {

@@ -31,6 +31,10 @@ class PackageCompilation:
     def __enter__(self):
         return self
 
+    def attach(self, module):
+        module._aot_builder._enable_streaming_exports()
+        self.module = module
+
     def entry(self, entry):
         from taichi_forge.lang.kernel_impl import Kernel, TaichiCallableTemplateMapper
 

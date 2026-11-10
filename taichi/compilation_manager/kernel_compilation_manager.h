@@ -117,6 +117,10 @@ class KernelCompilationManager final {
   // offline_cache is disabled, while preserving finalize-time ownership order.
   void clear();
 
+  // A private build manager has no executable consumers. Release parsed IR,
+  // retaining only metadata for already-published disk assets until dump().
+  void release_build_cache();
+
   // Retire in-memory compiled artifacts that contain a static binding to the
   // specified SNodeTree. Explicit tree destruction is a cold transaction, so
   // this waits for outstanding compilation before removing matching entries.

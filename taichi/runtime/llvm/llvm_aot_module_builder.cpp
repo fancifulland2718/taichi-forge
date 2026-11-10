@@ -13,6 +13,8 @@
 #include "taichi/program/kernel_compile_request.h"
 #include "taichi/runtime/llvm/runtime_context_abi.h"
 #include "taichi/runtime/llvm/array_layout_abi.h"
+#include "taichi/runtime/llvm/llvm_module_codec.h"
+#include "llvm/Support/raw_ostream.h"
 #include "taichi/runtime/llvm/aot_artifact_integrity.h"
 #include "taichi/runtime/llvm/aot_snode_relocation.h"
 #include "taichi/runtime/llvm/aot_snode_resources.h"
@@ -48,6 +50,75 @@ void LlvmAotModuleBuilder::set_artifact_format(const std::string &format) {
   TI_ERROR_IF(format == "cubin" && !explicit_cuda_target_,
               "AOT cubin requires an explicit cuda_compute_capability in caps");
   artifact_format_ = format;
+}
+
+void LlvmAotModuleBuilder::enable_streaming_exports() {
+  AotModuleBuilder::enable_streaming_exports();
+  if (streaming_compilation_manager_)
+    return;
+  streaming_compilation_manager_ = prog_->make_kernel_compilation_manager();
+  streaming_compilation_manager_->set_executable_lifecycle_telemetry_enabled(true);
+}
+
+void LlvmAotModuleBuilder::seal_kernel_export_per_backend(
+    const std::string &identifier) {
+  if (!streaming_compilation_manager_)
+    return;
+  const auto &name = kernel_names_.at(identifier);
+  auto &compiled = cache_.kernels.at(name).compiled_data;
+  if (compiled.module) {
+    std::string bytes;
+    llvm::raw_string_ostream output(bytes);
+    encode_llvm_module(*compiled.module, output, LLVMModuleEncoding::bitcode);
+    output.flush();
+    sealed_bitcode_.emplace(name, std::move(bytes));
+    compiled.module.reset();
+    compiled.module_context_owner.reset();
+  }
+  // Code is already atomically published. Release build-owned IR now, and
+  // flush its metadata index once at archive time, avoiding a growing rewrite
+  // after every asset. Alias lookup retains the original target identity.
+  streaming_compilation_manager_->release_build_cache();
+}
+
+std::map<std::string, std::uint64_t>
+LlvmAotModuleBuilder::streaming_export_statistics() {
+  if (!streaming_compilation_manager_)
+    return {};
+  const auto stats =
+      streaming_compilation_manager_->executable_lifecycle_statistics(false);
+  std::uint64_t resident = 0, bytes = 0;
+  for (const auto &[_, kernel] : cache_.kernels)
+    resident += kernel.compiled_data.module != nullptr;
+  for (const auto &[_, bitcode] : sealed_bitcode_)
+    bytes += bitcode.size();
+  return {{"resident_ir_modules", resident},
+          {"serialized_code_bytes", bytes},
+          {"physical_code_entries", cache_.kernels.size()},
+          {"resident_templates", stats.resident_templates},
+          {"compiler_invocations", stats.compiler_invocations},
+          {"disk_loads", stats.disk_loads},
+          {"memory_cache_hits", stats.memory_cache_hits + stats.loaded_cache_hits}};
+}
+
+std::unique_ptr<llvm::Module> LlvmAotModuleBuilder::load_kernel_module(
+    const std::string &name,
+    std::shared_ptr<llvm::LLVMContext> &context_owner) const {
+  const auto &compiled = cache_.kernels.at(name).compiled_data;
+  if (compiled.module) {
+    context_owner = compiled.module_context_owner;
+    return llvm::CloneModule(*compiled.module);
+  }
+  const auto &bytes = sealed_bitcode_.at(name);
+  // A private context also releases LLVM's interned types/constants after
+  // writing this asset; parsing into the Program context would retain them.
+  context_owner = std::make_shared<llvm::LLVMContext>();
+  auto decoded = decode_llvm_module(llvm::MemoryBufferRef(bytes, name),
+                                    *context_owner, LLVMModuleEncoding::bitcode);
+  if (!decoded)
+    TI_ERROR("Cannot decode sealed AOT kernel {}: {}", name,
+              llvm::toString(decoded.takeError()));
+  return std::move(*decoded);
 }
 
 void LlvmAotModuleBuilder::dump(const std::string &output_dir,
@@ -120,8 +191,8 @@ void LlvmAotModuleBuilder::dump(const std::string &output_dir,
     metadata.initial_root_data.push_back(std::move(local));
   }
   auto prepare_module = [&](LlvmOfflineCache::KernelCacheData &kernel) {
-    auto module = llvm::CloneModule(
-        *cache_.kernels.at(kernel.kernel_key).compiled_data.module);
+    auto module = load_kernel_module(kernel.kernel_key,
+                                     kernel.compiled_data.module_context_owner);
     if (relocatable) {
       LLVM::remap_aot_kernel_tree_ids(*module, kernel, tree_mapping);
     } else {
@@ -216,14 +287,22 @@ void LlvmAotModuleBuilder::dump(const std::string &output_dir,
     metadata.launch_abi_sha256 = LLVM::aot_launch_abi_sha256(metadata);
   }
   for (const auto &[name, kernel] : cache_.kernels) {
-    const auto state = LLVM::runtime_state_use(*kernel.compiled_data.module);
-    auto arrays = LLVM::runtime_affine_arrays(*kernel.compiled_data.module);
+    // A sealed export retains compact bitcode; inspect one module at a time.
+    std::shared_ptr<llvm::LLVMContext> context_owner;
+    std::unique_ptr<llvm::Module> restored;
+    auto *module = kernel.compiled_data.module.get();
+    if (module == nullptr) {
+      restored = load_kernel_module(name, context_owner);
+      module = restored.get();
+    }
+    const auto state = LLVM::runtime_state_use(*module);
+    auto arrays = LLVM::runtime_affine_arrays(*module);
     if (!arrays.empty())
       metadata.kernel_runtime_affine_arrays.emplace(name, std::move(arrays));
     if (state)
       metadata.kernel_runtime_state.emplace(name, state);
     const auto view_abi =
-        LLVM::sparse_runtime_view_abi(*kernel.compiled_data.module);
+        LLVM::sparse_runtime_view_abi(*module);
     if (view_abi)
       metadata.kernel_sparse_runtime_view_abis.emplace(name, view_abi);
   }
@@ -280,6 +359,8 @@ void LlvmAotModuleBuilder::dump(const std::string &output_dir,
   aot::write_value_parameter_artifact(value_parameters_, output_dir);
   aot::write_argument_origin_artifact(argument_origins_, output_dir);
   exported_tree_bindings_ = tree_mapping;
+  if (streaming_compilation_manager_)
+    streaming_compilation_manager_->dump();
 }
 
 const std::vector<int> &LlvmAotModuleBuilder::kernel_snode_tree_ids(
@@ -433,7 +514,9 @@ const LLVM::CompiledKernelData &LlvmAotModuleBuilder::compile_kernel(
   const auto request = resolve_kernel_compile_request(
       config, caps_, kernel->get_compile_tier_override(), CompilePurpose::aot,
       compile_options_);
-  const auto &ckd = compilation_manager_.load_or_compile(
+  auto &manager = streaming_compilation_manager_ ? *streaming_compilation_manager_
+                                                : compilation_manager_;
+  const auto &ckd = manager.load_or_compile(
       request, *kernel);
   TI_ASSERT(arch_uses_llvm(ckd.arch()));
   return dynamic_cast<const LLVM::CompiledKernelData &>(ckd);

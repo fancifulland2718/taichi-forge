@@ -16,6 +16,7 @@ def test_sealed_aot_export_releases_source_and_reserves_name(tmp_path):
     runtime = ti.lang.impl.get_runtime()
     baseline = runtime.prog._debug_kernel_definition_count()
     aot = runtime.prog.make_aot_module_builder(ti.lang.impl.current_cfg().arch, [])
+    aot._enable_streaming_exports()
     arg = ti.graph.Arg(ti.graph.ArgKind.NDARRAY, "out", ti.i32, ndim=1)
 
     def export():
@@ -43,6 +44,17 @@ def test_sealed_aot_export_releases_source_and_reserves_name(tmp_path):
     assert effects == aot._kernel_resource_effects('alias')
     # The native builder must still own enough code/metadata to write a module.
     aot.dump(str(tmp_path), '')
+    first = {p.name: p.read_bytes() for p in tmp_path.glob('*.bc')}
+    aot.dump(str(tmp_path), '')
+    assert first == {p.name: p.read_bytes() for p in tmp_path.glob('*.bc')}
+    stats = aot._streaming_export_statistics()
+    if stats:
+        assert stats['physical_code_entries'] == 1
+        assert stats['resident_ir_modules'] == stats['resident_templates'] == 0
+        assert stats['serialized_code_bytes'] > 0
+        assert len(first) == 1
+    with pytest.raises(RuntimeError, match='before exporting'):
+        aot._enable_streaming_exports()
 
     # Check rejection separately: exception tracebacks may retain call frames,
     # which are legitimate source owners until the exception is released.
@@ -87,6 +99,44 @@ def test_rejected_aot_export_does_not_publish_stale_effects():
     effects = aot._kernel_resource_effects("retry")
     assert effects["available"] and not effects["opaque"]
     assert {(tuple(effect["arg_id"]), effect["access"]) for effect in effects["effects"]} == {((0,), "write")}
+
+
+@test_utils.test(arch=[ti.cpu, ti.cuda])
+def test_streamed_aot_exports_reuse_disk_cache_after_releasing_ir(tmp_path):
+    arch = ti.lang.impl.current_cfg().arch
+    ti.init(arch=arch, offline_cache=True, offline_cache_file_path=str(tmp_path / 'cache'))
+    runtime = ti.lang.impl.get_runtime()
+    arg = ti.graph.Arg(ti.graph.ArgKind.NDARRAY, "out", ti.i32, ndim=1)
+
+    @ti.kernel
+    def first(out: ti.types.ndarray(ti.i32, ndim=1)):
+        for i in out:
+            out[i] = i + 1
+
+    @ti.kernel
+    def second(out: ti.types.ndarray(ti.i32, ndim=1)):
+        for i in out:
+            out[i] = 2 * i
+
+    for attempt in range(2):
+        aot = runtime.prog.make_aot_module_builder(arch, [])
+        aot._enable_streaming_exports()
+        for name, kernel in (('first', first), ('second', second)):
+            aot.add(name, gen_cpp_kernel(kernel, [arg]))
+            aot._seal_kernel_export(name)
+        # A new logical entry may share code whose expanded IR is already gone.
+        aot.add('alias', gen_cpp_kernel(first, [arg]))
+        aot._seal_kernel_export('alias')
+        stats = aot._streaming_export_statistics()
+        assert stats['physical_code_entries'] == 2
+        assert stats['resident_ir_modules'] == stats['resident_templates'] == 0
+        if attempt == 1:
+            assert stats['disk_loads'] == 3
+            assert stats['compiler_invocations'] == 0
+        output = tmp_path / f'export{attempt}'
+        output.mkdir()
+        aot.dump(str(output), '')
+        assert len(list(output.glob('*.bc'))) == 2
 
 
 @test_utils.test(arch=[ti.cpu, ti.cuda, ti.vulkan], offline_cache=False)

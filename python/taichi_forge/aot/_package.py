@@ -1608,7 +1608,7 @@ def _export_package(package, output, *, arch, caps, source_root, compilation):
     ) = _preflight_package(package, arch=arch, source_root=source_root)
     package = packages[0]
     module = Module(caps=caps)
-    compilation.module = module
+    compilation.attach(module)
     from ._package_owner_graph import OwnerGraph, owner_bindings, layout_owner
 
     owner_graph = OwnerGraph(sources, imported_modules, module)
