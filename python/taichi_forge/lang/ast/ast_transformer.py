@@ -1209,6 +1209,10 @@ class ASTTransformer(Builder):
             ast.Invert: lambda l: ~l,
         }.get(type(node.op))
         node.ptr = op(node.operand.ptr)
+        if isinstance(node.op, ast.Not) and is_model_value(node.operand.ptr):
+            truth = getattr(node.operand.ptr, "_uniform_truth", None)
+            if truth is not None:
+                node.ptr._uniform_truth = not truth
         return node.ptr
 
     @staticmethod
@@ -1234,15 +1238,22 @@ class ASTTransformer(Builder):
                     # Python and/or select an operand, not a boolean result.
                     node.ptr = (ti_ops.ifte(accumulated, value.ptr, accumulated) if is_and
                                 else ti_ops.ifte(accumulated, accumulated, value.ptr))
-                    if (isinstance(value.ptr, (bool, int, float, np.bool_, np.integer, np.floating))
-                            and bool(value.ptr) != is_and):
-                        break  # this constant makes every remaining operand dead
+                    truth = (getattr(value.ptr, "_uniform_truth", None) if is_model_value(value.ptr)
+                             else bool(value.ptr))
+                    if truth is not None and truth != is_and:
+                        # Both selected operands have the same truth, but not
+                        # necessarily the same value (e.g. model or 7). Retain
+                        # operand selection while folding unreachable branches.
+                        node.ptr._uniform_truth = truth
                 else:
                     node.ptr = value.ptr
                 if index == len(node.values) - 1:
                     break
                 if is_model_value(node.ptr):
-                    accumulated = node.ptr
+                    truth = getattr(node.ptr, "_uniform_truth", None)
+                    if truth is not None and truth != is_and:
+                        break
+                    accumulated = node.ptr if truth is None else None
                     continue
                 if bool(node.ptr) != is_and:
                     break
@@ -1856,6 +1867,12 @@ class ASTTransformer(Builder):
         build_stmt(ctx, node.test)
         is_static_if = ASTTransformer.get_decorator(ctx, node.test) == "static"
 
+        if is_static_if and is_model_value(node.test.ptr):
+            truth = getattr(node.test.ptr, "_uniform_truth", None)
+            if truth is not None:
+                build_stmts(ctx, node.body if truth else node.orelse)
+                return node
+
         if is_static_if and not is_model_value(node.test.ptr):
             if node.test.ptr:
                 build_stmts(ctx, node.body)
@@ -1899,6 +1916,12 @@ class ASTTransformer(Builder):
     def build_IfExp(ctx, node):
         build_stmt(ctx, node.test)
         is_static_if = ASTTransformer.get_decorator(ctx, node.test) == "static"
+
+        if is_static_if and is_model_value(node.test.ptr):
+            truth = getattr(node.test.ptr, "_uniform_truth", None)
+            if truth is not None:
+                node.ptr = build_stmt(ctx, node.body if truth else node.orelse)
+                return node.ptr
 
         if is_static_if and not is_model_value(node.test.ptr):
             if node.test.ptr:

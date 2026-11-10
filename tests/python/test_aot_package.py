@@ -20309,3 +20309,77 @@ class Model:
             pytest.raises(ValueError, match="format 78"),
         ):
             load_package(runtime, tmp_path / "sdk")
+
+@pytest.mark.parametrize('form', ['and', 'or', 'not', 'expression'])
+@test_utils.test(arch=[ti.cpu, ti.cuda], offline_cache=False)
+def test_package_prepared_predicate_folds_static_child_absence(tmp_path, monkeypatch, form):
+    source = '''
+import taichi_forge as ti
+@ti.data_oriented
+class Child:
+    def __init__(self, n: int):
+        self.n = n
+        scope = ti.experimental.ResourceScope(self)
+        scope.values = scope.field(ti.i32, shape=scope.dim('n'), initialization='zero')
+    @ti.func
+    def value(self, i):
+        self.values[i] += 3
+        return self.values[i]
+@ti.data_oriented
+class Model:
+    def __init__(self, n: int, enabled: bool, policy: int):
+        self.n, self.enabled, self.policy = n, enabled, policy
+        scope = ti.experimental.ResourceScope(self)
+        scope.dim('n')
+        scope.static('enabled', choices=(False, True))
+        scope.value('policy', ti.i32, affects_plan=True)
+        scope.out = scope.field(ti.i32, shape=scope.dim('n'), initialization='zero')
+        if self.enabled:
+            scope.child = Child(n)
+    @ti.kernel
+    def step(self):
+        for i in range(self.n):
+            if ti.static(self.policy and self.enabled):
+                self.out[i] = self.child.value(i)
+            else:
+                self.out[i] = 2
+            # Truth folding must not change Python operand-selection values.
+            self.out[i] += ti.static(self.policy or 7)
+            self.out[i] += ti.static(self.policy and 0)
+            if ti.static((self.policy and False and self.missing) or (self.policy or True or self.missing)):
+                self.out[i] += 11
+            else:
+                self.out[i] = self.missing[0]
+'''
+    if form == 'or':
+        source = source.replace('self.policy and self.enabled', 'self.policy or not self.enabled')
+        source = source.replace('self.out[i] = self.child.value(i)', 'self.out[i] = 2')
+        source = source.replace('            else:\n                self.out[i] = 2',
+                                '            else:\n                self.out[i] = self.child.value(i)', 1)
+    elif form == 'not':
+        source = source.replace('self.policy and self.enabled', 'not (not self.policy or not self.enabled)')
+    elif form == 'expression':
+        source = source.replace('''            if ti.static(self.policy and self.enabled):
+                self.out[i] = self.child.value(i)
+            else:
+                self.out[i] = 2''', '''            self.out[i] = self.child.value(i) if ti.static(self.policy and self.enabled) else 2''')
+    package = _source_package(tmp_path, monkeypatch, source)
+    manifest = ti.aot.export_package(package, tmp_path / 'sdk')
+    entries = [entry for entry in manifest['entries'].values()
+               if 'definition_fixture.model.Model.step' in entry['definitions']]
+    assert len(entries) == 2  # Presence is static; policy values never multiply exports.
+    with Runtime(manifest['target']) as runtime, load_package(runtime, tmp_path / 'sdk') as code:
+        instances = []
+        for enabled in (False, True):
+            for policy in (-3, 0, 2):
+                n = len(instances) + 3
+                normal = package.Model(n, enabled, policy)
+                loaded = code.host.Model(n, enabled, policy)
+                normal.step()
+                loaded.step()
+                instances.append(loaded)
+                expected = (3 if enabled and (policy == 0 if form == 'or' else policy != 0) else 2)
+                expected += (policy or 7) + 11
+                np.testing.assert_array_equal(normal.out.to_numpy(), np.full(n, expected))
+                np.testing.assert_array_equal(loaded.out.to_numpy(), normal.out.to_numpy())
+                assert hasattr(loaded, 'child') == enabled

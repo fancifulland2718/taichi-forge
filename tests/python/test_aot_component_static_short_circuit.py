@@ -33,9 +33,10 @@ def test_component_static_short_circuit_preserves_actual_capture_contract():
     assert other.compile(second.run) is code
     code.run(other, second)
     np.testing.assert_array_equal(second.out.to_numpy(), np.arange(9) + 7)
-    # The same expression is still invalid when its dynamic operand is reached.
+    # Model dimensions can now enter prepared static expressions, but the
+    # reached undeclared operand must still be rejected.
     second.enabled = True
-    with pytest.raises(ti.TaichiCompilationError, match="runtime capture.*n.*ti.static"):
+    with pytest.raises(ti.TaichiCompilationError, match=r"undeclared capture self\.missing"):
         other.compile(second.run)
 
 
