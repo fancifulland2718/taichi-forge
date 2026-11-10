@@ -152,6 +152,69 @@ def value() -> ti.i32:
         if automatic_gc:
             gc.enable()
 
+@pytest.mark.parametrize('failure', ('transient', 'persistent', 'archive'))
+@test_utils.test(arch=ti.cpu, offline_cache=False)
+def test_package_publication_preserves_completed_output(tmp_path, monkeypatch, failure):
+    from taichi_forge.aot import _package
+    from taichi_forge.aot.module import Module
+
+    package = _source_package(tmp_path, monkeypatch, '''
+import taichi_forge as ti
+@ti.kernel
+def value() -> ti.i32:
+    return 7
+''', initializer='from .model import value\n')
+    output = tmp_path / 'sdk'
+    rename = Path.rename
+    archive = Module.archive
+    attempts, archives, sleeps = [], [], []
+    monkeypatch.setattr(_package.time, 'sleep', sleeps.append)
+
+    def save(module, path, **kwargs):
+        archives.append(path)
+        if failure == 'archive':
+            Path(path).write_bytes(b'incomplete archive')
+            raise OSError('injected archive failure')
+        return archive(module, path, **kwargs)
+
+    def publish(path, destination):
+        if Path(destination) == output:
+            attempts.append(path)
+            assert (path / 'package.json').is_file()
+            if failure == 'persistent' or len(attempts) <= 2:
+                error = PermissionError('injected Windows sharing denial')
+                error.winerror = 5
+                raise error
+        return rename(path, destination)
+
+    monkeypatch.setattr(Module, 'archive', save)
+    monkeypatch.setattr(Path, 'rename', publish)
+    if failure == 'archive':
+        with pytest.raises(OSError, match='injected archive failure'):
+            ti.aot.export_package(package, output)
+        assert not output.exists()
+        assert not list(tmp_path.glob('.forge-package-*'))
+        assert len(archives) == 1 and not attempts
+        return
+    if failure == 'persistent':
+        with pytest.raises(_package.PackageExportError, match='complete package is preserved') as failure_info:
+            ti.aot.export_package(package, output)
+        assert len(attempts) == 6
+        assert not output.exists()
+        staged, = tmp_path.glob('.forge-package-*')
+        assert str(staged) in str(failure_info.value)
+        # Recover the existing archive without invoking the compiler or exporter.
+        rename(staged, output)
+    else:
+        ti.aot.export_package(package, output)
+        assert len(attempts) == 3
+    assert len(archives) == 1
+    assert sleeps and not list(tmp_path.glob('.forge-package-*'))
+    manifest = json.loads((output / 'package.json').read_text())
+    with Runtime(manifest['target']) as target, load_package(target, output) as code:
+        assert code.host.value() == 7
+
+
 OWNER_INPUT_SOURCE = """
 import taichi_forge as ti
 constructors = 0

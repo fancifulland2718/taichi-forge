@@ -16,6 +16,7 @@ from functools import reduce
 from pathlib import Path
 import shutil
 import tempfile
+import time
 from types import SimpleNamespace
 
 from taichi_forge.tools._compiled_host import decorator_resolver
@@ -1572,12 +1573,31 @@ def check_package(package, *, arch=None, source_root=None):
     )
 
 
+def _publish_package(staging, output):
+    # Windows scanners can briefly deny directory renames after large writes.
+    # Keep publication atomic; never fall back to copying into a visible output.
+    for delay in (0.0, 0.1, 0.2, 0.4, 0.8, 1.6):
+        if delay:
+            time.sleep(delay)
+        try:
+            staging.rename(output)
+            return
+        except OSError as error:
+            if getattr(error, "winerror", None) not in (5, 32, 33) or delay == 1.6:
+                raise PackageExportError(
+                    f"Package is complete but could not be published to {output}: {error}. "
+                    f"The complete package is preserved at {staging}; move that directory "
+                    "after resolving the destination or filesystem lock, without rebuilding."
+                ) from error
+
+
 def export_package(package, output, *, arch=None, caps=None, source_root=None):
     """Export decorated definitions without executing a model to discover coverage.
 
     ``check_package`` runs this same declaration phase without compilation.
     Multiple roots share one compiler and source closure, not separate exports.
     Selects ``arch`` on a cold Runtime or validates the active backend.
+    A completed package is retained at the reported staging path if publication fails.
     """
     from ._package_compilation import PackageCompilation
 
@@ -2612,6 +2632,7 @@ def _export_package(package, output, *, arch, caps, source_root, compilation):
         raise PackageExportError("Package contains no supported decorated kernels")
     output.parent.mkdir(parents=True, exist_ok=True)
     staging = Path(tempfile.mkdtemp(prefix=".forge-package-", dir=output.parent))
+    complete = False
     try:
         module.archive(str(staging / "code.tcm"))
         for relative, data in payloads.items():
@@ -2624,9 +2645,10 @@ def _export_package(package, output, *, arch, caps, source_root, compilation):
         if any(path.read_text(encoding="utf8") != text for _, path, _, text, *_ in sources):
             raise PackageExportError("Source changed during export")
         (staging / "package.json").write_text(json.dumps(manifest, indent=2), encoding="utf8")
-        staging.rename(output)
+        complete = True
+        _publish_package(staging, output)
     finally:
         # This is the exact private staging directory allocated above, never user input.
-        if staging.exists() and staging.parent == output.parent and staging.name.startswith(".forge-package-"):
+        if not complete and staging.exists() and staging.parent == output.parent and staging.name.startswith(".forge-package-"):
             shutil.rmtree(staging)
     return manifest
