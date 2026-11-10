@@ -14,7 +14,7 @@ import operator
 import sys
 from dataclasses import dataclass, replace
 from math import prod
-from types import CodeType, MappingProxyType, MemberDescriptorType, ModuleType
+from types import BuiltinMethodType, CodeType, MappingProxyType, MemberDescriptorType, ModuleType
 from typing import Final, get_origin
 
 from taichi_forge.lang import impl, kernel_arguments
@@ -2591,14 +2591,31 @@ class _Capture:
             "use a declared component value, an immutable module typing.Final, or a literal"
         )
 
-    def check_call(self, value):
+    def check_call(self, value, *, ctx=None, args=(), keywords=None):
         if getattr(value, "_is_taichi_function", False):
             return
         # The AST routes builtin print to ti_print/PrintStmt, never to a host
         # Python callback. Preserve diagnostics in original deployed kernels.
         if any(value is item for item in (range, len, min, max, abs, int, float, bool, enumerate, zip, print)):
             return
-        if getattr(value, "__module__", "").startswith("taichi_forge"):
+        # Definition tables may use tuple queries while resolving a static
+        # template. Both the receiver and query must be immutable: otherwise
+        # equality/index conversions could execute arbitrary Python callbacks
+        # or inspect device data during compilation. Normal Final capture guards
+        # above still own the table's dependency identity.
+        if (
+            type(value) is BuiltinMethodType
+            and type(value.__self__) is tuple
+            and value.__name__ in ("index", "count")
+        ):
+            if ctx is None or not ctx.is_in_static_scope() or keywords:
+                raise TaichiCompilationError("Component tuple queries require ti.static and immutable arguments")
+            _static_value(value.__self__)
+            for argument in args:
+                _static_value(argument)
+            return
+        module = getattr(value, "__module__", None)
+        if isinstance(module, str) and module.startswith("taichi_forge"):
             return
         raise TaichiCompilationError("Uncontrolled Python calls are not supported in component captures")
 

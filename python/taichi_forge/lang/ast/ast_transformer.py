@@ -612,7 +612,7 @@ class ASTTransformer(Builder):
             if func is isinstance:
                 node.ptr = ctx.deployment.field_type_check(args, keywords)
                 return node.ptr
-            ctx.deployment.check_call(func)
+            ctx.deployment.check_call(func, ctx=ctx, args=args, keywords=keywords)
 
         if id(func) in [id(print), id(impl.ti_print)]:
             ctx.func.has_print = True

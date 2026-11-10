@@ -15,6 +15,7 @@ FACTORS: Final = (2, 5)
 UNUSED: Final[int] = 999
 UNDECLARED = 7
 MUTABLE: Final = [1, 2]
+NAMES: Final = ("a", "b", "a", "c")
 
 
 @ti.data_oriented
@@ -87,8 +88,44 @@ class _State:
     def mutable(self):
         self.output[0] = MUTABLE[0]
 
+    @ti.kernel
+    def tuple_queries(self):
+        index = ti.static(NAMES.index("b", 1, 3))
+        count = ti.static(NAMES.count("a"))
+        nested = ti.static(((1, 2), (3, 4)).index((3, 4)))
+        self.output[0], self.output[1], self.output[2] = index, count, nested
+
+    @ti.kernel
+    def mutable_call(self):
+        self.output[0] = ti.static([2, 1].pop())
+
+    @ti.kernel
+    def device_tuple_query(self):
+        self.output[0] = ti.static((1, 2).index(self.output[0]))
+
     def record(self, builder):
         builder.dispatch(self.step, template_args={"self": self})
+
+
+@test_utils.test(arch=[ti.cpu, ti.cuda], offline_cache=False)
+def test_static_tuple_queries_keep_constant_guards_and_reject_mutable_calls(monkeypatch):
+    state = _State(3, declared=True)
+    environment = Component.from_owner(state)
+    code = environment.compile(state.tuple_queries)
+    for run in (state.tuple_queries, lambda: code.run(environment, state)):
+        run()
+        np.testing.assert_array_equal(state.output.to_numpy(), [1, 2, 1])
+    assert {item[2] for item in code.contract["constants"]} == {"NAMES"}
+    monkeypatch.setitem(globals(), "NAMES", ("b", "a", "b", "c"))
+    assert not code.matches(environment, state)
+    revised = environment.compile(state.tuple_queries)
+    assert revised.semantic_key != code.semantic_key
+    revised.run(environment, state)
+    np.testing.assert_array_equal(state.output.to_numpy(), [2, 1, 1])
+    with pytest.raises(ti.TaichiCompilationError, match="Uncontrolled Python calls"):
+        environment.compile(state.mutable_call)
+    with pytest.raises(ti.TaichiCompilationError, match="immutable scalar values or tuples"):
+        environment.compile(state.device_tuple_query)
 
 
 @test_utils.test(arch=ti.cpu, offline_cache=False)
