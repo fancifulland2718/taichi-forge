@@ -84,6 +84,68 @@ class Model:
 
 
 @test_utils.test(arch=ti.cuda, offline_cache=False)
+def test_package_library_prepares_parallel_range_schedules(tmp_path, monkeypatch):
+    from itertools import product
+    from taichi_forge.aot._component import _ComponentCode
+
+    source = '''import taichi_forge as ti
+@ti.data_oriented
+class Model:
+    def __init__(self, n: int, reset: bool, add: bool):
+        self.n, self.reset, self.add = n, reset, add
+        scope = ti.experimental.ResourceScope(self)
+        scope.dim('n')
+        scope.static('reset', choices=(False, True))
+        scope.static('add', choices=(False, True))
+        scope.out = scope.field(ti.i32, shape=scope.dim('n'))
+    @ti.kernel
+    def step(self, value: ti.i32):
+        if ti.static(self.reset):
+            ti.loop_config(block_dim=64)
+            for i in range(self.n):
+                self.out[i] = value + i
+            for i in range(self.n):
+                self.out[i] *= 2
+        else:
+            ti.loop_config(block_dim=128)
+            for i in range(self.n):
+                self.out[i] = value - i
+        if ti.static(self.add):
+            for i in range(self.n):
+                self.out[i] += 7
+            for i in range(self.n):
+                self.out[i] *= 3
+'''
+    tasks = []
+    original = _ComponentCode.export
+
+    def observe(code, module, name):
+        result = original(code, module, name)
+        if code.entry_definition[1] == 'Model.step':
+            tasks.extend(code.runtime.prog._kernel_task_manifest(code.kernel.compiled_kernels[code.key]))
+        return result
+
+    monkeypatch.setattr(_ComponentCode, 'export', observe)
+    package = _source_package(tmp_path, monkeypatch, source)
+    manifest = ti.aot.export_package(package, tmp_path / 'sdk', artifact_format='bc-library')
+    entries = [v for v in manifest['entries'].values() if v['definition'].endswith('.Model.step')]
+    assert len(entries) == 1  # both independent schedule axes share one caller
+    assert {v['name'] for v in entries[0]['captures'] if 'prepare_static' in v} == {'reset', 'add'}
+    parallel = [task for task in tasks if task['task_type'] == 'range_for']
+    assert len(parallel) == 5, tasks
+    assert parallel[0]['selected_block_size'] == 64
+    assert parallel[2]['selected_block_size'] == 128
+    with Runtime('cuda') as runtime, load_package(runtime, tmp_path / 'sdk') as code:
+        for flags in product((False, True), repeat=2):
+            for n in (1, 3, 513):
+                aot, jit = code.host.Model(n, *flags), package.model.Model(n, *flags)
+                for value in (2, 11):
+                    aot.step(value)
+                    jit.step(value)
+                    np.testing.assert_array_equal(aot.out.to_numpy(), jit.out.to_numpy())
+
+
+@test_utils.test(arch=ti.cuda, offline_cache=False)
 def test_package_library_prepares_independent_static_conditions(tmp_path, monkeypatch):
     from itertools import product
 

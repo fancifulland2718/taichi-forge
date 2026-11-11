@@ -19,6 +19,7 @@ from taichi_forge.lang._local_tensor import LocalTensor, field_iteration_scope, 
 from taichi_forge.lang.argpack import ArgPackType
 from taichi_forge.lang.ast.ast_transformer_utils import Builder, LoopStatus, ReturnStatus
 from taichi_forge.lang.ast.symbol_resolver import ASTResolver
+from taichi_forge.lang.ast._uniform_schedule import uniform_range_schedule
 from taichi_forge.lang.exception import (
     TaichiIndexError,
     TaichiSyntaxError,
@@ -1834,6 +1835,23 @@ class ASTTransformer(Builder):
         Arbitrary calls, device indexing, sparse iteration and surrounding
         statements retain their ordinary control-flow lowering.
         """
+        from taichi_forge.lang.misc import loop_config
+
+        def kind(expression):
+            if ASTResolver.resolve_to(expression, loop_config, ctx.global_vars):
+                return "loop_config"
+            return ASTTransformer.get_decorator(ctx, ast.Call(func=expression))
+        if uniform_range_schedule(node, kind):
+            for branch, truth in ((node.body, True), (node.orelse, False)):
+                if not branch:
+                    continue
+                guard = node.test.ptr if truth else ti_ops.logical_not(node.test.ptr)
+                with ctx.deployment.input_condition(node.test.ptr, truth), ctx.variable_scope_guard():
+                    for statement in branch:
+                        if isinstance(statement, ast.For):
+                            statement._uniform_loop_guard = guard
+                        build_stmt(ctx, statement)
+            return True
         if node.orelse or len(node.body) != 1 or not isinstance(node.body[0], ast.For):
             return False
         loop = node.body[0]
@@ -1872,7 +1890,7 @@ class ASTTransformer(Builder):
             return False
         loop._uniform_loop_guard = node.test.ptr
         # The conditional's lexical scope must not leak loop-local aliases.
-        with ctx.variable_scope_guard():
+        with ctx.deployment.input_condition(node.test.ptr, True), ctx.variable_scope_guard():
             build_stmt(ctx, loop)
         return True
 
@@ -1895,9 +1913,8 @@ class ASTTransformer(Builder):
             return node
 
         if is_static_if and is_model_value(node.test.ptr) and ctx.deployment is not None:
-            with ctx.deployment.input_condition(node.test.ptr, True):
-                if ASTTransformer.build_uniform_loop_branch(ctx, node):
-                    return node
+            if ASTTransformer.build_uniform_loop_branch(ctx, node):
+                return node
 
         with ctx.non_static_if_guard(node):
             stmt_dbg_info = _ti_core.DebugInfo(ctx.get_pos_info(node))

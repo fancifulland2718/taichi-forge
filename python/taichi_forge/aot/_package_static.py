@@ -8,6 +8,8 @@ Unproven structural uses keep the ordinary finite specialization contract.
 import ast
 import copy
 
+from taichi_forge.lang.ast._uniform_schedule import uniform_range_schedule
+
 
 class StaticPreparation:
     def __init__(self, sources):
@@ -129,6 +131,8 @@ class StaticPreparation:
         while (parent := parents.get(id(child))) is not None:
             if isinstance(parent, (ast.If, ast.IfExp)) and child is parent.test:
                 branches = parent.body + parent.orelse if isinstance(parent, ast.If) else (parent.body, parent.orelse)
+                if uniform_range_schedule(parent, kind):
+                    return "prepare_condition"
                 if any(self._structural(branch, kind) for branch in branches):
                     return "structural_branch"
                 threaded = outer_threaded or self._threaded(parent, parents, kind)
