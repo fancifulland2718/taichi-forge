@@ -173,13 +173,25 @@ class StaticPreparation:
     def _structural(node, kind):
         # These operations define types, Python objects, or execution structure.
         # Their branch alternatives cannot be represented by a scalar IR phi.
+        fixed_cast_types = set()
         for part in ast.walk(node):
+            if isinstance(part, ast.Call) and kind(part.func) == 'cast':
+                # A literal dtype operand of the normal numeric cast creates a
+                # value, not a Python type/layout alternative. Keep conditional
+                # dtype expressions and every other use under the usual proof.
+                dtype = part.args[1] if len(part.args) == 2 else next(
+                    (kw.value for kw in part.keywords if kw.arg == 'dtype'), None)
+                if isinstance(dtype, (ast.Name, ast.Attribute)) and kind(dtype) in (
+                        'i8', 'i16', 'i32', 'i64', 'u8', 'u16', 'u32', 'u64', 'f16', 'f32', 'f64'):
+                    fixed_cast_types.add(id(dtype))
+            # ast.walk visits the call before its dtype operand.
             if isinstance(part, (ast.Return, ast.Break, ast.Continue, ast.Raise)):
                 return True
             if isinstance(part, ast.Attribute) and (
                 part.attr in ("loop_config", "SharedArray", "Vector", "Matrix", "field", "ndarray")
                 or (kind(part) or "").startswith("types.")
-                or kind(part) in ("i8", "i16", "i32", "i64", "u8", "u16", "u32", "u64", "f16", "f32", "f64")
+                or (kind(part) in ("i8", "i16", "i32", "i64", "u8", "u16", "u32", "u64", "f16", "f32", "f64")
+                    and id(part) not in fixed_cast_types)
             ):
                 return True
             if isinstance(part, ast.Assign) and any(isinstance(t, ast.Name) for t in part.targets):

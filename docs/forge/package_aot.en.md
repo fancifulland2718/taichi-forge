@@ -56,7 +56,13 @@ Proven scalar reads, writes and scalar helpers between loops retain their order.
 A count saved before a reset crosses the guard as a typed local value rather
 than being reread after the reset. These conditions no longer require copies
 of the whole entry. Rebinding, ambiguous call names and resource/type uses retain
-their original restrictions. Model template expressions
+their original restrictions. A fixed dtype operand of `ti.cast(value, ti.f32)`,
+including the `dtype=` form, is numerical computation and does not by itself
+force whole-entry variants of the enclosing condition. Conditional dtype
+selection, type/resource aliases and unrecognized conversion calls keep the
+conservative rules. Fixed integer enums used as numerical scheduling values can
+be explicitly cast to their existing integer type instead of being treated as
+Python object aliases. Model template expressions
 crossing `real_func` boundaries are rebuilt from immutable argument provenance in
 the callee; they do not reuse caller-owned IR or ship Python ASTs.
 

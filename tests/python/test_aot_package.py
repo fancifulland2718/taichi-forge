@@ -640,6 +640,83 @@ def step(self):
 
 
 @test_utils.test(arch=ti.cuda, offline_cache=False)
+@pytest.mark.parametrize('keyword_dtype', (False, True))
+def test_package_library_prepares_fixed_numeric_casts(tmp_path, monkeypatch, keyword_dtype):
+    from itertools import product
+
+    source = '''import taichi_forge as ti
+@ti.data_oriented
+class Model:
+    FORM_FUSED = 1
+    FORM_DEFERRED = 2
+    def __init__(self, n: int, deferred: bool, extra: bool):
+        self.n, self.deferred, self.extra = n, deferred, extra
+        scope = ti.experimental.ResourceScope(self)
+        scope.dim('n')
+        scope.static('deferred', choices=(False, True))
+        scope.static('extra', choices=(False, True))
+        scope.constant('FORM_FUSED')
+        scope.constant('FORM_DEFERRED')
+        scope.out = scope.field(ti.i32, shape=scope.dim('n'))
+    @ti.func
+    def value(self, i: ti.i32) -> ti.i32:
+        result = i
+        form = ti.cast(self.FORM_FUSED, ti.i32)
+        if ti.static(self.deferred):
+            form = ti.cast(self.FORM_DEFERRED, ti.i32)
+            j = 0
+            while j < 3:
+                result += ti.cast(1.75, ti.i32)
+                j += 1
+        if ti.static(self.extra):
+            j = 0
+            while j < 2:
+                result += ti.cast(ti.cast(i, ti.f32) + 0.5, ti.i32)
+                j += 1
+        return result + form
+    @ti.kernel
+    def step(self):
+        for i in range(self.n):
+            self.out[i] = self.value(i)
+'''
+    if keyword_dtype:
+        source = source.replace(', ti.i32)', ', dtype=ti.i32)').replace(', ti.f32)', ', dtype=ti.f32)')
+    package = _source_package(tmp_path, monkeypatch, source)
+    manifest = ti.aot.export_package(package, tmp_path / 'sdk', artifact_format='bc-library')
+    entries = [e for e in manifest['entries'].values() if e['definition'].endswith('.Model.step')]
+    assert len(entries) == 1
+    assert {c['name'] for c in entries[0]['captures'] if 'prepare_static' in c} == {'deferred', 'extra'}
+    with Runtime('cuda') as runtime, load_package(runtime, tmp_path / 'sdk') as code:
+        for n in (3, 17):
+            for flags in product((False, True), repeat=2):
+                aot, jit = code.host.Model(n, *flags), package.model.Model(n, *flags)
+                aot.step()
+                jit.step()
+                np.testing.assert_array_equal(aot.out.to_numpy(), jit.out.to_numpy())
+
+
+@pytest.mark.parametrize('body', [
+    'dtype = ti.f32 if self.flag else ti.i32\n    out = ti.cast(1, dtype)',
+    'if ti.static(self.flag):\n        dtype = ti.f32\n        out = ti.cast(1, dtype)',
+    'if ti.static(self.flag):\n        out = custom.cast(1, ti.f32)',
+    'if ti.static(self.flag):\n        field = self.out',
+])
+def test_package_fixed_cast_proof_keeps_type_and_resource_uses(body):
+    from taichi_forge.aot._package_static import StaticPreparation
+    from taichi_forge.tools._compiled_host import decorator_resolver
+
+    source = '''import taichi_forge as ti
+@ti.kernel
+def step(self):
+    for i in range(3):
+        BODY
+'''.replace('BODY', body.replace('\n', '\n    '))
+    tree = ast.parse(source)
+    proof = StaticPreparation([('model', None, None, source, tree, decorator_resolver(tree), None, None)])
+    assert proof.entry_uses('model.step')['flag'] != {'prepare_condition'}
+
+
+@test_utils.test(arch=ti.cuda, offline_cache=False)
 def test_package_library_keeps_type_choices_out_of_prepare_conditions(tmp_path, monkeypatch):
     source = '''import taichi_forge as ti
 @ti.data_oriented
