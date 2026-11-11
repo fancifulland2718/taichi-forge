@@ -10249,6 +10249,50 @@ def legacy_capability_fallback():
         assert host.scalar_roundtrip(b, -4.0) == -4.0
 
 
+@test_utils.test(arch=[ti.cpu, ti.cuda, ti.vulkan], offline_cache=False)
+def test_package_host_zero_dimensional_tensor_assignment(tmp_path, monkeypatch):
+    source = """
+import taichi_forge as ti
+@ti.data_oriented
+class Model:
+    def __init__(self):
+        scope = ti.experimental.ResourceScope(self)
+        scope.vector = scope.vector_field(3, ti.f32, shape=())
+        scope.matrix = scope.matrix_field(2, 2, ti.f32, shape=())
+        scope.marker = scope.field(ti.i32, shape=())
+    def initialize(self, gain):
+        self.marker[None] = 17
+        self.vector[None] = ti.Vector([gain, gain + 1, gain + 2])
+        self.matrix[None] = ti.Matrix([[gain, 2], [3, gain + 4]])
+    @ti.kernel
+    def checksum(self) -> ti.f32:
+        return self.vector[None].sum() + self.matrix[None].sum() + self.marker[None]
+"""
+    package = _source_package(tmp_path, monkeypatch, source)
+    manifest = ti.aot.export_package(package, tmp_path / "sdk")
+    original = package.Model()
+    original.initialize(2.5)
+    expected = original.checksum()
+    with Runtime(manifest["target"]) as runtime, load_package(runtime, tmp_path / "sdk") as loaded:
+        first, second = loaded.host.Model(), loaded.host.Model()
+        first.initialize(2.5)
+        second.initialize(-2.0)
+        assert first.checksum() == expected
+        assert first.marker[None] == second.marker[None] == 17
+        np.testing.assert_array_equal(first.vector.to_numpy(), [2.5, 3.5, 4.5])
+        np.testing.assert_array_equal(first.matrix.to_numpy(), [[2.5, 2], [3, 6.5]])
+        np.testing.assert_array_equal(second.vector.to_numpy(), [-2, -1, 0])
+        with pytest.raises(ValueError, match="shape"):
+            first.vector[None] = [1, 2]
+        with pytest.raises(TypeError, match="zero-dimensional Field"):
+            first.vector[0] = [1, 2, 3]
+        # A copied NumPy tensor is not a writable Field reference. Keep tensor
+        # reads explicit until Host element writeback semantics are supported.
+        with pytest.raises(TypeError, match="zero-dimensional Field"):
+            first.vector[None]
+        assert first.checksum() == expected
+
+
 @pytest.mark.parametrize("eager", ["value = ti.field(ti.i32, shape=3)", "def setup(value=ti.FieldsBuilder()): pass"])
 @test_utils.test(arch=ti.cpu, offline_cache=False)
 def test_package_does_not_defer_eager_unprojected_allocations(tmp_path, monkeypatch, eager):

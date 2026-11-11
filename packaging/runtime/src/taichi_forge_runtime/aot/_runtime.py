@@ -950,6 +950,12 @@ class NdArray:
         return struct.unpack(format, self.read())[0]
 
     def __setitem__(self, key, value):
+        if key is None and not self.shape and self.element_shape and hasattr(self, "_group_owner"):
+            # A zero-dimensional tensor Field contains exactly one tensor. The
+            # descriptor-aware transfer preserves interleaved SNode placement;
+            # it does not upload the rest of the owning field group.
+            self.from_numpy(value)
+            return
         format = self._scalar_field_format(key)
         self.write(struct.pack(format, value))
 
