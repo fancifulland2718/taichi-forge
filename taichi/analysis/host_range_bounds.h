@@ -182,6 +182,22 @@ inline std::optional<HostRangeBound> describe_host_range_bound(
       node.lhs = indices.at(unary->operand);
     } else if (auto *cast = stmt->cast<UnaryOpStmt>();
                cast && cast->op_type == UnaryOpType::cast_value &&
+               cast->cast_type == PrimitiveType::u1 &&
+               cast->operand->ret_type == PrimitiveType::i32) {
+      if (!emit) {
+        pending.emplace_back(stmt, true);
+        pending.emplace_back(cast->operand, false);
+        continue;
+      }
+      // Taichi's boolean cast is a nonzero test, not truncation to the low
+      // bit. Reuse the existing boolean instructions without changing the
+      // frozen launch-bound format, including for negative/even inputs.
+      node.op = HostRangeOp::logical_not;
+      node.lhs = indices.at(cast->operand);
+      result.program.push_back(node);
+      node.lhs = result.program.size() - 1;
+    } else if (auto *cast = stmt->cast<UnaryOpStmt>();
+               cast && cast->op_type == UnaryOpType::cast_value &&
                (cast->cast_type == cast->operand->ret_type ||
                 (cast->cast_type == PrimitiveType::i32 && cast->operand->ret_type == PrimitiveType::u1))) {
       if (!emit) {

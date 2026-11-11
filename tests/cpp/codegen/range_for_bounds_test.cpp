@@ -441,6 +441,25 @@ TEST(HostRangeBounds, DescriptionSharesCompositeDagNodes) {
   EXPECT_FALSE(describe_host_range_bound(division, arguments));
 }
 
+TEST(HostRangeBounds, BooleanCastMatchesNonzeroInsteadOfTruncation) {
+  const auto *arguments = TypeFactory::get_instance()
+      .get_struct_type({{PrimitiveType::i32, "enabled"}})->as<StructType>();
+  Block body;
+  auto *value = body.push_back<ArgLoadStmt>(
+      std::vector<int>{0}, PrimitiveType::i32, false, true, 0);
+  auto *condition = body.push_back<UnaryOpStmt>(UnaryOpType::cast_value, value);
+  condition->as<UnaryOpStmt>()->cast_type = PrimitiveType::u1;
+  auto *integer = body.push_back<UnaryOpStmt>(UnaryOpType::cast_value, condition);
+  integer->as<UnaryOpStmt>()->cast_type = PrimitiveType::i32;
+  auto *one = body.push_back<ConstStmt>(TypedConstant(1));
+  auto *sum = body.push_back<BinaryOpStmt>(BinaryOpType::add, integer, one);
+  irpass::type_check(&body, CompileConfig{});
+  const auto bound = describe_host_range_bound(sum, arguments);
+  ASSERT_TRUE(bound);
+  for (std::int32_t input : {0, 1, 2, -2, INT32_MIN, INT32_MAX})
+    EXPECT_EQ(bound->evaluate(&input, sizeof(input)), input == 0 ? 1 : 2);
+}
+
 TEST(HostRangeBounds, ClampedProductsKeepIntermediateOverflowGuards) {
   const auto *arguments = TypeFactory::get_instance()
       .get_struct_type({{PrimitiveType::i32, "width"},

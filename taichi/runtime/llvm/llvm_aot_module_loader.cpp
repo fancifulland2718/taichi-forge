@@ -466,6 +466,67 @@ aot::Kernel *LlvmAotModule::specialize_kernel(
   auto &module = *data.compiled_data.module;
   TI_ERROR_IF(cuda::is_graph_gate_launch_abi(compiled_kernel_launch_abi(module)),
               "Prepared specialization does not accept gated graph kernels");
+  // Select tasks from immutable prepared facts before lowering LLVM to device
+  // code. A current argument value alone is not a constant: live scalar ranges
+  // must remain callable with later values. Exclude TLS/collective/prologue
+  // cases; the existing independent-iteration proof establishes that an empty
+  // range has no effects outside its iterations.
+  auto &tasks = data.compiled_data.tasks;
+  const auto original_task_count = tasks.size();
+  auto fixed_bound = [&](const HostRangeBound &bound) {
+    auto fixed_input = [&](uint64_t offset) {
+      if (offset > INT_MAX)
+        return false;
+      const auto found = constants.find(static_cast<int>(offset));
+      return found != constants.end() && found->second.bits == 32;
+    };
+    for (auto offset : bound.offsets)
+      if (!fixed_input(offset))
+        return false;
+    for (const auto &node : bound.program)
+      if (node.is_input() && !fixed_input(node.offset))
+        return false;
+    return true;
+  };
+  for (auto it = tasks.begin(); it != tasks.end();) {
+    const auto &range = it->range_bounds;
+    if (tasks.size() == 1 || it->task_type != OffloadedTaskType::range_for || !range ||
+        range->empty_group_elision != EmptyRangeGroupProof::independent_iterations ||
+        !range->host_launch || !fixed_bound(range->host_launch->begin) ||
+        !fixed_bound(range->host_launch->end)) {
+      ++it;
+      continue;
+    }
+    const auto &bounds = *range->host_launch;
+    const auto first = bounds.begin.evaluate(context.get_context().arg_buffer, kernel.args_size);
+    const auto last = bounds.end.evaluate(context.get_context().arg_buffer, kernel.args_size);
+    auto *entry = module.getFunction(it->name);
+    if (!first || !last || *last > *first || !entry || !entry->use_empty() ||
+        std::count_if(tasks.begin(), tasks.end(), [&](const auto &task) {
+          return task.name == it->name;
+        }) != 1) {
+      ++it;
+      continue;
+    }
+    if (auto *annotations = module.getNamedMetadata("nvvm.annotations")) {
+      std::vector<llvm::MDNode *> keep;
+      for (auto *node : annotations->operands()) {
+        const auto *value = node->getNumOperands()
+            ? llvm::dyn_cast_or_null<llvm::ValueAsMetadata>(node->getOperand(0).get()) : nullptr;
+        if (!value || value->getValue() != entry)
+          keep.push_back(node);
+      }
+      annotations->clearOperands();
+      for (auto *node : keep)
+        annotations->addOperand(node);
+    }
+    entry->eraseFromParent();
+    it = tasks.erase(it);
+  }
+  // Keep one empty task when the entire invocation is empty, preserving the
+  // existing registration/launch ABI without introducing another runtime path.
+  TI_DEBUG("Prepared specialization {} pruned {} of {} tasks before registration",
+           code, original_task_count - tasks.size(), original_task_count);
   const auto &layout = module.getDataLayout();
   std::set<llvm::Function *> contexts;
   for (const auto &task : data.compiled_data.tasks) {

@@ -47,6 +47,21 @@ Shared units are extracted when sealing entries; units requiring final resource
 numbering wait for archive remapping. Host arrays still transfer on each invocation;
 reusing specialized code does not cache their contents.
 
+Build-time analysis follows immutable `ti.static` local aliases and resolvable
+helper parameters to their condition uses. Helpers made of pure range schedules
+can remain independently guarded loops in one entry, preserving each loop's
+block/serialize policy. Rebinding, ambiguous call names, resource/type uses and
+device-read bounds retain their original restrictions. Model template expressions
+crossing `real_func` boundaries are rebuilt from immutable argument provenance in
+the callee; they do not reuse caller-owned IR or ship Python ASTs.
+
+Before device code generation, CUDA prepare can remove range tasks proved empty
+by fixed arguments and proved to have no effects outside their iterations.
+Tasks controlled by live invocation arguments remain. This reuses existing range
+and independent-iteration proofs without per-call checks. TLS reductions, block
+collectives and unproven effects are excluded. An entirely empty invocation keeps
+one task for the existing launch contract; complex schedules are not all reduced.
+
 This experimental representation does not promise
 smaller or faster builds for every engine. Measure producer export, consumer
 prepare, first call and warm execution separately; investigate dependency
