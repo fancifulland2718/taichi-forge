@@ -19,6 +19,71 @@ from taichi_forge_runtime.aot import Runtime, load_package
 
 
 @test_utils.test(arch=ti.cuda, offline_cache=False)
+@pytest.mark.parametrize("helper", ["func", "real_func"])
+def test_package_library_reuses_llvm_functions_before_emission(tmp_path, monkeypatch, helper):
+    from taichi_forge.aot._package_compilation import PackageCompilation
+
+    snapshots = []
+    original = PackageCompilation.compile
+
+    def observe(transaction, code):
+        original(transaction, code)
+        snapshots.append(transaction.module._aot_builder._streaming_export_statistics())
+
+    monkeypatch.setattr(PackageCompilation, 'compile', observe)
+    source = '''import taichi_forge as ti
+@ti.data_oriented
+class Model:
+    def __init__(self, n: int):
+        self.n = n
+        s = ti.experimental.ResourceScope(self)
+        s.dim('n')
+        s.out = s.field(ti.i32, shape=s.dim('n'))
+    @ti.HELPER
+    def leaf(self, value: ti.i32, offset: ti.template()) -> ti.i32:
+        # libdevice brings an internal helper and a constant global into the
+        # unit; importing it must not change the next archive's canonical name.
+        return ti.cast(ti.abs(ti.cast(value + offset, ti.f32)), ti.i32)
+    @ti.kernel
+    def a_parallel(self, value: ti.i32):
+        for i in range(self.n):
+            self.out[i] = self.leaf(value + i, 3)
+        for i in range(self.n):
+            self.out[i] += self.leaf(value + i * 2, 3)
+    @ti.kernel
+    def first(self, value: ti.i32):
+        for i in range(self.n):
+            self.out[i] = self.leaf(value + i, 3)
+    @ti.kernel
+    def second(self, value: ti.i32):
+        for i in range(self.n):
+            self.out[i] = self.leaf(value + i, 3) + 1
+    @ti.kernel
+    def third(self, value: ti.i32):
+        for i in range(self.n):
+            self.out[i] = self.leaf(value + i, 7)
+'''.replace('ti.HELPER', 'ti.' + helper)
+    package = _source_package(tmp_path, monkeypatch, source)
+    manifest = ti.aot.export_package(package, tmp_path / 'sdk', artifact_format='bc-library')
+    assert len([e for e in manifest['entries'].values()
+                if '.Model.' in e['definition']]) == 4
+    # These counters are taken before archive(); they prove skipped codegen,
+    # independently of the final ZIP's content-addressed deduplication.
+    assert snapshots[-1]['llvm_function_body_emissions'] == 2
+    assert snapshots[-1]['llvm_function_body_reuses'] == 3
+    assert snapshots[-1]['cached_llvm_functions'] == 2
+    assert snapshots[-1]['shared_code_units'] == 2
+    with Runtime('cuda') as runtime, load_package(runtime, tmp_path / 'sdk') as code:
+        for n in (3, 13):
+            aot, jit = code.host.Model(n), package.model.Model(n)
+            for entry in ('a_parallel', 'first', 'second', 'third'):
+                for value in (2, 11):
+                    getattr(aot, entry)(value)
+                    getattr(jit, entry)(value)
+                    np.testing.assert_array_equal(aot.out.to_numpy(), jit.out.to_numpy())
+
+
+@test_utils.test(arch=ti.cuda, offline_cache=False)
 def test_package_library_prepares_independent_static_conditions(tmp_path, monkeypatch):
     from itertools import product
 

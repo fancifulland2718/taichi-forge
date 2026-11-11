@@ -25,10 +25,14 @@ inline constexpr char kRealFunctionUnit[] = "taichi.aot.real_function";
 inline void export_code_units(llvm::Module &module,
                               const std::function<void(const std::string &,
                                                        const std::string &)> &emit,
-                              bool allow_resource_relocations = true) {
+                              bool allow_resource_relocations = true,
+                              llvm::Function *selected_root = nullptr,
+                              bool rewrite_caller = true,
+                              std::string *selected_symbol = nullptr) {
   std::vector<llvm::Function *> roots;
   for (auto &function : module)
-    if (!function.isDeclaration() && function.hasFnAttribute(kRealFunctionUnit))
+    if (!function.isDeclaration() && function.hasFnAttribute(kRealFunctionUnit) &&
+        (!selected_root || &function == selected_root))
       roots.push_back(&function);
   // Extract callees before callers. Otherwise each parent's closure embeds
   // its children's bodies, even when those same children get their own units
@@ -48,9 +52,11 @@ inline void export_code_units(llvm::Module &module,
               order(callee);
     ordered.push_back(function);
   };
-  for (auto *root : roots)
-    order(root);
-  roots = std::move(ordered);
+  if (!selected_root) {
+    for (auto *root : roots)
+      order(root);
+    roots = std::move(ordered);
+  }
   for (auto *root : roots) {
     std::unordered_set<const llvm::Value *> seen;
     std::unordered_set<const llvm::GlobalValue *> definitions;
@@ -117,7 +123,6 @@ inline void export_code_units(llvm::Module &module,
       unit->eraseNamedMetadata(metadata);
     for (size_t i = 0; i < order.size(); ++i) {
       auto *value = llvm::cast<llvm::GlobalValue>(values[order[i]]);
-      value->setName("__ti_unit_" + std::to_string(i));
       value->setLinkage(i == 0 ? llvm::GlobalValue::ExternalLinkage
                                : llvm::GlobalValue::InternalLinkage);
     }
@@ -130,6 +135,33 @@ inline void export_code_units(llvm::Module &module,
       auto &function = *iterator++;
       if (function.isDeclaration() && function.use_empty())
         function.eraseFromParent();
+    }
+    // Imported units already contain canonical local names. Clear the whole
+    // closure before assigning names, otherwise setName() silently adds a
+    // suffix when another member still owns the desired name. Drop unused
+    // declarations first, as they may also retain names from imported units.
+    for (const auto *original : order)
+      if (llvm::Value *value = values[original])
+        value->setName("");
+    for (size_t i = 0; i < order.size(); ++i)
+      if (llvm::Value *value = values[order[i]])
+        value->setName("__ti_unit_" + std::to_string(i));
+    // LLVM linking can change definition/declaration insertion order without
+    // changing a function. Canonical names alone do not canonicalize bitcode's
+    // value numbering or its identified-type traversal order.
+    unit->getFunctionList().sort([](const llvm::Function &a,
+                                   const llvm::Function &b) {
+      return a.getName() < b.getName();
+    });
+    std::vector<llvm::GlobalVariable *> globals;
+    for (auto &global : unit->globals())
+      globals.push_back(&global);
+    std::sort(globals.begin(), globals.end(), [](const auto *a, const auto *b) {
+      return a->getName() < b->getName();
+    });
+    for (auto *global : globals) {
+      unit->removeGlobalVariable(global);
+      unit->insertGlobalVariable(global);
     }
     // LLVM assigns context-local suffixes to identified structs during task
     // cloning. Normalize only private copies, retaining the complete layouts.
@@ -152,6 +184,8 @@ inline void export_code_units(llvm::Module &module,
     const auto identity = aot_artifact_sha256(canonical);
     auto *exported = unit->getFunction("__ti_unit_0");
     const auto symbol = "__ti_unit_" + identity;
+    if (selected_symbol)
+      *selected_symbol = symbol;
     exported->setName(symbol);
     std::string bytes;
     llvm::raw_string_ostream stream(bytes);
@@ -159,6 +193,10 @@ inline void export_code_units(llvm::Module &module,
     const auto digest = aot_artifact_sha256(bytes);
     const auto filename = "code_units/" + digest + ".bc";
     emit(filename, bytes);
+    if (!rewrite_caller) {
+      unit.reset();
+      continue;
+    }
     root->deleteBody();
     root->setLinkage(llvm::GlobalValue::ExternalLinkage);
     if (auto *existing = module.getFunction(symbol)) {
@@ -176,10 +214,12 @@ inline void export_code_units(llvm::Module &module,
              llvm::MDString::get(module.getContext(), digest)}));
     unit.reset();  // The private LLVMContext must outlive its module.
   }
-  llvm::ModuleAnalysisManager analysis;
-  llvm::PassBuilder passes;
-  passes.registerModuleAnalyses(analysis);
-  llvm::GlobalDCEPass().run(module, analysis);
+  if (rewrite_caller) {
+    llvm::ModuleAnalysisManager analysis;
+    llvm::PassBuilder passes;
+    passes.registerModuleAnalyses(analysis);
+    llvm::GlobalDCEPass().run(module, analysis);
+  }
 }
 
 inline void export_code_units(llvm::Module &module,

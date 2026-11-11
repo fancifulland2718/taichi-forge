@@ -19,6 +19,8 @@
 #include "taichi/runtime/llvm/aot_snode_relocation.h"
 #include "taichi/runtime/llvm/aot_snode_resources.h"
 #include "taichi/runtime/llvm/aot_code_units.h"
+#include "taichi/runtime/llvm/aot_function_code_cache.h"
+#include "taichi/analysis/offline_cache_util.h"
 #if defined(TI_WITH_CUDA)
 #include "taichi/runtime/cuda/jit_cuda.h"
 #include "taichi/runtime/cuda/cuda_artifact_provider.h"
@@ -53,6 +55,8 @@ void LlvmAotModuleBuilder::set_artifact_format(const std::string &format) {
   artifact_format_ = format;
   TI_ERROR_IF(format == "bc-library" && compile_config_.arch != Arch::cuda,
               "Experimental AOT code libraries currently require CUDA");
+  function_code_cache_ = format == "bc-library"
+      ? std::make_shared<LLVM::AotFunctionCodeCache>() : nullptr;
 }
 
 void LlvmAotModuleBuilder::enable_streaming_exports() {
@@ -106,7 +110,7 @@ LlvmAotModuleBuilder::streaming_export_statistics() {
   std::uint64_t unit_bytes = 0;
   for (const auto &[_, bitcode] : sealed_code_units_)
     unit_bytes += bitcode.size();
-  return {{"resident_ir_modules", resident},
+  std::map<std::string, std::uint64_t> result = {{"resident_ir_modules", resident},
           {"serialized_code_bytes", bytes},
           {"serialized_code_unit_bytes", unit_bytes},
           {"shared_code_units", sealed_code_units_.size()},
@@ -115,6 +119,9 @@ LlvmAotModuleBuilder::streaming_export_statistics() {
           {"compiler_invocations", stats.compiler_invocations},
           {"disk_loads", stats.disk_loads},
           {"memory_cache_hits", stats.memory_cache_hits + stats.loaded_cache_hits}};
+  if (function_code_cache_)
+    result.merge(function_code_cache_->statistics());
+  return result;
 }
 
 std::unique_ptr<llvm::Module> LlvmAotModuleBuilder::load_kernel_module(
@@ -542,6 +549,12 @@ const LLVM::CompiledKernelData &LlvmAotModuleBuilder::compile_kernel(
       compile_options_);
   auto &manager = streaming_compilation_manager_ ? *streaming_compilation_manager_
                                                 : compilation_manager_;
+  LLVM::AotFunctionCodeScope functions(kernel, function_code_cache_,
+      function_code_cache_
+          ? get_hashed_offline_cache_key_context(request.config(),
+                                                request.device_caps(), nullptr) +
+                kernel->optimization_spec_cache_key()
+          : "");
   const auto &ckd = manager.load_or_compile(
       request, *kernel);
   TI_ASSERT(arch_uses_llvm(ckd.arch()));
