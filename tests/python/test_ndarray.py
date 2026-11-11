@@ -2511,6 +2511,23 @@ def test_ndarray_arg_builtin_float_type():
 
 
 @test_utils.test(arch=[ti.cpu, ti.cuda])
+def test_real_func_scalar_ndarray_between_scalar_arguments():
+    @ti.real_func
+    def update(before: ti.i32, value: ti.types.ndarray(ti.i32, 0), after: ti.i32) -> ti.i32:
+        value[None] += before * 10 + after
+        return value[None]
+
+    @ti.kernel
+    def run(value: ti.types.ndarray(ti.i32, 0)) -> ti.i32:
+        return update(3, value, 7)
+
+    value = ti.ndarray(ti.i32, shape=())
+    value[None] = 5
+    assert run(value) == 42
+    assert value[None] == 42
+
+
+@test_utils.test(arch=[ti.cpu, ti.cuda])
 def test_real_func_vector_ndarray_arg():
     @ti.real_func
     def foo(x: ti.types.ndarray(ndim=1)) -> vec3:

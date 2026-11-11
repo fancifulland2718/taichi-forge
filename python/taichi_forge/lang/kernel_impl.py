@@ -587,6 +587,12 @@ class Func:
                         raise TaichiTypeError(
                             f"Expected ndarray in the kernel argument for argument {kernel_arg.name}, got {args[i]}"
                         )
+                    # The ndarray ABI reserves one shape slot even for rank
+                    # zero. The external-tensor helper emits actual dimensions,
+                    # strides, affine mode and pointers, so retain that padding
+                    # before flattening a scalar Field's descriptor.
+                    if not args[i].shape:
+                        non_template_args.append(ops.cast(0, primitive_types.i32))
                     non_template_args += _ti_core.get_external_tensor_real_func_args(
                         args[i].ptr, dbg_info
                     )
