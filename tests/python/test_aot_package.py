@@ -185,6 +185,154 @@ class Model:
 
 
 @test_utils.test(arch=ti.cuda, offline_cache=False)
+def test_package_library_guards_live_device_range_bounds(tmp_path, monkeypatch):
+    from itertools import product
+    from taichi_forge.aot._component import _ComponentCode
+
+    source = '''import taichi_forge as ti
+@ti.data_oriented
+class Model:
+    def __init__(self, n: int, enabled: bool, add: bool):
+        self.n, self.enabled, self.add = n, enabled, add
+        scope = ti.experimental.ResourceScope(self)
+        scope.dim('n')
+        scope.static('enabled', choices=(False, True))
+        scope.static('add', choices=(False, True))
+        scope.count = scope.field(ti.i32, shape=())
+        scope.start = scope.field(ti.i32, shape=())
+        scope.out = scope.field(ti.i32, shape=scope.dim('n'))
+    @ti.func
+    def emit(self):
+        ti.loop_config(block_dim=64)
+        for i in range(self.count[None]):
+            self.out[i] = i + 7
+    @ti.kernel
+    def step(self, live_count: ti.i32):
+        self.count[None] = live_count
+        self.start[None] = 2
+        for i in range(self.n):
+            self.out[i] = -1
+        if ti.static(self.enabled):
+            self.emit()
+        if ti.static(self.add):
+            ti.loop_config(block_dim=128)
+            for i in range(self.start[None], ti.min(self.count[None], self.n) + 2):
+                self.out[i - 2] += 11
+'''
+    tasks = []
+    original = _ComponentCode.export
+
+    def observe(code, module, name):
+        result = original(code, module, name)
+        if code.entry_definition[1] == 'Model.step':
+            tasks.extend(code.runtime.prog._kernel_task_manifest(code.kernel.compiled_kernels[code.key]))
+        return result
+
+    monkeypatch.setattr(_ComponentCode, 'export', observe)
+    package = _source_package(tmp_path, monkeypatch, source)
+    manifest = ti.aot.export_package(package, tmp_path / 'sdk', artifact_format='bc-library')
+    entries = [e for e in manifest['entries'].values() if e['definition'].endswith('.Model.step')]
+    assert len(entries) == 1
+    assert {v['name'] for v in entries[0]['captures'] if 'prepare_static' in v} == {'enabled', 'add'}
+    parallel = [task for task in tasks if task['task_type'] == 'range_for']
+    assert len(parallel) == 3, tasks
+    assert [task['selected_block_size'] for task in parallel[1:]] == [64, 128]
+    with Runtime('cuda') as runtime, load_package(runtime, tmp_path / 'sdk') as code:
+        for flags in product((False, True), repeat=2):
+            aot, jit = code.host.Model(17, *flags), package.model.Model(17, *flags)
+            for count in (0, 7, 17, 2, 0):
+                aot.step(count)
+                jit.step(count)
+                np.testing.assert_array_equal(aot.out.to_numpy(), jit.out.to_numpy())
+
+
+@test_utils.test(arch=ti.cuda, offline_cache=False)
+def test_package_library_preserves_guarded_reset_snapshots(tmp_path, monkeypatch):
+    from taichi_forge.aot._component import _ComponentCode
+
+    source = '''import taichi_forge as ti
+@ti.data_oriented
+class Model:
+    def __init__(self, n: int, enabled: bool):
+        self.n, self.enabled = n, enabled
+        scope = ti.experimental.ResourceScope(self)
+        scope.dim('n')
+        scope.static('enabled', choices=(False, True))
+        scope.count = scope.field(ti.i32, shape=())
+        scope.reuse = scope.field(ti.i32, shape=())
+        scope.summary = scope.field(ti.i32, shape=())
+        scope.state = scope.struct_field({'count': ti.i32, 'offset': ti.types.vector(2, ti.i32)}, shape=())
+        scope.out = scope.field(ti.i32, shape=scope.dim('n'))
+    @ti.func
+    def may_reuse(self):
+        ready = 0
+        if self.reuse[None] != 0:
+            ready = ti.cast(self.count[None] >= 0, ti.i32)
+        return ready
+    @ti.func
+    def clear_summary(self):
+        self.summary[None] = 0
+    @ti.func
+    def reset(self):
+        previous = ti.min(self.count[None], self.n)
+        snapshot = self.state[None]
+        keep = 0
+        if self.may_reuse():
+            keep = previous + 0
+        self.count[None] = 0
+        self.state.count[None] = 0
+        self.state.offset[None] *= 0
+        self.clear_summary()
+        ti.loop_config(block_dim=64)
+        for i in range(previous):
+            self.out[i] = i + 7 + snapshot.count + snapshot.offset[1]
+        self.count[None] = keep
+        self.summary[None] = previous
+        for i in range(self.count[None]):
+            self.out[i] += 3
+    @ti.kernel
+    def step(self, count: ti.i32, reuse: ti.i32):
+        self.count[None] = count
+        self.reuse[None] = reuse
+        self.summary[None] = 91
+        self.state.count[None] = count + 2
+        self.state.offset[None] = ti.Vector([reuse, 3])
+        for i in range(self.n):
+            self.out[i] = -1
+        if ti.static(self.enabled):
+            self.reset()
+        else:
+            self.summary[None] += 1
+'''
+    tasks = []
+    original = _ComponentCode.export
+
+    def observe(code, module, name):
+        result = original(code, module, name)
+        if code.entry_definition[1] == 'Model.step':
+            tasks.extend(code.runtime.prog._kernel_task_manifest(code.kernel.compiled_kernels[code.key]))
+        return result
+
+    monkeypatch.setattr(_ComponentCode, 'export', observe)
+    package = _source_package(tmp_path, monkeypatch, source)
+    manifest = ti.aot.export_package(package, tmp_path / 'sdk', artifact_format='bc-library')
+    entries = [e for e in manifest['entries'].values() if e['definition'].endswith('.Model.step')]
+    assert len(entries) == 1
+    parallel = [task for task in tasks if task['task_type'] == 'range_for']
+    assert len(parallel) == 3, tasks
+    assert parallel[1]['selected_block_size'] == 64
+    with Runtime('cuda') as runtime, load_package(runtime, tmp_path / 'sdk') as code:
+        for enabled in (False, True):
+            aot, jit = code.host.Model(17, enabled), package.model.Model(17, enabled)
+            for count, reuse in ((0, 0), (7, 1), (17, 0), (2, 1), (0, 1)):
+                aot.step(count, reuse)
+                jit.step(count, reuse)
+                np.testing.assert_array_equal(aot.out.to_numpy(), jit.out.to_numpy())
+                assert aot.count[None] == jit.count[None]
+                assert aot.summary[None] == jit.summary[None]
+
+
+@test_utils.test(arch=ti.cuda, offline_cache=False)
 def test_package_library_prepares_independent_static_conditions(tmp_path, monkeypatch):
     from itertools import product
 

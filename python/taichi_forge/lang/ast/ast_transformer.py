@@ -19,7 +19,7 @@ from taichi_forge.lang._local_tensor import LocalTensor, field_iteration_scope, 
 from taichi_forge.lang.argpack import ArgPackType
 from taichi_forge.lang.ast.ast_transformer_utils import Builder, LoopStatus, ReturnStatus
 from taichi_forge.lang.ast.symbol_resolver import ASTResolver
-from taichi_forge.lang.ast._uniform_schedule import uniform_range_schedule
+from taichi_forge.lang.ast._uniform_schedule import _bound, scalar_statement, uniform_range_schedule
 from taichi_forge.lang.exception import (
     TaichiIndexError,
     TaichiSyntaxError,
@@ -930,7 +930,14 @@ class ASTTransformer(Builder):
                     ctx.create_variable(arg.arg, impl.expr_init_func(data))
 
         with ctx.variable_scope_guard():
-            build_stmts(ctx, node.body)
+            compilation = getattr(ctx.deployment.kernel, '_package_compilation', None) if ctx.deployment else None
+            if (compilation is not None and compilation.schedule_guard is not None
+                    and not compilation.thread_local_call and not ctx.is_real_function
+                    and compilation.static_preparation is not None
+                    and node.name in compilation.static_preparation.schedule_functions):
+                ASTTransformer.build_guarded_schedule(ctx, node.body, compilation.schedule_guard)
+            else:
+                build_stmts(ctx, node.body)
 
         if ctx.is_kernel and ctx.deployment is not None:
             # Captures are discovered by this same traversal. Only parameters
@@ -1491,12 +1498,14 @@ class ASTTransformer(Builder):
         return True
 
     @staticmethod
-    def build_range_for(ctx, node):
-        with ctx.variable_scope_guard():
-            loop_name = node.target.id
-            ctx.check_loop_var(loop_name)
-            loop_var = expr.Expr(ctx.ast_builder.make_id_expr(""))
-            ctx.create_variable(loop_name, loop_var)
+    def build_range_bounds(ctx, node):
+        guard = getattr(node, '_uniform_loop_guard', None)
+        deferred = guard is not None and not all(_bound(arg) for arg in node.iter.args)
+        dbg_info = _ti_core.DebugInfo(ctx.get_pos_info(node))
+        if deferred:
+            impl.begin_frontend_if(ctx.ast_builder, guard, dbg_info)
+            ctx.ast_builder.begin_frontend_if_true()
+        try:
             if len(node.iter.args) not in [1, 2]:
                 raise TaichiSyntaxError(f"Range should have 1 or 2 arguments, found {len(node.iter.args)}")
             if len(node.iter.args) == 2:
@@ -1519,12 +1528,30 @@ class ASTTransformer(Builder):
                 begin = ti_ops.cast(expr.Expr(0), primitive_types.i32)
                 end = ti_ops.cast(end_expr, primitive_types.i32)
 
-            guard = getattr(node, "_uniform_loop_guard", None)
-            if guard is not None:
-                # The schedule proof admits only pure bounds. Keep their
-                # selection in SSA so prepared Host-range analysis can see it,
-                # instead of introducing a serial task/global-temporary phi.
-                end = ti_ops.select(guard, end, begin)
+        finally:
+            if deferred:
+                ctx.ast_builder.pop_scope()
+        if deferred:
+            # Device counts remain live and ordered after preceding writes.
+            # Inactive bounds are not read; do not eagerly select a device load
+            # or move the parallel loop into a serial conditional region.
+            ctx.ast_builder.begin_frontend_if_false()
+            empty = ti_ops.cast(expr.Expr(0), primitive_types.i32)
+            ctx.ast_builder.pop_scope()
+            begin = ASTTransformer.merge_branch_value(ctx, 'range_begin', begin, empty, dbg_info)
+            end = ASTTransformer.merge_branch_value(ctx, 'range_end', end, empty, dbg_info)
+        elif guard is not None:
+            end = ti_ops.select(guard, end, begin)
+        return begin, end
+
+    @staticmethod
+    def build_range_for(ctx, node):
+        with ctx.variable_scope_guard():
+            loop_name = node.target.id
+            ctx.check_loop_var(loop_name)
+            loop_var = expr.Expr(ctx.ast_builder.make_id_expr(""))
+            ctx.create_variable(loop_name, loop_var)
+            begin, end = ASTTransformer.build_range_bounds(ctx, node)
             for_di = _ti_core.DebugInfo(ctx.get_pos_info(node))
             ctx.ast_builder.begin_frontend_range_for(loop_var.ptr, begin.ptr, end.ptr, for_di)
             with iteration_scope(ctx, loop_var, begin, end):
@@ -1835,24 +1862,84 @@ class ASTTransformer(Builder):
             "both values must have matching Taichi types; static Python objects remain block-local")
 
     @staticmethod
-    def build_uniform_loop_branch(ctx, node):
-        """Preserve a parallel loop under a uniform model-presence condition.
-
-        Only move side-effect-free iteration bounds out of the conditional.
-        Arbitrary calls, device indexing, sparse iteration and surrounding
-        statements retain their ordinary control-flow lowering.
-        """
+    def schedule_kind(ctx, expression):
         from taichi_forge.lang.misc import loop_config
 
-        def kind(expression):
-            if ASTResolver.resolve_to(expression, loop_config, ctx.global_vars):
-                return "loop_config"
-            return ASTTransformer.get_decorator(ctx, ast.Call(func=expression))
+        if ASTResolver.resolve_to(expression, loop_config, ctx.global_vars):
+            return "loop_config"
+        for operation in (ti_ops.min, ti_ops.max, ti_ops.cast, ti_ops.abs):
+            if ASTResolver.resolve_to(expression, operation, ctx.global_vars):
+                return operation.__name__
+        return ASTTransformer.get_decorator(ctx, ast.Call(func=expression))
+
+    @staticmethod
+    def build_guarded_schedule(ctx, statements, guard):
+        """Keep scalar effects ordered while outlining parallel range tasks."""
+        compilation = getattr(ctx.deployment.kernel, '_package_compilation', None)
+        scalar_helpers = compilation.static_preparation.scalar_functions if (
+            compilation is not None and compilation.static_preparation is not None) else ()
+        kind = lambda expression: ASTTransformer.schedule_kind(ctx, expression)
+
+        def empty_value(value):
+            if isinstance(value, Expr):
+                if value.is_tensor():
+                    return impl.expr_init(Matrix.zero(value.element_type(), *value.get_shape()))
+                return ti_ops.cast(0, value.ptr.get_rvalue_type())
+            if isinstance(value, Struct):
+                result = copy.copy(value)
+                result._Struct__entries = {key: empty_value(value[key]) for key in value.keys}
+                result._register_methods()
+                return result
+            if isinstance(value, (tuple, list)):
+                return type(value)(empty_value(item) for item in value)
+            raise TaichiTypeError('A guarded schedule local must be a numerical value')
+
+        with ctx.variable_scope_guard():
+            index = 0
+            while index < len(statements):
+                first = index
+                while index < len(statements) and scalar_statement(statements[index], kind, scalar_helpers):
+                    index += 1
+                if index == first:
+                    statement = statements[index]
+                    if isinstance(statement, ast.For):
+                        statement._uniform_loop_guard = guard
+                    build_stmt(ctx, statement)
+                    index += 1
+                    continue
+                # A reset and its count snapshot share one original serial
+                # region. Its new locals cross the guard via typed phis; they
+                # must not be reread after a later reset or at each iteration.
+                dbg_info = _ti_core.DebugInfo(ctx.get_pos_info(statements[first]))
+                impl.begin_frontend_if(ctx.ast_builder, guard, dbg_info)
+                ctx.ast_builder.begin_frontend_if_true()
+                previous = compilation.schedule_guard if compilation is not None else None
+                if compilation is not None:
+                    compilation.schedule_guard = None
+                try:
+                    locals_ = build_stmts(ctx, statements[first:index], capture_scope=True)
+                finally:
+                    if compilation is not None:
+                        compilation.schedule_guard = previous
+                    ctx.ast_builder.pop_scope()
+                ctx.ast_builder.begin_frontend_if_false()
+                defaults = {name: empty_value(value) for name, value in locals_.items()}
+                ctx.ast_builder.pop_scope()
+                for name, value in locals_.items():
+                    ctx.create_variable(name, ASTTransformer.merge_branch_value(
+                        ctx, name, value, defaults[name], dbg_info))
+
+    @staticmethod
+    def build_uniform_loop_branch(ctx, node):
+        """Preserve separate scalar and parallel regions of a model branch."""
+        kind = lambda expression: ASTTransformer.schedule_kind(ctx, expression)
         compilation = getattr(ctx.deployment.kernel, "_package_compilation", None)
         helpers = compilation.static_preparation.schedule_functions if (
             compilation is not None and compilation.static_preparation is not None
         ) else ()
-        if uniform_range_schedule(node, kind, helpers):
+        scalar_helpers = compilation.static_preparation.scalar_functions if (
+            compilation is not None and compilation.static_preparation is not None) else ()
+        if uniform_range_schedule(node, kind, helpers, scalar_helpers):
             for branch, truth in ((node.body, True), (node.orelse, False)):
                 if not branch:
                     continue
@@ -1865,10 +1952,7 @@ class ASTTransformer(Builder):
                     compilation.schedule_guard = guard
                 try:
                     with ctx.deployment.input_condition(node.test.ptr, truth), ctx.variable_scope_guard():
-                        for statement in branch:
-                            if isinstance(statement, ast.For):
-                                statement._uniform_loop_guard = guard
-                            build_stmt(ctx, statement)
+                        ASTTransformer.build_guarded_schedule(ctx, branch, guard)
                 finally:
                     if compilation is not None:
                         compilation.schedule_guard = previous

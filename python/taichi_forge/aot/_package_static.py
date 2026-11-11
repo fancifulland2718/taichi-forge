@@ -8,7 +8,9 @@ Unproven structural uses keep the ordinary finite specialization contract.
 import ast
 import copy
 
-from taichi_forge.lang.ast._uniform_schedule import helper_call_name, uniform_range_schedule, uniform_range_statements
+from taichi_forge.lang.ast._uniform_schedule import (
+    helper_call_name, scalar_statement, uniform_range_schedule, uniform_range_statements,
+)
 
 
 class StaticPreparation:
@@ -71,12 +73,23 @@ class StaticPreparation:
         # A call name qualifies only when every definition with that name in
         # the source closure is a proven inline schedule. Recursive/unresolved
         # groups never bootstrap themselves into this set.
+        self.scalar_functions = set()
+        while True:
+            proven = {identity for identity, function, kind in functions
+                      if any(kind(d) in ('func', 'real_func', 'pyfunc') for d in function.decorator_list)
+                      and all(scalar_statement(statement, kind, self.scalar_functions, returns=True)
+                              for statement in function.body)}
+            names = {name for name, identities in self._names.items()
+                     if name not in self._ambiguous_names and identities <= proven}
+            if names <= self.scalar_functions:
+                break
+            self.scalar_functions.update(names)
         self.schedule_functions = set()
         while True:
             proven = {
                 identity for identity, function, kind in functions
                 if any(kind(d) in ("func", "pyfunc") for d in function.decorator_list)
-                and uniform_range_statements(function.body, kind, self.schedule_functions)
+                and uniform_range_statements(function.body, kind, self.schedule_functions, self.scalar_functions)
             }
             names = {name for name, identities in self._names.items()
                      if name not in self._ambiguous_names and identities <= proven}
@@ -231,7 +244,7 @@ class StaticPreparation:
         while (parent := parents.get(id(child))) is not None:
             if isinstance(parent, (ast.If, ast.IfExp)) and child is parent.test:
                 branches = parent.body + parent.orelse if isinstance(parent, ast.If) else (parent.body, parent.orelse)
-                if uniform_range_schedule(parent, kind, self.schedule_functions):
+                if uniform_range_schedule(parent, kind, self.schedule_functions, self.scalar_functions):
                     return {"prepare_condition"}
                 if any(self._structural(branch, kind) for branch in branches):
                     return {"structural_branch"}

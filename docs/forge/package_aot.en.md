@@ -48,10 +48,15 @@ numbering wait for archive remapping. Host arrays still transfer on each invocat
 reusing specialized code does not cache their contents.
 
 Build-time analysis follows immutable `ti.static` local aliases and resolvable
-helper parameters to their condition uses. Helpers made of pure range schedules
+helper parameters to their condition uses. Helpers made of range schedules
 can remain independently guarded loops in one entry, preserving each loop's
-block/serialize policy. Rebinding, ambiguous call names, resource/type uses and
-device-read bounds retain their original restrictions. Model template expressions
+block/serialize policy. Device counts in `range` bounds are evaluated under the
+original guard and in their original order; inactive bounds are not read early.
+Proven scalar reads, writes and scalar helpers between loops retain their order.
+A count saved before a reset crosses the guard as a typed local value rather
+than being reread after the reset. These conditions no longer require copies
+of the whole entry. Rebinding, ambiguous call names and resource/type uses retain
+their original restrictions. Model template expressions
 crossing `real_func` boundaries are rebuilt from immutable argument provenance in
 the callee; they do not reuse caller-owned IR or ship Python ASTs.
 
@@ -60,7 +65,9 @@ by fixed arguments and proved to have no effects outside their iterations.
 Tasks controlled by live invocation arguments remain. This reuses existing range
 and independent-iteration proofs without per-call checks. TLS reductions, block
 collectives and unproven effects are excluded. An entirely empty invocation keeps
-one task for the existing launch contract; complex schedules are not all reduced.
+one task for the existing launch contract. Device-count bounds and scalar
+preludes are not generally proved empty at prepare: preserving execution order
+does not imply that all unselected device task code has been removed.
 
 This experimental representation does not promise
 smaller or faster builds for every engine. Measure producer export, consumer
