@@ -3590,6 +3590,7 @@ void TaskCodeGenLLVM::visit(FuncCallStmt *stmt) {
     }
     auto guard =
         get_function_creation_guard(argument_types, stmt->func->get_name());
+    guard.body->addFnAttr("taichi.aot.real_function");
     const Callable *old_callable = current_callable;
     current_callable = stmt->func;
     func_map.insert({stmt->func, guard.body});

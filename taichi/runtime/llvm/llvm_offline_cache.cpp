@@ -1,4 +1,4 @@
-#include "llvm_offline_cache.h"
+#include "taichi/runtime/llvm/llvm_offline_cache.h"
 
 #include <queue>
 
@@ -15,6 +15,7 @@
 #include "taichi/runtime/llvm/llvm_context.h"
 #include "taichi/runtime/llvm/aot_snode_resources.h"
 #include "taichi/runtime/llvm/llvm_module_codec.h"
+#include "taichi/runtime/llvm/aot_code_units.h"
 #include "taichi/util/io.h"
 #include "taichi/util/lock.h"
 #include "taichi/util/offline_cache.h"
@@ -293,6 +294,7 @@ std::unique_ptr<llvm::Module> LlvmOfflineCacheFileReader::load_module(
       TI_DEBUG("Fail to parse {}: {}", filename, llvm::toString(ret.takeError()));
       return nullptr;
     }
+    LLVM::link_code_units(**ret, *directory_);
     // Preserve the bitcode loader's IR verification without its fatal error
     // path; malformed deployment inputs are reported as artifact failures.
     if (bitcode && llvm::verifyModule(**ret, &llvm::errs())) {

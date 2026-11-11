@@ -13,6 +13,81 @@ from taichi_forge_runtime.aot import Scalar
 from tests import test_utils
 
 
+@test_utils.test(arch=ti.cuda, offline_cache=False)
+def test_bitcode_library_shares_real_function_and_validates_dependencies(tmp_path):
+    import numpy as np
+    from zipfile import ZipFile, ZIP_DEFLATED
+    from taichi_forge_runtime.aot import Runtime
+
+    @ti.real_func
+    def shared(value: ti.f32, bias: ti.types.ndarray(ti.f32, 0)) -> ti.f32:
+        x = value
+        for _ in range(5):
+            x = ti.sin(x) * 0.25 + bias[None]
+        return x
+
+    @ti.kernel
+    def first(data: ti.types.ndarray(ti.f32, 1), bias: ti.types.ndarray(ti.f32, 0)):
+        for i in range(data.shape[0]):
+            data[i] = shared(shared(data[i], bias), bias)
+
+    @ti.kernel
+    def second(data: ti.types.ndarray(ti.f32, 1), bias: ti.types.ndarray(ti.f32, 0)):
+        for i in range(data.shape[0]):
+            data[i] = shared(data[i], bias) + 1
+
+    module = ti.aot.Module(artifact_format="bc-library")
+    module.add_kernel(first)
+    module.add_kernel(second)
+    artifact = tmp_path / "library.tcm"
+    module.archive(str(artifact))
+    with ZipFile(artifact) as archive:
+        units = [name for name in archive.namelist() if name.startswith("code_units/")]
+        assert len(units) == 1  # Actual shared storage, not two equal copies.
+
+    with Runtime("cuda") as runtime:
+        loaded = runtime.load_module(str(artifact))
+        a = runtime.ndarray("f32", (37,))
+        b = runtime.ndarray("f32", (37,))
+        bias = runtime.ndarray("f32", ())
+        bias_value = np.array(0.5, dtype=np.float32)
+        bias.write(bias_value.tobytes())
+        for name, reference in (("first", first), ("second", second)):
+            source = np.linspace(0, 1, 37, dtype=np.float32)
+            expected = source.copy()
+            reference(expected, bias_value)
+            peer_expected = source + 7
+            reference(peer_expected, bias_value)
+            a.write(source.tobytes())
+            b.write((source + 7).tobytes())
+            with loaded.kernel(name).bind(a, bias).prepare(specialize=True) as prepared:
+                with loaded.kernel(name).bind(b, bias).prepare(specialize=True) as peer:
+                    prepared.run()
+                    runtime.wait()
+                    np.testing.assert_array_equal(np.frombuffer(b.read(), np.float32), source + 7)
+                    peer.run()
+                    runtime.wait()
+                    np.testing.assert_allclose(np.frombuffer(a.read(), np.float32), expected, rtol=1e-6, atol=1e-6)
+                    np.testing.assert_allclose(np.frombuffer(b.read(), np.float32), peer_expected, rtol=1e-6, atol=1e-6)
+        a.close()
+        b.close()
+        bias.close()
+
+    for failure, message in (("missing", "Missing AOT code unit"), ("corrupt", "checksum mismatch")):
+        broken = tmp_path / (failure + ".tcm")
+        with ZipFile(artifact) as original, ZipFile(broken, "w", ZIP_DEFLATED) as output:
+            for name in original.namelist():
+                if name == units[0] and failure == "missing":
+                    continue
+                contents = original.read(name)
+                if name == units[0]:
+                    contents += b"corrupted"
+                output.writestr(name, contents)
+        with Runtime("cuda") as runtime:
+            with pytest.raises(RuntimeError, match=message):
+                runtime.load_module(str(broken)).kernel("first")
+
+
 def export_execution_context_module(tmp_path, artifact_format, explicit_target, tier):
     @ti.func
     def transform(value: ti.types.vector(2, ti.f32)) -> ti.f32:

@@ -130,7 +130,7 @@ LlvmAotModule::LlvmAotModule(
 
   // Select exactly the declared representation. Missing/corrupt payloads must
   // not silently fall back to a different generation left in this directory.
-  const auto format = metadata.kernel_format == "bc"
+  const auto format = is_llvm_aot_bitcode_format(metadata.kernel_format)
                           ? LlvmOfflineCache::Format::BC
                           : (is_cuda_aot_artifact_format(metadata.kernel_format)
                                  ? LlvmOfflineCache::Format::CUDAArtifact
@@ -381,7 +381,7 @@ aot::Kernel *LlvmAotModule::specialize_kernel(
     aot::Kernel &kernel, LaunchContextBuilder &context,
     const std::vector<uint32_t> &constant_args) {
   auto *source = dynamic_cast<llvm_aot::KernelImpl *>(&kernel);
-  TI_ERROR_IF((!arch_is_cpu(arch()) && arch() != Arch::cuda) || metadata_.kernel_format != "bc" || !source ||
+  TI_ERROR_IF((!arch_is_cpu(arch()) && arch() != Arch::cuda) || !is_llvm_aot_bitcode_format(metadata_.kernel_format) || !source ||
                   !source->device_range_tasks().empty(),
               "Prepared specialization requires an ordinary CPU/CUDA bitcode kernel");
   const auto alias = metadata_.kernel_aliases.find(kernel.name);

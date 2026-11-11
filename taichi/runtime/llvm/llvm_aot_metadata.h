@@ -41,6 +41,10 @@ inline bool is_cuda_aot_artifact_format(const std::string &format) {
   return format == "ptx" || format == "cubin";
 }
 
+inline bool is_llvm_aot_bitcode_format(const std::string &format) {
+  return format == "bc" || format == "bc-library";
+}
+
 inline bool is_sparse_aot_resource_binding(const std::string &binding) {
   return binding == "sparse_v1" || binding == "sparse_v2";
 }
@@ -157,7 +161,7 @@ inline void validate_llvm_aot_metadata(const LlvmAotMetadata &metadata) {
   if (launch_abi) {
     TI_ERROR_IF(metadata.abi_sha256.size() != 64 ||
                     metadata.launch_abi_sha256.size() != 64 ||
-                    (metadata.kernel_format != "bc" &&
+                    (!is_llvm_aot_bitcode_format(metadata.kernel_format) &&
                      !is_cuda_aot_artifact_format(metadata.kernel_format)),
                 "AOT kernel launch ABI requires BC/PTX/cubin and checksums");
     for (const auto &[name, abi] : metadata.kernel_launch_abis) {
@@ -208,7 +212,7 @@ inline void validate_llvm_aot_metadata(const LlvmAotMetadata &metadata) {
   } else if (schema == kRelocatableLlvmAotSchemaVersion) {
     TI_ERROR_IF(
         !is_relocatable_aot_resource_binding(metadata.resource_binding) ||
-            (metadata.kernel_format != "bc" &&
+            (!is_llvm_aot_bitcode_format(metadata.kernel_format) &&
              metadata.kernel_format != "ptx") ||
             metadata.abi_sha256.size() != 64,
         "Relocatable LLVM AOT requires dense_v1/list_v1/sparse_v1/sparse_v2, BC/PTX and an ABI "
@@ -221,7 +225,7 @@ inline void validate_llvm_aot_metadata(const LlvmAotMetadata &metadata) {
                     metadata.abi_sha256.size() != 64,
                 "CUDA PTX AOT requires PTX format and a launch ABI checksum.");
   } else {
-    TI_ERROR_IF(metadata.kernel_format != "ll" && metadata.kernel_format != "bc",
+    TI_ERROR_IF(metadata.kernel_format != "ll" && !is_llvm_aot_bitcode_format(metadata.kernel_format),
                 "Unsupported or missing LLVM AOT kernel format '{}'.",
                 metadata.kernel_format);
   }

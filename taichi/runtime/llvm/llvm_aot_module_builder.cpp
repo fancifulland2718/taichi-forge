@@ -18,6 +18,7 @@
 #include "taichi/runtime/llvm/aot_artifact_integrity.h"
 #include "taichi/runtime/llvm/aot_snode_relocation.h"
 #include "taichi/runtime/llvm/aot_snode_resources.h"
+#include "taichi/runtime/llvm/aot_code_units.h"
 #if defined(TI_WITH_CUDA)
 #include "taichi/runtime/cuda/jit_cuda.h"
 #include "taichi/runtime/cuda/cuda_artifact_provider.h"
@@ -42,7 +43,7 @@ LlvmAotModuleBuilder::LlvmAotModuleBuilder(
 void LlvmAotModuleBuilder::set_artifact_format(const std::string &format) {
   TI_ERROR_IF(compile_options_frozen_,
               "AOT artifact format must be selected before exporting kernels.");
-  TI_ERROR_IF(format != "bc" && !LLVM::is_cuda_aot_artifact_format(format),
+  TI_ERROR_IF(format != "bc" && format != "bc-library" && !LLVM::is_cuda_aot_artifact_format(format),
               "Unsupported LLVM AOT artifact format '{}'", format);
   TI_ERROR_IF(LLVM::is_cuda_aot_artifact_format(format) &&
                   compile_config_.arch != Arch::cuda,
@@ -50,6 +51,8 @@ void LlvmAotModuleBuilder::set_artifact_format(const std::string &format) {
   TI_ERROR_IF(format == "cubin" && !explicit_cuda_target_,
               "AOT cubin requires an explicit cuda_compute_capability in caps");
   artifact_format_ = format;
+  TI_ERROR_IF(format == "bc-library" && compile_config_.arch != Arch::cuda,
+              "Experimental AOT code libraries currently require CUDA");
 }
 
 void LlvmAotModuleBuilder::enable_streaming_exports() {
@@ -199,6 +202,8 @@ void LlvmAotModuleBuilder::dump(const std::string &output_dir,
       // Unsupported layouts/tasks and legacy targets retain embedded IDs.
       LLVM::resolve_aot_tree_ids(*module, tree_mapping);
     }
+    if (artifact_format_ == "bc-library")
+      LLVM::export_code_units(*module, output_dir);
     return module;
   };
   writer.set_data(std::move(exported));
