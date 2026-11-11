@@ -33,6 +33,13 @@ class StaticPreparation:
                 # decorated helper. Ambiguity retains producer specialization.
                 if isinstance(function, ast.arg):
                     self._ambiguous_names.add(function.arg)
+                elif isinstance(function, ast.alias):
+                    # Imported DSL helpers retain their existing resolution.
+                    # Only establish whether the builtin used below is known.
+                    if (function.asname or function.name.split('.')[0]) in ('getattr', '*'):
+                        self._ambiguous_names.add('getattr')
+                elif isinstance(function, ast.ClassDef) and function.name == 'getattr':
+                    self._ambiguous_names.add('getattr')
                 elif isinstance(function, (ast.Name, ast.Attribute)) and isinstance(function.ctx, ast.Store):
                     self._ambiguous_names.add(getattr(function, 'id', getattr(function, 'attr', '')))
                 if not isinstance(function, ast.FunctionDef):
@@ -132,8 +139,20 @@ class StaticPreparation:
                         and isinstance(node.args[1], ast.Constant)
                         and isinstance(node.args[1].value, str)
                     ):
-                        for context in uses.values():
-                            context.setdefault(node.args[1].value, set()).add("reflective_use")
+                        # Component lowering already resolves builtin getattr
+                        # through the declared owner/record attribute path. A
+                        # literal lookup with an inert default has the same
+                        # numerical use as self.flag. Unknown reflection and
+                        # shadowed builtins must not acquire that proof.
+                        declared_read = (
+                            callee == 'getattr' and callee not in self._ambiguous_names
+                            and len(node.args) in (2, 3) and not node.keywords
+                            and isinstance(node.args[0], (ast.Name, ast.Attribute))
+                            and (len(node.args) == 2 or isinstance(node.args[2], ast.Constant))
+                        )
+                        for threaded, context in uses.items():
+                            reasons = self._use(node, parents, kind, threaded) if declared_read else {'reflective_use'}
+                            context.setdefault(node.args[1].value, set()).update(reasons)
                 if isinstance(node, ast.Attribute) and isinstance(node.ctx, ast.Load):
                     for threaded, context in uses.items():
                         context.setdefault(node.attr, set()).update(self._use(node, parents, kind, threaded))
@@ -170,7 +189,7 @@ class StaticPreparation:
         return result
 
     @staticmethod
-    def _structural(node, kind):
+    def _structural(node, kind, parents):
         # These operations define types, Python objects, or execution structure.
         # Their branch alternatives cannot be represented by a scalar IR phi.
         fixed_cast_types = set()
@@ -185,8 +204,22 @@ class StaticPreparation:
                         'i8', 'i16', 'i32', 'i64', 'u8', 'u16', 'u32', 'u64', 'f16', 'f32', 'f64'):
                     fixed_cast_types.add(id(dtype))
             # ast.walk visits the call before its dtype operand.
-            if isinstance(part, (ast.Return, ast.Break, ast.Continue, ast.Raise)):
+            if isinstance(part, (ast.Return, ast.Raise)):
                 return True
+            if isinstance(part, (ast.Break, ast.Continue)):
+                # The ordinary DSL lowering already handles device loop
+                # transfers under a runtime predicate. Check the actual
+                # lexical target, not just whether some enclosing loop is
+                # parallel: an inner static loop still requires producer
+                # expansion and cannot accept a runtime break/continue.
+                target = parents.get(id(part))
+                while target is not None and not isinstance(target, (ast.For, ast.While, ast.FunctionDef)):
+                    target = parents.get(id(target))
+                if not isinstance(target, (ast.For, ast.While)) or (
+                    isinstance(target, ast.For) and isinstance(target.iter, ast.Call)
+                    and kind(target.iter.func) == 'static'
+                ):
+                    return True
             if isinstance(part, ast.Attribute) and (
                 part.attr in ("loop_config", "SharedArray", "Vector", "Matrix", "field", "ndarray")
                 or (kind(part) or "").startswith("types.")
@@ -258,7 +291,7 @@ class StaticPreparation:
                 branches = parent.body + parent.orelse if isinstance(parent, ast.If) else (parent.body, parent.orelse)
                 if uniform_range_schedule(parent, kind, self.schedule_functions, self.scalar_functions):
                     return {"prepare_condition"}
-                if any(self._structural(branch, kind) for branch in branches):
+                if any(self._structural(branch, kind, parents) for branch in branches):
                     return {"structural_branch"}
                 threaded = outer_threaded or self._threaded(parent, parents, kind)
                 if not threaded and any(

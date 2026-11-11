@@ -56,7 +56,17 @@ Proven scalar reads, writes and scalar helpers between loops retain their order.
 A count saved before a reset crosses the guard as a typed local value rather
 than being reread after the reset. These conditions no longer require copies
 of the whole entry. Rebinding, ambiguous call names and resource/type uses retain
-their original restrictions. A fixed dtype operand of `ti.cast(value, ti.f32)`,
+their original restrictions. Conditional `continue` / `break` targeting the nearest
+dynamic loop use the existing DSL control flow without forcing another whole-entry
+variant. Transfers targeting an unrolled `ti.static` loop and function returns
+retain their restrictions. Literal builtin `getattr(owner, 'flag', False)` follows
+the declared attribute's condition uses without requiring engine source rewrites.
+Dynamic names, nonliteral defaults, shadowed builtins and type/resource uses do not
+gain that proof; missing attributes retain the declaration contract. Focused CUDA
+library tests cover four option combinations, nested loops and JIT equivalence.
+CPU checks use existing explicit prepare values for the same control flow, not
+automatic `bc-library` projection. Analysis runs only at build time and adds no
+runtime checks or Host scheduling. A fixed dtype operand of `ti.cast(value, ti.f32)`,
 including the `dtype=` form, is numerical computation and does not by itself
 force whole-entry variants of the enclosing condition. Conditional dtype
 selection, type/resource aliases and unrecognized conversion calls keep the

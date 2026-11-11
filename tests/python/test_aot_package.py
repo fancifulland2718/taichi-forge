@@ -695,6 +695,168 @@ class Model:
                 np.testing.assert_array_equal(aot.out.to_numpy(), jit.out.to_numpy())
 
 
+@test_utils.test(arch=[ti.cpu, ti.cuda], offline_cache=False)
+@pytest.mark.parametrize('attribute_access', ('direct', 'getattr'))
+def test_package_library_prepares_device_loop_transfers(tmp_path, monkeypatch, attribute_access):
+    from itertools import product
+
+    source = '''import taichi_forge as ti
+@ti.data_oriented
+class Model:
+    def __init__(self, n: int, skip: bool, stop: bool):
+        self.n, self.skip, self.stop = n, skip, stop
+        scope = ti.experimental.ResourceScope(self)
+        scope.dim('n')
+        scope.static('skip', choices=(False, True))
+        scope.static('stop', choices=(False, True))
+        scope.out = scope.field(ti.i32, shape=scope.dim('n'))
+        scope.hits = scope.field(ti.i32, shape=scope.dim('n'))
+    @ti.kernel
+    def step(self):
+        for i in range(self.n):
+            self.out[i] = -99
+            self.hits[i] = 0
+            if ti.static(self.skip):
+                if i % 2 == 0:
+                    self.hits[i] += 1
+                    continue
+            value = 0
+            for j in range(5):
+                if ti.static(self.stop):
+                    if j == 2:
+                        break
+                value += i + j
+            j = 0
+            while j < 4:
+                j += 1
+                if ti.static(self.skip):
+                    if j == 2:
+                        continue
+                if ti.static(self.stop):
+                    if j == 3:
+                        break
+                value += j
+            self.out[i] = value
+        for i in range(self.n):
+            self.hits[i] += 7
+'''
+    if attribute_access == 'getattr':
+        source = source.replace('ti.static(self.skip)', "ti.static(getattr(self, 'skip', False))")
+        source = source.replace('ti.static(self.stop)', "ti.static(getattr(self, 'stop'))")
+    cuda = ti.lang.impl.current_cfg().arch == ti.cuda
+    if not cuda:
+        # Automatic library projection is CUDA-only. Exercise the same DSL
+        # control flow on CPU through the existing explicit prepare values.
+        source = source.replace('= n, skip, stop', '= n, int(skip), int(stop)')
+        for flag in ('skip', 'stop'):
+            source = source.replace(f"scope.static('{flag}', choices=(False, True))",
+                                    f"scope.value('{flag}', ti.i32, affects_plan=True)")
+    package = _source_package(tmp_path, monkeypatch, source)
+    manifest = ti.aot.export_package(package, tmp_path / 'sdk', artifact_format='bc-library' if cuda else 'bc')
+    entries = [e for e in manifest['entries'].values() if e['definition'].endswith('.Model.step')]
+    assert len(entries) == 1
+    if cuda:
+        assert {c['name'] for c in entries[0]['captures'] if 'prepare_static' in c} == {'skip', 'stop'}
+    with Runtime('cuda' if cuda else 'cpu') as runtime, load_package(runtime, tmp_path / 'sdk') as code:
+        for n in (1, 17):
+            instances = []
+            for skip, stop in product((False, True), repeat=2):
+                aot, jit = code.host.Model(n, skip, stop), package.model.Model(n, skip, stop)
+                expected = np.array([-99 if skip and i % 2 == 0 else
+                    sum(i+j for j in range(2 if stop else 5)) +
+                    sum(j for j in range(1, 3 if stop else 5) if not (skip and j == 2))
+                    for i in range(n)], dtype=np.int32)
+                hits = np.array([7 + int(skip and i % 2 == 0) for i in range(n)], dtype=np.int32)
+                aot.step()
+                jit.step()
+                np.testing.assert_array_equal(aot.out.to_numpy(), jit.out.to_numpy())
+                np.testing.assert_array_equal(aot.out.to_numpy(), expected)
+                np.testing.assert_array_equal(aot.hits.to_numpy(), hits)
+                instances.append((aot, expected))
+            for aot, expected in reversed(instances):
+                aot.step()
+                np.testing.assert_array_equal(aot.out.to_numpy(), expected)
+
+
+@test_utils.test(arch=ti.cuda, offline_cache=False)
+@pytest.mark.parametrize('transfer', ('break', 'continue'))
+def test_package_library_keeps_static_loop_transfers(tmp_path, monkeypatch, transfer):
+    source = '''import taichi_forge as ti
+@ti.data_oriented
+class Model:
+    def __init__(self, n: int, skip: bool):
+        self.n, self.skip = n, skip
+        scope = ti.experimental.ResourceScope(self)
+        scope.dim('n')
+        scope.static('skip', choices=(False, True))
+        scope.out = scope.field(ti.i32, shape=scope.dim('n'))
+    @ti.kernel
+    def step(self):
+        for i in range(self.n):
+            value = 0
+            for j in ti.static(range(4)):
+                if ti.static(self.skip):
+                    if ti.static(j == 1):
+                        TRANSFER
+                value += i + j
+            self.out[i] = value
+'''.replace('TRANSFER', transfer)
+    package = _source_package(tmp_path, monkeypatch, source)
+    manifest = ti.aot.export_package(package, tmp_path / 'sdk', artifact_format='bc-library')
+    entries = [e for e in manifest['entries'].values() if e['definition'].endswith('.Model.step')]
+    assert len(entries) == 2
+    assert all(not any(c['name'] == 'skip' and 'prepare_static' in c for c in e['captures']) for e in entries)
+    with Runtime('cuda') as runtime, load_package(runtime, tmp_path / 'sdk') as code:
+        for skip in (False, True):
+            aot, jit = code.host.Model(7, skip), package.model.Model(7, skip)
+            aot.step()
+            jit.step()
+            np.testing.assert_array_equal(aot.out.to_numpy(), jit.out.to_numpy())
+            terms = range(4) if not skip else ((0,) if transfer == 'break' else (0, 2, 3))
+            np.testing.assert_array_equal(aot.out.to_numpy(), [sum(i+j for j in terms) for i in range(7)])
+
+
+@pytest.mark.parametrize('body', [
+    'for i in range(3):\n    for j in ti.static(range(2)):\n        if ti.static(self.flag):\n            continue',
+    'for i in range(3):\n    for j in ti.static(range(2)):\n        if ti.static(self.flag):\n            break',
+    'for i in range(3):\n    if ti.static(self.flag):\n        return',
+    'if ti.static(self.flag):\n    continue',
+])
+def test_package_loop_transfer_proof_keeps_static_and_escaping_control(body):
+    from taichi_forge.aot._package_static import StaticPreparation
+    from taichi_forge.tools._compiled_host import decorator_resolver
+
+    source = 'import taichi_forge as ti\n@ti.kernel\ndef step(self):\n' + textwrap.indent(body, '    ')
+    tree = ast.parse(source)
+    proof = StaticPreparation([('model', None, None, source, tree, decorator_resolver(tree), None, None)])
+    assert proof.entry_uses('model.step')['flag'] != {'prepare_condition'}
+
+
+@pytest.mark.parametrize('shadow', [
+    'from custom import *',
+    'from custom import getattr',
+    'from custom import read as getattr',
+    'getattr = custom_read',
+    'class getattr:\n    pass',
+    'def getattr(owner, name, default):\n    return default',
+])
+def test_package_literal_getattr_proof_keeps_shadowed_builtins(shadow):
+    from taichi_forge.aot._package_static import StaticPreparation
+    from taichi_forge.tools._compiled_host import decorator_resolver
+
+    source = '''import taichi_forge as ti
+SHADOW
+@ti.kernel
+def step(self):
+    for i in range(3):
+        if ti.static(getattr(self, 'flag', False)):
+            continue
+'''.replace('SHADOW', shadow)
+    tree = ast.parse(source)
+    proof = StaticPreparation([('model', None, None, source, tree, decorator_resolver(tree), None, None)])
+    assert proof.entry_uses('model.step')['flag'] != {'prepare_condition'}
+
+
 @pytest.mark.parametrize('body', [
     'dtype = ti.f32 if self.flag else ti.i32\n    out = ti.cast(1, dtype)',
     'if ti.static(self.flag):\n        dtype = ti.f32\n        out = ti.cast(1, dtype)',
