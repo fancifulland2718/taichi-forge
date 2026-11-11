@@ -1,4 +1,8 @@
 #pragma once
+#include <exception>
+#include <functional>
+#include <mutex>
+
 #include "taichi/util/lang_util.h"
 #include "taichi/aot/graph_data.h"
 #include "taichi/aot/module_loader.h"
@@ -16,10 +20,13 @@ class KernelImpl : public aot::Kernel {
                       Arch target_arch,
                       const std::string &kernel_name,
                       const LLVM::KernelCallContract &kernel_data,
-                      std::vector<std::vector<int>> affine_arrays = {})
+                      std::vector<std::vector<int>> affine_arrays = {},
+                      std::function<KernelLaunchHandle()> materialize = {})
       : launcher_(launcher), handle_(handle) {
     TI_ASSERT(launcher_ != nullptr);
-    TI_ASSERT(handle_.get_launch_id() >= 0);
+    TI_ASSERT(handle_.get_launch_id() >= 0 || materialize);
+    if (materialize)
+      deferred_ = std::make_shared<DeferredRegistration>(std::move(materialize));
     TI_ASSERT(arch_uses_llvm(target_arch));
     rets = kernel_data.rets;
     ret_type = kernel_data.ret_type;
@@ -38,7 +45,7 @@ class KernelImpl : public aot::Kernel {
   void launch(LaunchContextBuilder &ctx) override {
     TI_ERROR_IF(!device_range_tasks_.empty(),
                 "AOT device range requires its Graph recording recipe");
-    launcher_->launch_llvm_kernel(handle_, ctx);
+    launcher_->launch_llvm_kernel(handle(), ctx);
   }
 
   // The source is an internal physical callable, before any public entry's
@@ -47,6 +54,7 @@ class KernelImpl : public aot::Kernel {
              const std::string &entry_name,
              std::vector<std::uint32_t> range_tasks)
       : launcher_(source.launcher_), handle_(source.handle_),
+        deferred_(source.deferred_),
         device_range_tasks_(std::move(range_tasks)) {
     static_cast<CallableBase &>(*this) = static_cast<const CallableBase &>(source);
     runtime_affine_arrays = source.runtime_affine_arrays;
@@ -62,16 +70,45 @@ class KernelImpl : public aot::Kernel {
   }
 
   KernelLaunchHandle handle() const {
-    return handle_;
+    return deferred_ ? deferred_->get() : handle_;
   }
 
  private:
+  struct DeferredRegistration {
+    explicit DeferredRegistration(std::function<KernelLaunchHandle()> factory)
+        : materialize(std::move(factory)) {
+    }
+
+    KernelLaunchHandle get() {
+      std::call_once(once, [&] {
+        try {
+          handle = materialize();
+        } catch (...) {
+          failure = std::current_exception();
+        }
+        // Retain neither compiler IR nor the factory after materialization.
+        // A failed registration is also final, rather than recompiling on
+        // every use of a second public alias.
+        materialize = {};
+      });
+      if (failure)
+        std::rethrow_exception(failure);
+      return handle;
+    }
+
+    std::once_flag once;
+    std::function<KernelLaunchHandle()> materialize;
+    KernelLaunchHandle handle;
+    std::exception_ptr failure;
+  };
+
   // The module owns both the launcher and its registrations. Prepared users
   // must retain the module, just like ordinary AOT kernel/graph consumers.
   // Keep the loaded entry accessible without retaining compiler IR or
   // registering a second copy when preparing backend replay.
   LLVM::KernelLauncher *const launcher_;
   const KernelLaunchHandle handle_;
+  std::shared_ptr<DeferredRegistration> deferred_;
   const std::vector<std::uint32_t> device_range_tasks_;
 };
 

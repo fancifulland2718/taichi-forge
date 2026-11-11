@@ -67,6 +67,78 @@ def test_prepared_bitcode_specialization_keeps_shapes_and_instances_independent(
             bound.prepare(constant_args=(1,))
 
 
+@test_utils.test(arch=[ti.cpu, ti.cuda], offline_cache=False)
+def test_prepared_real_function_arguments_have_their_own_layout(tmp_path):
+    from taichi_forge_runtime.aot import Scalar
+
+    @ti.real_func
+    def leaf(value: ti.i32, count: ti.i32) -> ti.i32:
+        result = value
+        for i in range(count):
+            result += i + 1
+        return result
+
+    @ti.real_func
+    def shared(mode: ti.i32, data: ti.types.ndarray(ti.i32, 1), count: ti.i32):
+        for i in range(data.shape[0]):
+            # Two calls to one leaf must keep their distinct arguments. The
+            # entry and this callee deliberately use different argument orders.
+            if mode:
+                data[i] = leaf(data[i], count) + leaf(10, count + 1)
+            else:
+                data[i] = leaf(data[i], count + 2)
+
+    @ti.kernel
+    def update(data: ti.types.ndarray(ti.i32, 1), count: ti.i32, mode: ti.i32):
+        shared(mode, data, count)
+
+    module = ti.aot.Module(artifact_format="bc-library" if ti.cfg.arch == ti.cuda else "bc")
+    module.add_kernel(update)
+    artifact = tmp_path / "real-arguments.tcm"
+    module.archive(str(artifact))
+    with ti.aot.borrow_runtime() as runtime, ExitStack() as stack:
+        loaded = stack.enter_context(runtime.load_module(artifact))
+        from taichi_forge._lib import core
+
+        def loaded_entries():
+            return core.query_int64("cuda_artifact_entry_points_loaded")
+
+        before_lookup = loaded_entries() if ti.cfg.arch == ti.cuda else None
+        kernel = loaded.kernel("update")
+        if before_lookup is not None:
+            assert loaded_entries() == before_lookup
+        records = []
+        for size, count, mode in ((7, 2, 0), (11, 5, 1), (7, 2, 1)):
+            initial = np.arange(size, dtype=np.int32)
+            expected = initial.copy()
+            update(expected, count, mode)
+            array = stack.enter_context(closing(runtime.ndarray("i32", (size,))))
+            array.write(initial)
+            prepared = stack.enter_context(closing(kernel.bind(
+                array, Scalar("i32", count), Scalar("i32", mode)).prepare(
+                    specialize=True, constant_args=(1, 2))))
+            records.append((array, prepared, expected))
+        for array, prepared, expected in reversed(records):
+            prepared.run()
+            np.testing.assert_array_equal(np.frombuffer(array.read(), np.int32), expected)
+        # The generic callable is still usable after several specializations.
+        # Its mutable input and scalar arguments must not retain their values.
+        array, _, _ = records[0]
+        generic_entries = None
+        for count, mode in ((4, 1), (1, 0)):
+            initial = np.arange(7, dtype=np.int32)
+            expected = initial.copy()
+            update(expected, count, mode)
+            array.write(initial)
+            kernel.run(array, Scalar("i32", count), Scalar("i32", mode))
+            np.testing.assert_array_equal(np.frombuffer(array.read(), np.int32), expected)
+            if ti.cfg.arch == ti.cuda:
+                after = loaded_entries()
+                if generic_entries is not None:
+                    assert after == generic_entries
+                generic_entries = after
+
+
 @test_utils.test(arch=[ti.cpu, ti.cuda, ti.vulkan], offline_cache=False)
 @pytest.mark.parametrize("field_storage", [False, True])
 def test_prepared_specialization_preserves_storage_relations_and_aliases(tmp_path, field_storage):

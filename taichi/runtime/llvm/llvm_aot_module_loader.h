@@ -100,7 +100,7 @@ class LlvmAotModule final : public aot::Module {
       const std::string &name) override;
   std::unique_ptr<aot::Kernel> make_new_kernel_impl(const std::string &name);
   std::unique_ptr<llvm_aot::KernelImpl> load_kernel_payload(
-      const std::string &name);
+      const std::string &name, bool defer_registration = true);
 
   std::unique_ptr<aot::KernelTemplate> make_new_kernel_template(
       const std::string &name) override {

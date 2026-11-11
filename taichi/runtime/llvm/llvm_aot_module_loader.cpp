@@ -576,6 +576,26 @@ aot::Kernel *LlvmAotModule::specialize_kernel(
       }
     }
   }
+  // A library function receives a private argument buffer, not the entry's
+  // RuntimeContext layout. Let LLVM expose those stores/loads through a legal
+  // inline instead of copying entry offsets into an unrelated callee ABI.
+  // Only a single direct use is selected: prepared code does not duplicate a
+  // shared implementation at every call site. The persisted library and the
+  // ordinary JIT/unspecialized optimization policy remain unchanged.
+  if (replacements || pointer_replacements) {
+    for (auto &function : module) {
+      if (!function.hasLocalLinkage() || function.isDeclaration() ||
+          !function.hasFnAttribute("taichi.aot.real_function") ||
+          function.hasFnAttribute(llvm::Attribute::NoInline) ||
+          function.hasFnAttribute(llvm::Attribute::OptimizeNone) ||
+          !function.hasOneUse())
+        continue;
+      auto *call = llvm::dyn_cast<llvm::CallBase>(*function.user_begin());
+      if (call && call->getCalledFunction() == &function &&
+          call->getFunction() != &function)
+        function.addFnAttr(llvm::Attribute::AlwaysInline);
+    }
+  }
   TI_DEBUG("Prepared specialization {} folded {} ABI loads and {} storage relations",
            code, replacements, pointer_replacements);
   if (arch_is_cpu(arch())) {
@@ -664,9 +684,22 @@ std::unique_ptr<aot::Kernel> LlvmAotModule::make_new_kernel_impl(
 }
 
 std::unique_ptr<llvm_aot::KernelImpl> LlvmAotModule::load_kernel_payload(
-    const std::string &name) {
-  if (!cache_reader_->has_kernel(name)) return nullptr;
-  auto kernel_cache = load_kernel_from_cache(name);
+    const std::string &name, bool defer_registration) {
+  std::unique_ptr<LlvmOfflineCacheFileReader> reopened;
+  auto *reader = cache_reader_.get();
+  if (!defer_registration) {
+    // take_kernel_cache consumes its metadata as well as its IR. A deferred
+    // ordinary registration must reopen the frozen artifact, just as prepared
+    // specialization does, rather than reusing that consumed reader.
+    TI_ERROR_IF(aot_artifact_sha256(read_artifact(*directory_, "metadata.tcb")) != metadata_.abi_sha256,
+                "AOT metadata changed after loading");
+    reopened = LlvmOfflineCacheFileReader::make(directory_, LlvmOfflineCache::Format::BC);
+    TI_ERROR_IF(!reopened || !reopened->has_kernel(name),
+                "Cannot reopen deferred AOT kernel: {}", name);
+    reader = reopened.get();
+  }
+  if (!reader->has_kernel(name)) return nullptr;
+  auto kernel_cache = load_kernel_from_cache(name, reader);
   const auto array_declaration = metadata_.kernel_runtime_affine_arrays.find(name);
   const auto affine_arrays = array_declaration == metadata_.kernel_runtime_affine_arrays.end()
       ? std::vector<std::vector<int>>{} : array_declaration->second;
@@ -794,6 +827,17 @@ std::unique_ptr<llvm_aot::KernelImpl> LlvmAotModule::load_kernel_payload(
   TI_ERROR_IF(compiled_kernel_launch_abi(
                   *compiled.get_internal_data().compiled_data.module) != launch_abi,
               "AOT LLVM code does not match its kernel launch ABI: {}", name);
+  if (defer_registration && !gated && metadata_.kernel_format == "bc-library") {
+    // Contract/dependency validation above still happens at lookup. A prepared
+    // consumer can now compile only its specialization; an ordinary consumer
+    // registers the generic implementation when it first needs its handle.
+    // Reopen through the same validated reader rather than retaining a large
+    // LLVM module for a generic implementation that may never be used.
+    return std::make_unique<llvm_aot::KernelImpl>(
+        kernel_launcher_.get(), KernelLaunchHandle{}, arch(), kernel_name,
+        compiled.get_internal_data(), affine_arrays,
+        [this, name] { return load_kernel_payload(name, false)->handle(); });
+  }
   KernelLaunchHandle handle;
   KernelRegistrationState registration;
   if (gated) {

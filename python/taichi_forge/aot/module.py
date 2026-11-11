@@ -285,6 +285,10 @@ class Module:
             to export; driver compilation and runtime initialization remain.
             Experimental CUDA ``bc-library`` stores compatible real-function
             definitions separately and links them before consumer specialization.
+            Lookup validates its contracts without compiling unused generic
+            device code; ordinary execution materializes that code on demand.
+            Preparation may inline a single-use library function to expose
+            fixed inputs, without changing the stored shared definition.
             CUDA target requirements are selected by ``caps``.
             Cubin requires an explicit ``cuda_compute_capability`` capability
             and external ptxas at export (``TI_CUDA_PTXAS_PATH`` or PATH). It
