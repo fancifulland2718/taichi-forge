@@ -1006,17 +1006,16 @@ class Module(_Resource):
         Native entry argument validation remains authoritative at preparation.
         """
         from urllib.parse import quote
-        from zipfile import ZipFile
+        from ._component_info import _document_reader
+        from ._component_storage import decode_entry_document, _unique_record_fields
 
         with self._runtime._lock:
             self._check()
             _name(name)
             relative = "component_entries/" + quote(name, safe="-_.") + ".json"
-            if self._source_path.is_dir():
-                value = json.loads((self._source_path / relative).read_text(encoding="utf8"))
-            else:
-                with ZipFile(self._source_path) as archive:
-                    value = json.loads(archive.read(relative))
+            with _document_reader(self._source_path) as read:
+                document = json.loads(read(relative), object_pairs_hook=_unique_record_fields)
+                value = decode_entry_document(document, read)
             if value.get("version") != 1 or value.get("entry") != name:
                 raise ValueError("Unknown or mismatched component entry contract")
             return value

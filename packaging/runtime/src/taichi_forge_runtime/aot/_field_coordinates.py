@@ -1,12 +1,9 @@
 """Cold Field transfers using exported library kernels and instance bindings."""
 
 from contextlib import ExitStack, closing
-import json
 import math
 import operator
 import struct
-from urllib.parse import quote
-from zipfile import ZipFile
 
 from ._plan import ExecutionPlan
 from ._runtime import _dtype
@@ -28,13 +25,7 @@ def load_transfers(module, contract):
         _dtype(resource["dtype"])
         plans = {}
         for operation, entry in bindings.items():
-            relative = "component_entries/" + quote(entry, safe="-_.") + ".json"
-            if module._source_path.is_dir():
-                payload = (module._source_path / relative).read_bytes()
-            else:
-                with ZipFile(module._source_path) as archive:
-                    payload = archive.read(relative)
-            metadata = json.loads(payload)
+            metadata = module.component_entry_contract(entry)
             source = metadata["contract"]
             expected_members = [resource["group"], resource["paths"]]
             if (metadata.get("version") != 1 or metadata.get("entry") != entry

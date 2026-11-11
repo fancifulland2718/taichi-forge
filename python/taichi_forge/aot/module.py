@@ -798,7 +798,8 @@ class Module:
         Args:
           filepath (str): path to a folder to store aot files.
           shared_component_contracts (bool): store repeated compiler records
-            once, requiring a Runtime with component contract storage v1.
+            and entry resource groups once, requiring the corresponding Runtime
+            component/entry contract storage readers.
           shared_execution_plans (bool): share exact kernel call records in
             plans, requiring a Runtime with execution plan storage v1.
         """
@@ -833,12 +834,19 @@ class Module:
                 for name, plan in self._execution_plans.items():
                     plan.save(directory / (quote(name, safe="-_.") + ".json"))
         if self._component_entries:
-            directory = output_dir / "component_entries"
-            directory.mkdir(exist_ok=True)
-            for name, contract in self._component_entries.items():
-                (directory / (quote(name, safe="-_.") + ".json")).write_text(
-                    json.dumps(contract, sort_keys=True, separators=(",", ":")), encoding="utf8"
-                )
+            contracts = {"component_entries/" + quote(name, safe="-_.") + ".json": contract
+                         for name, contract in self._component_entries.items()}
+            if shared_component_contracts:
+                from taichi_forge_runtime.aot._component_storage import encode_entry_documents
+
+                documents = encode_entry_documents(contracts)
+            else:
+                documents = {name: json.dumps(contract, sort_keys=True, separators=(",", ":")).encode("utf8")
+                             for name, contract in contracts.items()}
+            for relative, payload in documents.items():
+                target = output_dir / relative
+                target.parent.mkdir(parents=True, exist_ok=True)
+                target.write_bytes(payload)
         if self._component_roots:
             directory = output_dir / "components"
             directory.mkdir(exist_ok=True)
@@ -887,7 +895,8 @@ class Module:
             unchanged. GFX JSON metadata is always retained.
           shared_component_contracts (bool): losslessly share repeated compiler
             records when this reduces the archive. Requires a Runtime reader
-            supporting component contract storage v1; older readers reject it.
+            supporting the component/entry contract storage formats; older
+            readers reject shared documents they do not support.
           shared_execution_plans (bool): share exact plan kernel call records
             before ordinary Runtime plan decoding; requires plan storage v1.
 

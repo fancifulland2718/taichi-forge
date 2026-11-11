@@ -14,6 +14,7 @@ import zlib
 
 _FORMAT = "component_contract_records_v1"
 _LAYOUT_FORMAT = "component_contract_records_v2"
+_ENTRY_FORMAT = "component_entry_records_v1"
 _LAYOUT_SECTIONS = frozenset(("resources", "groups", "dimensions", "values"))
 _DIGEST = re.compile(r"[0-9a-f]{64}\Z")
 
@@ -63,6 +64,26 @@ def _all_records(contract):
     yield from _records(contract)
 
 
+def _entry_records(entry):
+    # Binding names remain local to each entry. Only exact group values are
+    # interned; layouts, source paths, guards and effects are never normalized.
+    for name, group in entry.get("contract", {}).get("groups", {}).items():
+        yield ("contract", "groups", name), group
+
+
+def encode_entry_documents(entries):
+    """Share exact resource groups across entry captures when it saves bytes."""
+    return _encode_documents(entries, _entry_records, _ENTRY_FORMAT, "entry_contract", "component_contracts",
+                             record_type=str)
+
+
+def decode_entry_document(document, read_bytes):
+    """Restore the ordinary entry capture before cold preparation/admission."""
+    return _decode_document(document, read_bytes, _ENTRY_FORMAT, "entry_contract", "component_contracts",
+                            lambda path: len(path) == 3 and path[:2] == ["contract", "groups"]
+                            and isinstance(path[2], str), record_type=str)
+
+
 def _zip_cost(name, payload):
     compressor = zlib.compressobj(1, zlib.DEFLATED, -15)
     compressed = len(compressor.compress(payload) + compressor.flush())
@@ -97,12 +118,12 @@ def encode_contract_documents(contracts):
         _zip_cost(name, value) for name, value in documents.items()))
 
 
-def _encode_documents(contracts, records, storage_format, content_key, directory):
+def _encode_documents(contracts, records, storage_format, content_key, directory, *, record_type=dict):
     original = {name: _json_bytes(contract) for name, contract in contracts.items()}
     counts, payloads, locations = Counter(), {}, {}
     for name, contract in contracts.items():
         for path, record in records(contract):
-            if not isinstance(record, dict):
+            if not isinstance(record, record_type):
                 continue
             payload = _json_bytes(record)
             digest = sha256(payload).hexdigest()
@@ -165,7 +186,7 @@ def _layout_path(path):
             or path == ["compilation", "input_sources"])
 
 
-def _decode_document(document, read_bytes, storage_format, content_key, directory, allowed_path):
+def _decode_document(document, read_bytes, storage_format, content_key, directory, allowed_path, *, record_type=dict):
     if not isinstance(document, dict):
         raise ValueError("Unsupported component contract")
     if "storage_format" not in document:
@@ -209,7 +230,7 @@ def _decode_document(document, read_bytes, storage_format, content_key, director
             if sha256(payload).hexdigest() != digest:
                 raise ValueError("Component record digest mismatch")
             record = json.loads(payload, object_pairs_hook=_unique_record_fields)
-            if not isinstance(record, dict):
+            if not isinstance(record, record_type):
                 raise ValueError("Invalid component compiler record")
             records[digest] = record
         # Separate logical calls and component instances must never share mutable

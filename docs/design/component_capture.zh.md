@@ -1325,6 +1325,12 @@ Host 冷重置可先调用 `source.retire_bindings()`，同时退休该源的计
 组件名称、语义身份和配置 guard 仍各自保留，恢复后的合同完整相同且不共享可变字典。
 v2 需要配套 reader，新 reader 继续读取 v1；这不合并实例，也不删除必要的静态算法差异。
 
+同一选项也对 `component_entries/` 中完全相同的资源组 schema 字符串去重，使用
+`component_entry_records_v1`。组名、成员绑定和各入口身份仍留在原入口；schema 的
+原始字符串逐字保留。`export_package()` 默认启用这项存储选择，只有计入压缩和文件头
+后更小时才共享。消费者通过 `Module.component_entry_contract()` 在冷准备阶段还原，
+不增加每步处理；需要支持此入口存储格式的 Runtime。冻结归档工具同样支持入口记录。
+
 Runtime 的 `inspect_component()` 和加载组件共用读取路径：检查片段摘要、引用位置
 和完整合同摘要，恢复原合同后继续执行已有配置、ABI、资源、effects 和执行计划校验。
 每个逻辑调用获得独立的可变字典；磁盘共享不引入实例状态共享。该存储格式只比较完整

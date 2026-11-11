@@ -1664,6 +1664,14 @@ are unchanged and have independent mutable dictionaries. v2 requires its matchin
 reader, which also accepts v1. It neither merges instances nor removes necessary
 static algorithm differences.
 
+The same option shares exact resource-group schema strings in `component_entries/`
+using `component_entry_records_v1`. Group names, member bindings and entry identities
+remain local, and schema strings retain their exact spelling. `export_package()`
+enables this storage selection by default, only sharing when compression and file
+headers together become smaller. `Module.component_entry_contract()` restores entries
+during cold preparation without adding per-step work. The matching Runtime entry
+reader is required; the frozen-archive tool supports these records as well.
+
 Runtime inspection and loaded components share one reader. It verifies record digests,
 reference positions and the expanded contract digest, then runs the existing configuration,
 ABI, resource, effects and plan checks. Logical calls receive independent mutable

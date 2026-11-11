@@ -13,6 +13,7 @@ from zipfile import ZIP_DEFLATED, ZipFile, ZipInfo
 
 from taichi_forge_runtime.aot._component_storage import (
     decode_contract_document, encode_contract_documents, decode_plan_document, encode_plan_documents,
+    decode_entry_document, encode_entry_documents,
 )
 
 
@@ -33,6 +34,13 @@ def share_component_contracts(source, destination, *, shared_execution_plans=Fal
         for name, contract in roots.items():
             if decode_contract_document(json.loads(documents[name]), documents.__getitem__) != contract:
                 raise ValueError("Component storage roundtrip changed the original contract")
+        entries = {name: decode_entry_document(json.loads(archive.read(name)), archive.read)
+                   for name in names if name.startswith("component_entries/") and name.endswith(".json")}
+        entry_documents = encode_entry_documents(entries)
+        for name, contract in entries.items():
+            if decode_entry_document(json.loads(entry_documents[name]), entry_documents.__getitem__) != contract:
+                raise ValueError("Entry storage roundtrip changed the original contract")
+        documents.update(entry_documents)
         plans = {}
         if shared_execution_plans:
             from taichi_forge_runtime.aot._plan import ExecutionPlan, _unique_fields
@@ -53,7 +61,8 @@ def share_component_contracts(source, destination, *, shared_execution_plans=Fal
         with ZipFile(output, "w", compression=ZIP_DEFLATED, compresslevel=1) as target:
             target.comment = archive.comment
             for item in archive.infolist():
-                if (item.filename in roots or item.filename.startswith("component_contracts/")
+                if (item.filename in roots or item.filename in entries
+                        or item.filename.startswith("component_contracts/")
                         or shared_execution_plans and (item.filename in plans
                                                        or item.filename.startswith("execution_records/"))):
                     continue
@@ -73,7 +82,7 @@ def share_component_contracts(source, destination, *, shared_execution_plans=Fal
         stream.write(chosen)
     return dict(source=str(source.resolve()), source_sha256=sha256(original).hexdigest(),
                 destination=str(destination.resolve()), sha256=sha256(chosen).hexdigest(),
-                before_bytes=len(original), after_bytes=len(chosen), roots=len(roots),
+                before_bytes=len(original), after_bytes=len(chosen), roots=len(roots), entries=len(entries),
                 changed=chosen is not original, noncontract_payload_sha256=unchanged,
                 noncontract_compressed_byte_delta=compressed_delta,
                 shared_execution_plans=shared_execution_plans, execution_plan_count=len(plans))

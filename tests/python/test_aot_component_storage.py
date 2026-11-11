@@ -1,5 +1,6 @@
 """Shared artifact records preserve full contracts and instance admission."""
 from copy import deepcopy
+from contextlib import ExitStack, closing
 import json
 from pathlib import Path
 import random
@@ -17,6 +18,7 @@ from taichi_forge_runtime.aot import Runtime, inspect_component, ExecutionPlan
 from taichi_forge_runtime.aot._component_info import _document_reader
 from taichi_forge_runtime.aot._component_storage import (
     decode_contract_document, encode_contract_documents, decode_plan_document, encode_plan_documents,
+    decode_entry_document, encode_entry_documents,
 )
 from tests import test_utils
 from tests.python.test_aot_component_configuration import _NestedConfiguration
@@ -47,6 +49,111 @@ def test_shared_records_are_exact_and_do_not_alias():
     # Header/file overhead exceeds sharing savings for tiny contracts.
     tiny = {"components/a.json": {"entries": [{"x": 1}] * 2}}
     assert json.loads(encode_contract_documents(tiny)["components/a.json"]) == tiny["components/a.json"]
+
+
+def test_shared_entry_groups_preserve_binding_names_and_exact_schema_strings(tmp_path):
+    rng = random.Random(52)
+    # Schema JSON is itself a string in entry contracts. Preserve its exact
+    # spelling instead of interpreting or normalizing this inner ABI document.
+    group = json.dumps({"nodes": [{"name": rng.randbytes(400).hex()} for _ in range(100)]}, indent=2)
+    first = dict(version=1, entry="first", target="cpu", semantic_key="first",
+                 contract=dict(groups={"first.binding": group}, members={"x": ["first.binding", [0]]}))
+    second = deepcopy(first)
+    second.update(entry="second", semantic_key="second")
+    second["contract"].update(groups={"other.binding": group}, members={"x": ["other.binding", [0]]})
+    originals = {"component_entries/first.json": first, "component_entries/second.json": second}
+    encoded = encode_entry_documents(originals)
+    assert len(encoded) == 3
+    doc = json.loads(encoded["component_entries/first.json"])
+    assert doc["storage_format"] == "component_entry_records_v1"
+    assert doc["references"][0][0] == ["contract", "groups", "first.binding"]
+    for name, expected in originals.items():
+        restored = decode_entry_document(json.loads(encoded[name]), encoded.__getitem__)
+        assert restored == expected
+        restored["contract"]["groups"].clear()
+        assert decode_entry_document(json.loads(encoded[name]), encoded.__getitem__) == expected
+    for path in (["target"], ["contract", "members", "x"], ["contract", "groups", 0]):
+        bad = deepcopy(doc)
+        bad["references"][0][0] = path
+        with pytest.raises(ValueError, match="record path"):
+            decode_entry_document(bad, encoded.__getitem__)
+    with pytest.raises(ValueError, match="record digest"):
+        decode_entry_document(doc, lambda _: b'"corrupt"')
+    bad = deepcopy(doc)
+    bad["entry_contract"]["semantic_key"] = "changed"
+    with pytest.raises(ValueError, match="entry_contract digest"):
+        decode_entry_document(bad, encoded.__getitem__)
+    tiny = {"component_entries/tiny.json": {"contract": {"groups": {"a": "{}", "b": "{}"}}}}
+    assert json.loads(encode_entry_documents(tiny)["component_entries/tiny.json"]) == tiny["component_entries/tiny.json"]
+
+    # Exercise the existing frozen-archive tool, including a second conversion:
+    # it must retain records still referenced by entry documents.
+    from taichi_forge.tools._component_archive import share_component_contracts
+
+    original, shared, repeated = (tmp_path / name for name in ("original.tcm", "shared.tcm", "repeated.tcm"))
+    with ZipFile(original, "w") as archive:
+        for name, value in originals.items():
+            archive.writestr(name, json.dumps(value))
+        archive.writestr("code.bc", b"unchanged compiled bytes")
+    assert share_component_contracts(original, shared)["entries"] == 2
+    share_component_contracts(shared, repeated)
+    for path in (shared, repeated):
+        with ZipFile(path) as archive:
+            for name, expected in originals.items():
+                assert decode_entry_document(json.loads(archive.read(name)), archive.read) == expected
+            assert archive.read("code.bc") == b"unchanged compiled bytes"
+
+
+@test_utils.test(arch=[ti.cpu, ti.cuda], offline_cache=False)
+def test_shared_entry_groups_load_and_run_original_field_code(tmp_path):
+    from taichi_forge.aot._component import DenseField, Dimension
+
+    @ti.data_oriented
+    class Model:
+        def __init__(self, n):
+            self.n = n
+            # A wide, real SNode layout makes sharing worthwhile after deflate.
+            self.x = ti.Matrix.field(12, 12, ti.f32, shape=n)
+
+        @ti.kernel
+        def step(self):
+            for i in range(self.n):
+                self.x[i][0, 0] += i + 1
+                self.x[i][11, 11] = i * 2
+
+    env = Component(n=Dimension(), x=DenseField(ti.types.matrix(12, 12, ti.f32), ("n",), "state"))
+    producer = Model(7)
+    code = env.compile(producer.step)
+    module = ti.aot.Module()
+    for index in range(12):
+        code.export(module, "entry" + str(index))
+    artifact = tmp_path / "entries.tcm"
+    module.archive(str(artifact), shared_component_contracts=True)
+    with ZipFile(artifact) as archive:
+        assert json.loads(archive.read("component_entries/entry0.json"))["storage_format"] == "component_entry_records_v1"
+        archive.extractall(tmp_path / "directory")
+    with Runtime(ti.cfg.arch.name) as runtime, ExitStack() as stack:
+        loaded = stack.enter_context(runtime.load_module(artifact))
+        directory = stack.enter_context(runtime.load_module(tmp_path / "directory"))
+        metadata = loaded.component_entry_contract("entry0")
+        assert directory.component_entry_contract("entry0") == metadata
+        assert metadata["contract"] == code.contract
+        instances = []
+        for n in (3, 11):
+            contract = loaded.component_entry_contract("entry0")["contract"]
+            group = stack.enter_context(runtime.dense_snode_group(contract["groups"]["state"], {"n": n}))
+            view = stack.enter_context(closing(group.member(contract["members"]["x"][1], "f32", element_shape=(12, 12))))
+            view.write(np.zeros((n, 12, 12), np.float32).tobytes())
+            arguments = []
+            for name, declaration in contract["captures"]:
+                arguments.append(n if declaration[0] == "dimension" else view)
+            reference = Model(n)
+            instances.append((arguments, view, reference))
+        for index in (0, 1, 0):
+            arguments, view, reference = instances[index]
+            loaded.kernel("entry0")(*arguments)
+            reference.step()
+            np.testing.assert_array_equal(view.to_numpy(), reference.x.to_numpy())
 
 
 def test_local_specializations_share_layout_contracts_without_sharing_state():
@@ -198,10 +305,12 @@ def test_shared_contract_export_and_loaded_instances(tmp_path):
         assert any(name.startswith("component_contracts/") for name in new.namelist())
         assert shared.stat().st_size < legacy.stat().st_size
         for name in old.namelist():
-            if not name.startswith(("components/", "executions/")):
+            if not name.startswith(("components/", "executions/", "component_entries/")):
                 assert new.read(name) == old.read(name)
             elif name.startswith("executions/"):
                 assert decode_plan_document(json.loads(new.read(name)), new.read) == json.loads(old.read(name))
+            elif name.startswith("component_entries/"):
+                assert decode_entry_document(json.loads(new.read(name)), new.read) == json.loads(old.read(name))
         directory = tmp_path / "directory"
         new.extractall(directory)
     for index in range(4):
@@ -210,6 +319,11 @@ def test_shared_contract_export_and_loaded_instances(tmp_path):
         assert inspect_component(directory, name).contract == inspect_component(legacy, name).contract
         assert inspect_component(rewritten, name).contract == inspect_component(legacy, name).contract
     with Runtime("cpu") as runtime, runtime.load_module(shared) as loaded:
+        with ZipFile(legacy) as original:
+            for name in original.namelist():
+                if name.startswith("component_entries/"):
+                    expected = json.loads(original.read(name))
+                    assert loaded.component_entry_contract(expected["entry"]) == expected
         component = loaded.component("step0")
         configuration = {name: (128 if source["path"] == ["repeat"] else
                                 source["path"][-1] == "scale")

@@ -2647,7 +2647,7 @@ def _export_package(package, output, *, arch, caps, source_root, compilation, ar
     staging = Path(tempfile.mkdtemp(prefix=".forge-package-", dir=output.parent))
     complete = False
     try:
-        module.archive(str(staging / "code.tcm"))
+        module.archive(str(staging / "code.tcm"), shared_component_contracts=True)
         for relative, data in payloads.items():
             target = staging / relative
             target.parent.mkdir(parents=True, exist_ok=True)
