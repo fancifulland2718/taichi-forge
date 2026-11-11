@@ -5,7 +5,6 @@ import copy
 import gc
 import hashlib
 import json
-from contextlib import contextmanager
 from types import SimpleNamespace
 
 
@@ -102,21 +101,6 @@ class PackageCompilation:
                 function.mapper = TaichiCallableTemplateMapper(function.arguments, function.template_slot_locations)
                 self.functions[source] = function
         return self.functions[source]
-
-    @contextmanager
-    def function_call_scope(self, ctx):
-        # Calls at kernel scope can contribute parallel offloads or CTA-local
-        # storage. Turning that helper into a serial device function changes
-        # execution semantics. Only calls already inside an iteration/function
-        # may acquire a library boundary, including nested inline helpers.
-        previous = self.thread_local_call
-        self.thread_local_call = previous or ctx.is_real_function or any(
-            not scope.is_static for scope in ctx.loop_scopes
-        )
-        try:
-            yield
-        finally:
-            self.thread_local_call = previous
 
     def _release_functions(self):
         for function in self.functions.values():

@@ -634,39 +634,45 @@ class ASTTransformer(Builder):
             return node.ptr
 
         compilation = getattr(ctx.deployment.kernel, "_package_compilation", None) if ctx.deployment else None
-        if compilation is not None and compilation.function_library:
-            with compilation.function_call_scope(ctx):
-                return ASTTransformer.build_function_call(ctx, node, func, args, keywords)
-        return ASTTransformer.build_function_call(ctx, node, func, args, keywords)
-
-    @staticmethod
-    def build_function_call(ctx, node, func, args, keywords):
-        if hasattr(node.func, "caller"):
-            node.ptr = func(node.func.caller, *args, **keywords)
-            return node.ptr
-        ASTTransformer.warn_if_is_external_func(ctx, node)
+        library = compilation is not None and compilation.function_library
+        previous = compilation.thread_local_call if library else False
+        if library:
+            # Keep this state on the existing AST call frame. Deep inline
+            # helpers must not acquire another Python call/contextmanager frame
+            # merely to decide whether a device-function boundary is legal.
+            compilation.thread_local_call = previous or ctx.is_real_function or any(
+                not scope.is_static for scope in ctx.loop_scopes
+            )
         try:
-            node.ptr = func(*args, **keywords)
-        except TypeError as e:
-            module = inspect.getmodule(func)
-            error_msg = re.sub(r"\bExpr\b", "Taichi Expression", str(e))
-            msg = f"TypeError when calling `{func.__name__}`: {error_msg}."
-            if ASTTransformer.is_external_func(ctx, node.func.ptr):
-                args_has_expr = any([isinstance(arg, Expr) for arg in args])
-                if args_has_expr and (module == math or module == np):
-                    exec_str = f"from taichi_forge import {func.__name__}"
-                    try:
-                        exec(exec_str, {})
-                    except:
-                        pass
-                    else:
-                        msg += f"\nDid you mean to use `ti.{func.__name__}` instead of `{module.__name__}.{func.__name__}`?"
-            raise TaichiTypeError(msg)
+            if hasattr(node.func, "caller"):
+                node.ptr = func(node.func.caller, *args, **keywords)
+                return node.ptr
+            ASTTransformer.warn_if_is_external_func(ctx, node)
+            try:
+                node.ptr = func(*args, **keywords)
+            except TypeError as e:
+                module = inspect.getmodule(func)
+                error_msg = re.sub(r"\bExpr\b", "Taichi Expression", str(e))
+                msg = f"TypeError when calling `{func.__name__}`: {error_msg}."
+                if ASTTransformer.is_external_func(ctx, node.func.ptr):
+                    args_has_expr = any([isinstance(arg, Expr) for arg in args])
+                    if args_has_expr and (module == math or module == np):
+                        exec_str = f"from taichi_forge import {func.__name__}"
+                        try:
+                            exec(exec_str, {})
+                        except:
+                            pass
+                        else:
+                            msg += f"\nDid you mean to use `ti.{func.__name__}` instead of `{module.__name__}.{func.__name__}`?"
+                raise TaichiTypeError(msg)
 
-        if getattr(func, "_is_taichi_function", False):
-            ctx.func.has_print |= func.func.has_print
+            if getattr(func, "_is_taichi_function", False):
+                ctx.func.has_print |= func.func.has_print
 
-        return node.ptr
+            return node.ptr
+        finally:
+            if library:
+                compilation.thread_local_call = previous
 
     @staticmethod
     def build_FunctionDef(ctx, node):
