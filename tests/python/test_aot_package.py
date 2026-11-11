@@ -181,17 +181,30 @@ class Model:
 
 
 @test_utils.test(arch=ti.cuda, offline_cache=False)
-def test_package_bitcode_library_preserves_jit_functions(tmp_path, monkeypatch):
+@pytest.mark.parametrize("fail_export", [False, True])
+def test_package_bitcode_library_preserves_jit_functions(tmp_path, monkeypatch, fail_export):
     from taichi_forge.aot._package_compilation import PackageCompilation
 
     original_compile = PackageCompilation.compile
+    original_release = PackageCompilation._release_functions
     sealed_units = []
+    retired = []
+
+    def release(transaction):
+        definitions = [native for function in transaction.functions.values() if function is not None
+                       for native in function.taichi_functions.values()]
+        original_release(transaction)
+        assert all(native._definition_retired() for native in definitions)
+        retired.extend(definitions)
 
     def observe(transaction, code):
+        if fail_export and code.entry_definition[1].endswith('.second'):
+            raise RuntimeError('injected package export failure')
         original_compile(transaction, code)
         sealed_units.append(transaction.module._aot_builder._streaming_export_statistics()['shared_code_units'])
 
     monkeypatch.setattr(PackageCompilation, 'compile', observe)
+    monkeypatch.setattr(PackageCompilation, '_release_functions', release)
     source = '''import taichi_forge as ti
 @ti.data_oriented
 class Model:
@@ -236,7 +249,17 @@ class Model:
     normal = package.model.Model(5)
     normal.first(2)
     expected = normal.out.to_numpy()
+    if fail_export:
+        from taichi_forge.aot._package import PackageExportError
+
+        with pytest.raises(PackageExportError, match='injected package export failure'):
+            ti.aot.export_package(package, tmp_path / 'sdk', artifact_format='bc-library')
+        assert retired and all(native._definition_retired() for native in retired)
+        normal.first(4)
+        np.testing.assert_array_equal(normal.out.to_numpy(), 12 + np.arange(5))
+        return
     manifest = ti.aot.export_package(package, tmp_path / 'sdk', artifact_format='bc-library')
+    assert retired and all(native._definition_retired() for native in retired)
     assert max(sealed_units) == 2  # sharing happens during streaming, before archive()
     assert all(not f.is_real_function and not f.taichi_functions for f in functions)
     with zipfile.ZipFile(tmp_path / 'sdk/code.tcm') as archive:

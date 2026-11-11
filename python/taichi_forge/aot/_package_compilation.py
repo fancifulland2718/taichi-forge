@@ -30,6 +30,7 @@ class PackageCompilation:
         self.exported = {}
         self.resource_effects = {}
         self.functions = {}
+        self.retired_function_definitions = 0
         self.function_library = False
         self.thread_local_call = False
         self.static_preparation = None
@@ -120,6 +121,12 @@ class PackageCompilation:
     def _release_functions(self):
         for function in self.functions.values():
             if function is not None:
+                # These are build-owned copies, never the ordinary JIT Func's
+                # definitions. Program retains native shells; dropping Python
+                # handles alone would keep every callee's frontend IR alive.
+                for definition in function.taichi_functions.values():
+                    definition._retire_definition()
+                    self.retired_function_definitions += 1
                 function.compiled = {}
                 function.taichi_functions.clear()
 

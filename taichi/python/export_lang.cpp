@@ -7913,6 +7913,11 @@ void export_lang(py::module &m) {
       .def("get_struct_ret_float", &LaunchContextBuilder::get_struct_ret_float);
 
   py::class_<Function>(m, "Function")
+      // Definition-package builders own private functions whose callers have
+      // already been serialized. Retire their IR without deleting the stable
+      // Program-owned function shell or touching executable/library payloads.
+      .def("_retire_definition", &Function::retire_definition)
+      .def("_definition_retired", &Function::definition_retired)
       .def("insert_scalar_param", &Function::insert_scalar_param)
       .def("insert_value_param", &Function::insert_value_param)
       .def("record_argument_origin", &Function::record_argument_origin)
