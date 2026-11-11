@@ -717,6 +717,59 @@ def step(self):
 
 
 @test_utils.test(arch=ti.cuda, offline_cache=False)
+def test_package_library_prepares_packed_matrix_addressing(tmp_path, monkeypatch):
+    source = '''import taichi_forge as ti
+@ti.data_oriented
+class Model:
+    def __init__(self, n: int, packed: bool):
+        self.n, self.packed = n, packed
+        self.rows = n * n if packed else n
+        self.cols = 1 if packed else n
+        scope = ti.experimental.ResourceScope(self)
+        scope.dim('n')
+        scope.static('packed', choices=(False, True))
+        scope.matrix = scope.field(ti.f32, shape=(scope.dim('rows'), scope.dim('cols')))
+        scope.out = scope.field(ti.f32, shape=scope.dim('n'))
+    @ti.func
+    def read(self, row: ti.i32, col: ti.i32) -> ti.f32:
+        value = 0.0
+        if ti.static(self.packed):
+            value = self.matrix[row * self.n + col, 0]
+        else:
+            value = self.matrix[row, col]
+        return value
+    @ti.kernel
+    def step(self):
+        for row in range(self.n):
+            value = 0.0
+            for col in range(self.n):
+                value += self.read(row, col)
+            self.out[row] = value
+'''
+    package = _source_package(tmp_path, monkeypatch, source)
+    manifest = ti.aot.export_package(package, tmp_path / 'sdk', artifact_format='bc-library')
+    entries = [e for e in manifest['entries'].values() if e['definition'].endswith('.Model.step')]
+    assert len(entries) == 1
+    assert {c['name'] for c in entries[0]['captures'] if 'prepare_static' in c} == {'packed'}
+    with Runtime('cuda') as runtime, load_package(runtime, tmp_path / 'sdk') as code:
+        for n in (3, 7):
+            instances = []
+            for packed in (False, True):
+                aot, jit = code.host.Model(n, packed), package.model.Model(n, packed)
+                values = np.arange(n * n, dtype=np.float32).reshape(n, n) + int(packed)
+                for model in (aot, jit):
+                    model.matrix.from_numpy(values.reshape(model.rows, model.cols))
+                    model.step()
+                np.testing.assert_array_equal(aot.out.to_numpy(), jit.out.to_numpy())
+                np.testing.assert_array_equal(aot.out.to_numpy(), values.sum(axis=1))
+                instances.append((aot, values.sum(axis=1)))
+            # Opposite layouts in one loaded library keep independent bindings.
+            for aot, expected in instances:
+                aot.step()
+                np.testing.assert_array_equal(aot.out.to_numpy(), expected)
+
+
+@test_utils.test(arch=ti.cuda, offline_cache=False)
 def test_package_library_keeps_type_choices_out_of_prepare_conditions(tmp_path, monkeypatch):
     source = '''import taichi_forge as ti
 @ti.data_oriented

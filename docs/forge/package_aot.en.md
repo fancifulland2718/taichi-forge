@@ -62,7 +62,15 @@ force whole-entry variants of the enclosing condition. Conditional dtype
 selection, type/resource aliases and unrecognized conversion calls keep the
 conservative rules. Fixed integer enums used as numerical scheduling values can
 be explicitly cast to their existing integer type instead of being treated as
-Python object aliases. Model template expressions
+Python object aliases. Where storage alternatives can use the same dtype, rank
+and resource-group contract, normal Host preparation can choose extents for one
+set of dynamic dimensions. For example, a packed matrix can use `(value_count, 1)`
+and a dense matrix `(n, n)` without adding packed elements. Its addressing
+condition can then use the existing prepare-time numerical specialization rules
+instead of copying the whole entry. Forge does not automatically reinterpret
+existing Fields of different ranks; uploads and reads must follow the normal
+resource declaration. The focused CUDA test covers two sizes, both address
+calculations and simultaneously live independent instances. Model template expressions
 crossing `real_func` boundaries are rebuilt from immutable argument provenance in
 the callee; they do not reuse caller-owned IR or ship Python ASTs.
 
