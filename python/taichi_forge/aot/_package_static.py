@@ -175,7 +175,12 @@ class StaticPreparation:
             choices = item["choices"]
             path = paths[name]
             reasons = uses.get(path[-1], {"unproven_use"})
-            if name in protected or item.get("conditions"):
+            if len(choices) == 1:
+                # A frozen capability has no combination cost. Keeping it at
+                # build time also keeps unsupported/dead branches unreachable;
+                # turning it into a runtime value would capture both arms.
+                reason = "single_choice"
+            elif name in protected or item.get("conditions"):
                 reason = "resource_or_layout"
             elif not all(v[0] in ("bool", "int") and -(2**31) <= v[1] < 2**31 for v in choices):
                 reason = "type_or_non_i32_value"

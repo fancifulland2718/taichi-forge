@@ -27,14 +27,23 @@ def test_package_library_prepares_independent_static_conditions(tmp_path, monkey
 class Model:
     def __init__(self, n: int, first: bool, second: bool, third: bool):
         self.n, self.first, self.second, self.third = n, first, second, third
+        self.disabled, self.always_on = False, True
         scope = ti.experimental.ResourceScope(self)
         scope.dim('n')
         scope.static('first', choices=(False, True))
         scope.static('second', choices=(False, True))
         scope.static('third', choices=(False, True))
+        scope.static('disabled', choices=(False,))
+        scope.static('always_on', choices=(True,))
         scope.out = scope.field(ti.i32, shape=scope.dim('n'))
     @ti.func
     def shared(self, i: ti.i32):
+        if ti.static(self.disabled):
+            self.out[i] += self.unsupported_gain
+        if ti.static(self.always_on):
+            self.out[i] += 1
+        else:
+            self.out[i] += self.unsupported_gain
         if ti.static(self.first):
             self.out[i] += 3
         if ti.static(self.second):
