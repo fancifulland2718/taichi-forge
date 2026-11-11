@@ -1521,7 +1521,10 @@ class ASTTransformer(Builder):
 
             guard = getattr(node, "_uniform_loop_guard", None)
             if guard is not None:
-                end = ti_ops.ifte(guard, end, begin)
+                # The schedule proof admits only pure bounds. Keep their
+                # selection in SSA so prepared Host-range analysis can see it,
+                # instead of introducing a serial task/global-temporary phi.
+                end = ti_ops.select(guard, end, begin)
             for_di = _ti_core.DebugInfo(ctx.get_pos_info(node))
             ctx.ast_builder.begin_frontend_range_for(loop_var.ptr, begin.ptr, end.ptr, for_di)
             with iteration_scope(ctx, loop_var, begin, end):
@@ -1541,7 +1544,7 @@ class ASTTransformer(Builder):
             )
             guard = getattr(node, "_uniform_loop_guard", None)
             if guard is not None:
-                ndrange_end = ti_ops.ifte(guard, ndrange_end, 0)
+                ndrange_end = ti_ops.select(guard, ndrange_end, 0)
             ndrange_loop_var = expr.Expr(ctx.ast_builder.make_id_expr(""))
             for_di = _ti_core.DebugInfo(ctx.get_pos_info(node))
             ctx.ast_builder.begin_frontend_range_for(ndrange_loop_var.ptr, ndrange_begin.ptr, ndrange_end.ptr, for_di)
@@ -1591,7 +1594,7 @@ class ASTTransformer(Builder):
             )
             guard = getattr(node, "_uniform_loop_guard", None)
             if guard is not None:
-                ndrange_end = ti_ops.ifte(guard, ndrange_end, 0)
+                ndrange_end = ti_ops.select(guard, ndrange_end, 0)
             ndrange_loop_var = expr.Expr(ctx.ast_builder.make_id_expr(""))
             for_di = _ti_core.DebugInfo(ctx.get_pos_info(node))
             ctx.ast_builder.begin_frontend_range_for(ndrange_loop_var.ptr, ndrange_begin.ptr, ndrange_end.ptr, for_di)
@@ -1729,6 +1732,10 @@ class ASTTransformer(Builder):
     def build_For(ctx, node):
         if node.orelse:
             raise TaichiSyntaxError("'else' clause for 'for' not supported in Taichi kernels")
+        compilation = getattr(ctx.deployment.kernel, "_package_compilation", None) if ctx.deployment else None
+        if (compilation is not None and compilation.schedule_guard is not None and not ctx.is_real_function
+                and not compilation.thread_local_call and not any(not scope.is_static for scope in ctx.loop_scopes)):
+            node._uniform_loop_guard = compilation.schedule_guard
         decorator = ASTTransformer.get_decorator(ctx, node.iter)
         double_decorator = ""
         if decorator != "" and len(node.iter.args) == 1:
@@ -1841,16 +1848,30 @@ class ASTTransformer(Builder):
             if ASTResolver.resolve_to(expression, loop_config, ctx.global_vars):
                 return "loop_config"
             return ASTTransformer.get_decorator(ctx, ast.Call(func=expression))
-        if uniform_range_schedule(node, kind):
+        compilation = getattr(ctx.deployment.kernel, "_package_compilation", None)
+        helpers = compilation.static_preparation.schedule_functions if (
+            compilation is not None and compilation.static_preparation is not None
+        ) else ()
+        if uniform_range_schedule(node, kind, helpers):
             for branch, truth in ((node.body, True), (node.orelse, False)):
                 if not branch:
                     continue
                 guard = node.test.ptr if truth else ti_ops.logical_not(node.test.ptr)
-                with ctx.deployment.input_condition(node.test.ptr, truth), ctx.variable_scope_guard():
-                    for statement in branch:
-                        if isinstance(statement, ast.For):
-                            statement._uniform_loop_guard = guard
-                        build_stmt(ctx, statement)
+                previous = compilation.schedule_guard if compilation is not None else None
+                if (previous is not None and not compilation.thread_local_call and not ctx.is_real_function
+                        and not any(not scope.is_static for scope in ctx.loop_scopes)):
+                    guard = ti_ops.logical_and(previous, guard)
+                if compilation is not None:
+                    compilation.schedule_guard = guard
+                try:
+                    with ctx.deployment.input_condition(node.test.ptr, truth), ctx.variable_scope_guard():
+                        for statement in branch:
+                            if isinstance(statement, ast.For):
+                                statement._uniform_loop_guard = guard
+                            build_stmt(ctx, statement)
+                finally:
+                    if compilation is not None:
+                        compilation.schedule_guard = previous
             return True
         if node.orelse or len(node.body) != 1 or not isinstance(node.body[0], ast.For):
             return False

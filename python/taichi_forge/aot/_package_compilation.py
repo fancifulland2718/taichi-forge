@@ -32,6 +32,7 @@ class PackageCompilation:
         self.retired_function_definitions = 0
         self.function_library = False
         self.thread_local_call = False
+        self.schedule_guard = None
         self.static_preparation = None
         self.static_policies = {}
         self._automatic_gc = None

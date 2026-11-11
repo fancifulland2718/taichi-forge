@@ -745,6 +745,14 @@ class _StaticTemplate:
     value: object
 
 
+@dataclass(frozen=True)
+class _UniformTemplate:
+    # Producer-only provenance for a template expression crossing a callable
+    # boundary. Never retain an Expr belonging to the caller's IR builder.
+    expression: tuple
+    dtype: object
+
+
 def _used_template_signature(signature, used):
     """Project explicit static facts at the same AST reads as resource facts."""
 
@@ -1997,9 +2005,19 @@ class _Capture:
 
     def call_real_function(self, function, args):
         from taichi_forge._lib import core
+        from taichi_forge.lang._local_tensor import is_model_value
 
         if not core.arch_uses_llvm(impl.current_cfg().arch):
             raise TaichiCompilationError("real_func AOT requires an LLVM backend (CPU or CUDA)")
+        args = list(args)
+        for index in function.template_slot_locations:
+            if is_model_value(args[index]):
+                expression = getattr(args[index], '_uniform_extent', None)
+                if expression is None:
+                    raise TaichiCompilationError(
+                        'A model template passed to real_func requires immutable scalar provenance; '
+                        'use a typed scalar parameter for other runtime expressions')
+                args[index] = _UniformTemplate(freeze_extent(expression), args[index].ptr.get_rvalue_type())
         function._ensure_real_function_cache_current_program()
         instance_id, features = function.mapper.lookup(args)
         identity = (function, instance_id)
@@ -2065,6 +2083,31 @@ class _Capture:
         return function.func_call_rvalue(state["key"], args, capture_arguments=arguments, capture_values=values)
 
     def resolve_template(self, ctx, value):
+        if isinstance(value, _UniformTemplate):
+            from taichi_forge.lang import ops
+
+            def lower(expression):
+                op, *arguments = expression
+                if op == 'const':
+                    return arguments[0]
+                if op == 'dim':
+                    path = self.component._paths[arguments[0]]
+                    return self.attribute(ctx, path[-1], prefix=path[:-1])
+                operations = {
+                    'add': ops.add, 'sub': ops.sub, 'mul': ops.mul,
+                    'floordiv': ops.floordiv, 'min': ops.min, 'max': ops.max,
+                    'cmp_lt': ops.cmp_lt, 'cmp_le': ops.cmp_le, 'cmp_gt': ops.cmp_gt,
+                    'cmp_ge': ops.cmp_ge, 'cmp_eq': ops.cmp_eq, 'cmp_ne': ops.cmp_ne,
+                    'logical_and': ops.logical_and, 'logical_or': ops.logical_or, 'select': ops.ifte,
+                }
+                if op not in operations:
+                    raise TaichiCompilationError(f'Unsupported model template expression {op!r}')
+                return operations[op](*(lower(argument) for argument in arguments))
+
+            result = ops.cast(lower(value.expression), value.dtype)
+            result._model_uniform = True
+            result._uniform_extent = value.expression
+            return result
         if isinstance(value, _OptionalArrayReference) and not ctx.is_in_static_scope():
             return self.attribute(ctx, value.path[-1], prefix=value.path[:-1])
         if isinstance(value, _StaticTemplate):

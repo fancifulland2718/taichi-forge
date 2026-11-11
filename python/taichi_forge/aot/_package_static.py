@@ -8,7 +8,7 @@ Unproven structural uses keep the ordinary finite specialization contract.
 import ast
 import copy
 
-from taichi_forge.lang.ast._uniform_schedule import uniform_range_schedule
+from taichi_forge.lang.ast._uniform_schedule import helper_call_name, uniform_range_schedule, uniform_range_statements
 
 
 class StaticPreparation:
@@ -18,13 +18,27 @@ class StaticPreparation:
         self._entry_uses = {}
         self._functions = {}
         self._names = {}
+        self._syntax = {}
+        self._local_values = {}
+        self._value_uses = {}
+        self._ambiguous_names = set()
         functions = []
         for module, _, _, _, tree, kind, _, _ in sources:
             tree_parents = {id(child): node for node in ast.walk(tree) for child in ast.iter_child_nodes(node)}
             for function in ast.walk(tree):
-                if not isinstance(function, ast.FunctionDef) or not any(
+                # Name-based closure analysis must not mistake a shadowing
+                # parameter, callable alias or ordinary Host method for a
+                # decorated helper. Ambiguity retains producer specialization.
+                if isinstance(function, ast.arg):
+                    self._ambiguous_names.add(function.arg)
+                elif isinstance(function, (ast.Name, ast.Attribute)) and isinstance(function.ctx, ast.Store):
+                    self._ambiguous_names.add(getattr(function, 'id', getattr(function, 'attr', '')))
+                if not isinstance(function, ast.FunctionDef):
+                    continue
+                if not any(
                     kind(d) in ("kernel", "func", "real_func", "pyfunc") for d in function.decorator_list
                 ):
+                    self._ambiguous_names.add(function.name)
                     continue
                 names, ancestor = [function.name], function
                 while (ancestor := tree_parents.get(id(ancestor))) is not None:
@@ -33,6 +47,42 @@ class StaticPreparation:
                 identity = module + "." + ".".join(names)
                 functions.append((identity, function, kind))
                 self._names.setdefault(function.name, set()).add(identity)
+        for identity, function, kind in functions:
+            parents = {id(child): node for node in ast.walk(function) for child in ast.iter_child_nodes(node)}
+            self._syntax[identity] = function, parents, kind
+            reads, stores, aliases = {}, {}, {}
+            for node in ast.walk(function):
+                if isinstance(node, ast.Name):
+                    (reads if isinstance(node.ctx, ast.Load) else stores).setdefault(node.id, []).append(node)
+            # Only immutable, dominating aliases are followed. Branch-local
+            # assignments and rebinding retain the finite producer contract.
+            for statement in function.body:
+                if (isinstance(statement, ast.Assign) and len(statement.targets) == 1
+                        and isinstance(statement.targets[0], ast.Name)
+                        and isinstance(statement.value, ast.Call) and kind(statement.value.func) == 'static'):
+                    name = statement.targets[0].id
+                    if (len(stores.get(name, ())) == 1
+                            and all(read.lineno > statement.end_lineno for read in reads.get(name, ()))):
+                        aliases[id(statement)] = name
+            if any(isinstance(node, (ast.FunctionDef, ast.Lambda)) and node is not function
+                   for node in ast.walk(function)):
+                aliases.clear()
+            self._local_values[id(function)] = reads, stores, aliases
+        # A call name qualifies only when every definition with that name in
+        # the source closure is a proven inline schedule. Recursive/unresolved
+        # groups never bootstrap themselves into this set.
+        self.schedule_functions = set()
+        while True:
+            proven = {
+                identity for identity, function, kind in functions
+                if any(kind(d) in ("func", "pyfunc") for d in function.decorator_list)
+                and uniform_range_statements(function.body, kind, self.schedule_functions)
+            }
+            names = {name for name, identities in self._names.items()
+                     if name not in self._ambiguous_names and identities <= proven}
+            if names <= self.schedule_functions:
+                break
+            self.schedule_functions.update(names)
         # Inline helpers at kernel scope can contribute parallel tasks. Follow
         # their ordinary call names conservatively before moving a condition;
         # the absence of loop_config at the call site is not a legality proof.
@@ -73,7 +123,7 @@ class StaticPreparation:
                             context.setdefault(node.args[1].value, set()).add("reflective_use")
                 if isinstance(node, ast.Attribute) and isinstance(node.ctx, ast.Load):
                     for threaded, context in uses.items():
-                        context.setdefault(node.attr, set()).add(self._use(node, parents, kind, threaded))
+                        context.setdefault(node.attr, set()).update(self._use(node, parents, kind, threaded))
             self._functions[identity] = uses, edges
             for name, reasons in uses[False].items():
                 self.uses.setdefault(name, set()).update(reasons)
@@ -126,15 +176,65 @@ class StaticPreparation:
                     return True
         return False
 
-    def _use(self, node, parents, kind, outer_threaded=False):
+    def _local_use(self, function, name, parents, kind, threaded, visiting):
+        key = id(function), name, threaded
+        if key in visiting:
+            return {'recursive_value_use'}
+        if key in self._value_uses:
+            return self._value_uses[key]
+        reads, stores, aliases = self._local_values[id(function)]
+        if name in stores and name not in aliases.values():
+            return {'rebound_value'}
+        reasons = set()
+        for read in reads.get(name, ()):
+            reasons.update(self._use(read, parents, kind, threaded, visiting | {key}))
+        result = reasons or {'unused_value'}
+        # Recursive failures depend on the traversal stack, so never memoize
+        # them as facts for an unrelated entry.
+        if 'recursive_value_use' not in result:
+            self._value_uses[key] = result
+        return result
+
+    def _argument_use(self, call, child, parents, kind, threaded, visiting):
+        name = helper_call_name(call)
+        targets = self._names.get(name, ()) if name not in self._ambiguous_names else ()
+        if not targets or any(isinstance(arg, ast.Starred) for arg in call.args):
+            return {'unresolved_argument_use'}
+        keyword = child.arg if isinstance(child, ast.keyword) else None
+        if keyword is None and child not in call.args:
+            return {'non_condition_use'}
+        reasons = set()
+        for identity in targets:
+            function, target_parents, target_kind = self._syntax[identity]
+            parameters = function.args.posonlyargs + function.args.args
+            if function.args.vararg or function.args.kwarg:
+                return {'unresolved_argument_use'}
+            if keyword is not None:
+                names = {arg.arg for arg in parameters + function.args.kwonlyargs}
+                if keyword not in names:
+                    return {'unresolved_argument_use'}
+                name = keyword
+            else:
+                offset = int(isinstance(call.func, ast.Attribute))
+                index = call.args.index(child) + offset
+                if index >= len(parameters):
+                    return {'unresolved_argument_use'}
+                name = parameters[index].arg
+            if name in self._local_values[id(function)][1]:
+                return {'rebound_value'}
+            reasons.update(self._local_use(function, name, target_parents, target_kind,
+                                           threaded or self._threaded(call, parents, kind), visiting))
+        return reasons
+
+    def _use(self, node, parents, kind, outer_threaded=False, visiting=frozenset()):
         child = node
         while (parent := parents.get(id(child))) is not None:
             if isinstance(parent, (ast.If, ast.IfExp)) and child is parent.test:
                 branches = parent.body + parent.orelse if isinstance(parent, ast.If) else (parent.body, parent.orelse)
-                if uniform_range_schedule(parent, kind):
-                    return "prepare_condition"
+                if uniform_range_schedule(parent, kind, self.schedule_functions):
+                    return {"prepare_condition"}
                 if any(self._structural(branch, kind) for branch in branches):
-                    return "structural_branch"
+                    return {"structural_branch"}
                 threaded = outer_threaded or self._threaded(parent, parents, kind)
                 if not threaded and any(
                     isinstance(part, (ast.For, ast.While))
@@ -143,22 +243,35 @@ class StaticPreparation:
                     for branch in branches
                     for part in ast.walk(branch)
                 ):
-                    return "parallel_structure"
+                    return {"parallel_structure"}
                 # A scalar conditional used to construct a type/block still
                 # belongs to the producer, even when its two leaves are ints.
                 outer = parent
                 while (outer := parents.get(id(outer))) is not None and not isinstance(outer, ast.stmt):
                     if isinstance(outer, ast.Call) and kind(outer.func) != "static":
-                        return "structural_expression"
-                return "prepare_condition"
+                        return {"structural_expression"}
+                return {"prepare_condition"}
             if isinstance(parent, (ast.BoolOp, ast.UnaryOp, ast.Compare, ast.BinOp)):
                 child = parent
                 continue
             if isinstance(parent, ast.Call) and kind(parent.func) == "static":
                 child = parent
                 continue
-            return "non_condition_use"
-        return "non_condition_use"
+            if isinstance(parent, ast.keyword):
+                child = parent
+                continue
+            if isinstance(parent, ast.Call):
+                return self._argument_use(parent, child, parents, kind, outer_threaded, visiting)
+            if isinstance(parent, ast.Assign):
+                function = parent
+                while function is not None and not isinstance(function, ast.FunctionDef):
+                    function = parents.get(id(function))
+                if function is not None:
+                    alias = self._local_values[id(function)][2].get(id(parent))
+                    if alias is not None:
+                        return self._local_use(function, alias, parents, kind, outer_threaded, visiting)
+            return {"non_condition_use"}
+        return {"non_condition_use"}
 
     def classify(self, schema, paths, identity=None):
         """Read-only facts; useful before allocating a producer witness."""

@@ -145,6 +145,45 @@ class Model:
                     np.testing.assert_array_equal(aot.out.to_numpy(), jit.out.to_numpy())
 
 
+@test_utils.test(arch=[ti.cpu, ti.cuda], offline_cache=False)
+def test_package_specialization_preserves_live_ranges(tmp_path, monkeypatch):
+    source = '''import taichi_forge as ti
+@ti.data_oriented
+class Model:
+    def __init__(self, n: int, enabled: bool):
+        self.n, self.enabled = n, int(enabled)
+        scope = ti.experimental.ResourceScope(self)
+        scope.dim('n')
+        scope.value('enabled', ti.i32, affects_plan=True)
+        scope.out = scope.field(ti.i32, shape=scope.dim('n'))
+    @ti.kernel
+    def step(self, live_count: ti.i32):
+        if ti.static(self.enabled):
+            for i in range(self.n):
+                self.out[i] = i + 7
+        else:
+            for i in range(self.n):
+                self.out[i] = i - 5
+        for i in range(live_count):
+            self.out[i] += 11
+'''
+    cuda = ti.lang.impl.current_cfg().arch == ti.cuda
+    if cuda:
+        source = source.replace("scope.value('enabled', ti.i32, affects_plan=True)",
+                                "scope.static('enabled', choices=(0, 1))")
+    package = _source_package(tmp_path, monkeypatch, source)
+    ti.aot.export_package(package, tmp_path / 'sdk', artifact_format='bc-library' if cuda else 'bc')
+    with Runtime('cuda' if cuda else 'cpu') as runtime, load_package(runtime, tmp_path / 'sdk') as code:
+        for enabled in (False, True):
+            aot, jit = code.host.Model(13, enabled), package.model.Model(13, enabled)
+            for live_count in (0, 0, 13, 13, 2, 2):
+                aot.step(live_count)
+                jit.step(live_count)
+                np.testing.assert_array_equal(aot.out.to_numpy(), jit.out.to_numpy())
+            ready = next(iter(aot._forge_package_calls.values()))
+            assert ready.prepared is not None and ready.specialize
+
+
 @test_utils.test(arch=ti.cuda, offline_cache=False)
 def test_package_library_prepares_independent_static_conditions(tmp_path, monkeypatch):
     from itertools import product
@@ -270,7 +309,7 @@ class Model:
 '''
     package = _source_package(tmp_path, monkeypatch, source)
     manifest = ti.aot.export_package(package, tmp_path / 'sdk', artifact_format='bc-library')
-    for name, count in (('parallel', 2), ('numerical', 1)):
+    for name, count in (('parallel', 1), ('numerical', 1)):
         entries = [v for v in manifest['entries'].values() if v['definition'].endswith('.Model.' + name)]
         assert len(entries) == count
     with Runtime('cuda') as runtime, load_package(runtime, tmp_path / 'sdk') as code:
@@ -280,6 +319,176 @@ class Model:
             np.testing.assert_array_equal(owner.out.to_numpy(), np.arange(37) + 5 if enabled else np.zeros(37))
             owner.numerical()
             np.testing.assert_array_equal(owner.out.to_numpy(), np.arange(37) + 5 * enabled)
+
+
+@test_utils.test(arch=ti.cuda, offline_cache=False)
+def test_package_library_prepares_inline_helper_schedules(tmp_path, monkeypatch):
+    from itertools import product
+    from taichi_forge.aot._component import _ComponentCode
+
+    source = '''import taichi_forge as ti
+@ti.data_oriented
+class Model:
+    def __init__(self, n: int, enabled: bool, extra: bool):
+        self.n, self.enabled, self.extra = n, enabled, extra
+        scope = ti.experimental.ResourceScope(self)
+        scope.dim('n')
+        scope.static('enabled', choices=(False, True))
+        scope.static('extra', choices=(False, True))
+        scope.out = scope.field(ti.i32, shape=scope.dim('n'))
+    @ti.real_func
+    def value(self, i: ti.i32) -> ti.i32:
+        result = i + 3
+        if ti.static(self.extra):
+            for j in range(2):
+                result += j
+        return result
+    @ti.func
+    def fill(self, serialized: ti.template()):
+        ti.loop_config(serialize=serialized, block_dim=64)
+        for i in range(self.n):
+            self.out[i] = self.value(i)
+    @ti.func
+    def add(self):
+        if ti.static(self.extra):
+            ti.loop_config(block_dim=128)
+            for i in range(self.n):
+                self.out[i] += 7
+    @ti.func
+    def schedule(self):
+        self.fill(False)
+        self.add()
+    @ti.kernel
+    def step(self):
+        for i in range(self.n):
+            self.out[i] = -1
+        if ti.static(self.enabled):
+            self.schedule()
+'''
+    tasks = []
+    original = _ComponentCode.export
+
+    def observe(code, module, name):
+        result = original(code, module, name)
+        if code.entry_definition[1] == 'Model.step':
+            tasks.extend(code.runtime.prog._kernel_task_manifest(code.kernel.compiled_kernels[code.key]))
+        return result
+
+    monkeypatch.setattr(_ComponentCode, 'export', observe)
+    package = _source_package(tmp_path, monkeypatch, source)
+    manifest = ti.aot.export_package(package, tmp_path / 'sdk', artifact_format='bc-library')
+    entries = [v for v in manifest['entries'].values() if v['definition'].endswith('.Model.step')]
+    assert len(entries) == 1
+    assert {v['name'] for v in entries[0]['captures'] if 'prepare_static' in v} == {'enabled', 'extra'}
+    parallel = [task for task in tasks if task['task_type'] == 'range_for']
+    assert len(parallel) == 3, tasks
+    assert [task['selected_block_size'] for task in parallel[1:]] == [64, 128]
+    with Runtime('cuda') as runtime, load_package(runtime, tmp_path / 'sdk') as code:
+        for n in (3, 513):
+            for flags in product((False, True), repeat=2):
+                aot, jit = code.host.Model(n, *flags), package.model.Model(n, *flags)
+                aot.step()
+                jit.step()
+                np.testing.assert_array_equal(aot.out.to_numpy(), jit.out.to_numpy())
+
+
+@test_utils.test(arch=ti.cuda, offline_cache=False)
+@pytest.mark.parametrize('helper', ['func', 'real_func'])
+def test_package_library_follows_static_alias_and_argument_roles(tmp_path, monkeypatch, helper):
+    from itertools import product
+
+    source = '''import taichi_forge as ti
+@ti.data_oriented
+class Model:
+    def __init__(self, n: int, first: bool, second: bool, serial: bool):
+        self.n, self.first, self.second, self.serial = n, first, second, serial
+        scope = ti.experimental.ResourceScope(self)
+        scope.dim('n')
+        scope.static('first', choices=(False, True))
+        scope.static('second', choices=(False, True))
+        scope.static('serial', choices=(False, True))
+        scope.out = scope.field(ti.i32, shape=scope.dim('n'))
+    @ti.HELPER
+    def numerical(self, i: ti.i32, flag: ti.template()):
+        use = ti.static(not flag)
+        if ti.static(use):
+            self.out[i] += 3
+        else:
+            self.out[i] += 7
+    @ti.func
+    def policy(self, serial: ti.template()):
+        ti.loop_config(serialize=serial, block_dim=64)
+        for i in range(self.n):
+            self.out[i] *= 2
+    @ti.kernel
+    def step(self):
+        selected = ti.static(self.first and self.second)
+        alias = ti.static(selected)
+        serialized = ti.static(self.serial)
+        for i in range(self.n):
+            self.out[i] = i
+            self.numerical(i, flag=alias)
+        if ti.static(alias):
+            self.policy(False)
+        self.policy(serialized)
+'''.replace('ti.HELPER', 'ti.' + helper)
+    package = _source_package(tmp_path, monkeypatch, source)
+    manifest = ti.aot.export_package(package, tmp_path / 'sdk', artifact_format='bc-library')
+    entries = [v for v in manifest['entries'].values() if v['definition'].endswith('.Model.step')]
+    # Only the real execution policy remains a producer choice. Boolean alias
+    # and forwarded numerical predicate do not multiply the two callers by 4.
+    assert len(entries) == 2
+    assert all({c['name'] for c in e['captures'] if 'prepare_static' in c} == {'first', 'second'}
+               for e in entries)
+    with Runtime('cuda') as runtime, load_package(runtime, tmp_path / 'sdk') as code:
+        for flags in product((False, True), repeat=3):
+            for n in (3, 129):
+                aot, jit = code.host.Model(n, *flags), package.model.Model(n, *flags)
+                aot.step()
+                jit.step()
+                np.testing.assert_array_equal(aot.out.to_numpy(), jit.out.to_numpy())
+
+
+@pytest.mark.parametrize('body', [
+    'alias = ti.static(self.flag)\n    alias = False\n    if ti.static(alias):\n        x = 1',
+    'if ti.static(self.other):\n        alias = ti.static(self.flag)\n    if ti.static(alias):\n        x = 1',
+    'alias = ti.static(self.flag)\n    self.policy(alias)',
+    'alias = ti.static(self.flag)\n    self.unresolved(alias)',
+    'alias = ti.static(self.flag)\n    self.recursive(alias)',
+    'alias = ti.static(self.flag)\n    numerical = self.unresolved\n    numerical(alias)',
+    'alias = ti.static(self.flag)\n    self.host_method(alias)',
+])
+def test_package_static_alias_proof_keeps_unproven_uses(body):
+    from taichi_forge.aot._package_static import StaticPreparation
+    from taichi_forge.tools._compiled_host import decorator_resolver
+
+    source = '''import taichi_forge as ti
+@ti.func
+def policy(self, value: ti.template()):
+    ti.loop_config(serialize=value)
+    for i in range(3):
+        self.out[i] = i
+@ti.func
+def recursive(self, value: ti.template()):
+    self.recursive(value)
+@ti.func
+def numerical(value: ti.template()):
+    if ti.static(value):
+        x = 1
+@ti.func
+def host_method(self, value: ti.template()):
+    if ti.static(value):
+        x = 1
+class Other:
+    def host_method(self, value):
+        return value
+@ti.kernel
+def step(self):
+    BODY
+'''.replace('BODY', body)
+    tree = ast.parse(source)
+    proof = StaticPreparation([('model', None, None, source, tree, decorator_resolver(tree), None, None)])
+    assert proof.entry_uses('model.step')['flag'] != {'prepare_condition'}
 
 
 @test_utils.test(arch=ti.cuda, offline_cache=False)
