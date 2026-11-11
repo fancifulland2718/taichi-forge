@@ -1554,6 +1554,13 @@ class entry:
             buffers = HostBuffers(package.runtime, contract["arguments"], arguments)
             with buffers as prepared:
                 call = kernel.bind(*prepared)
+                specialize = selected.symbol in package._specialization_entries
+                constant_args = tuple(
+                    len(contract["arguments"]) + index
+                    for index, item in enumerate(contract["captures"])
+                    if item["kind"] == "dimension" or "prepare_static" in item
+                ) if specialize else ()
+                library = package.manifest.get("artifact_format") == "bc-library"
                 # Host arrays must upload/download on every call. Mutable
                 # tensor/scalar wrappers also require a fresh value snapshot.
                 reusable = not buffers.pending and all(
@@ -1563,25 +1570,23 @@ class entry:
                     item["kind"] == "value" and item.get("element_shape") for item in contract["captures"]
                 )
                 if reusable:
-                    specialize = selected.symbol in package._specialization_entries
-                    # Only declared model dimensions are scalar code facts.
-                    # Explicit ordinary integers (indices/counts/etc.) stay live.
-                    constant_args = tuple(
-                        len(contract["arguments"]) + index
-                        for index, item in enumerate(contract["captures"])
-                        if item["kind"] == "dimension"
-                    ) if specialize else ()
                     ready = CachedCall(guard, values, call, workspaces,
                                        specialize=specialize, constant_args=constant_args)
                     if previous is not None:
                         previous.close()
                     cache[self] = ready
                     retained = True
-                    return ready.run()
+                    return ready.run(reuse=specialize and library)
                 else:
                     if previous is not None:
                         previous.close()
                     cache.pop(self, None)
+                if specialize and library:
+                    # Host transfers still happen for every invocation. Native
+                    # code specialization is cached independently of that frame.
+                    with call.prepare(specialize=True, constant_args=constant_args) as ready:
+                        ready.run()
+                        return ready.result() if ready._return_layout is not None else None
                 return call.run()
         finally:
             # BoundCall retains memory even on a partially submitted failure.
@@ -1754,6 +1759,7 @@ class LoadedPackage:
                 78,
                 79,
                 80,
+                81,
             )
             or self.manifest.get("kind") != "forge_definition_package_prototype"
         ):
@@ -1763,6 +1769,11 @@ class LoadedPackage:
             raise ValueError("Application source package is missing its import boundary")
         if self.manifest["target"] != runtime.arch:
             raise ValueError("Package target differs from Runtime")
+        if self.manifest["version"] < 81 and any(
+            "prepare_static" in capture
+            for entry in self.manifest["entries"].values() for capture in entry.get("captures", ())
+        ):
+            raise ValueError("Prepared static inputs require definition package version 81")
         if self.manifest["version"] < 78 and any(
             member.get("dynamic_storage_condition")
             for owner in self.manifest["owners"].values()
@@ -1835,6 +1846,11 @@ class LoadedPackage:
         self._specialization_entries = specialization_entries(
             self.directory / "code.tcm", runtime.arch, self.manifest["entries"]
         )
+        if any(
+            name not in self._specialization_entries and any("prepare_static" in c for c in entry.get("captures", ()))
+            for name, entry in self.manifest["entries"].items()
+        ):
+            raise ValueError("Prepared static inputs require a specialization-capable numerical entry")
         self._module = runtime.load_module(self.directory / "code.tcm")
         self._arrays, self._kernels = [], {}
         self._call_lock = threading.RLock()

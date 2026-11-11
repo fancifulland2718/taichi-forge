@@ -1,9 +1,11 @@
 """Build-owned definitions, streamed into the existing AOT Module builder."""
 
+import ast
 import copy
 import gc
 import hashlib
 import json
+from contextlib import contextmanager
 from types import SimpleNamespace
 
 
@@ -27,14 +29,20 @@ class PackageCompilation:
         self.kernels = {}
         self.exported = {}
         self.resource_effects = {}
+        self.functions = {}
+        self.function_library = False
+        self.thread_local_call = False
+        self.static_preparation = None
+        self.static_policies = {}
         self._automatic_gc = None
 
     def __enter__(self):
         return self
 
-    def attach(self, module):
+    def attach(self, module, *, function_library=False):
         module._aot_builder._enable_streaming_exports()
         self.module = module
+        self.function_library = function_library
         # Discovery has finished. Keep short-lived lowering cycles in the young
         # generations until each private definition is sealed. Otherwise the
         # automatic collector can promote them, requiring a scan of the entire
@@ -55,9 +63,65 @@ class PackageCompilation:
             kernel.reset()
             kernel.kernel_cpp = None
             kernel.mapper = TaichiCallableTemplateMapper(kernel.arguments, kernel.template_slot_locations)
+            kernel._package_compilation = self
             kernel.runtime.kernels.add(kernel)
             self.kernels[source] = kernel
         return SimpleNamespace(_primal=self.kernels[source], _kernel_owner=getattr(entry, "_kernel_owner", None))
+
+    def library_function(self, source):
+        """Retain typed device boundaries without mutating JIT definitions.
+
+        Untyped returns and arguments keep their existing inline semantics.
+        This is an opt-in producer representation; prepared LLVM optimization
+        remains responsible for profitable inlining after constants are known.
+        """
+        if not self.function_library or not self.thread_local_call or not source._can_auto_promote():
+            return None
+        if source not in self.functions:
+            from taichi_forge.lang.kernel_impl import Func, TaichiCallableTemplateMapper
+
+            tree, _ = source._definition.acquire(cache=True)
+            if (source.return_type is None and any(
+                isinstance(node, ast.Return) and node.value is not None for node in ast.walk(tree)
+            )) or any(
+                isinstance(node, ast.Attribute) and node.attr in ("simt", "SharedArray", "loop_config")
+                for node in ast.walk(tree)
+            ):
+                self.functions[source] = None
+            else:
+                function = copy.copy(source)
+                function.func_id = Func.function_counter
+                Func.function_counter += 1
+                function.is_real_function = True
+                function.compiled = None
+                function.taichi_functions = {}
+                function._compiled_program = None
+                function._real_function_cache_variants = {}
+                function._next_real_function_variant_id = 0
+                function.mapper = TaichiCallableTemplateMapper(function.arguments, function.template_slot_locations)
+                self.functions[source] = function
+        return self.functions[source]
+
+    @contextmanager
+    def function_call_scope(self, ctx):
+        # Calls at kernel scope can contribute parallel offloads or CTA-local
+        # storage. Turning that helper into a serial device function changes
+        # execution semantics. Only calls already inside an iteration/function
+        # may acquire a library boundary, including nested inline helpers.
+        previous = self.thread_local_call
+        self.thread_local_call = previous or ctx.is_real_function or any(
+            not scope.is_static for scope in ctx.loop_scopes
+        )
+        try:
+            yield
+        finally:
+            self.thread_local_call = previous
+
+    def _release_functions(self):
+        for function in self.functions.values():
+            if function is not None:
+                function.compiled = {}
+                function.taichi_functions.clear()
 
     def compile(self, code):
         """Export each discovered implementation before exploring its neighbors."""
@@ -78,6 +142,7 @@ class PackageCompilation:
         self.module._exported_kernels[symbol] = identity
         code.kernel.compiled_kernels.pop(code.key)
         code.kernel.kernel_cpp = None
+        self._release_functions()
         # Lowering contexts can form Python cycles through AST/Expr objects.
         # Release their reference-internal builder leases before native GC.
         gc.collect(1)
@@ -107,7 +172,10 @@ class PackageCompilation:
             kernel._component_candidates.clear()
         self.exported.clear()
         self.resource_effects.clear()
+        self._release_functions()
+        self.functions.clear()
         self.kernels.clear()
+        self.static_preparation = None
         if self.module is not None:
             # Failed builds may have exported a native asset before its Python
             # contract validation failed. Drop the build-owned builder as well.

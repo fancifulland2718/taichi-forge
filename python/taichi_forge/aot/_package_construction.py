@@ -316,7 +316,7 @@ def discover_construction_methods(tree, namespace, module, fail, kind):
                     isinstance(call, ast.Call)
                     and isinstance(call.func, ast.Attribute)
                     and (
-                        call.func.attr == "record"
+                        call.func.attr in ("record", "value", "static", "dim")
                         or call.func.attr == "borrow"
                         and {keyword.arg for keyword in call.keywords} >= {"external", "dtype", "shape"}
                     )

@@ -27,7 +27,7 @@ def specialization_entries(path, target, entries):
         return frozenset()
     llvm = target != "vulkan"
     metadata = _read_document(path, "aot_metadata.json" if llvm else "metadata.json")
-    if llvm and metadata.get("kernel_format") != "bc":
+    if llvm and metadata.get("kernel_format") not in ("bc", "bc-library"):
         return frozenset()
     # Old metadata without an explicit task policy cannot prove eligibility.
     if "device_range_dispatch" not in metadata:
@@ -145,9 +145,9 @@ class CachedCall:
         return tuple(_token(x) for x in values) == self.tokens and self.guard.matches(owner)
 
     def run(self, *, reuse=False):
-        # Do native preparation when an unchanged binding is actually reused.
-        # One-off calls and continually changing scalar inputs keep the ordinary
-        # AOT launch path instead of building/retiring a native graph each time.
+        # Library packages request preparation on their first call, before any
+        # generic backend compilation. Legacy formats prepare on reuse. Neither
+        # path rebuilds a descriptor while its captured inputs remain unchanged.
         if reuse and self.prepared is None:
             self.prepared = self.call.prepare(specialize=self.specialize, constant_args=self.constant_args)
         if self.prepared is None:

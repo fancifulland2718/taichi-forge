@@ -24,6 +24,34 @@ adds no consumer checks and does not bound total asset or metadata memory.
 Resource access facts in the manifest come from the exported target code,
 without another compilation using the Producer's ordinary JIT configuration.
 
+CUDA exports can explicitly try `artifact_format="bc-library"`. Build copies
+retain typed `ti.func` boundaries and store compatible implementations as shared
+bitcode units. Parent units reference child units instead of embedding their
+bodies again. Functions with untyped arguments or unannotated return values keep
+their inline representation; `pyfunc` and AD are not automatically converted.
+Ordinary JIT definitions are unchanged. Consumers optimize after specializing
+actual arguments and resources. Automatic boundaries require calls already inside
+an iteration or device function. Helpers contributing top-level parallel loops,
+and helpers with explicit thread-block operations, remain inline to preserve
+offload and shared-memory semantics.
+
+The producer classifies existing declarations per entry and call closure. Finite
+bool/i32 options used only in numerical conditions, with no type or resource-layout
+dependency, become specialization inputs instead of Cartesian products of callers.
+The first ordinary package call prepares code using the actual options and model
+dimensions, then links, propagates constants and inlines. Ordinary numerical
+arguments stay live. Host/JIT declarations remain unchanged; consumers do not read
+the numerical AST. Type, layout, parallel-structure and unproven uses retain their
+necessary static variants. This does not eliminate every static combination.
+Shared units are extracted when sealing entries; units requiring final resource
+numbering wait for archive remapping. Host arrays still transfer on each invocation;
+reusing specialized code does not cache their contents.
+
+This experimental representation does not promise
+smaller or faster builds for every engine. Measure producer export, consumer
+prepare, first call and warm execution separately; investigate dependency
+expansion before continuing a build whose output grows unexpectedly.
+
 Before numerical compilation, export collects independent input-signature gaps
 in recognized kernels alongside declaration errors. Diagnostics identify the
 module, source line, entry and parameter. Missing template type domains or array

@@ -18,6 +18,280 @@ from tests import test_utils
 from taichi_forge_runtime.aot import Runtime, load_package
 
 
+@test_utils.test(arch=ti.cuda, offline_cache=False)
+def test_package_library_prepares_independent_static_conditions(tmp_path, monkeypatch):
+    from itertools import product
+
+    source = '''import taichi_forge as ti
+@ti.data_oriented
+class Model:
+    def __init__(self, n: int, first: bool, second: bool, third: bool):
+        self.n, self.first, self.second, self.third = n, first, second, third
+        scope = ti.experimental.ResourceScope(self)
+        scope.dim('n')
+        scope.static('first', choices=(False, True))
+        scope.static('second', choices=(False, True))
+        scope.static('third', choices=(False, True))
+        scope.out = scope.field(ti.i32, shape=scope.dim('n'))
+    @ti.func
+    def shared(self, i: ti.i32):
+        if ti.static(self.first):
+            self.out[i] += 3
+        if ti.static(self.second):
+            self.out[i] *= 2
+        if ti.static(self.third):
+            self.out[i] -= 7
+    @ti.kernel
+    def step(self, value: ti.i32):
+        for i in range(self.n):
+            self.out[i] = value + i
+            self.shared(i)
+'''
+    package = _source_package(tmp_path, monkeypatch, source)
+    manifest = ti.aot.export_package(package, tmp_path / 'sdk', artifact_format='bc-library')
+    entries = [v for v in manifest['entries'].values() if v['definition'].endswith('.Model.step')]
+    assert len(entries) == 1  # three independent booleans must not create eight callers
+    prepared = [v for v in entries[0]['captures'] if 'prepare_static' in v]
+    assert {v['name'] for v in prepared} == {'first', 'second', 'third'}
+    with Runtime('cuda') as runtime, load_package(runtime, tmp_path / 'sdk') as code:
+        assert entries[0]['symbol'] in code._specialization_entries
+        for index, flags in enumerate(product((False, True), repeat=3)):
+            jit = package.model.Model(index + 2, *flags)
+            jit.step(5)
+            aot = code.host.Model(index + 2, *flags)
+            aot.step(5)
+            np.testing.assert_array_equal(aot.out.to_numpy(), jit.out.to_numpy())
+            ready = next(iter(aot._forge_package_calls.values()))
+            assert ready.prepared is not None  # the first ordinary package call specializes
+            aot.step(5)
+            assert next(iter(aot._forge_package_calls.values())) is ready
+        aot.first = False
+        aot.step(5)
+        jit = package.model.Model(index + 2, False, flags[1], flags[2])
+        jit.step(5)
+        np.testing.assert_array_equal(aot.out.to_numpy(), jit.out.to_numpy())
+        aot.first = 'invalid'
+        with pytest.raises(ValueError, match='declared package domain'):
+            aot.step(5)
+
+
+@test_utils.test(arch=ti.cuda, offline_cache=False)
+def test_package_library_prepares_host_arrays_and_preserves_live_arguments(tmp_path, monkeypatch):
+    source = '''import taichi_forge as ti
+@ti.data_oriented
+class Model:
+    def __init__(self, mode: int):
+        self.mode = mode
+        ti.experimental.ResourceScope(self).static('mode', choices=(0, 1, 2))
+    @ti.kernel
+    def update(self, out: ti.types.ndarray(dtype=ti.i32, ndim=1), gain: ti.i32) -> ti.i32:
+        for i in range(out.shape[0]):
+            out[i] += gain
+            if ti.static(self.mode == 1):
+                out[i] *= 2
+            elif ti.static(self.mode == 2):
+                out[i] -= 3
+        return out[0]
+'''
+    package = _source_package(tmp_path, monkeypatch, source)
+    manifest = ti.aot.export_package(package, tmp_path / 'sdk', artifact_format='bc-library')
+    entries = [v for v in manifest['entries'].values() if v['definition'].endswith('.Model.update')]
+    assert len(entries) == 1
+    with Runtime('cuda') as runtime, load_package(runtime, tmp_path / 'sdk') as code:
+        for mode in range(3):
+            jit, aot = package.model.Model(mode), code.host.Model(mode)
+            expected, actual = np.arange(7, dtype=np.int32), np.arange(7, dtype=np.int32)
+            for gain in (5, -2):
+                assert aot.update(actual, gain) == jit.update(expected, gain)
+                np.testing.assert_array_equal(actual, expected)
+
+
+@test_utils.test(arch=ti.cuda, offline_cache=False)
+def test_package_library_classifies_static_use_per_entry(tmp_path, monkeypatch):
+    source = '''import taichi_forge as ti
+@ti.data_oriented
+class Model:
+    def __init__(self, n: int, enabled: bool):
+        self.n, self.enabled = n, enabled
+        scope = ti.experimental.ResourceScope(self)
+        scope.dim('n')
+        scope.static('enabled', choices=(False, True))
+        scope.out = scope.field(ti.i32, shape=scope.dim('n'))
+    @ti.func
+    def fill(self):
+        for i in range(self.n):
+            self.out[i] = i + 5
+    @ti.kernel
+    def parallel(self):
+        if ti.static(self.enabled):
+            self.fill()
+    @ti.kernel
+    def numerical(self):
+        for i in range(self.n):
+            self.out[i] = i
+            if ti.static(self.enabled):
+                self.out[i] += 5
+'''
+    package = _source_package(tmp_path, monkeypatch, source)
+    manifest = ti.aot.export_package(package, tmp_path / 'sdk', artifact_format='bc-library')
+    for name, count in (('parallel', 2), ('numerical', 1)):
+        entries = [v for v in manifest['entries'].values() if v['definition'].endswith('.Model.' + name)]
+        assert len(entries) == count
+    with Runtime('cuda') as runtime, load_package(runtime, tmp_path / 'sdk') as code:
+        for enabled in (False, True):
+            owner = code.host.Model(37, enabled)
+            owner.parallel()
+            np.testing.assert_array_equal(owner.out.to_numpy(), np.arange(37) + 5 if enabled else np.zeros(37))
+            owner.numerical()
+            np.testing.assert_array_equal(owner.out.to_numpy(), np.arange(37) + 5 * enabled)
+
+
+@test_utils.test(arch=ti.cuda, offline_cache=False)
+def test_package_library_keeps_type_choices_out_of_prepare_conditions(tmp_path, monkeypatch):
+    source = '''import taichi_forge as ti
+@ti.data_oriented
+class Model:
+    def __init__(self, n: int, wide: bool, add: bool):
+        self.n, self.wide, self.add = n, wide, add
+        scope = ti.experimental.ResourceScope(self)
+        scope.dim('n')
+        scope.static('wide', choices=(False, True))
+        scope.static('add', choices=(False, True))
+        scope.out = scope.field(ti.f64 if self.wide else ti.f32, shape=scope.dim('n'))
+    @ti.kernel
+    def step(self):
+        for i in range(self.n):
+            self.out[i] = i + 0.25
+            if ti.static(self.add):
+                self.out[i] += 3
+'''
+    package = _source_package(tmp_path, monkeypatch, source)
+    manifest = ti.aot.export_package(package, tmp_path / 'sdk', artifact_format='bc-library')
+    entries = [v for v in manifest['entries'].values() if v['definition'].endswith('.Model.step')]
+    assert len(entries) == 2  # two real storage ABIs, not four (ABI x numerical flag)
+    assert all({c['name'] for c in e['captures'] if 'prepare_static' in c} == {'add'} for e in entries)
+    with Runtime('cuda') as runtime, load_package(runtime, tmp_path / 'sdk') as code:
+        for wide in (False, True):
+            for add in (False, True):
+                jit = package.model.Model(5, wide, add)
+                jit.step()
+                aot = code.host.Model(5, wide, add)
+                aot.step()
+                np.testing.assert_array_equal(aot.out.to_numpy(), jit.out.to_numpy())
+
+
+@test_utils.test(arch=ti.cuda, offline_cache=False)
+def test_package_bitcode_library_preserves_jit_functions(tmp_path, monkeypatch):
+    from taichi_forge.aot._package_compilation import PackageCompilation
+
+    original_compile = PackageCompilation.compile
+    sealed_units = []
+
+    def observe(transaction, code):
+        original_compile(transaction, code)
+        sealed_units.append(transaction.module._aot_builder._streaming_export_statistics()['shared_code_units'])
+
+    monkeypatch.setattr(PackageCompilation, 'compile', observe)
+    source = '''import taichi_forge as ti
+@ti.data_oriented
+class Model:
+    def __init__(self, n: int):
+        self.n = n
+        s = ti.experimental.ResourceScope(self)
+        s.dim('n')
+        s.out = s.field(ti.i32, shape=s.dim('n'))
+    @ti.func
+    def untyped(self, value):
+        return value * 3
+    @ti.func
+    def leaf(self, value: ti.i32) -> ti.i32:
+        return value + 4
+    @ti.func
+    def shared(self, value: ti.i32):
+        for i in range(self.n):
+            self.out[i] = self.untyped(value) + self.leaf(i) - 4
+    @ti.kernel
+    def first(self, value: ti.i32):
+        for _ in range(1):
+            self.shared(value)
+    @ti.kernel
+    def second(self, value: ti.i32):
+        for _ in range(1):
+            self.shared(value + 1)
+    @ti.func
+    def cooperative(self):
+        ti.loop_config(block_dim=32)
+        for i in range(self.n):
+            values = ti.simt.block.SharedArray((32,), ti.i32)
+            values[i % 32] = i
+            ti.simt.block.sync()
+            self.out[i] = values[(i + 1) % 32]
+    @ti.kernel
+    def parallel(self):
+        self.cooperative()
+'''
+    package = _source_package(tmp_path, monkeypatch, source)
+    functions = [package.model.Model.shared.func, package.model.Model.untyped.func]
+    assert all(not f.is_real_function for f in functions)
+    normal = package.model.Model(5)
+    normal.first(2)
+    expected = normal.out.to_numpy()
+    manifest = ti.aot.export_package(package, tmp_path / 'sdk', artifact_format='bc-library')
+    assert max(sealed_units) == 2  # sharing happens during streaming, before archive()
+    assert all(not f.is_real_function and not f.taichi_functions for f in functions)
+    with zipfile.ZipFile(tmp_path / 'sdk/code.tcm') as archive:
+        units = [n for n in archive.namelist() if n.startswith('code_units/')]
+        assert len(units) == 2  # both entry stubs share parent and leaf implementations
+        import re
+        # The parent must reference the leaf's content-addressed symbol, rather
+        # than embedding a second private copy of the leaf body in its closure.
+        references = [set(re.findall(rb'__ti_unit_[0-9a-f]{64}', archive.read(n))) for n in units]
+        assert sorted(map(len, references)) == [1, 2]
+        assert len(set.union(*references)) == 2
+    normal.first(4)
+    np.testing.assert_array_equal(normal.out.to_numpy(), 12 + np.arange(5))
+    with Runtime('cuda') as runtime, load_package(runtime, tmp_path / 'sdk') as code:
+        a, b = code.host.Model(5), code.host.Model(9)
+        a.first(2)
+        b.second(6)
+        np.testing.assert_array_equal(a.out.to_numpy(), expected)
+        np.testing.assert_array_equal(b.out.to_numpy(), 21 + np.arange(9))
+        a.second(8)
+        np.testing.assert_array_equal(a.out.to_numpy(), 27 + np.arange(5))
+        np.testing.assert_array_equal(b.out.to_numpy(), 21 + np.arange(9))
+        c = code.host.Model(64)
+        c.parallel()
+        expected = np.arange(64) // 32 * 32 + (np.arange(64) + 1) % 32
+        np.testing.assert_array_equal(c.out.to_numpy(), expected)
+
+
+@test_utils.test(arch=ti.cpu, offline_cache=False)
+def test_package_late_scope_roles_use_host_projection(tmp_path, monkeypatch):
+    source = RESOURCE_FACTORY_SOURCE + '''
+@ti.data_oriented
+class Model:
+    def __init__(self):
+        self.flag, self.gain = False, 2
+    def select(self, flag, gain):
+        self.flag, self.gain = flag, gain
+        resource_scope(self, requires=('static',)).static('flag', choices=(False, True))
+        resource_scope(self, requires=('value',)).value('gain', ti.i32)
+    @ti.kernel
+    def compute(self) -> ti.i32:
+        value = self.gain
+        if ti.static(self.flag):
+            value += 7
+        return value
+'''
+    package = _source_package(tmp_path, monkeypatch, source)
+    ti.aot.export_package(package, tmp_path / 'sdk')
+    with Runtime('x64') as runtime, load_package(runtime, tmp_path / 'sdk') as code:
+        model = code.host.Model()
+        for flag, gain in ((False, 3), (True, 5), (False, 11)):
+            model.select(flag, gain)
+            assert model.compute() == gain + (7 if flag else 0)
+
+
 @test_utils.test(arch=[ti.cpu, ti.cuda, ti.vulkan], offline_cache=False)
 def test_package_streams_private_definitions_and_preserves_caller_cache(tmp_path, monkeypatch):
     import gc

@@ -64,6 +64,7 @@ class LlvmAotModuleBuilder : public AotModuleBuilder {
   // Sealing never evicts a normal JIT/Graph/Component caller's cache entry.
   std::unique_ptr<KernelCompilationManager> streaming_compilation_manager_;
   std::map<std::string, std::string> sealed_bitcode_;
+  std::map<std::string, std::string> sealed_code_units_;
   const CompileConfig &compile_config_;
   LlvmProgramImpl *prog_ = nullptr;
   DeviceCapabilityConfig caps_;

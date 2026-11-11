@@ -44,10 +44,14 @@ def compile_static_variants(environment, entry, arguments, owner, schema, *, tem
     different branch reads another value, that compiler result extends coverage.
     No application constructor, Host recording or numerical execution is used.
     """
+    compilation = getattr(entry._primal, "_package_compilation", None)
+    if compilation is not None and compilation.static_preparation is not None:
+        environment, schema, facts = compilation.static_preparation.project(environment, schema, entry._primal)
+        compilation.static_policies[entry._primal.func.__qualname__] = facts
     domains = {
         name: tuple(read_static_key(value) for value in item["choices"])
         for name, item in schema.items()
-        if item["kind"] == "static" and not item.get("dynamic_storage_condition")
+        if item["kind"] == "static" and not item.get("dynamic_storage_condition") and not item.get("prepare_static")
     }
     # Constants are fixed definition dependencies, not consumer configuration
     # axes. Include their one value in the existing coverage/guard machinery.

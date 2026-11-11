@@ -369,8 +369,13 @@ class Func:
         # P9.A-2 (F2) — auto_real_function: one-shot promotion check before
         # entering the inline path. Once promoted, stays promoted.
         deployment = getattr(impl.get_runtime().current_kernel, "_deployment_context", None)
-        if deployment is not None and self.is_real_function:
-            return deployment.call_real_function(self, args)
+        if deployment is not None:
+            if self.is_real_function:
+                return deployment.call_real_function(self, args)
+            compilation = getattr(impl.get_runtime().current_kernel, "_package_compilation", None)
+            function = compilation.library_function(self) if compilation is not None else None
+            if function is not None:
+                return deployment.call_real_function(function, args)
         if deployment is None and not self.is_real_function and not self._auto_promoted:
             if self._can_auto_promote() and self._should_auto_promote():
                 self._auto_promoted = True

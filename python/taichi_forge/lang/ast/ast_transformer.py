@@ -633,6 +633,14 @@ class ASTTransformer(Builder):
         if ASTTransformer.build_call_if_is_type(ctx, node, args, keywords):
             return node.ptr
 
+        compilation = getattr(ctx.deployment.kernel, "_package_compilation", None) if ctx.deployment else None
+        if compilation is not None and compilation.function_library:
+            with compilation.function_call_scope(ctx):
+                return ASTTransformer.build_function_call(ctx, node, func, args, keywords)
+        return ASTTransformer.build_function_call(ctx, node, func, args, keywords)
+
+    @staticmethod
+    def build_function_call(ctx, node, func, args, keywords):
         if hasattr(node.func, "caller"):
             node.ptr = func(node.func.caller, *args, **keywords)
             return node.ptr

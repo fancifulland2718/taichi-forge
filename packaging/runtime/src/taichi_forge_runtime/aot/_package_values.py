@@ -196,6 +196,8 @@ def capture_value(owner, spec):
         return resolve(spec["name"])
     for name in spec.get("path", (spec["name"],)):
         owner = getattr(owner, name)
+    if "prepare_static" in spec and static_key(owner) not in tuple(map(tuple, spec["prepare_static"])):
+        raise ValueError("Prepared static configuration is outside its declared package domain")
     if owner is None and "optional_array" in spec:
         # A valid zero-work descriptor is an ABI token, not fabricated model
         # storage. Admission has already ruled out every active read/write.

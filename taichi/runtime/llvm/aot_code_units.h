@@ -1,6 +1,7 @@
 #pragma once
 
 #include <fstream>
+#include <functional>
 #include <unordered_set>
 
 #include "taichi/common/virtual_dir.h"
@@ -22,11 +23,34 @@ inline constexpr char kRealFunctionUnit[] = "taichi.aot.real_function";
 // once, independently of its callers. Only local symbols are canonicalized;
 // external symbols, target, layout, attributes and module ABI flags remain.
 inline void export_code_units(llvm::Module &module,
-                              const std::string &directory) {
+                              const std::function<void(const std::string &,
+                                                       const std::string &)> &emit,
+                              bool allow_resource_relocations = true) {
   std::vector<llvm::Function *> roots;
   for (auto &function : module)
     if (!function.isDeclaration() && function.hasFnAttribute(kRealFunctionUnit))
       roots.push_back(&function);
+  // Extract callees before callers. Otherwise each parent's closure embeds
+  // its children's bodies, even when those same children get their own units
+  // later. The entry's flat dependency list already retains every exported
+  // unit, so parent units need only the canonical callee declarations.
+  std::unordered_set<llvm::Function *> visited;
+  std::vector<llvm::Function *> ordered;
+  std::function<void(llvm::Function *)> order = [&](llvm::Function *function) {
+    if (!visited.insert(function).second)
+      return;
+    for (auto &block : *function)
+      for (auto &instruction : block)
+        if (auto *call = llvm::dyn_cast<llvm::CallBase>(&instruction))
+          if (auto *callee = llvm::dyn_cast<llvm::Function>(
+                  call->getCalledOperand()->stripPointerCasts()))
+            if (!callee->isDeclaration() && callee->hasFnAttribute(kRealFunctionUnit))
+              order(callee);
+    ordered.push_back(function);
+  };
+  for (auto *root : roots)
+    order(root);
+  roots = std::move(ordered);
   for (auto *root : roots) {
     std::unordered_set<const llvm::Value *> seen;
     std::unordered_set<const llvm::GlobalValue *> definitions;
@@ -41,6 +65,14 @@ inline void export_code_units(llvm::Module &module,
             return;
           }
           if (auto *global = llvm::dyn_cast<llvm::GlobalValue>(value)) {
+            // The module's final resource numbering is assigned at archive
+            // time. Do not persist a unit containing producer tree IDs before
+            // that remap. Argument-only functions can be shared immediately.
+            if (!allow_resource_relocations &&
+                global->getName().starts_with("__ti_aot_tree_id_")) {
+              supported = false;
+              return;
+            }
             if (global->isDeclaration())
               return;
             if (global != root && !global->hasLocalLinkage()) {
@@ -126,11 +158,7 @@ inline void export_code_units(llvm::Module &module,
     encode_llvm_module(*unit, stream, LLVMModuleEncoding::bitcode);
     const auto digest = aot_artifact_sha256(bytes);
     const auto filename = "code_units/" + digest + ".bc";
-    taichi::create_directories(taichi::join_path(directory, "code_units"));
-    std::ofstream output(taichi::join_path(directory, filename),
-                         std::ios::binary);
-    output.write(bytes.data(), bytes.size());
-    TI_ERROR_IF(!output, "Cannot write AOT code unit {}", filename);
+    emit(filename, bytes);
     root->deleteBody();
     root->setLinkage(llvm::GlobalValue::ExternalLinkage);
     if (auto *existing = module.getFunction(symbol)) {
@@ -152,6 +180,17 @@ inline void export_code_units(llvm::Module &module,
   llvm::PassBuilder passes;
   passes.registerModuleAnalyses(analysis);
   llvm::GlobalDCEPass().run(module, analysis);
+}
+
+inline void export_code_units(llvm::Module &module,
+                              const std::string &directory) {
+  export_code_units(module, [&](const std::string &filename,
+                                const std::string &bytes) {
+    taichi::create_directories(taichi::join_path(directory, "code_units"));
+    std::ofstream output(taichi::join_path(directory, filename), std::ios::binary);
+    output.write(bytes.data(), bytes.size());
+    TI_ERROR_IF(!output, "Cannot write AOT code unit {}", filename);
+  });
 }
 
 inline void link_code_units(llvm::Module &module,

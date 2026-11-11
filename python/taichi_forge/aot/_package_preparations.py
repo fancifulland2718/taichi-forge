@@ -37,6 +37,22 @@ def _declares_values(node, namespace):
     import taichi_forge as ti
 
     for statement in node.body:
+        if (
+            isinstance(statement, ast.Expr)
+            and isinstance(statement.value, ast.Call)
+            and isinstance(statement.value.func, ast.Attribute)
+            and isinstance(statement.value.func.value, ast.Call)
+        ):
+            call = statement.value.func.value
+            target = _source_value(call.func, namespace)
+            if target is ti.experimental.ResourceScope:
+                return True
+            try:
+                normalized = prove_factory(target, call)
+            except (TypeError, ValueError, OSError):
+                normalized = None
+            if normalized is not None and getattr(normalized, "_package_role", None) == "experimental.ResourceScope":
+                return True
         if not (
             isinstance(statement, ast.Assign)
             and len(statement.targets) == 1

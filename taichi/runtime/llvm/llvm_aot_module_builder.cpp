@@ -70,6 +70,14 @@ void LlvmAotModuleBuilder::seal_kernel_export_per_backend(
   const auto &name = kernel_names_.at(identifier);
   auto &compiled = cache_.kernels.at(name).compiled_data;
   if (compiled.module) {
+    if (artifact_format_ == "bc-library") {
+      LLVM::export_code_units(*compiled.module,
+          [&](const std::string &unit, const std::string &bytes) {
+            const auto [item, inserted] = sealed_code_units_.emplace(unit, bytes);
+            TI_ERROR_IF(!inserted && item->second != bytes,
+                        "Conflicting AOT code unit {}", unit);
+          }, false);
+    }
     std::string bytes;
     llvm::raw_string_ostream output(bytes);
     encode_llvm_module(*compiled.module, output, LLVMModuleEncoding::bitcode);
@@ -95,8 +103,13 @@ LlvmAotModuleBuilder::streaming_export_statistics() {
     resident += kernel.compiled_data.module != nullptr;
   for (const auto &[_, bitcode] : sealed_bitcode_)
     bytes += bitcode.size();
+  std::uint64_t unit_bytes = 0;
+  for (const auto &[_, bitcode] : sealed_code_units_)
+    unit_bytes += bitcode.size();
   return {{"resident_ir_modules", resident},
           {"serialized_code_bytes", bytes},
+          {"serialized_code_unit_bytes", unit_bytes},
+          {"shared_code_units", sealed_code_units_.size()},
           {"physical_code_entries", cache_.kernels.size()},
           {"resident_templates", stats.resident_templates},
           {"compiler_invocations", stats.compiler_invocations},
@@ -206,6 +219,14 @@ void LlvmAotModuleBuilder::dump(const std::string &output_dir,
       LLVM::export_code_units(*module, output_dir);
     return module;
   };
+  if (!sealed_code_units_.empty()) {
+    taichi::create_directories(taichi::join_path(output_dir, "code_units"));
+    for (const auto &[name, bytes] : sealed_code_units_) {
+      std::ofstream output(taichi::join_path(output_dir, name), std::ios::binary);
+      output.write(bytes.data(), bytes.size());
+      TI_ERROR_IF(!output, "Cannot write sealed AOT code unit {}", name);
+    }
+  }
   writer.set_data(std::move(exported));
   if (LLVM::is_cuda_aot_artifact_format(artifact_format_)) {
 #if defined(TI_WITH_CUDA)

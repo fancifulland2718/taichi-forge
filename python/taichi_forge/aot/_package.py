@@ -1591,22 +1591,24 @@ def _publish_package(staging, output):
                 ) from error
 
 
-def export_package(package, output, *, arch=None, caps=None, source_root=None):
+def export_package(package, output, *, arch=None, caps=None, source_root=None, artifact_format=None):
     """Export decorated definitions without executing a model to discover coverage.
 
     ``check_package`` runs this same declaration phase without compilation.
     Multiple roots share one compiler and source closure, not separate exports.
     Selects ``arch`` on a cold Runtime or validates the active backend.
     A completed package is retained at the reported staging path if publication fails.
+    Experimental CUDA ``artifact_format="bc-library"`` preserves typed function
+    boundaries in the build copy and shares their bitcode across entry points.
     """
     from ._package_compilation import PackageCompilation
 
     with PackageCompilation() as compilation:
         return _export_package(package, output, arch=arch, caps=caps, source_root=source_root,
-                               compilation=compilation)
+                               compilation=compilation, artifact_format=artifact_format)
 
 
-def _export_package(package, output, *, arch, caps, source_root, compilation):
+def _export_package(package, output, *, arch, caps, source_root, compilation, artifact_format=None):
     import taichi_forge as ti
     from taichi_forge.aot._component import Component
     from taichi_forge_runtime._static_values import static_key, read_static_key
@@ -1627,8 +1629,12 @@ def _export_package(package, output, *, arch, caps, source_root, compilation):
         host_contexts, function_inputs, factory_calls, target_arch, packages,
     ) = _preflight_package(package, arch=arch, source_root=source_root)
     package = packages[0]
-    module = Module(caps=caps)
-    compilation.attach(module)
+    module = Module(caps=caps, artifact_format=artifact_format)
+    compilation.attach(module, function_library=artifact_format == "bc-library")
+    if artifact_format == "bc-library":
+        from ._package_static import StaticPreparation
+
+        compilation.static_preparation = StaticPreparation(sources)
     from ._package_owner_graph import OwnerGraph, owner_bindings, layout_owner
 
     owner_graph = OwnerGraph(sources, imported_modules, module)
@@ -1643,6 +1649,7 @@ def _export_package(package, output, *, arch, caps, source_root, compilation):
             else 1
         ),
         kind="forge_definition_package_prototype",
+        artifact_format=artifact_format or "default",
         target=module._arch.name,
         target_capabilities=list(caps or ()),
         module_root=package.__name__,
@@ -2180,6 +2187,9 @@ def _export_package(package, output, *, arch, caps, source_root, compilation):
             variants = []
             family_schema, family_paths = {}, {}
             for code, owner, environment, compilation_schema in contexts:
+                if compilation.static_preparation is not None:
+                    environment, compilation_schema, _ = compilation.static_preparation.project(
+                        environment, compilation_schema, code.kernel)
                 if "closure_environment" in definition and any(
                     compilation_schema[key].get("owner_alternatives")
                     for key in owner_bindings(environment, compilation_schema, code.used)
@@ -2409,6 +2419,9 @@ def _export_package(package, output, *, arch, caps, source_root, compilation):
                     ]
                     for item in capture:
                         resource = compilation_schema.get(item["name"], {})
+                        if resource.get("prepare_static"):
+                            item["prepare_static"] = resource["choices"]
+                            manifest["version"] = max(81, manifest["version"])
                         if resource.get("input_record"):
                             predicate = resource["input_record"]
                             nullable = (
