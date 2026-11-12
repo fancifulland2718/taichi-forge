@@ -19,6 +19,56 @@ from taichi_forge_runtime.aot import Runtime, load_package
 
 
 @test_utils.test(arch=ti.cuda, offline_cache=False)
+@pytest.mark.parametrize('model_shape', [False, True])
+def test_package_library_keeps_shared_array_templates_inline(tmp_path, monkeypatch, model_shape):
+    from taichi_forge.aot._package_compilation import PackageCompilation
+    from taichi_forge.lang.simt.block import SharedArray
+
+    source = '''import taichi_forge as ti
+@ti.func
+def write(tile: ti.template(), index: ti.i32, value: ti.i32):
+    tile[index] = value
+@ti.data_oriented
+class Model:
+    def __init__(self, n: int, width: int):
+        self.n, self.width = n, width
+        s = ti.experimental.ResourceScope(self)
+        s.dim('width')
+        s.out = s.field(ti.i32, shape=s.dim('n'))
+    @ti.kernel
+    def step(self, amount: ti.i32):
+        ti.loop_config(block_dim=128)
+        for i in range(self.n):
+            tile = ti.simt.block.SharedArray((WIDTH,), ti.i32)
+            write(tile, i % 128, i + amount)
+            ti.simt.block.sync()
+            self.out[i] = tile[(i + 1) % 128]
+'''.replace('WIDTH', 'self.width' if model_shape else '128')
+    seen = []
+    original = PackageCompilation.library_function
+
+    def observe(compilation, function, args, **kwargs):
+        promoted = original(compilation, function, args, **kwargs)
+        if function.func.__name__ == 'write' and isinstance(args[0], SharedArray):
+            seen.append(True)
+            assert promoted is None
+        return promoted
+
+    monkeypatch.setattr(PackageCompilation, 'library_function', observe)
+    package = _source_package(tmp_path, monkeypatch, source)
+    output = tmp_path / 'sdk'
+    ti.aot.export_package(package, output, artifact_format='bc-library')
+    assert seen
+    with Runtime('cuda') as runtime, load_package(runtime, output) as code:
+        for n, width in ((128, 128), (256, 256)):
+            jit, aot = package.model.Model(n, width), code.host.Model(n, width)
+            for amount in (3, 9):
+                jit.step(amount)
+                aot.step(amount)
+                np.testing.assert_array_equal(aot.out.to_numpy(), jit.out.to_numpy())
+
+
+@test_utils.test(arch=ti.cuda, offline_cache=False)
 def test_package_library_keeps_transitive_task_context_inline(tmp_path, monkeypatch):
     from taichi_forge.aot._package_compilation import PackageCompilation
 

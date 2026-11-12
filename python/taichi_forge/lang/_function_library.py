@@ -90,16 +90,17 @@ class FunctionLibrary:
         from taichi_forge.lang.kernel_impl import Func, TaichiCallableTemplateMapper
         from taichi_forge.lang.kernel_arguments import KernelArgument
         from taichi_forge.lang.matrix import MatrixType, VectorType
+        from taichi_forge.lang.simt.block import SharedArray
         from taichi_forge.types import primitive_types
         from taichi_forge.types.annotations import template
 
         arguments = list(source.arguments)
         signature = []
         for index, (argument, value) in enumerate(zip(arguments, args)):
-            if isinstance(argument.annotation, template) and isinstance(value, AnyArray):
+            if isinstance(argument.annotation, template) and isinstance(value, (AnyArray, SharedArray)):
                 # A template has no callee ABI slot. This descriptor contains
-                # the caller's external-array argument index, unlike resources
-                # accessed through an owner and recaptured in the callee.
+                # the caller's array argument index or task-local shared
+                # allocation, unlike resources recaptured through an owner.
                 # Keep ordinary inline lowering until it can be rebound.
                 return None
             if argument.annotation is not inspect.Parameter.empty:
