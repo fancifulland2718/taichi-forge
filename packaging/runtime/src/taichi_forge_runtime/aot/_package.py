@@ -1397,6 +1397,7 @@ class entry:
         self._selected = {}
         self._conditions = {}
         self._selection_order = []
+        self._selection_tree = None
         if self.family is not None and "owner_inputs" in self.family:
             for identity, target in self.family["owner_inputs"].items():
                 contract = package.manifest.get("entry_families", {}).get(target) or _entry_contract(
@@ -1457,6 +1458,29 @@ class entry:
 
             for name in self._domain:
                 order(name)
+            if not self._conditions:
+                # Recorded selections are paths, not a Cartesian product of
+                # every axis. Build a decision tree once; inactive branches
+                # must not read an absent owner member during ordinary calls.
+                def decision(variants):
+                    if all(not selection for selection, _ in variants):
+                        return None, {symbol for _, symbol in variants}
+                    common = set.intersection(*(set(selection) for selection, _ in variants))
+                    name = next((key for key in self._selection_order if key in common), None)
+                    if name is None:
+                        return None  # Keep the general matcher for non-tree families.
+                    branches = {}
+                    for value in {selection[name] for selection, _ in variants}:
+                        child = decision([
+                            ({key: item for key, item in selection.items() if key != name}, symbol)
+                            for selection, symbol in variants if selection[name] == value
+                        ])
+                        if child is None:
+                            return None
+                        branches[value] = child
+                    return name, branches
+
+                self._selection_tree = decision(self._variants) if self._variants else None
         self.signature = inspect.Signature(
             [
                 inspect.Parameter(item["name"], inspect.Parameter.POSITIONAL_OR_KEYWORD)
@@ -1629,31 +1653,42 @@ class entry:
             if symbol not in self._selected:
                 self._selected[symbol] = entry(self.package, symbol)
             return self._selected[symbol]._select(owner)
-        values = {}
-        for name in self._selection_order:
-            if not all(
-                values.get(key) == static_key(expected) for key, expected in self._conditions.get(name, {}).items()
-            ):
-                continue
-            value = path_value(owner, self.family.get("paths", {}).get(name, (name,)))
-            if type(value) is str and all(key[0] == "dtype" for key in self._domain[name]):
-                value = ("dtype", value)
-            else:
-                value = static_key(value is not None if name in self.family.get("record_presence", ()) else value)
-            if value not in self._domain[name]:
-                raise ValueError("Static configuration is outside its declared package domain")
-            values[name] = value
-        matches = {
-            symbol
-            for selection, symbol in self._variants
-            if all(values.get(name) == value for name, value in selection.items())
-        }
+        if self._selection_tree is not None:
+            node = self._selection_tree
+            while node[0] is not None:
+                name, branches = node
+                value = self._selection_value(owner, name)
+                node = branches.get(value, (None, ()))
+            matches = node[1]
+        else:
+            values = {}
+            for name in self._selection_order:
+                if not all(
+                    values.get(key) == static_key(expected) for key, expected in self._conditions.get(name, {}).items()
+                ):
+                    continue
+                values[name] = self._selection_value(owner, name)
+            matches = {
+                symbol
+                for selection, symbol in self._variants
+                if all(values.get(name) == value for name, value in selection.items())
+            }
         if len(matches) != 1:
             raise ValueError("Static configuration has missing or ambiguous package code")
-        symbol = matches.pop()
+        symbol = next(iter(matches))
         if symbol not in self._selected:
             self._selected[symbol] = entry(self.package, symbol)
         return self._selected[symbol]
+
+    def _selection_value(self, owner, name):
+        value = path_value(owner, self.family.get("paths", {}).get(name, (name,)))
+        if type(value) is str and all(key[0] == "dtype" for key in self._domain[name]):
+            value = ("dtype", value)
+        else:
+            value = static_key(value is not None if name in self.family.get("record_presence", ()) else value)
+        if value not in self._domain[name]:
+            raise ValueError("Static configuration is outside its declared package domain")
+        return value
 
 
 @dataclass(frozen=True)

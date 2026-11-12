@@ -18,6 +18,51 @@ from tests import test_utils
 from taichi_forge_runtime.aot import Runtime, load_package
 
 
+@test_utils.test(arch=ti.cpu, offline_cache=False)
+def test_package_selects_only_reachable_static_inputs(tmp_path, monkeypatch):
+    source = '''import taichi_forge as ti
+@ti.data_oriented
+class Model:
+    def __init__(self, n: int, mode: int, child: bool):
+        self.n, self.z_mode, self.a_child = n, mode, child
+        s = ti.experimental.ResourceScope(self)
+        s.static('z_mode', choices=(0, 1, 2))
+        s.static('a_child', choices=(False, True))
+        s.out = s.field(ti.i32, shape=s.dim('n'))
+    @ti.kernel
+    def step(self):
+        for i in range(self.n):
+            if ti.static(self.z_mode == 0):
+                self.out[i] = 1
+            elif ti.static(self.z_mode == 1):
+                if ti.static(self.a_child):
+                    self.out[i] = 3
+                else:
+                    self.out[i] = 2
+            else:
+                self.out[i] = 4
+'''
+    package = _source_package(tmp_path, monkeypatch, source)
+    output = tmp_path / 'sdk'
+    ti.aot.export_package(package, output)
+    with Runtime('cpu') as runtime, load_package(runtime, output) as code:
+        for mode, child in ((0, False), (1, False), (1, True), (2, True)):
+            jit, aot = package.model.Model(3, mode, child), code.host.Model(3, mode, child)
+            if mode != 1:
+                del jit.a_child
+                del aot.a_child
+            jit.step()
+            aot.step()
+            np.testing.assert_array_equal(aot.out.to_numpy(), jit.out.to_numpy())
+        aot = code.host.Model(3, 1, False)
+        del aot.a_child
+        with pytest.raises(AttributeError, match='a_child'):
+            aot.step()
+        aot.a_child = 123
+        with pytest.raises(ValueError, match='outside its declared package domain'):
+            aot.step()
+
+
 @test_utils.test(arch=ti.cuda, offline_cache=False)
 @pytest.mark.parametrize('value_kind', ['scalar', 'vector', 'struct', 'model_tensor'])
 def test_package_library_keeps_local_template_references_inline(tmp_path, monkeypatch, value_kind):
