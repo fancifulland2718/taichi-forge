@@ -2496,7 +2496,10 @@ class _Capture:
             for cls in classes
         ):
             raise TaichiCompilationError("Component isinstance only supports builtin Field categories")
-        if isinstance(value, _FieldReference):
+        if isinstance(value, _FieldReference) or (
+            isinstance(value, _OptionalArrayReference)
+            and isinstance(self.declarations[_capture_id(value.path)], DenseField)
+        ):
             category = MatrixField if self.field_type_metadata(None, value, "matrix") else ScalarField
         elif isinstance(value, _RecordReference):
             self.record_field_members(value)
@@ -2548,7 +2551,13 @@ class _Capture:
         owner, name = args[:2]
         from taichi_forge.lang.any_array import AnyArray, ModelTensorArray
 
-        if isinstance(owner, _FieldReference):
+        if isinstance(owner, _FieldReference) or (
+            isinstance(owner, _OptionalArrayReference)
+            and isinstance(self.declarations[_capture_id(owner.path)], DenseField)
+        ):
+            # Element types are fixed by the declaration even when storage is
+            # absent. Inspecting them must not acquire a presence requirement;
+            # actual indexing still follows the optional resource binding.
             if presence:
                 if name not in ("dtype", "n", "m", "ndim"):
                     raise TaichiCompilationError("Component Field introspection requires declared element metadata")

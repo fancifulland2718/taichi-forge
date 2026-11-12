@@ -22653,6 +22653,13 @@ class Model:
     @ti.kernel
     def required(self) -> ti.i32:
         return self.observations.samples.value[0]
+    @ti.kernel
+    def element_type(self) -> ti.i32:
+        field = ti.static(getattr(self.observations.samples, 'vector'))
+        result = 0
+        if ti.static(isinstance(field, ti.MatrixField) and field.dtype == ti.i32):
+            result += ti.static(field.n + field.m + field.ndim)
+        return result
     def graph(self):
         b = ti.graph.GraphBuilder()
         b.dispatch(self.step)
@@ -22680,6 +22687,7 @@ class Model:
         np.testing.assert_array_equal(a.observations.samples.vector.to_numpy(), normal.observations.samples.vector.to_numpy())
         np.testing.assert_array_equal(b.out.to_numpy(), 1)
         assert a.required() == 5
+        assert a.element_type() == b.element_type() == normal.element_type() == 5
         with pytest.raises(ValueError, match='presence'):
             b.required()
         with a.graph().bind({}) as call:

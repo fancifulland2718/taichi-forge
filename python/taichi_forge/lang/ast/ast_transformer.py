@@ -1151,9 +1151,9 @@ class ASTTransformer(Builder):
             return node.ptr
 
         if ctx.deployment is not None:
-            from taichi_forge.aot._component import _FieldReference, _RecordReference
+            from taichi_forge.aot._component import _FieldReference, _OptionalArrayReference, _RecordReference
 
-            if isinstance(node.value.ptr, (_FieldReference, _RecordReference)):
+            if isinstance(node.value.ptr, (_FieldReference, _OptionalArrayReference, _RecordReference)):
                 node.ptr = ctx.deployment.named_attribute(ctx, [node.value.ptr, node.attr], {})
                 return node.ptr
 
