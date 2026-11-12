@@ -375,6 +375,9 @@ class OwnerGraph:
 
         project_borrows(owner, environment, expanded)
         project_field_likes(environment, expanded)
+        from ._package_optional import project_struct_member_inputs
+
+        project_struct_member_inputs(environment, expanded)
         result = owner, schema, environment, expanded
         if resource_key is not None:
             self._resource_contexts[resource_key] = result
@@ -496,6 +499,8 @@ def _compose(environment, schema, children):
                 transformed["input_presence_attribute"] = names[item["input_presence_attribute"]]
             if "input_record" in item:
                 transformed["input_record"] = names[item["input_record"]]
+            if "input_conditions" in item:
+                transformed["input_conditions"] = [names[key] for key in item["input_conditions"]]
             if item.get("external"):
                 transformed["shape_expressions"] = [expression(axis) for axis in item["shape_expressions"]]
             if "reference_path" in item:

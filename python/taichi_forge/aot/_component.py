@@ -2200,13 +2200,19 @@ class _Capture:
         ):
             self.resource_conditions[name] = declaration.conditions
             present = True
+            dynamic_record = False
             for condition, expected in declaration.conditions:
                 predicate = self.declarations.get(condition)
                 if isinstance(predicate, (_InputRecord, _InputPresence)):
-                    if expected is not True or not isinstance(declaration, _ConditionalDenseField):
+                    if expected is not True or not isinstance(declaration, (_ConditionalDenseField, _ConditionalRecord)):
                         raise TaichiCompilationError("Dynamic storage requires a whole present-only Dense group")
                     record_path = self.component._paths[condition]
                     self.attribute(ctx, record_path[-1], prefix=record_path[:-1])
+                    if isinstance(declaration, _ConditionalRecord):
+                        # A namespace access is not a buffer read. Its original
+                        # Dense members record requirements at their use sites.
+                        dynamic_record = True
+                        continue
                     if ctx is not None and ctx.is_in_static_scope():
                         return _OptionalArrayReference(path)
                     if not _argument_binding:
@@ -2233,6 +2239,8 @@ class _Capture:
                     self.missing_resource = name
                     raise TaichiCompilationError(f"Numerical entry requires Field self.{'.'.join(path)}")
                 return None
+            if dynamic_record:
+                return _RecordReference(path)
         if isinstance(declaration, _OwnerReference):
             if not declaration.matches(self.component, self.owner, name):
                 raise TaichiCompilationError(f"Component owner reference {'.'.join(path)!r} changed; rebuild declarations")

@@ -91,9 +91,11 @@ def check_admission(owner, contract):
                 continue
             value = path_value(owner, resource["path"])
             allocated_owner = path_value(owner, resource.get("layout_owner_path", ()))
-            member = resource.get("layout_member", name)
-            schema = owner._forge_package_owner.manifest["owners"][owner_type(allocated_owner)]
-            source = (allocated_owner, tuple(schema[member].get("path", (member,))))
+            # Whole optional StructFields bind their ordinary Dense members.
+            # The allocation namespace and member path remain authoritative;
+            # the encoded layout member id need not be a top-level owner key.
+            prefix = resource.get("layout_owner_path", ())
+            source = (allocated_owner, tuple(resource["path"])[len(prefix):])
             if getattr(value, "_forge_package_field_source", None) != source:
                 raise ValueError("Conditional workspace no longer refers to its owned Field")
             check_external_resource(owner, resource, value)

@@ -389,14 +389,19 @@ Kernel ABI 参数或改变数值代码身份。根合同补齐仅供约束使用
 
 `scope.struct_field(members, shape=...)` 声明正常的扁平 StructField，
 包括 rank-zero 状态和具有显式动态 extent 的记录数组，默认使用 AOS。
-隐式根下可选择 `layout=ti.Layout.SOA`，直接沿原 `Struct.field` 分配：每个成员
-占一个 dense 块，向量/矩阵元素内部仍保留原排列。显式 builder/placement 当前
-要求 AOS，不支持的组合在分配前拒绝。成员沿既有 Record/DenseField
+隐式根或显式 builder 下可选择 `layout=ti.Layout.SOA`，沿原 `Struct.field` 的成员放置规则：
+每个成员占一个 dense 块，向量/矩阵元素内部仍保留原排列。指定的单一 placement
+仍要求 AOS，不支持的组合在分配前拒绝。成员沿既有 Record/DenseField
 路径自动捕获，原成员别名共用实际参数；维度保留原声明作用域，不因进入记录或别名
 而改名。消费者以同一 SNode 布局规则保留整个记录，按成员真实偏移及 record stride
 绑定各实例，复用已有 affine 参数 ABI。CPU/CUDA 已验证 AOS/SOA 标量/向量/矩阵成员、普通
 JIT 与借用存储、同模块不同尺寸实例交错执行。Host 紧凑缓冲只传输选定成员的逻辑
 元素，相邻成员和未活动尾部保持不变；原始紧凑内存接口拒绝重新解释 strided 成员。
+
+定义包中，完整可选 StructField 组的固定标量/向量/矩阵成员可沿已有 Dense 存在性投影，
+由 prepare 固定正常 Host 的存在条件；缺席组不分配，成员保持原 SOA/AOS 布局和实例所有权。
+CPU/CUDA 局部检查覆盖一维/二维资源、新尺寸、Graph 描述符快照和错误实例成员拒绝。
+混合组、条件性维度、模型长度元素和布局选择仍沿原特化准入，不因这项能力自动放宽。
 已加载 LLVM 入口还必须带有编译器证明的 runtime-stride 参数资格；事实来自原 IR
 依赖遍历，保留在 bitcode 及带校验的部署元数据中（含 PTX/cubin）。旧产物或紧凑特化
 入口不能通过改绑定元数据获得此能力，需使用 affine view exemplar 或组件捕获重新

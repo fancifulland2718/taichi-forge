@@ -696,10 +696,12 @@ class ResourceScope:
         else:
             from taichi_forge.lang import impl
             from taichi_forge.lang.enums import Layout
+            from taichi_forge.lang.struct import Struct
 
+            struct_soa = factory == Struct.field and kwargs.get("layout") == Layout.SOA and placement is None
             if (
                 any(kwargs.get(key) for key in ("offset", "needs_grad", "needs_dual"))
-                or kwargs.get("layout", Layout.AOS) != Layout.AOS
+                or kwargs.get("layout", Layout.AOS) != Layout.AOS and not struct_soa
             ):
                 raise ValueError("ResourceScope explicit groups currently require plain AOS Fields")
             order = kwargs.pop("order", None)
@@ -707,7 +709,12 @@ class ResourceScope:
                 raise ValueError("Explicit placement already determines the Field index order")
             axis_seq, shape_seq, same_level = impl._field_layout_axes(concrete, order)
             field = factory(*args, **{**kwargs, "shape": None})
-            if placement is None:
+            if struct_soa:
+                # Match Struct.field's normal SOA placement, with this explicit
+                # owner instead of the global root. Vector lanes stay together.
+                for member in field.field_dict.values():
+                    impl._create_snode(axis_seq, shape_seq, same_level, root_node=self._builder).place(member)
+            elif placement is None:
                 impl._create_snode(axis_seq, shape_seq, same_level, root_node=self._builder).place(field)
             else:
                 placement.place(field)
@@ -853,8 +860,8 @@ class ResourceScope:
         """Declare a flat record at its normal allocation site.
 
         Member Field access and aliases retain the original shared placement.
-        Implicit-root SOA uses Struct.field's ordinary per-member placement;
-        explicit groups/placement currently require AOS. Whole Struct element
+        SOA uses Struct.field's ordinary per-member placement in the global or
+        explicit group root; a supplied placement requires AOS. Whole Struct element
         indexing requires fixed-SNode capture; nested records are unqualified.
         ``member_initialization`` overrides the scope/record policy for named
         members without changing their normal placement or allocation.

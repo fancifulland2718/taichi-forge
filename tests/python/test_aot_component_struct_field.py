@@ -83,14 +83,15 @@ def test_record_declaration_rejects_unqualified_layout_before_allocation():
             scope.struct_field(dict(value=ti.f32), **kwargs)
     builder = ti.FieldsBuilder()
     explicit = ti.experimental.ResourceScope(type("Owner", (), {})(), builder=builder)
+    placement = builder.dense(ti.i, 1)
     with pytest.raises(ValueError, match="explicit groups currently require plain AOS"):
-        explicit.struct_field(dict(value=ti.f32), shape=(), layout=ti.Layout.SOA)
-    # Reject before allocating unplaced fields or mutating the builder.
-    assert not builder.root._get_children()
+        explicit.struct_field(dict(value=ti.f32), shape=(1,), layout=ti.Layout.SOA, placement=placement)
+    # A supplied single placement cannot represent separate SOA member blocks.
+    assert not placement._get_children()
     for policy, error in (({"missing": "zero"}, ValueError), ({"value": "sample"}, ValueError), ([], TypeError)):
         with pytest.raises(error, match="member initialization"):
             explicit.struct_field(dict(value=ti.f32), shape=(), member_initialization=policy)
-    assert not builder.root._get_children()
+    assert not placement._get_children()
 
 
 @ti.data_oriented

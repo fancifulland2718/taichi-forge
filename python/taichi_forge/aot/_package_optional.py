@@ -115,8 +115,8 @@ def project_boolean_groups(schema, declarations):
                 # Field. It needs a presence contract of its own before it can
                 # use a nullable argument, unlike an unconditional shape axis.
                 or item["kind"] != "dense_field"
-                or item.get("struct_field")
                 or item["element"].get("model_tensor")
+                or any(member.get("model_tensor") for member in item["element"].get("members", {}).values())
                 or not item.get("group_builder")
                 for item in conditioned.values()
             )
@@ -150,3 +150,28 @@ def project_boolean_groups(schema, declarations):
             item.update(input_record=names[0], dynamic_input_storage=True)
             if len(names) > 1:
                 item["input_conditions"] = names
+
+
+def project_struct_member_inputs(environment, schema):
+    """Use existing Dense member descriptors for a whole optional StructField.
+
+    This is compilation metadata only: the Host still owns one original group
+    and record. No new allocation, aggregate pointer ABI or layout is invented.
+    """
+    from ._component import _capture_id
+
+    for name, item in list(schema.items()):
+        if not item.get("dynamic_input_storage"):
+            continue
+        if not item.get("struct_field"):
+            item["shape"] = list(environment.declarations[name].shape)
+            continue
+        path = tuple(item.get("path", (name,)))
+        for member, element in item["element"]["members"].items():
+            key = _capture_id((*path, member))
+            schema[key] = {
+                **{k: v for k, v in item.items() if k != "struct_field"},
+                "path": [*path, member],
+                "element": element,
+                "shape": list(environment.declarations[key].shape),
+            }

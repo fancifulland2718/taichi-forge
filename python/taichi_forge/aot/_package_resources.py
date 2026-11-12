@@ -2149,8 +2149,8 @@ def scope_declarations(
                     layout = {"Layout.AOS": "AOS", "Layout.SOA": "SOA"}.get(qualified_kind(layouts[0], kind))
                     if len(layouts) != 1 or layout is None:
                         fail(module, call, "Struct Field layout requires the original AOS/SOA enum")
-                if layout == "SOA" and scope_groups[scope] in builders:
-                    fail(module, call, "Explicit ResourceScope groups require the original AOS Struct Field layout")
+                if layout == "SOA" and any(k.arg == "placement" for k in call.keywords):
+                    fail(module, call, "SOA Struct Fields require separate ordinary member placements")
             elif any(k.arg == "layout" for k in call.keywords):
                 fail(module, call, "Package Field declarations currently require plain default AOS layout")
             if method != "struct_field" and any(k.arg == "member_initialization" for k in call.keywords):

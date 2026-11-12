@@ -22615,6 +22615,87 @@ class Model:
         load_package(runtime, tmp_path / 'sdk')
 
 
+@pytest.mark.parametrize("layout", ["AOS", "SOA"])
+@pytest.mark.parametrize("rank", [1, 2])
+@test_utils.test(arch=[ti.cpu, ti.cuda], offline_cache=False)
+def test_package_optional_struct_group_uses_member_presence(tmp_path, monkeypatch, layout, rank):
+    source = '''
+import taichi_forge as ti
+from resource_contexts import resource_group
+@ti.data_oriented
+class Observations:
+    def __init__(self, n: int, enabled: bool):
+        self.n, self.enabled = n, enabled
+        scope = ti.experimental.ResourceScope(self)
+        scope.dim('n')
+        scope.static('enabled', choices=(False, True))
+        if self.enabled:
+            with resource_group(self, 'optional', initialization='zero') as fields:
+                fields.samples = fields.struct_field(dict(value=ti.i32, vector=ti.types.vector(3, ti.i32)),
+                    shape=fields.dim('n'), layout=ti.Layout.LAYOUT)
+@ti.data_oriented
+class Model:
+    def __init__(self, n: int, enabled: bool):
+        self.n = n
+        scope = ti.experimental.ResourceScope(self)
+        scope.dim('n')
+        scope.observations = Observations(n, enabled)
+        with resource_group(self, 'output', initialization='zero') as fields:
+            fields.out = fields.field(ti.i32, shape=fields.dim('n'))
+    @ti.kernel
+    def step(self):
+        for i in range(self.n):
+            self.out[i] += 1
+            if ti.static(self.observations.enabled):
+                self.observations.samples.value[i] += i + 5
+                self.observations.samples.vector[i] = ti.Vector([i, 2, 3])
+                self.out[i] += self.observations.samples.value[i] + self.observations.samples.vector[i][1]
+    @ti.kernel
+    def required(self) -> ti.i32:
+        return self.observations.samples.value[0]
+    def graph(self):
+        b = ti.graph.GraphBuilder()
+        b.dispatch(self.step)
+        return b.compile()
+'''.replace('ti.Layout.LAYOUT', 'ti.Layout.' + layout)
+    if rank == 2:
+        source = source.replace("shape=fields.dim('n'), layout=", "shape=(2, fields.dim('n')), layout=")
+        source = source.replace('samples.value[i]', 'samples.value[1, i]')
+        source = source.replace('samples.vector[i]', 'samples.vector[1, i]')
+        source = source.replace('samples.value[0]', 'samples.value[1, 0]')
+    package, _ = _resource_context_fixture(tmp_path, monkeypatch, model=source)
+    normal = package.Model(7, True)
+    normal.step()
+    options = dict(artifact_format='bc-library') if ti.lang.impl.current_cfg().arch == ti.cuda else {}
+    manifest = ti.aot.export_package(package, tmp_path / 'sdk', **options)
+    assert not manifest['entry_families']
+    assert manifest['owners']['definition_fixture.model.Observations']['enabled']['dynamic_storage_condition']
+    with Runtime(manifest['target']) as runtime, load_package(runtime, tmp_path / 'sdk') as code:
+        a, b = code.host.Model(7, True), code.host.Model(19, False)
+        assert not hasattr(b.observations, 'samples')
+        assert not b.observations._forge_package_field_groups
+        a.step()
+        b.step()
+        np.testing.assert_array_equal(a.out.to_numpy(), normal.out.to_numpy())
+        np.testing.assert_array_equal(a.observations.samples.vector.to_numpy(), normal.observations.samples.vector.to_numpy())
+        np.testing.assert_array_equal(b.out.to_numpy(), 1)
+        assert a.required() == 5
+        with pytest.raises(ValueError, match='presence'):
+            b.required()
+        with a.graph().bind({}) as call:
+            a.observations.enabled = False
+            call.run()
+        a.observations.enabled = True
+        normal.step()
+        np.testing.assert_array_equal(a.out.to_numpy(), normal.out.to_numpy())
+        original = a.observations.samples.value
+        a.observations.samples.field_dict['value'] = code.host.Model(7, True).observations.samples.value
+        with pytest.raises(ValueError, match='owned Field'):
+            a.required()
+        a.observations.samples.field_dict['value'] = original
+        np.testing.assert_array_equal(b.out.to_numpy(), 1)
+
+
 @pytest.mark.parametrize("mixed", [False, True, "conditional_extent", "early_return", "early_return_free_domain"])
 @test_utils.test(arch=[ti.cpu, ti.cuda], offline_cache=False)
 def test_package_boolean_workspace_reuses_code_without_allocating_absent_groups(

@@ -419,9 +419,9 @@ record members preserve the full root in the schema.
 
 `scope.struct_field(members, shape=...)` declares a normal flat StructField,
 including rank-zero state and arrays with declared dynamic extents. AOS is the
-default. With the implicit root, `layout=ti.Layout.SOA` uses the original
-`Struct.field` allocation: one dense block per member, with the usual vector
-and matrix element layout. Explicit builders/placement currently require AOS;
+default. With an implicit root or explicit builder, `layout=ti.Layout.SOA` follows
+the original `Struct.field` placement: one dense block per member, with the usual
+vector and matrix element layout. A supplied single placement still requires AOS;
 an unsupported combination is rejected before allocation. Members use
 the existing Record/DenseField capture path; aliases share an actual argument.
 Dimensions retain their original declaration scope, including through aliases.
@@ -431,6 +431,14 @@ tests cover AOS/SOA scalar/vector/matrix members, ordinary JIT and borrowed stor
 and different-size instances sharing loaded code. Packed Host buffers transfer
 only the selected logical elements; neighboring members and inactive tails stay
 intact. Raw packed-memory access cannot reinterpret a strided member handle.
+
+Definition packages can project complete optional StructField groups through the
+existing Dense presence ABI for fixed scalar/vector/matrix members. Prepare fixes
+the ordinary Host presence flags; absent groups allocate no storage, and members
+retain their SOA/AOS layout and instance ownership. Local CPU/CUDA checks cover
+rank-one/rank-two resources, new sizes, Graph descriptor snapshots and rejection
+of foreign instance members. Mixed groups, conditional dimensions, model-sized
+elements and layout choices retain their existing specialization admission.
 Loaded LLVM entries must also carry compiler-proven runtime-stride inputs.
 These facts come from the existing IR dependency pass and are preserved in
 bitcode and checksummed deployment metadata, including PTX/cubin artifacts.
