@@ -1033,6 +1033,11 @@ def _host_projection(
 
         def visit_Attribute(self, node):
             role = qualified_kind(node, kind)
+            if isinstance(node.ctx, ast.Load) and role == "lang.util.to_numpy_type":
+                self.minimum_version = max(self.minimum_version, 83)
+                return ast.copy_location(
+                    ast.Attribute(ast.Name(_PREFIX + "runtime", ast.Load()), "numpy_type", ast.Load()), node
+                )
             if isinstance(node.ctx, ast.Load) and role and role.startswith("ui."):
                 from taichi_forge.ui import constants as ui_constants
 

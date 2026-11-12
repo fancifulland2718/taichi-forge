@@ -188,6 +188,13 @@ class _ModuleBinding:
         record(builder)
         return builder.compile().written_resources()
 
+    @staticmethod
+    def numpy_type(dtype):
+        from ._package_values import _numpy_dtype
+        import numpy as np
+
+        return np.dtype(_numpy_dtype(dtype)).type
+
     def control_capabilities(self):
         self.package._check()
         modes = self.package.runtime.execution_control_capabilities()
@@ -1798,6 +1805,7 @@ class LoadedPackage:
                 80,
                 81,
                 82,
+                83,
             )
             or self.manifest.get("kind") != "forge_definition_package_prototype"
         ):

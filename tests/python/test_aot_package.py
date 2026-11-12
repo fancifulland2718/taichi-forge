@@ -12084,6 +12084,25 @@ def test_package_cold_factory_rejects_unproven_inputs_without_execution(
     assert not (tmp_path / "sdk").exists()
 
 
+@test_utils.test(arch=ti.cpu, offline_cache=False)
+def test_package_host_numpy_type_conversion_needs_no_frontend(tmp_path, monkeypatch):
+    package = _source_package(tmp_path, monkeypatch, '''
+import taichi_forge as ti
+class Model:
+    @staticmethod
+    def numpy_types():
+        return tuple(ti.lang.util.to_numpy_type(dtype) for dtype in
+            (ti.f32, ti.f64, ti.i8, ti.i16, ti.i32, ti.i64, ti.u8, ti.u16, ti.u32, ti.u64))
+''')
+    expected = package.Model.numpy_types()
+    manifest = ti.aot.export_package(package, tmp_path / 'sdk')
+    assert manifest['version'] == 83
+    with Runtime(manifest['target']) as runtime, load_package(runtime, tmp_path / 'sdk') as code:
+        assert code.host.Model.numpy_types() == expected
+    host = (tmp_path / 'sdk/host/model.py').read_text(encoding='utf8')
+    assert 'lang.util' not in host
+
+
 @test_utils.test(arch=[ti.cpu, ti.cuda, ti.vulkan], offline_cache=False)
 def test_package_host_ndarray_checks_distinguish_field_views(tmp_path, monkeypatch):
     source = """

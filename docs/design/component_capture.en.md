@@ -220,6 +220,10 @@ path: `dtype/n/m/ndim` remain inspectable without allocating absent storage,
 while actual reads and writes still require presence. A conditionally constructed
 child owner retains its allocation guard; entries requiring that owner export
 only admissible selections and reject consumption when the owner is absent.
+Retained Host code may convert supported scalar dtypes through
+`ti.lang.util.to_numpy_type`. Definition package format 83 projects this pure
+conversion to the Runtime's NumPy mapping without loading the JIT frontend or
+downloading field contents.
 Model tensor `n/m` remain dynamic element axes, including runtime lowering of
 the original static-loop spelling. Application instance hooks and arbitrary Host
 reflection are not executed. CPU/CUDA definition-package checks cover new sizes,
