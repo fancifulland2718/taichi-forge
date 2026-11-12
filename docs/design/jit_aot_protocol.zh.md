@@ -2,7 +2,7 @@
 
 [English](jit_aot_protocol.en.md)
 
-日期：2026-11-12。源码核查基线：Forge `7420977ca`。
+日期：2026-11-12。源码核查基线：Forge `7420977ca`；专家复核修订基线：`cb34ab93d`。
 状态：本阶段交付协议对照、收敛决定与最小一致性检查集合；不启动实现全面统一。
 本文描述开发源码，不能作为已发布 wheel 的能力声明。
 
@@ -19,6 +19,10 @@ JIT 和 AOT 对相同编译语义、函数边界、依赖、产物和消费过�
 
 以下“合同字段”是对现有对象的语义投影，不是要求新增四个大对象或公共注册接口。
 “应当”描述一致性要求；“待补”明确表示当前未建立对应的完整接口或验证证据。
+本阶段交付的是**语义规范、现有实现映射和关键行为测试**，不是由统一 C++ 类型、
+Python API 或 Compiler Interface 强制执行的新公共协议接口。
+后续改动以各节列出的权威实现为入口，按第 8 节选择局部测试；新增用途差异、固定时点或失败行为时，
+须同步说明它属于哪项合同并补对应反例，不为落实规范增加运行时抽象层。
 
 ## 2. 已对齐与尚未对齐的总览
 
@@ -57,6 +61,19 @@ JIT 和 AOT 对相同编译语义、函数边界、依赖、产物和消费过�
 **收敛要求：** 比较请求时比较解析后的有效值，同时列出函数、ABI 和资源依赖。
 请求解析不得临时修改 Program 或调用者的能力配置。保持入口发现方式不同：JIT 从实际调用取得特化输入，
 AOT 从正式导出定义及其依赖闭包取得输入，不以某个测试的执行轨迹代替整个引擎的正式导出范围。
+
+本次源码检索覆盖 `taichi/`、`python/` 中 `CompilePurpose` 的声明、传递及实际读取点：
+
+| 用途读取/传递位置 | 实际差异 | 对应合同 |
+| --- | --- | --- |
+| `kernel_compile_request.cpp::resolve_kernel_target` | 当前设备/AOT 默认目标、显式目标准入及诊断 | 有效 capabilities、target source 和目标准入规则 |
+| 同文件 `resolve_kernel_compile_request` | 启动提示归一化、仅允许 AOT export overrides | 有效 CompileConfig 和请求准入；无效请求不生成代码 |
+| `codegen/llvm/kernel_compiler.cpp::compile` | JIT 绑定 Program 函数缓存；AOT 保留已有生产事务 scope | Artifact 的缓存所有者/复用范围；有效目标与优化 spec 仍参与函数单元查找，并非另一套数值语义 |
+| LLVM/Gfx AOT Builder 与请求默认参数 | 显式传入 AOT 或默认 JIT，交给上述解析/编译路径 | 入口与生命周期差异；这些传递点本身不增加新的用途分支 |
+
+因此用途差异不全属于配置字段：LLVM 缓存 scope 属于已明确保留的所有权合同。
+上述实际读取点未发现另外一个未映射的、仅按用途选择数值算法的分支；这是当前源码审计结论，
+不代替未来新增用途读取点时的审查，也不推导 JIT/AOT 具有相同机器码。
 
 ## 4. Function Contract
 
@@ -112,6 +129,13 @@ LLVM `FunctionCodeCache` 保存不可变的符号/bitcode，由 Program 编译�
 本阶段不把 Python 本地函数 key、原生函数缓存 key 和归档内容 hash 重命名成一个 ID，
 也不声称已具备跨进程函数缓存。工具链/编译器版本、运行时 ABI 和产物格式版本是不同失效域。
 
+**当前兼容保证仅限已有显式字段及实际执行的检查。**
+[LLVM 归档读取器](../../taichi/runtime/llvm/llvm_offline_cache.cpp)核对 Forge major/minor/patch；
+code-unit 导入检查内容 hash、target triple 和 data layout，相关 ABI/schema 另按原机制核对。
+这些不等于独立记录、验证了 LLVM Producer Version；当前没有该项完整的显式兼容合同。
+LLVM 能解析 bitcode 也不证明可以安全执行。工具链版本的独立记录/相容策略保留为后续兼容性工作，
+本次不新增版本管理系统或工具链兼容承诺。
+
 ### 5.2 后端能力表
 
 | 路径 | 当前产物/共享范围 | 必须保留的限制 |
@@ -155,10 +179,19 @@ LLVM `FunctionCodeCache` 保存不可变的符号/bitcode，由 Program 编译�
 | 仅用途/配置来源不同，有效输入一致 | 不仅因来源标签制造数值代码差异；用途造成的有效目标/几何等差异仍需区分 |
 | 定义、实际静态依赖、调用 ABI、影响代码的布局改变 | 相应单元重新编译或选择另一相容单元；依赖它的调用方重新核对，不默认全引擎失效 |
 | 目标能力/有效优化配置改变 | 核对产物兼容域并选择或重建受影响产物；缺少必需能力明确拒绝，不能只看 arch 相同 |
-| 格式/schema、编译器/LLVM、运行时 ABI 改变 | 分别按各自现有版本机制检查；未知必需版本拒绝，不能只比较 wheel 版本或一个内容 hash |
-| 缺失单元、损坏内容、错误 triple/layout | 在链接/加载的相应阶段失败，不回退私有数值 JIT，不静默修改原归档 |
+| 已显式声明的格式/schema、Forge 版本、运行时 ABI 改变 | 按各自实际版本检查处理，未知必需版本拒绝；尚未独立记录/验证的 LLVM Producer Version 不视为已有保证 |
+| 可选 JIT 缓存未命中、身份不匹配或被判失效 | 按现有机制正常重新编译相应产物；这是缓存恢复，不是 AOT 私有源码回退 |
+| AOT 必需 Code Unit 缺失或内容损坏 | 在依赖解析/加载阶段报错或拒绝消费，不回退私有数值 JIT，不静默修改发行归档 |
+| 待导入单元的 triple/layout 不匹配 | 拒绝导入该单元；若属于可选缓存，可按既有恢复规则重新生成；若是 AOT 必需依赖，则拒绝消费 |
+| 可选消费特化缓存未命中/失效 | 原始 AOT 产物及格式允许时，按已有路径重新准备/生成执行产物；不重新发现私有 AST |
 | prepare 常量/shape/已证明别名关系改变 | 使用新的相容特化；普通数据值改变不自动变成特化要求 |
 | 资源实例或代际改变 | 重绑/重建相应准备状态并遵守租约；代码相容时可复用，不共享可变实例状态 |
+
+JIT 缓存是可恢复的性能优化，AOT 必需依赖是交付合同，失败语义不能合并。
+现有 [KernelCompilationManager](../../taichi/compilation_manager/kernel_compilation_manager.cpp)
+在没有可用缓存结果时正常编译；[FunctionCodeCache](../../taichi/runtime/llvm/function_code_cache.h)
+仍拒绝错误目标/布局的单元导入。本规范不新增“捕获所有异常然后重试”的恢复层，
+也不把内部编译错误、错误 ABI 或缺失的交付依赖统称为普通 cache miss。
 
 这是对现有机制的统一约束和后续核查标准，**不表示各层已有一个完整共同的版本清单或完备 effects 摘要**。
 若未来要跨路径读取缓存，必须先证明现有分散字段足以表达相容域；本阶段不开放这种互读。
@@ -173,15 +206,15 @@ LLVM `FunctionCodeCache` 保存不可变的符号/bitcode，由 Program 编译�
 | --- | --- | --- |
 | 请求快照、覆盖、默认与来源 | [kernel_compile_request_test.cpp](../../tests/cpp/program/kernel_compile_request_test.cpp)：`OwnsConfigAndTargetWithoutChangingTheCaller`、`ResolvesCudaTargetsWithoutBorrowingProducerCapabilities`、`PortableAotDoesNotBorrowProducerLaunchHints`、`PurposeAndEquivalentOriginsDoNotChangeCodeIdentity`、`PreservesExplicitCapAndIgnoresOriginsInCodeIdentity`、`ExportOverridesAreFrozenValuesWithoutJitMutation` | 覆盖显式 False/0、JIT/AOT 目标差异及来源不单独改变 key；不据此证明整个函数身份相同 |
 | 有效请求进入后端 | [test_aot_compile_request.py](../../tests/python/test_aot_compile_request.py)：`test_aot_resolves_kernel_tier_before_codegen_and_cache_lookup` | 现有 fast/full、普通/模板参数；选择受影响后端即可 |
+| 同一函数的 JIT/AOT 对照 | [test_aot_value_arguments.py](../../tests/python/test_aot_value_arguments.py)：`test_jit_aot_function_contract_matches_values_effects_and_static_inputs` | 同一 `ti.func`、显式相同数值优化配置和 CUDA 目标、声明任务 block size；两种静态输入、同一准备结果下的数据变化、值副本、资源累加及错误 dtype 拒绝；不比较 key/字节 |
 | 值 ABI、资源与 fallback | [test_func_inline_ir.py](../../tests/python/test_func_inline_ir.py)：`test_jit_function_library_preserves_tensor_copies`、`test_jit_function_library_keeps_field_state_and_bindings`、`test_jit_function_library_tracks_nested_owner_and_static_dependencies`、`test_jit_function_library_does_not_skip_python_attribute_effects` | 建立 JIT 侧边界证据；不是完整 JIT/AOT 对照套件 |
 | 后端独有函数边界 | 同文件 `test_jit_function_library_spirv_retains_one_typed_body`、`test_jit_function_library_spirv_keeps_array_abi_inline` | Vulkan 模块内单体/多调用与数组 fallback；不证明跨模块缓存 |
 | 持久单元与依赖错误 | [test_aot_execution_context.py](../../tests/python/test_aot_execution_context.py)：`test_bitcode_library_shares_real_function_and_validates_dependencies` | CUDA 实际 code-unit 共用、JIT 数值参考、实例隔离、缺失/损坏拒绝；不外推其他格式 |
 | AOT 构造不污染 JIT | [test_aot_package.py](../../tests/python/test_aot_package.py)：`test_package_bitcode_library_preserves_jit_functions` | 成功/失败导出的退休、原装饰器/定义可继续 JIT、生产期 inline fallback；只选该节点 |
 | 消费特化与实例 | [test_aot_value_arguments.py](../../tests/python/test_aot_value_arguments.py)：`test_prepared_bitcode_specialization_keeps_shapes_and_instances_independent`、`test_prepared_real_function_arguments_have_their_own_layout` | shape/选定常量与实例内容分离；内部函数 ABI 独立。首项虽名为 bitcode，也已有 Vulkan 分支 |
 
-待补的最小证据：若后续调整共同合同，优先在上述文件补一个相同小函数的 JIT/AOT 语义对照，
-显式对齐有效目标/配置，并覆盖一项静态变化、一项普通数据变化和一个不相容输入。
-从现有案例取 fixture，不新增独立运行器；不比较内部 key 字符串或强求相同二进制。
+上述最小成对用例已补入原测试文件，CPU/CUDA/Vulkan 局部通过；这不是全语言/全格式资格，
+也不新增独立运行器。沿用其他已有案例，不扩大为完整矩阵。
 跨格式版本/能力拒绝的完整覆盖也尚未由本次核查证明，按实际更改补相应反例。
 
 ## 9. 收敛工作与暂停点
@@ -192,7 +225,7 @@ LLVM `FunctionCodeCache` 保存不可变的符号/bitcode，由 Program 编译�
 | 函数合同投影 | 已定义参数、返回、静态/资源依赖、effects、特化、fallback 的共同解释；实现仍分散 | 真正需要比较时，在现有对象补最小只读投影；不要新建前端或强求两侧相同准入算法 |
 | 产物合同投影 | 已区分语义身份、内容身份、最终特化身份、版本域和后端格式 | 后续仅补现有 metadata 缺少且消费者确需的字段；不现在建立共同存储或全量格式迁移 |
 | 消费固定时点 | 已明确生产、prepare、执行分别可固定什么及拒绝责任 | 保留原准备复用、绑定和退休，不合并 JIT Program/AOT Runtime |
-| 一致性检查 | 已映射到现有局部用例；明确尚无完整共同对照套件 | 更改具体合同才补对应最小反例，最后集成节点再考虑扩大回归 |
+| 一致性检查 | 已映射到现有局部用例，补一个三后端小型成对用例；不是完整共同对照套件 | 更改具体合同才补对应最小反例，最后集成节点再考虑扩大回归 |
 
 本阶段完成标准是对照和计划可供评审、语义与差异明确、没有引入执行行为变化；
 不是宣布所有接口字段已统一，也不要求证明跨路径编译时间下降。

@@ -2,7 +2,7 @@
 
 [中文](jit_aot_protocol.zh.md)
 
-Date: 2026-11-12. Source audit baseline: Forge `7420977ca`.
+Date: 2026-11-12. Source audit baseline: Forge `7420977ca`; review revision baseline: `cb34ab93d`.
 Status: protocol comparison, convergence decisions and a minimal consistency-test selection;
 implementation unification is not started. This describes development sources, not released-wheel qualification.
 
@@ -22,6 +22,11 @@ and off by default. Existing JIT and AOT consumption behavior remains unchanged.
 The contract fields below are semantic projections of existing objects, not four new large
 objects or registration APIs. Requirements and implemented behavior are distinguished;
 documenting a requirement does not claim that a complete common interface already exists.
+The deliverable is a **semantic specification, implementation mapping and key behavior tests**,
+not a new public protocol enforced by common C++ types, Python APIs or a Compiler Interface.
+Subsequent changes should use each section's authoritative implementations and the focused tests
+in section 8. A new purpose-dependent behavior, binding time or failure mode must identify its
+contract and corresponding counterexample; enforcement does not require a new runtime layer.
 
 ## 2. Alignment overview
 
@@ -61,6 +66,20 @@ Compare effective resolved values together with function, ABI and resource depen
 Resolution must not temporarily mutate the Program or caller capabilities. Discovery stays distinct:
 JIT obtains specialization inputs from calls; AOT obtains definitions and dependencies from the
 formal export scope, not from a single test's execution trace as a substitute for engine coverage.
+
+This audit searched declarations, forwarding and actual reads of `CompilePurpose` in `taichi/` and `python/`:
+
+| Read/forwarding site | Difference | Contract mapping |
+| --- | --- | --- |
+| `kernel_compile_request.cpp::resolve_kernel_target` | Current-device/AOT defaults, explicit-target admission and diagnostics | Effective capabilities, target source and target admission |
+| Same file, `resolve_kernel_compile_request` | Launch-hint normalization and AOT-only export overrides | Effective CompileConfig and request admission; invalid requests generate no code |
+| `codegen/llvm/kernel_compiler.cpp::compile` | JIT attaches the Program function cache; AOT retains its producer transaction scope | Artifact ownership/reuse scope; effective target and optimization spec still constrain lookup, without another numerical semantics policy |
+| LLVM/Gfx AOT Builders and request defaults | Pass AOT explicitly or default to JIT for the resolver/compiler above | Entry/lifetime differences; forwarding itself adds no new purpose branch |
+
+Not every purpose difference is a configuration field: the LLVM cache scope belongs to the
+preserved ownership contract. These reads revealed no additional unmapped purpose-only numerical
+algorithm switch. This is a current-source audit, not a substitute for reviewing future reads
+or a claim of identical JIT/AOT machine code.
 
 ## 4. Function Contract
 
@@ -124,6 +143,14 @@ native cache keys and archive content hashes remain separate namespaces. There i
 cross-process function cache. Toolchain/compiler version, runtime ABI and format version are
 distinct invalidation domains.
 
+**Current compatibility guarantees cover only explicit fields and checks actually performed.**
+The [LLVM archive reader](../../taichi/runtime/llvm/llvm_offline_cache.cpp) checks Forge
+major/minor/patch; code-unit import checks content hashes, target triple and data layout;
+relevant ABI/schema checks retain their existing mechanisms. These do not independently record
+and validate LLVM Producer Version: no complete explicit contract for it exists today.
+LLVM parsing bitcode is not proof of safe execution. Independent toolchain version recording
+and compatibility policy remain future work, without a new version system or compatibility promise now.
+
 ### Backend differences
 
 | Path | Current representation/reuse | Preserved limit |
@@ -171,10 +198,21 @@ latency, cache-hit counts and final sizes are not required.
 | Purpose/origin label only, effective inputs equal | Do not manufacture numerical variants solely from the label; distinguish any effective target/geometry differences |
 | Definition, actual static dependency, ABI or code-affecting layout | Recompile/select the affected compatible unit and recheck dependent callers; do not assume whole-engine invalidation |
 | Target capabilities/effective optimization | Check the compatibility domain and select/rebuild affected artifacts; missing requirements reject, even for the same arch |
-| Schema/format, compiler/LLVM or runtime ABI | Check their existing version mechanisms independently; reject unknown required versions rather than relying on wheel version/content hash alone |
-| Missing/corrupt unit or wrong triple/layout | Fail at the relevant link/load boundary, without private-source fallback or mutation of the original archive |
+| Explicit schema/format, Forge version or runtime ABI | Apply the actual checks independently and reject unknown required versions; independently unrecorded/unvalidated LLVM Producer Version is not an existing guarantee |
+| Optional JIT cache miss, identity mismatch or invalidated entry | Recompile the affected artifact through existing mechanisms; cache recovery is not AOT private-source fallback |
+| Missing or corrupt required AOT Code Unit | Fail dependency resolution/loading or reject consumption, without private-source fallback or silent archive mutation |
+| Triple/layout mismatch on a unit being imported | Reject that import; optional caches may regenerate through existing recovery rules, whereas required AOT dependencies reject consumption |
+| Optional consumption-specialization cache miss/invalidation | Reprepare/regenerate from the original AOT artifact where its format supports it; do not rediscover private AST |
 | Prepared constants/shapes/proven alias relations | Select a new compatible specialization; ordinary data changes do not become static implicitly |
 | Resource instance/generation | Rebind/reprepare as required and honor leases; compatible code may remain shared, mutable state may not |
+
+JIT caches are recoverable performance aids; required AOT dependencies are delivery obligations.
+Their failure semantics must remain distinct. Existing
+[KernelCompilationManager](../../taichi/compilation_manager/kernel_compilation_manager.cpp)
+compiles normally when no usable cached result is available;
+[FunctionCodeCache](../../taichi/runtime/llvm/function_code_cache.h) rejects a wrong-target/layout
+unit import. This specification does not add a catch-all retry layer or classify internal
+compiler errors, invalid ABIs and missing delivered dependencies as ordinary misses.
 
 These are common requirements, not a claim of one complete version manifest or effects summary
 today. Future cross-path cache access requires proof that existing distributed fields define a
@@ -192,18 +230,17 @@ checks only where affected.
 | --- | --- | --- |
 | Snapshot, overrides, defaults/origins | [kernel_compile_request_test.cpp](../../tests/cpp/program/kernel_compile_request_test.cpp): `OwnsConfigAndTargetWithoutChangingTheCaller`, `ResolvesCudaTargetsWithoutBorrowingProducerCapabilities`, `PortableAotDoesNotBorrowProducerLaunchHints`, `PurposeAndEquivalentOriginsDoNotChangeCodeIdentity`, `PreservesExplicitCapAndIgnoresOriginsInCodeIdentity`, `ExportOverridesAreFrozenValuesWithoutJitMutation` | Explicit False/0, purpose-dependent targets and effective identity; not whole-function equivalence |
 | Effective request reaches backend | [test_aot_compile_request.py](../../tests/python/test_aot_compile_request.py): `test_aot_resolves_kernel_tier_before_codegen_and_cache_lookup` | Fast/full and ordinary/template arguments on the affected backend |
+| Paired JIT/AOT function semantics | [test_aot_value_arguments.py](../../tests/python/test_aot_value_arguments.py): `test_jit_aot_function_contract_matches_values_effects_and_static_inputs` | One `ti.func`, equal explicit numerical optimization settings and CUDA target, declared task block size; two static inputs, changed data under the same preparation, value copies, resource accumulation and wrong-dtype rejection; no key/byte comparison |
 | Value/resource/fallback semantics | [test_func_inline_ir.py](../../tests/python/test_func_inline_ir.py): `test_jit_function_library_preserves_tensor_copies`, `test_jit_function_library_keeps_field_state_and_bindings`, `test_jit_function_library_tracks_nested_owner_and_static_dependencies`, `test_jit_function_library_does_not_skip_python_attribute_effects` | JIT boundary evidence, not a complete paired JIT/AOT suite |
 | Backend boundary | Same file: `test_jit_function_library_spirv_retains_one_typed_body`, `test_jit_function_library_spirv_keeps_array_abi_inline` | Vulkan module-local sharing and array fallback, not cross-module caching |
 | Persistent units/errors | [test_aot_execution_context.py](../../tests/python/test_aot_execution_context.py): `test_bitcode_library_shares_real_function_and_validates_dependencies` | CUDA unit reuse, JIT numerical reference, instance isolation and missing/corrupt dependency rejection |
 | AOT construction preserves JIT | [test_aot_package.py](../../tests/python/test_aot_package.py): `test_package_bitcode_library_preserves_jit_functions` | Success/failure retirement, continued JIT and producer-side inline fallback; select this node only |
 | Consumption and instances | [test_aot_value_arguments.py](../../tests/python/test_aot_value_arguments.py): `test_prepared_bitcode_specialization_keeps_shapes_and_instances_independent`, `test_prepared_real_function_arguments_have_their_own_layout` | Shape/selected constants versus contents and independent internal ABI; the first test also has a Vulkan branch despite its name |
 
-If shared contracts are subsequently changed, add one small paired JIT/AOT case in these
-existing files, with explicit equal effective targets/configuration, one static change, one
-ordinary-data change and one incompatible input. Reuse fixtures rather than building another
-runner. Do not assert identical private key strings or binary bytes. Complete cross-format
-version/capability rejection coverage was not established by this audit; add focused negative
-cases when those contracts change.
+The small paired case is now in the existing file and passes locally on CPU/CUDA/Vulkan.
+It is not full-language/all-format qualification or a new runner. Retain the other existing
+cases rather than expanding this into a full matrix. Complete cross-format version/capability
+rejection coverage was not established by this audit; add focused negative cases when those contracts change.
 
 ## 9. Convergence decisions and stopping point
 
@@ -213,7 +250,7 @@ cases when those contracts change.
 | Function projection | Common meanings for ABI, static/resources/effects, specialization and fallback are defined; implementation remains distributed | Add a minimal read-only projection to existing objects only when needed for a concrete comparison; no new frontend or forced identical admission algorithm |
 | Artifact projection | Separate semantic/content/final-specialization identities, version domains and formats | Add only consumer-required missing metadata when justified; no shared storage or global migration now |
 | Consumption binding times | Production/prepare/execution responsibilities and rejection points are specified | Retain preparation reuse, binding and retirement; do not merge Program and AOT Runtime |
-| Consistency evidence | Existing focused tests mapped; no complete common comparison suite claimed | Add minimal relevant counterexamples with actual contract changes; broaden regression at integration points |
+| Consistency evidence | Existing focused tests mapped, with one small paired case on three backends; no complete common comparison suite claimed | Add minimal relevant counterexamples with actual contract changes; broaden regression at integration points |
 
 Completion means a reviewable comparison/plan, clear semantics and preserved differences,
 with no execution behavior change. It does not mean every interface field is now unified or

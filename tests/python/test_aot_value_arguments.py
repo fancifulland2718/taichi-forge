@@ -15,6 +15,81 @@ from tests import test_utils
 from tests.cpp.aot.python_scripts.value_argument_aot import export
 
 
+@test_utils.test(
+    arch=[ti.cpu, ti.cuda, ti.vulkan], offline_cache=False, fast_math=False,
+    compile_tier="fast", advanced_optimization=False, llvm_opt_level=0,
+    external_optimization_level=0, full_simplify_global_iter_cap=1,
+)
+def test_jit_aot_function_contract_matches_values_effects_and_static_inputs(tmp_path):
+    from taichi_forge_runtime.aot import Scalar
+
+    # Share the numerical optimization settings above. CUDA AOT uses an
+    # explicit current target instead of its portable SM80 default; the task
+    # below declares its own block size, rather than a producer-derived hint.
+    caps = ([ti.DeviceCapability.cuda_compute_capability(ti.lang.impl.get_cuda_compute_capability())]
+            if ti.cfg.arch == ti.cuda else None)
+
+    @ti.func
+    def adjust(value: ti.types.vector(2, ti.i32), positive: ti.template()) -> ti.i32:
+        if ti.static(positive):
+            value[0] += 7
+        else:
+            value[0] -= 3
+        value[1] *= 2
+        return value[0] + value[1]
+
+    @ti.kernel
+    def update(data: ti.types.ndarray(ti.i32, 1), ledger: ti.types.ndarray(ti.i32, 1),
+               delta: ti.i32, positive: ti.template()):
+        ti.loop_config(block_dim=64)
+        for i in range(data.shape[0]):
+            value = ti.Vector([data[i], delta])
+            ledger[i] += adjust(value, positive)
+            data[i] = value[0] + value[1]  # adjust must not mutate this value.
+
+    module = ti.aot.Module(caps=caps)
+    exemplars = {name: ti.ndarray(ti.i32, shape=(5,)) for name in ("data", "ledger")}
+    for positive in (False, True):
+        module.add_kernel(update, template_args={**exemplars, "positive": positive},
+                          name=f"update_{int(positive)}")
+    artifact = tmp_path / "function-contract.tcm"
+    module.archive(str(artifact))
+
+    with ti.aot.borrow_runtime() as runtime, ExitStack() as stack:
+        loaded = stack.enter_context(runtime.load_module(artifact))
+        data = stack.enter_context(closing(runtime.ndarray("i32", (5,))))
+        ledger = stack.enter_context(closing(runtime.ndarray("i32", (5,))))
+        delta = 4
+        for positive in (False, True):
+            entry = loaded.kernel(f"update_{int(positive)}")
+            with entry.bind(data, ledger, Scalar("i32", delta)).prepare(specialize=True) as prepared:
+                # Change ordinary resource contents without re-exporting or
+                # preparing again. Both paths must observe the new contents.
+                for seed in (1, 9):
+                    initial = np.arange(5, dtype=np.int32) + seed
+                    initial_ledger = np.full(5, seed * 2, dtype=np.int32)
+                    jit_data, jit_ledger = initial.copy(), initial_ledger.copy()
+                    update(jit_data, jit_ledger, delta, positive)
+                    data.write(initial)
+                    ledger.write(initial_ledger)
+                    prepared.run()
+                    actual_data = np.frombuffer(data.read(), np.int32)
+                    actual_ledger = np.frombuffer(ledger.read(), np.int32)
+                    expected_ledger = initial_ledger + initial + (7 if positive else -3) + 2 * delta
+                    np.testing.assert_array_equal(jit_data, initial + delta)
+                    np.testing.assert_array_equal(jit_ledger, expected_ledger)
+                    np.testing.assert_array_equal(actual_data, jit_data)
+                    np.testing.assert_array_equal(actual_ledger, jit_ledger)
+
+        # The same incompatible resource dtype is rejected through each
+        # path's existing argument checks, without requiring equal exceptions.
+        with pytest.raises((ValueError, ti.TaichiRuntimeError), match="[Dd]type|[Tt]ype"):
+            update(np.zeros(5, dtype=np.float32), np.zeros(5, dtype=np.int32), delta, False)
+        wrong = stack.enter_context(closing(runtime.ndarray("f32", (5,))))
+        with pytest.raises((ValueError, RuntimeError), match="[Dd]type|[Tt]ype"):
+            loaded.kernel("update_0").bind(wrong, ledger, Scalar("i32", delta)).prepare(specialize=True)
+
+
 @test_utils.test(arch=[ti.cpu, ti.cuda, ti.vulkan], offline_cache=False)
 @pytest.mark.parametrize("fold_dimensions", [False, True])
 def test_prepared_bitcode_specialization_keeps_shapes_and_instances_independent(tmp_path, fold_dimensions):
