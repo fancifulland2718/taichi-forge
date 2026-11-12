@@ -36,7 +36,7 @@ def _static_reference_aliases(schema, domains):
 
 
 def compile_static_variants(environment, entry, arguments, owner, schema, *, template_args=None, fixed=None,
-                            on_compiled=None):
+                            on_compiled=None, rejected=None):
     """Cover a kernel's finite declaration domain without multiplying owners.
 
     A compiled contract covers every assignment of unread configuration values.
@@ -108,6 +108,11 @@ def compile_static_variants(environment, entry, arguments, owner, schema, *, tem
                 # selection inadmissible. Keep exploring dependencies reached
                 # on that branch; all other compilation failures still abort.
                 code = missing
+                if rejected is not None:
+                    # A layout fixed by the outer explorer may be inadmissible
+                    # while another layout provides this required resource.
+                    # Keep dependency facts only, never traceback/compiler state.
+                    rejected.append(dict(missing.static))
             else:
                 codes.append(code)
                 if on_compiled is not None:
@@ -144,7 +149,7 @@ def compile_static_variants(environment, entry, arguments, owner, schema, *, tem
             write_member(owner, name, value, schema)
         for name, value in previous.items():
             write_member(owner, name, value, schema)
-    if not codes:
+    if not codes and rejected is None:
         raise ValueError("Numerical entry has no admissible resource/configuration choice")
     return codes
 
@@ -208,6 +213,7 @@ def compile_owner_variants(graph, identity, entry, arguments, *, template_args=N
             if getattr(entry, "_kernel_owner", None) is not None
             else entry
         )
+        rejected = []
         codes = compile_static_variants(
             environment,
             selected_entry,
@@ -217,9 +223,12 @@ def compile_owner_variants(graph, identity, entry, arguments, *, template_args=N
             template_args=template_args(owner) if template_args else None,
             fixed=fixed,
             on_compiled=on_compiled,
+            rejected=rejected,
         )
+        dependencies = []
         for code in codes:
             bindings = owner_bindings(environment, schema, code.used)
+            dependencies.append((code.used, code.static, bindings))
             # The existing compiler still decides physical code sharing. This
             # merely avoids emitting the same logical selection twice when a
             # branch did not visit the changed child.
@@ -233,19 +242,24 @@ def compile_owner_variants(graph, identity, entry, arguments, *, template_args=N
             if signature not in emitted:
                 emitted.add(signature)
                 results.append((code, owner, environment, schema))
+        # Rejected branches participate in dependency discovery, but never
+        # become exported code or admissible no-op entries. Explore only layout
+        # guards actually read before encountering the missing resource.
+        dependencies.extend(((), static, {}) for static in rejected)
+        for used, static, bindings in dependencies:
             for name, policy in (
                 *((name, item["shape_policy"]) for name, item in shape_choices.items()),
                 *((name, item["dtype_policy"]) for name, item in dtype_choices.items()),
                 *((name, item["source_policy"]) for name, item in source_choices.items()),
             ):
                 guard = policy["condition"]
-                if name in code.used or guard in code.static:
+                if name in used or guard in static:
                     for value in (False, True):
                         schedule({**selection, tuple(environment._paths[aliases.get(guard, guard)]): value})
             for name, item in choices.items():
                 # A parent method can also read the same configuration without
                 # touching the child. Its own static branches remain complete.
-                if name not in bindings and not code.static.keys() & item.get("choice_guards", {}).keys():
+                if name not in bindings and not static.keys() & item.get("choice_guards", {}).keys():
                     continue
                 for alternative in item["owner_alternatives"]:
                     guards = {
@@ -254,4 +268,6 @@ def compile_owner_variants(graph, identity, entry, arguments, *, template_args=N
                         if flag not in item.get("conditions", {})
                     }
                     schedule({**selection, **guards})
+    if not results:
+        raise ValueError("Numerical entry has no admissible resource/configuration choice")
     return results

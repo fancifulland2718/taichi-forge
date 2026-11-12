@@ -1040,6 +1040,13 @@ allocation path. Small CPU/CUDA tests cover both layouts, new sizes, independent
 instances, source-free consumption and invalid presence predicates. They do not
 qualify a complete engine.
 
+When the default source lacks an entry's required resource, the build still
+explores other declared sources through selection guards already read. The entry
+is rejected only when all relevant selections are inadmissible. Rejected branches
+are never exported as no-ops or admitted for consumption. Selection order does
+not change the valid entry set; this affects build exploration only, with no new
+runtime checks.
+
 An original initializer recording can join the same owner's step recording:
 `component.compile_graph(owner.record_step, initializer=owner.record_initialize)`.
 Both phases share capture and resource closure, including initializer-only SNode

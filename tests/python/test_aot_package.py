@@ -9421,6 +9421,33 @@ def test_package_rejects_unresolved_conditional_reborrow(tmp_path, monkeypatch):
         ti.aot.export_package(package, tmp_path / "sdk")
 
 
+@pytest.mark.parametrize("row_first", [False, True])
+@test_utils.test(arch=[ti.cpu, ti.cuda], offline_cache=False)
+def test_package_required_resource_can_select_nondefault_borrow_layout(tmp_path, monkeypatch, row_first):
+    source = NESTED_BORROW_CHOICES_SOURCE.replace(
+        "        s.borrow('common', self.storage.control.shared.value, source_scope=True)",
+        "        s.borrow('common', self.storage.control.shared.value, source_scope=True)\n"
+        "        if self.row:\n"
+        "            s.borrow('row_only', self.storage.rows.shared.value, source_scope=True)",
+    ).replace("for i in self.selected:", "for i in self.row_only:", 1)
+    if row_first:
+        source = source.replace("choices=(False, True)", "choices=(True, False)")
+    package = _source_package(tmp_path, monkeypatch, source, initializer="from .model import Model, Storage\n")
+    manifest = ti.aot.export_package(package, tmp_path / "sdk")
+    steps = [e for e in manifest["entries"].values() if "definition_fixture.model.Model.step" in e["definitions"]]
+    assert len(steps) == 1
+    with Runtime(manifest["target"]) as runtime, load_package(runtime, tmp_path / "sdk") as code:
+        for n in (3, 7):
+            original = package.Model(package.Storage(n, True), True)
+            model = code.host.Model(code.host.Storage(n, True), True)
+            original.step(4)
+            model.step(4)
+            np.testing.assert_array_equal(model.selected.to_numpy(), original.selected.to_numpy())
+        unsupported = code.host.Model(code.host.Storage(2, False), False)
+        with pytest.raises(ValueError):
+            unsupported.step(4)
+
+
 CHILD_CHOICES_SOURCE = """
 import taichi_forge as ti
 constructors = 0
