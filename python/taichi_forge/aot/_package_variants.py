@@ -1,6 +1,7 @@
 """Explore only static dependencies observed by the existing kernel compiler."""
 
 from collections import deque
+from types import SimpleNamespace
 
 from taichi_forge_runtime._static_values import read_static_key, static_key
 from ._package_records import read_member, write_member
@@ -101,13 +102,17 @@ def compile_static_variants(environment, entry, arguments, owner, schema, *, tem
                     write_member(owner, name, producer_static(value), schema)
             for name, value in records.items():
                 write_member(owner, name, value if selection[name] else None, schema)
+            discarded = False
             try:
                 code = environment.compile(entry, *arguments, owner=owner, template_args=template_args)
             except _DefinitionMissingResource as missing:
                 # Only an explicitly identified absent required resource makes a
                 # selection inadmissible. Keep exploring dependencies reached
                 # on that branch; all other compilation failures still abort.
-                code = missing
+                # Do not keep the traceback/capture/IR graph while visiting
+                # neighboring selections. Only these facts affect coverage.
+                code = SimpleNamespace(static=dict(missing.static), objects=dict(missing.objects))
+                discarded = True
                 if rejected is not None:
                     # A layout fixed by the outer explorer may be inadmissible
                     # while another layout provides this required resource.
@@ -117,6 +122,8 @@ def compile_static_variants(environment, entry, arguments, owner, schema, *, tem
                 codes.append(code)
                 if on_compiled is not None:
                     on_compiled(code)
+            if discarded and compilation is not None:
+                compilation.discard_capture(entry._primal)
             if not code.static.keys() <= domains.keys():
                 raise ValueError("Kernel static dependencies are outside the declared package domain")
             # Missing required storage is also a proven branch result. Its

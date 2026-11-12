@@ -9448,6 +9448,59 @@ def test_package_required_resource_can_select_nondefault_borrow_layout(tmp_path,
             unsupported.step(4)
 
 
+@test_utils.test(arch=ti.cuda, offline_cache=False)
+def test_package_rejected_layout_retires_capture_before_next_selection(tmp_path, monkeypatch):
+    import weakref
+    from taichi_forge.aot._component import _Capture
+    from taichi_forge.aot._package_compilation import PackageCompilation
+
+    captures, discarded = [], []
+    original_init, original_discard = _Capture.__init__, PackageCompilation.discard_capture
+
+    def capture_init(self, *args, **kwargs):
+        original_init(self, *args, **kwargs)
+        captures.append(weakref.ref(self))
+
+    def discard(self, kernel):
+        rejected = captures[-1]
+        original_discard(self, kernel)
+        assert rejected() is None
+        discarded.append(self.retired_function_definitions)
+
+    monkeypatch.setattr(_Capture, "__init__", capture_init)
+    monkeypatch.setattr(PackageCompilation, "discard_capture", discard)
+    source = """
+import taichi_forge as ti
+@ti.data_oriented
+class Model:
+    def __init__(self, n: int, row: bool):
+        self.n, self.row = n, row
+        s = ti.experimental.ResourceScope(self)
+        s.static('row', choices=(False, True))
+        s.common = s.field(ti.i32, shape=s.dim('n'), initialization='zero')
+        if self.row:
+            s.selected = s.field(ti.i32, shape=s.dim('n'), initialization='zero')
+    @ti.func
+    def adjusted(self, i: ti.i32, bias: ti.i32) -> ti.i32:
+        return i + bias
+    @ti.kernel
+    def step(self, bias: ti.i32):
+        for i in range(self.n):
+            self.common[i] = self.adjusted(i, bias)
+            self.selected[i] += self.common[i]
+"""
+    package = _source_package(tmp_path, monkeypatch, source, initializer="from .model import Model\n")
+    manifest = ti.aot.export_package(package, tmp_path / "sdk", artifact_format="bc-library")
+    assert discarded and max(discarded) > 0
+    with Runtime(manifest["target"]) as runtime, load_package(runtime, tmp_path / "sdk") as code:
+        original = package.Model(7, True)
+        model = code.host.Model(7, True)
+        original.step(4)
+        model.step(4)
+        np.testing.assert_array_equal(model.selected.to_numpy(), original.selected.to_numpy())
+        np.testing.assert_array_equal(model.common.to_numpy(), original.common.to_numpy())
+
+
 @pytest.mark.parametrize("related", [False, True])
 @test_utils.test(arch=[ti.cpu, ti.cuda], offline_cache=False)
 def test_package_borrowed_model_tensor_copy_uses_declared_extent_relation(tmp_path, monkeypatch, related):

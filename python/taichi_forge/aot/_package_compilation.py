@@ -117,6 +117,20 @@ class PackageCompilation(FunctionLibrary):
     def symbol(self, code):
         return self.exported[(code.kernel, code.key)]
 
+    def discard_capture(self, kernel):
+        """Retire build-owned IR after an inadmissible resource selection.
+
+        The explorer must first drop the exception/traceback and retain only
+        its dependency facts. Failed captures never reach compile()'s normal
+        retirement path, while automatic cyclic GC is disabled for the build.
+        """
+        if kernel not in self.kernels.values():
+            raise RuntimeError("Package compilation cannot retire a caller-owned kernel")
+        kernel.kernel_cpp = None
+        self._release_functions()
+        gc.collect(1)
+        kernel.runtime.collect_unused_kernel_definitions(force=True)
+
     def __exit__(self, *exception):
         try:
             self._release()
