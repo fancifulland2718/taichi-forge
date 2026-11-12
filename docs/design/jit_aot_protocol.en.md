@@ -106,6 +106,12 @@ Distinguish three outcomes:
    loading or preparation stage. Consumers do not fall back to private numerical source.
    A caller script's own JIT is separate from such a fallback.
 
+Caller-local expressions, structs/vectors, local tensors, shared arrays and bound array
+descriptors passed through `ti.template()` have no independent callee ABI slot. Automatic
+extraction retains inline lowering and the original reference semantics. Typed value arguments
+and resources recaptured through an owner remain eligible. Check task dependencies transitively:
+a wrapper containing synchronization/shared memory through another helper still belongs to its task.
+
 Current automatic boundaries still restrict AD, unknown callbacks/attribute effects, unproven
 dependencies and some return inference. Kernel-root parallel helpers must not become serial
 per-thread functions merely to obtain reuse. SIMT/shared-memory/task-dependent functions cannot
@@ -235,6 +241,7 @@ checks only where affected.
 | Backend boundary | Same file: `test_jit_function_library_spirv_retains_one_typed_body`, `test_jit_function_library_spirv_keeps_array_abi_inline` | Vulkan module-local sharing and array fallback, not cross-module caching |
 | Persistent units/errors | [test_aot_execution_context.py](../../tests/python/test_aot_execution_context.py): `test_bitcode_library_shares_real_function_and_validates_dependencies` | CUDA unit reuse, JIT numerical reference, instance isolation and missing/corrupt dependency rejection |
 | AOT construction preserves JIT | [test_aot_package.py](../../tests/python/test_aot_package.py): `test_package_bitcode_library_preserves_jit_functions` | Success/failure retirement, continued JIT and producer-side inline fallback; select this node only |
+| Caller references and task scope | Same file: `test_package_library_keeps_caller_array_templates_inline`, `test_package_library_keeps_shared_array_templates_inline`, `test_package_library_keeps_local_template_references_inline`, `test_package_library_keeps_transitive_task_context_inline` | CUDA package/JIT numerical checks: array/local template references and indirect synchronization stay inline; independent numerical helpers remain shareable. Does not extend explicit real_func ABI |
 | Consumption and instances | [test_aot_value_arguments.py](../../tests/python/test_aot_value_arguments.py): `test_prepared_bitcode_specialization_keeps_shapes_and_instances_independent`, `test_prepared_real_function_arguments_have_their_own_layout` | Shape/selected constants versus contents and independent internal ABI; the first test also has a Vulkan branch despite its name |
 
 The small paired case is now in the existing file and passes locally on CPU/CUDA/Vulkan.
