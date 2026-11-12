@@ -230,6 +230,10 @@ work separately; use `@ti.func` for small helpers unless evidence favors a chang
 
 ### Experimental late-inlined JIT function units
 
+Further JIT/AOT work is limited to [protocol comparison and convergence](../design/jit_aot_protocol.en.md).
+Request, function, artifact and consumption semantics are aligned in meaning; caches,
+storage and lifetimes remain independent. Full implementation unification is deferred.
+
 `ti.init(jit_function_library=True)` (or `TI_JIT_FUNCTION_LIBRARY=1`) opts into
 the package builder's existing typed function boundaries for ordinary `@ti.func`.
 The default is `False`. CPU/CUDA/Vulkan non-AD compilation can lower an eligible

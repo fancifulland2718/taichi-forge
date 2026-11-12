@@ -173,6 +173,9 @@ task 局部依赖仍按原路径生成。最终 kernel 保持自包含，后端�
 
 ### 实验性 JIT 函数单元与后期内联
 
+JIT/AOT 的后续工作先限定为[协议对照与收敛](../design/jit_aot_protocol.zh.md)。
+请求、函数边界、产物和消费语义对齐；缓存、存储与生命周期继续独立，暂不开展全面实现统一。
+
 `ti.init(jit_function_library=True)`（或 `TI_JIT_FUNCTION_LIBRARY=1`）让普通
 `@ti.func` 使用包构建器已有的类型化函数边界，默认 `False`。CPU/CUDA/Vulkan 非 AD 编译中，
 合格函数体在每个 kernel 特化内降级一次，再与调用方组合。CPU/CUDA 在 LLVM 中后期

@@ -34,8 +34,9 @@ struct KernelCompileOptions {
   std::optional<int> full_simplify_global_iter_cap;
 };
 
-// Diagnostic provenance, not code identity. The current resolver preserves
-// legacy defaults; purpose does not yet choose different JIT/AOT policies.
+// Diagnostic provenance, not code identity by itself. Purpose selects defaults
+// such as target and launch hints; the resolved values participate in identity.
+// Equivalent effective inputs do not differ solely because of their origins.
 struct CompileRequestProvenance {
   CompilePurpose purpose;
   CompileTierSource tier_source;
