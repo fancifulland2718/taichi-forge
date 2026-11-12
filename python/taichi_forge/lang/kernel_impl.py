@@ -302,7 +302,7 @@ class Func:
             self._real_function_cache_variants[variant] = variant_id
         return variant_id
 
-    def _can_auto_promote(self):
+    def _can_auto_promote(self, arguments=None):
         """P9.A-2 (F2) — structural eligibility for auto-promotion.
 
         Conditions (all must hold):
@@ -326,7 +326,7 @@ class Func:
             return False
         if not _ti_core.arch_uses_llvm(impl.default_cfg().arch):
             return False
-        for kernel_arg in self.arguments:
+        for kernel_arg in self.arguments if arguments is None else arguments:
             anno = kernel_arg.annotation
             if isinstance(anno, template):
                 continue
@@ -373,7 +373,7 @@ class Func:
             if self.is_real_function:
                 return deployment.call_real_function(self, args)
             compilation = getattr(impl.get_runtime().current_kernel, "_package_compilation", None)
-            function = compilation.library_function(self) if compilation is not None else None
+            function = compilation.library_function(self, args) if compilation is not None else None
             if function is not None:
                 return deployment.call_real_function(function, args)
         if deployment is None and not self.is_real_function and not self._auto_promoted:

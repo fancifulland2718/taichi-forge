@@ -966,6 +966,132 @@ class Model:
 
 
 @test_utils.test(arch=ti.cuda, offline_cache=False)
+@pytest.mark.parametrize('wide', [False, True])
+def test_package_library_captures_untyped_value_projection_once(tmp_path, monkeypatch, wide):
+    from collections import Counter
+    from taichi_forge.lang.kernel_impl import Func
+    from taichi_forge.aot._package_compilation import PackageCompilation
+
+    source = '''import taichi_forge as ti
+@ti.data_oriented
+class Model:
+    def __init__(self, n: int):
+        self.n = n
+        s = ti.experimental.ResourceScope(self)
+        s.dim('n')
+        s.out = s.field(ti.f64 if WIDE else ti.f32, shape=s.dim('n'))
+    @ti.func
+    def axis(self, i, depth, normal, separated):
+        for j in range(3):
+            depth = ti.max(depth, i + j + 0.25)
+            normal[j] += depth
+        separated += i
+        return depth, normal, separated
+    @ti.kernel
+    def step(self):
+        for i in range(self.n):
+            depth = ti.cast(0, ti.f64 if WIDE else ti.f32)
+            normal = ti.Vector.zero(ti.f64 if WIDE else ti.f32, 3)
+            separated = 0
+            for axis in ti.static(range(3)):
+                depth, normal, separated = self.axis(i + axis, depth, normal, separated)
+            self.out[i] = depth + normal.sum() + separated
+'''.replace('ti.f64 if WIDE else ti.f32', 'ti.f64' if wide else 'ti.f32')
+    package = _source_package(tmp_path, monkeypatch, source)
+    jit = package.model.Model(7)
+    jit.step()
+    expected = jit.out.to_numpy()
+    captures = Counter()
+    original = Func.do_compile
+    seal = PackageCompilation.compile
+    at_seal = []
+
+    def compile_function(function, *args, **kwargs):
+        if function.func.__name__ == 'axis':
+            captures['axis'] += 1
+        return original(function, *args, **kwargs)
+
+    def observe(transaction, code):
+        if code.entry_definition[1].endswith('.step'):
+            at_seal.append(captures['axis'])
+        seal(transaction, code)
+
+    monkeypatch.setattr(Func, 'do_compile', compile_function)
+    monkeypatch.setattr(PackageCompilation, 'compile', observe)
+    ti.aot.export_package(package, tmp_path / 'sdk', artifact_format='bc-library')
+    assert at_seal == [1]  # three static call sites, one capture before LLVM export
+    assert not package.model.Model.axis.func.is_real_function
+    with Runtime('cuda') as runtime, load_package(runtime, tmp_path / 'sdk') as code:
+        a, b = code.host.Model(7), code.host.Model(2)
+        a.step()
+        b.step()
+        np.testing.assert_array_equal(a.out.to_numpy(), expected)
+        np.testing.assert_array_equal(b.out.to_numpy(), expected[:2])
+
+
+@test_utils.test(arch=ti.cuda, offline_cache=False)
+def test_package_library_keeps_value_signatures_and_static_returns(tmp_path, monkeypatch):
+    from collections import Counter
+    from taichi_forge.lang.kernel_impl import Func
+
+    source = '''import taichi_forge as ti
+@ti.func
+def updated(value):
+    value += 0.75
+    return value
+@ti.func
+def static_result(value):
+    value = ti.static(7)
+    return value
+@ti.func
+def template_result(value: ti.template()):
+    return value
+@ti.func
+def singleton_result(value):
+    return value,
+@ti.data_oriented
+class Model:
+    def __init__(self, n: int):
+        self.n = n
+        s = ti.experimental.ResourceScope(self)
+        s.dim('n')
+        s.out = s.field(ti.f64, shape=s.dim('n'))
+    @ti.kernel
+    def step(self):
+        for i in range(self.n):
+            total = ti.cast(0, ti.f64)
+            for axis in ti.static(range(3)):
+                total += updated(ti.cast(i + axis, ti.i32))
+                total += updated(ti.cast(i + axis, ti.f64))
+                total += updated(ti.Vector([i + axis, i + axis + 1])).sum()
+                total += updated(ti.Matrix([[i, i + 1], [i + 2, i + 3]])).sum()
+            total += updated(self.n)
+            offset = ti.static(static_result(1) + template_result(2))
+            single, = singleton_result(i)
+            self.out[i] = total + offset + single
+'''
+    package = _source_package(tmp_path, monkeypatch, source)
+    normal = package.model.Model(4)
+    normal.step()
+    expected = normal.out.to_numpy()
+    captures = Counter()
+    original = Func.do_compile
+
+    def observe(function, *args, **kwargs):
+        captures[function.func.__name__] += 1
+        return original(function, *args, **kwargs)
+
+    monkeypatch.setattr(Func, 'do_compile', observe)
+    ti.aot.export_package(package, tmp_path / 'sdk', artifact_format='bc-library')
+    assert captures['updated'] == 4  # i32, f64, vec2(i32), mat2(i32); model extent stays inline
+    assert captures['static_result'] == captures['template_result'] == captures['singleton_result'] == 0
+    with Runtime('cuda') as runtime, load_package(runtime, tmp_path / 'sdk') as code:
+        aot = code.host.Model(4)
+        aot.step()
+        np.testing.assert_array_equal(aot.out.to_numpy(), expected)
+
+
+@test_utils.test(arch=ti.cuda, offline_cache=False)
 @pytest.mark.parametrize("fail_export", [False, True])
 def test_package_bitcode_library_preserves_jit_functions(tmp_path, monkeypatch, fail_export):
     from taichi_forge.aot._package_compilation import PackageCompilation

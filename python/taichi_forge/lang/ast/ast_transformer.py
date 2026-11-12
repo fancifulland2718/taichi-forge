@@ -790,7 +790,7 @@ class ASTTransformer(Builder):
 
         def transform_as_kernel():
             # Treat return type
-            if node.returns is not None:
+            if ctx.func.return_type is not None:
                 for return_type in ctx.func.return_type:
                     kernel_arguments.decl_ret(return_type)
             impl.get_runtime().compiling_callable.finalize_rets()
@@ -839,7 +839,16 @@ class ASTTransformer(Builder):
                         0,
                         argument_path,
                     )
-                    ctx.create_variable(arg.arg, obj if result else obj[0](*obj[1], _origin=obj[2]))
+                    value = obj if result else obj[0](*obj[1], _origin=obj[2])
+                    if getattr(ctx.func, '_aot_copy_value_arguments', False) and (
+                        id(annotation) in primitive_types.type_ids or isinstance(annotation, MatrixType)
+                    ):
+                        # A private AOT boundary retains ti.func's local value
+                        # parameters, unlike explicit real_func/kernel inputs.
+                        value = impl.expr_init_func(value)
+                        if arg.arg in ctx.kernel_args:
+                            ctx.kernel_args.remove(arg.arg)
+                    ctx.create_variable(arg.arg, value)
             for argpack, name, func, params, argument_origin in pending_argpack_members:
                 argpack[name] = func(*params, _origin=argument_origin)
             for k, v in create_variable_later.items():

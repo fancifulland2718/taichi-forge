@@ -27,8 +27,14 @@ without another compilation using the Producer's ordinary JIT configuration.
 CUDA exports can explicitly try `artifact_format="bc-library"`. Build copies
 retain typed `ti.func` boundaries and store compatible implementations as shared
 bitcode units. Parent units reference child units instead of embedding their
-bodies again. Functions with untyped arguments or unannotated return values keep
-their inline representation; `pyfunc` and AD are not automatically converted.
+bodies again. Unannotated numerical parameters can use the scalar or fixed tensor
+types of their DSL operands. A terminal return of these value parameters (or a
+tuple of them) can retain the boundary too. Parameters remain mutable local
+copies as in `ti.func`. Repeated calls reuse capture work before LLVM emission
+and archive deduplication. Different dtypes/shapes retain separate ABIs; numerical
+argument values do not create variants. Model-extent provenance, Python/resource
+returns, static rebinding and other unproven return types keep inline lowering.
+`pyfunc` and AD are not automatically converted.
 Ordinary JIT definitions are unchanged. Consumers optimize after specializing
 actual arguments and resources. Automatic boundaries require calls already inside
 an iteration or device function. Helpers contributing top-level parallel loops,
