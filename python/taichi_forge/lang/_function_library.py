@@ -84,23 +84,27 @@ class FunctionLibrary:
         if not supported:
             return None
 
-        from taichi_forge.lang._local_tensor import is_model_value
+        from taichi_forge.lang._local_tensor import ModelTensor, is_model_value
         from taichi_forge.lang.any_array import AnyArray
         from taichi_forge.lang.expr import Expr
         from taichi_forge.lang.kernel_impl import Func, TaichiCallableTemplateMapper
         from taichi_forge.lang.kernel_arguments import KernelArgument
-        from taichi_forge.lang.matrix import MatrixType, VectorType
+        from taichi_forge.lang.matrix import Matrix, MatrixType, VectorType
         from taichi_forge.lang.simt.block import SharedArray
+        from taichi_forge.lang.struct import Struct
         from taichi_forge.types import primitive_types
         from taichi_forge.types.annotations import template
 
         arguments = list(source.arguments)
         signature = []
         for index, (argument, value) in enumerate(zip(arguments, args)):
-            if isinstance(argument.annotation, template) and isinstance(value, (AnyArray, SharedArray)):
-                # A template has no callee ABI slot. This descriptor contains
-                # the caller's array argument index or task-local shared
-                # allocation, unlike resources recaptured through an owner.
+            if isinstance(argument.annotation, template) and isinstance(
+                value, (AnyArray, SharedArray, Expr, Matrix, Struct, ModelTensor)
+            ):
+                # Templates have no callee ABI slot. These operands refer to
+                # caller IR, local allocations or array argument indices,
+                # unlike resources recaptured through an owner. In particular,
+                # copying a local template would lose its reference semantics.
                 # Keep ordinary inline lowering until it can be rebound.
                 return None
             if argument.annotation is not inspect.Parameter.empty:
