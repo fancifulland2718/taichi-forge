@@ -33,6 +33,10 @@ def constructor_calls(
                 root = root.value
             if isinstance(root, ast.Name):
                 stores[root.id] = stores.get(root.id, 0) + 2
+    # Binding shadowing and value escape are different facts. Passing a tuple
+    # result to Host code can invalidate the result's alias, but cannot rebind
+    # the builtin used to construct it (or every other tuple in this owner).
+    bound_names = frozenset(stores)
     for node in ast.walk(constructor):
         if not isinstance(node, ast.Call):
             continue
@@ -46,7 +50,7 @@ def constructor_calls(
         if (
             isinstance(node.func, ast.Name)
             and node.func.id in ("tuple", "zip", "len")
-            and node.func.id not in stores
+            and node.func.id not in bound_names
             and namespace.get(node.func.id, getattr(builtins, node.func.id)) is getattr(builtins, node.func.id)
         ):
             continue
@@ -128,7 +132,7 @@ def constructor_calls(
         return (
             isinstance(node, ast.Name)
             and node.id == name
-            and node.id not in stores
+            and node.id not in bound_names
             and namespace.get(name, expected) is expected
             and builtin_namespace.get(name) is expected
         )

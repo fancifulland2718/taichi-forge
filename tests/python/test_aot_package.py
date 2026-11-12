@@ -11466,7 +11466,15 @@ SEQUENCE_FACTORY_SOURCE = (
 
 @test_utils.test(arch=[ti.cpu, ti.cuda, ti.vulkan], offline_cache=False)
 def test_package_factory_sequence_projects_each_stage_domain(tmp_path, monkeypatch):
-    package = _source_package(tmp_path, monkeypatch, SEQUENCE_FACTORY_SOURCE)
+    source = SEQUENCE_FACTORY_SOURCE.replace(
+        "        tiers = (self.first, self.second)",
+        # A Host observation of another tuple must not invalidate the builtin
+        # binding used below to construct the declared numerical factory pool.
+        "        counts = tuple((1, 2))\n"
+        "        self.observed_count = sum(counts)\n"
+        "        tiers = (self.first, self.second)",
+    )
+    package = _source_package(tmp_path, monkeypatch, source)
     original = sys.modules["definition_fixture.model"]
     forbidden = {original.Model.__init__.__code__, original.make_update.__wrapped__.__code__}
     previous = sys.getprofile()
@@ -11496,6 +11504,7 @@ def test_package_factory_sequence_projects_each_stage_domain(tmp_path, monkeypat
                 assert manifest["entries"][variant["symbol"]]["compile_options"]["opt_level"] == option
     assert original.make_update.cache_info().currsize == 0
     reference = original.Model(3, 2.0, "fast", "full", True)
+    assert reference.observed_count == 3
     reference.selected[1](reference, 5.0)
     np.testing.assert_array_equal(reference.values.to_numpy(), np.arange(3) + 7)
     probe = tmp_path / "consume_factory_sequence.py"
@@ -11564,6 +11573,7 @@ def test_package_factory_sequence_projects_each_stage_domain(tmp_path, monkeypat
         "mutating_call",
         "alias_mutation",
         "shadowed_zip",
+        "shadowed_tuple",
         "shadowed_factory",
         "filtered",
         "kernel_only",
@@ -11595,6 +11605,8 @@ def test_package_factory_sequence_rejects_unproven_input_domains(tmp_path, monke
         source = source.replace(
             "import taichi_forge as ti", "import taichi_forge as ti\ndef zip(*args):\n    raise AssertionError()"
         )
+    elif change == "shadowed_tuple":
+        source = source.replace("biased=False):", "biased=False, tuple=tuple):")
     elif change == "shadowed_factory":
         source = source.replace("biased=False):", "biased=False, make_update=None):")
     elif change == "filtered":
