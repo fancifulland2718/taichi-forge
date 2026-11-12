@@ -2657,7 +2657,7 @@ def _export_package(package, output, *, arch, caps, source_root, compilation, ar
                 manifest["files"][path.relative_to(staging).as_posix()] = hashlib.sha256(path.read_bytes()).hexdigest()
         if any(path.read_text(encoding="utf8") != text for _, path, _, text, *_ in sources):
             raise PackageExportError("Source changed during export")
-        (staging / "package.json").write_text(json.dumps(manifest, indent=2), encoding="utf8")
+        (staging / "package.json").write_text(json.dumps(manifest, separators=(",", ":")), encoding="utf8")
         complete = True
         _publish_package(staging, output)
     finally:

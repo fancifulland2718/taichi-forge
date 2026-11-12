@@ -15,6 +15,8 @@ import zlib
 _FORMAT = "component_contract_records_v1"
 _LAYOUT_FORMAT = "component_contract_records_v2"
 _ENTRY_FORMAT = "component_entry_records_v1"
+_ENTRY_SECTIONS_FORMAT = "component_entry_records_v2"
+_ENTRY_SECTION_TYPES = {"dimensions": dict, "input_requirements": dict, "functions": list, "methods": list}
 _LAYOUT_SECTIONS = frozenset(("resources", "groups", "dimensions", "values"))
 _DIGEST = re.compile(r"[0-9a-f]{64}\Z")
 
@@ -64,21 +66,46 @@ def _all_records(contract):
     yield from _records(contract)
 
 
-def _entry_records(entry):
+def _entry_group_records(entry):
     # Binding names remain local to each entry. Only exact group values are
     # interned; layouts, source paths, guards and effects are never normalized.
     for name, group in entry.get("contract", {}).get("groups", {}).items():
         yield ("contract", "groups", name), group
 
 
+def _entry_records(entry):
+    yield from _entry_group_records(entry)
+    contract = entry.get("contract", {})
+    for name, record_type in _ENTRY_SECTION_TYPES.items():
+        value = contract.get(name)
+        if value and isinstance(value, record_type):
+            yield ("contract", name), value
+
+
 def encode_entry_documents(entries):
-    """Share exact resource groups across entry captures when it saves bytes."""
-    return _encode_documents(entries, _entry_records, _ENTRY_FORMAT, "entry_contract", "component_contracts",
-                             record_type=str)
+    """Share exact group and preparation records, preserving every ABI field."""
+    groups = _encode_documents(entries, _entry_group_records, _ENTRY_FORMAT, "entry_contract", "component_contracts",
+                               record_type=str)
+    sections = _encode_documents(entries, _entry_records, _ENTRY_SECTIONS_FORMAT, "entry_contract",
+                                 "component_contracts", record_type=(str, dict, list))
+    return min((groups, sections), key=lambda documents: sum(
+        _zip_cost(name, value) for name, value in documents.items()))
+
+
+def _entry_record_type(path):
+    if len(path) == 3 and path[:2] == ["contract", "groups"] and isinstance(path[2], str):
+        return str
+    if len(path) == 2 and path[0] == "contract":
+        return _ENTRY_SECTION_TYPES.get(path[1])
+    return None
 
 
 def decode_entry_document(document, read_bytes):
     """Restore the ordinary entry capture before cold preparation/admission."""
+    if isinstance(document, dict) and document.get("storage_format") == _ENTRY_SECTIONS_FORMAT:
+        return _decode_document(document, read_bytes, _ENTRY_SECTIONS_FORMAT, "entry_contract", "component_contracts",
+                                _entry_record_type, record_type=(str, dict, list),
+                                record_type_for_path=_entry_record_type)
     return _decode_document(document, read_bytes, _ENTRY_FORMAT, "entry_contract", "component_contracts",
                             lambda path: len(path) == 3 and path[:2] == ["contract", "groups"]
                             and isinstance(path[2], str), record_type=str)
@@ -186,7 +213,8 @@ def _layout_path(path):
             or path == ["compilation", "input_sources"])
 
 
-def _decode_document(document, read_bytes, storage_format, content_key, directory, allowed_path, *, record_type=dict):
+def _decode_document(document, read_bytes, storage_format, content_key, directory, allowed_path, *, record_type=dict,
+                     record_type_for_path=None):
     if not isinstance(document, dict):
         raise ValueError("Unsupported component contract")
     if "storage_format" not in document:
@@ -233,6 +261,8 @@ def _decode_document(document, read_bytes, storage_format, content_key, director
             if not isinstance(record, record_type):
                 raise ValueError("Invalid component compiler record")
             records[digest] = record
+        if record_type_for_path is not None and not isinstance(records[digest], record_type_for_path(path)):
+            raise ValueError("Invalid component compiler record type for path")
         # Separate logical calls and component instances must never share mutable
         # Python contract dictionaries as a consequence of disk interning.
         parent[part] = deepcopy(records[digest])

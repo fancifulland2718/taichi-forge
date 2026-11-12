@@ -1672,6 +1672,16 @@ headers together become smaller. `Module.component_entry_contract()` restores en
 during cold preparation without adding per-step work. The matching Runtime entry
 reader is required; the frozen-archive tool supports these records as well.
 
+`component_entry_records_v2` additionally shares exact whole `dimensions`,
+`input_requirements`, `functions` and `methods` sections. The selector compares
+compressed-size estimates for group-only and section sharing, keeping the smaller
+representation without removing conditions, resource sources or function facts.
+During cold preparation the reader checks reference positions, their expected types
+and digests, then restores independent contracts. Prepared calls do not read these
+records. `package.json` uses compact JSON while retaining every field. These storage
+changes leave LLVM/SPIR-V, specialization and native execution unchanged; smaller
+packages are not evidence of faster execution.
+
 Runtime inspection and loaded components share one reader. It verifies record digests,
 reference positions and the expanded contract digest, then runs the existing configuration,
 ABI, resource, effects and plan checks. Logical calls receive independent mutable

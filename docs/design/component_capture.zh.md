@@ -1331,6 +1331,13 @@ v2 需要配套 reader，新 reader 继续读取 v1；这不合并实例，也�
 后更小时才共享。消费者通过 `Module.component_entry_contract()` 在冷准备阶段还原，
 不增加每步处理；需要支持此入口存储格式的 Runtime。冻结归档工具同样支持入口记录。
 
+`component_entry_records_v2` 还可共享完全相同的 `dimensions`、`input_requirements`、
+`functions` 和 `methods` 整段。选择器比较组共享与整段共享的实际压缩估计，保留较小表示；
+没有删除条件、资源来源或函数事实。reader 在冷准备阶段检查引用位置、对应类型及摘要，
+展开后仍为独立合同；已准备调用不读取这些共享记录。`package.json` 使用紧凑 JSON，
+保留全部字段。这些变更只缩减存储，不改变 LLVM/SPIR-V、特化或原生执行路径，
+包体缩减不能作为运行加速的证据。
+
 Runtime 的 `inspect_component()` 和加载组件共用读取路径：检查片段摘要、引用位置
 和完整合同摘要，恢复原合同后继续执行已有配置、ABI、资源、effects 和执行计划校验。
 每个逻辑调用获得独立的可变字典；磁盘共享不引入实例状态共享。该存储格式只比较完整

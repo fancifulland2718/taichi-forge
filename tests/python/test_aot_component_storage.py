@@ -104,9 +104,62 @@ def test_shared_entry_groups_preserve_binding_names_and_exact_schema_strings(tmp
             assert archive.read("code.bc") == b"unchanged compiled bytes"
 
 
+def test_shared_entry_preparation_sections_preserve_types_guards_and_independence():
+    from hashlib import sha256
+
+    rng = random.Random(61)
+    contract = dict(
+        groups={"state": json.dumps({"layout": rng.randbytes(20000).hex()})},
+        dimensions={"n": ["dimension", "i32", 1, None, rng.randbytes(20000).hex()]},
+        input_requirements={"optional": {"when": ["enabled", True], "source": rng.randbytes(20000).hex()}},
+        functions=[{"name": "helper", "definition": rng.randbytes(20000).hex()}],
+        methods=[{"name": "prepare", "definition": rng.randbytes(20000).hex()}],
+    )
+    originals = {"component_entries/" + name + ".json": dict(entry=name, contract=deepcopy(contract))
+                 for name in ("first", "second")}
+    encoded = encode_entry_documents(originals)
+    doc = json.loads(encoded["component_entries/first.json"])
+    assert doc["storage_format"] == "component_entry_records_v2"
+    assert {tuple(path) for path, _ in doc["references"]} == {
+        ("contract", "groups", "state"), ("contract", "dimensions"), ("contract", "input_requirements"),
+        ("contract", "functions"), ("contract", "methods"),
+    }
+    for name, expected in originals.items():
+        restored = decode_entry_document(json.loads(encoded[name]), encoded.__getitem__)
+        assert restored == expected
+        restored["contract"]["input_requirements"]["optional"]["when"].clear()
+        restored["contract"]["methods"].clear()
+        assert decode_entry_document(json.loads(encoded[name]), encoded.__getitem__) == expected
+
+    # Valid content hashes cannot make the wrong type or an identity field a
+    # legal shared record. Check every allowed record position.
+    for index, (path, _) in enumerate(doc["references"]):
+        wrong = b'{}' if path[-1] in ("functions", "methods", "state") else b'[]'
+        digest = sha256(wrong).hexdigest()
+        bad = deepcopy(doc)
+        bad["references"][index][1] = digest
+        with pytest.raises(ValueError, match="record type for path"):
+            decode_entry_document(bad, {**encoded, "component_contracts/" + digest + ".json": wrong}.__getitem__)
+    bad = deepcopy(doc)
+    bad["references"][0][0] = ["entry"]
+    with pytest.raises(ValueError, match="record path"):
+        decode_entry_document(bad, encoded.__getitem__)
+    with pytest.raises(KeyError):
+        decode_entry_document(doc, {}.__getitem__)
+    with pytest.raises(ValueError, match="record digest"):
+        decode_entry_document(doc, lambda _: b'{}')
+
+
 @test_utils.test(arch=[ti.cpu, ti.cuda], offline_cache=False)
-def test_shared_entry_groups_load_and_run_original_field_code(tmp_path):
+def test_shared_entry_groups_load_and_run_original_field_code(tmp_path, monkeypatch):
     from taichi_forge.aot._component import DenseField, Dimension
+    from taichi_forge_runtime.aot import _component_storage as storage
+
+    # Exercise the new reader on real compiler output independently of the
+    # size heuristic: this small fixture may prefer the group-only encoding.
+    monkeypatch.setattr(storage, "encode_entry_documents", lambda entries: storage._encode_documents(
+        entries, storage._entry_records, storage._ENTRY_SECTIONS_FORMAT, "entry_contract", "component_contracts",
+        record_type=(str, dict, list)))
 
     @ti.data_oriented
     class Model:
@@ -115,11 +168,19 @@ def test_shared_entry_groups_load_and_run_original_field_code(tmp_path):
             # A wide, real SNode layout makes sharing worthwhile after deflate.
             self.x = ti.Matrix.field(12, 12, ti.f32, shape=n)
 
+        @ti.func
+        def increment(self, index):
+            return index + 1
+
+        @ti.func
+        def twice(self, index):
+            return index * 2
+
         @ti.kernel
         def step(self):
             for i in range(self.n):
-                self.x[i][0, 0] += i + 1
-                self.x[i][11, 11] = i * 2
+                self.x[i][0, 0] += self.increment(i)
+                self.x[i][11, 11] = self.twice(i)
 
     env = Component(n=Dimension(), x=DenseField(ti.types.matrix(12, 12, ti.f32), ("n",), "state"))
     producer = Model(7)
@@ -130,7 +191,7 @@ def test_shared_entry_groups_load_and_run_original_field_code(tmp_path):
     artifact = tmp_path / "entries.tcm"
     module.archive(str(artifact), shared_component_contracts=True)
     with ZipFile(artifact) as archive:
-        assert json.loads(archive.read("component_entries/entry0.json"))["storage_format"] == "component_entry_records_v1"
+        assert json.loads(archive.read("component_entries/entry0.json"))["storage_format"] == "component_entry_records_v2"
         archive.extractall(tmp_path / "directory")
     with Runtime(ti.cfg.arch.name) as runtime, ExitStack() as stack:
         loaded = stack.enter_context(runtime.load_module(artifact))
