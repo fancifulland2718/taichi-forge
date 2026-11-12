@@ -1,5 +1,6 @@
 from contextvars import ContextVar
 
+from taichi_forge.lang import impl
 from taichi_forge.lang.ast.ast_transformer import ASTTransformer
 from taichi_forge.lang.ast.ast_transformer_utils import ASTTransformerContext, UnrollWarning
 
@@ -8,6 +9,11 @@ _unroll_warning = ContextVar("taichi_unroll_warning", default=None)
 
 def transform_tree(tree, ctx: ASTTransformerContext):
     warning = _unroll_warning.get()
+    runtime = impl.get_runtime()
+    if warning is None and not (runtime.unrolling_limit or runtime.unrolling_kernel_warning_limit):
+        # Ordinary compilation has no diagnostic collector, scopes or counters.
+        ASTTransformer()(ctx, tree)
+        return ctx.return_data
     token = None
     if warning is None or ctx.is_real_function:
         warning = UnrollWarning(ctx)

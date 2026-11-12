@@ -274,10 +274,10 @@ class _SpecialConfig:
         self.gdb_trigger = False
         self.short_circuit_operators = True
         self.print_full_traceback = False
-        self.unrolling_limit = 32
-        # Soft cumulative source-expansion warning, shared with inlined funcs.
-        # Never rejects a kernel or changes static-loop semantics. 0 disables.
-        self.unrolling_kernel_warning_limit = 1024
+        # Opt-in development diagnostics, shared with inlined functions.
+        # Zero disables collection as well as warnings; no semantic limit.
+        self.unrolling_limit = 0
+        self.unrolling_kernel_warning_limit = 0
         # P3.a — hard stop for a single ti.static(for ...) unroll. 0 = disabled.
         # When > 0 and a static-for would emit more than this many iterations,
         # compilation aborts with TaichiCompilationError instead of running to
@@ -494,7 +494,7 @@ def init(
     env_spec.add("gdb_trigger")
     env_spec.add("short_circuit_operators")
     env_spec.add("print_full_traceback")
-    env_spec.add("unrolling_limit")
+    env_spec.add("unrolling_limit", int)
     env_spec.add("unrolling_kernel_warning_limit", int)
     env_spec.add("unrolling_hard_limit")
     env_spec.add("unrolling_kernel_hard_limit")

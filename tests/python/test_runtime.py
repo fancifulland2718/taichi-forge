@@ -53,7 +53,8 @@ init_args = {
     "log_level": ["info", ["error", "warn", "info", "debug", "trace"]],
     "gdb_trigger": [False, TF],
     "compile_tier": ["fast", ["fast", "balanced", "full"]],
-    "unrolling_kernel_warning_limit": [1024, [0, 16, 2048]],
+    "unrolling_limit": [0, [0, 4, 32]],
+    "unrolling_kernel_warning_limit": [0, [0, 16, 2048]],
     "advanced_optimization": [False, TF],
     "debug": [False, TF],
     "print_ir": [False, TF],
@@ -77,6 +78,7 @@ init_args = {
 env_configs = ["TI_" + key.upper() for key in init_args.keys()]
 
 special_init_cfgs = [
+    "unrolling_limit",
     "unrolling_kernel_warning_limit",
     "log_level",
     "gdb_trigger",

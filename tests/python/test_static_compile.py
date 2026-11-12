@@ -171,6 +171,62 @@ def test_static_warnings_can_be_disabled():
     assert not caught
 
 
+@test_utils.test(ti.cpu)
+def test_static_diagnostics_default_off_without_a_collector(monkeypatch):
+    import importlib
+    from taichi_forge.lang.ast.ast_transformer import ASTTransformer
+
+    runtime = ti.lang.impl.get_runtime()
+    assert runtime.unrolling_limit == runtime.unrolling_kernel_warning_limit == 0
+
+    def forbidden(*args, **kwargs):
+        raise AssertionError('Default compilation must not create a development diagnostic collector')
+
+    monkeypatch.setattr(importlib.import_module('taichi_forge.lang.ast.transform'), 'UnrollWarning', forbidden)
+    monkeypatch.setattr(ASTTransformer, '_check_unroll_hard_limit', forbidden)
+
+    @ti.func
+    def inline(value):
+        for i in ti.static(range(3)):
+            value += i
+        return value
+
+    @ti.real_func
+    def compiled(value: ti.i32) -> ti.i32:
+        result = value
+        for i in ti.static(range(3)):
+            result += i
+        return result
+
+    @ti.kernel
+    def calculate() -> ti.i32:
+        total = 0
+        for i in ti.static(ti.grouped(ti.ndrange(4, 4))):
+            total += inline(i[0]) + compiled(i[1])
+        return total
+
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter('always')
+        assert calculate() == 144
+    assert not caught
+
+
+@pytest.mark.parametrize('option', ['unrolling_hard_limit', 'unrolling_kernel_hard_limit'])
+@test_utils.test(ti.cpu)
+def test_static_hard_limits_remain_explicitly_available(option):
+    setattr(ti.lang.impl.get_runtime(), option, 2)
+
+    @ti.kernel
+    def calculate() -> ti.i32:
+        total = 0
+        for i in ti.static(range(3)):
+            total += i
+        return total
+
+    with pytest.raises(ti.TaichiCompilationError, match=option + '=2'):
+        calculate()
+
+
 @test_utils.test(ti.cpu, unrolling_limit=0, unrolling_kernel_warning_limit=3)
 def test_static_warning_points_to_largest_outer_loop_not_helper():
     @ti.func

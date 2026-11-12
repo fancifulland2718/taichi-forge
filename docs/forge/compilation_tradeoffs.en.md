@@ -182,13 +182,15 @@ cache belongs to that source template and keeps text rather than AST nodes or
 specialization values. Error locations and carets retain their original format.
 This saves diagnostic formatting work without changing the generated program.
 
-`unrolling_kernel_warning_limit` is a soft source-expansion diagnostic (default
-1024 expanded statements), shared across inlined functions in a materialization.
+`unrolling_limit` and `unrolling_kernel_warning_limit` are opt-in development
+diagnostics, both defaulting to `0`. Default compilation creates no expansion
+diagnostic collector or its counters. To inspect expansion during development,
+use, for example, `ti.init(unrolling_limit=32, unrolling_kernel_warning_limit=1024)`.
+The cumulative source-statement count is shared across inlined functions in a materialization.
 It counts visited statements, so static breaks and skipped branches do not
 contribute hypothetical iterations. The warning names the callable and source
 location and never changes loop semantics. It is an estimate, not native IR size
-or a performance verdict. Set it and `unrolling_limit` to `0` to silence static
-expansion warnings. Both opt-in hard limits remain `0` by default.
+or a performance verdict. Both opt-in hard limits remain `0` by default.
 
 ## Where `real_func` fits
 

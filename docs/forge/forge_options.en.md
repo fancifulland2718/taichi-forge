@@ -59,8 +59,8 @@ still uses CPU fast O0. Do not apply current-source behavior to older wheels.
 | Kwarg | Default | Purpose |
 |---|---|---|
 | `tiered_full_simplify` | `True` | Splits `full_simplify` into a local fixed-point phase plus a single global round per outer iteration. It is cache-key isolated. Keep `True`; use `False` only to isolate a compiler regression against the legacy cadence. |
-| `unrolling_limit` | `32` | Soft warning when one static loop exceeds this many iterations. Shares one warning per materialization with the cumulative diagnostic; `0` disables this trigger. |
-| `unrolling_kernel_warning_limit` | `1024` | Soft warning after this many source statements have actually been expanded inside static loops, including nested loops and inlined functions. This estimates source expansion, not native IR size. Compilation continues; `0` disables this trigger. |
+| `unrolling_limit` | `0` (off) | Opt-in development warning when one static loop exceeds this many iterations. Shares one warning per materialization with the cumulative diagnostic; `0` disables this trigger. |
+| `unrolling_kernel_warning_limit` | `0` (off) | Opt-in development warning after this many source statements have actually been expanded inside static loops, including nested loops and inlined functions. This estimates source expansion, not native IR size. Compilation continues; with both warning options off, no diagnostic collector runs. |
 | `unrolling_hard_limit` | `0` (off) | Per-`ti.static(for ...)` unroll iteration cap. Aborts with `TaichiCompilationError` instead of silently consuming compile time. |
 | `unrolling_kernel_hard_limit` | `0` (off) | Total unroll iteration cap across a single kernel. |
 | `func_inline_depth_limit` | upstream default | Hard cap on `@ti.func` inline recursion depth. |

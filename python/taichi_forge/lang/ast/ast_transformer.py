@@ -1427,11 +1427,16 @@ class ASTTransformer(Builder):
 
     @staticmethod
     def build_static_for(ctx, node, is_grouped):
+        if ctx.unroll_warning is None:
+            return ASTTransformer._build_static_for(ctx, node, is_grouped)
         with ctx.unroll_warning.static_scope(ctx, node):
             return ASTTransformer._build_static_for(ctx, node, is_grouped)
 
     @staticmethod
     def _build_static_for(ctx, node, is_grouped):
+        runtime = impl.get_runtime()
+        check_limits = bool(runtime.unrolling_hard_limit or runtime.unrolling_kernel_hard_limit)
+        count_iterations = check_limits or ctx.unroll_warning is not None
         if is_grouped:
             assert len(node.iter.args[0].args) == 1
             ndrange_arg = build_stmt(ctx, node.iter.args[0].args[0])
@@ -1446,9 +1451,12 @@ class ASTTransformer(Builder):
             iter_time = 0
 
             for value in impl.grouped(ndrange_arg):
-                iter_time += 1
-                ASTTransformer._check_unroll_hard_limit(ctx, node, iter_time)
-                ctx.unroll_warning.record_iteration(ctx, node, iter_time)
+                if count_iterations:
+                    iter_time += 1
+                if check_limits:
+                    ASTTransformer._check_unroll_hard_limit(ctx, node, iter_time)
+                if ctx.unroll_warning is not None:
+                    ctx.unroll_warning.record_iteration(ctx, node, iter_time)
 
                 with ctx.variable_scope_guard():
                     ctx.create_variable(target, value)
@@ -1469,9 +1477,12 @@ class ASTTransformer(Builder):
                 if not isinstance(target_values, collections.abc.Sequence) or len(targets) == 1:
                     target_values = [target_values]
 
-                iter_time += 1
-                ASTTransformer._check_unroll_hard_limit(ctx, node, iter_time)
-                ctx.unroll_warning.record_iteration(ctx, node, iter_time)
+                if count_iterations:
+                    iter_time += 1
+                if check_limits:
+                    ASTTransformer._check_unroll_hard_limit(ctx, node, iter_time)
+                if ctx.unroll_warning is not None:
+                    ctx.unroll_warning.record_iteration(ctx, node, iter_time)
 
                 with ctx.variable_scope_guard():
                     for target, target_value in zip(targets, target_values):

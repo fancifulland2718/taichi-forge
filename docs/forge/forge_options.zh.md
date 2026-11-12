@@ -60,8 +60,8 @@ fast 仍为 O0。不要把当前源码策略套用于旧 wheel。
 | 参数 | 默认 | 用途 |
 |---|---|---|
 | `tiered_full_simplify` | `True` | 把 `full_simplify` 拆为局部 fixed-point + 每外圈一次 global pass，并有独立 cache key。建议保持 `True`；只有隔离编译器回归、对照旧 cadence 时才设 `False`。 |
-| `unrolling_limit` | `32` | 单个静态循环超过指定迭代次数时软告警。与累计提示共享每次编译最多一次的告警；`0` 关闭此触发条件。 |
-| `unrolling_kernel_warning_limit` | `1024` | 静态循环内实际展开的源码语句数超过此值时软告警，计入嵌套循环和内联函数。它估算源码展开量，并非原生 IR 计数；继续编译，`0` 关闭此触发条件。 |
+| `unrolling_limit` | `0`（关） | 开发时显式启用：单个静态循环超过指定迭代次数时软告警。与累计提示共享每次编译最多一次的告警；`0` 关闭此触发条件。 |
+| `unrolling_kernel_warning_limit` | `0`（关） | 开发时显式启用：静态循环内实际展开的源码语句数超过此值时软告警，计入嵌套循环和内联函数。它估算源码展开量，并非原生 IR 计数；继续编译。两个告警选项均关闭时，不运行诊断收集器。 |
 | `unrolling_hard_limit` | `0`（关） | 每个 `ti.static(for ...)` 的 unroll 迭代上限；超出抛 `TaichiCompilationError`，仅在用户显式启用时生效。 |
 | `unrolling_kernel_hard_limit` | `0`（关） | 单 kernel 内 unroll 总迭代上限。 |
 | `func_inline_depth_limit` | 上游默认 | `@ti.func` 内联递归深度硬上限。 |
