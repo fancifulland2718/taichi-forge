@@ -25,6 +25,8 @@ class StaticPreparation:
         self._numeric_locals = {}
         self._value_uses = {}
         self._ambiguous_names = set()
+        self._task_context_cache = {}
+        self._task_context_methods = set()
         functions = []
         for module, _, _, _, tree, kind, _, _ in sources:
             tree_parents = {id(child): node for node in ast.walk(tree) for child in ast.iter_child_nodes(node)}
@@ -55,6 +57,8 @@ class StaticPreparation:
                     if isinstance(ancestor, ast.ClassDef):
                         names.insert(0, ancestor.name)
                 identity = module + "." + ".".join(names)
+                if len(names) > 1:
+                    self._task_context_methods.add(identity)
                 functions.append((identity, function, kind))
                 self._names.setdefault(function.name, set()).add(identity)
         for identity, function, kind in functions:
@@ -201,6 +205,101 @@ class StaticPreparation:
             for callee, local in edges:
                 pending.extend((target, threaded or local) for target in self._names.get(callee, ()))
         self._entry_uses[identity] = result
+        return result
+
+    def requires_task_context(self, source, args):
+        """Keep task-local operations inline unless template facts exclude them.
+
+        This refines only the existing conservative call graph. No owner
+        attributes, runtime values or arbitrary Python expressions are evaluated.
+        """
+        from taichi_forge.types.annotations import template
+
+        if source.func.__name__ not in self.task_context_functions:
+            return False
+        identity = source.func.__module__ + '.' + source.func.__qualname__
+        bindings = {arg.name: value for arg, value in zip(source.arguments, args)
+                    if isinstance(arg.annotation, template) and type(value) is bool}
+        return self._function_task_context(identity, bindings, set())
+
+    def _function_task_context(self, identity, bindings, active):
+        if identity not in self._syntax:
+            return True
+        key = identity, tuple(sorted(bindings.items()))
+        if key in active:
+            return True
+        if key in self._task_context_cache:
+            return self._task_context_cache[key]
+        function, _, kind = self._syntax[identity]
+        # Rebinding or nested scopes can invalidate a parameter's lexical fact.
+        if any(isinstance(n, (ast.FunctionDef, ast.Lambda)) and n is not function for n in ast.walk(function)):
+            return True
+        assigned = {n.id for n in ast.walk(function) if isinstance(n, ast.Name) and isinstance(n.ctx, ast.Store)}
+        bindings = {name: value for name, value in bindings.items() if name not in assigned}
+
+        def literal(node):
+            if isinstance(node, ast.Constant) and type(node.value) is bool:
+                return node.value
+            if isinstance(node, ast.Name):
+                return bindings.get(node.id)
+            if isinstance(node, ast.UnaryOp) and isinstance(node.op, ast.Not):
+                value = literal(node.operand)
+                return None if value is None else not value
+            return None
+
+        def call_context(node, target):
+            callee, _, resolve = self._syntax[target]
+            parameters = [*callee.args.posonlyargs, *callee.args.args]
+            if callee.args.vararg or callee.args.kwarg or callee.args.kwonlyargs:
+                return True
+            if any(isinstance(arg, ast.Starred) for arg in node.args) or any(k.arg is None for k in node.keywords):
+                return True
+            names = [arg.arg for arg in parameters]
+            positional = list(node.args)
+            if isinstance(node.func, ast.Attribute) and target in self._task_context_methods:
+                if not names or names[0] not in ('self', 'cls'):
+                    return True
+                positional.insert(0, node.func.value)
+            if len(positional) > len(names) or any(k.arg not in names for k in node.keywords):
+                return True
+            # Defaults belong to the callee's definition scope, not the caller's
+            # template bindings. Only literal booleans have a scope-free value.
+            defaults = [n if isinstance(n, ast.Constant) and type(n.value) is bool
+                        else ast.Constant(value=None) for n in callee.args.defaults]
+            values = dict(zip(names[len(names)-len(defaults):], defaults))
+            values.update(zip(names, positional))
+            values.update((k.arg, k.value) for k in node.keywords)
+            fixed = {}
+            for parameter in parameters:
+                annotation = parameter.annotation
+                if (isinstance(annotation, ast.Call) and resolve(annotation.func) == 'template'
+                        and parameter.arg in values):
+                    value = literal(values[parameter.arg])
+                    if value is not None:
+                        fixed[parameter.arg] = value
+            return self._function_task_context(target, fixed, active | {key})
+
+        def visit(node):
+            if isinstance(node, ast.Attribute) and node.attr in ('loop_config', 'SharedArray', 'simt'):
+                return True
+            if isinstance(node, ast.If):
+                test = node.test
+                if (isinstance(test, ast.Call) and kind(test.func) == 'static'
+                        and len(test.args) == 1 and not test.keywords):
+                    value = literal(test.args[0])
+                    if value is not None:
+                        return any(visit(child) for child in (node.body if value else node.orelse))
+            if isinstance(node, ast.Call):
+                name = getattr(node.func, 'attr', getattr(node.func, 'id', ''))
+                if name in self.task_context_functions:
+                    targets = self._names.get(name, ())
+                    if (name in self._ambiguous_names or not targets
+                            or any(call_context(node, target) for target in targets)):
+                        return True
+            return any(visit(child) for child in ast.iter_child_nodes(node))
+
+        result = any(visit(statement) for statement in function.body)
+        self._task_context_cache[key] = result
         return result
 
     @staticmethod

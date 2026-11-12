@@ -70,7 +70,7 @@ class PackageCompilation(FunctionLibrary):
 
     def library_function(self, source, args, *, dependencies=None):
         if (self.static_preparation is not None
-                and source.func.__name__ in self.static_preparation.task_context_functions):
+                and self.static_preparation.requires_task_context(source, args)):
             # Direct syntax checks miss SIMT operations in inline callees.
             # Keep the existing task boundary instead of extracting a wrapper
             # whose transitive body requires that task's execution context.

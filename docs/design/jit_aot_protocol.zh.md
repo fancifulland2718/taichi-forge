@@ -101,6 +101,9 @@ AOT 从正式导出定义及其依赖闭包取得输入，不以某个测试的�
 传入时，没有独立的被调用方 ABI 槽位，自动函数提取保持内联，保留原引用语义。
 这不限制普通类型化值参数，也不禁止通过 owner 在函数内重新捕获资源。
 任务范围依赖须沿 helper 调用链检查；间接包含同步/共享内存的包装函数同样不能移出任务。
+生产期可以沿已知布尔模板实参和字面量默认值排除不可达的 `ti.static` 分支，
+再判断包装函数是否独立于任务。未知值、普通数值参数、被改写的模板参数和未解析的调用仍保守处理；
+不在消费期重新检查源码，也不因普通路径可提取而放宽实际协作路径。
 
 当前自动边界仍限制 AD、未知回调/属性副作用、无法证明的依赖及部分返回类型推导。
 Kernel 根部并行 helper 不能被改成每线程串行函数来换取复用。
@@ -217,6 +220,7 @@ JIT 缓存是可恢复的性能优化，AOT 必需依赖是交付合同，失败
 | 持久单元与依赖错误 | [test_aot_execution_context.py](../../tests/python/test_aot_execution_context.py)：`test_bitcode_library_shares_real_function_and_validates_dependencies` | CUDA 实际 code-unit 共用、JIT 数值参考、实例隔离、缺失/损坏拒绝；不外推其他格式 |
 | AOT 构造不污染 JIT | [test_aot_package.py](../../tests/python/test_aot_package.py)：`test_package_bitcode_library_preserves_jit_functions` | 成功/失败导出的退休、原装饰器/定义可继续 JIT、生产期 inline fallback；只选该节点 |
 | 调用方引用与任务范围 | 同文件 `test_package_library_keeps_caller_array_templates_inline`、`test_package_library_keeps_shared_array_templates_inline`、`test_package_library_keeps_local_template_references_inline`、`test_package_library_keeps_transitive_task_context_inline` | CUDA 包导出与 JIT 数值对照：数组/局部模板引用、间接同步保持内联；独立数值 helper 仍可共享。不是扩大显式 real_func ABI |
+| 已证不可达的协作分支 | 同文件 `test_package_library_extracts_proven_serial_task_branch`、`test_package_task_context_prunes_only_proven_template_calls`、`test_package_task_context_keeps_value_parameters_and_scoped_defaults` | CUDA 包导出与 JIT 对照覆盖默认/转发 False；语法反例保留未知值、普通参数和默认值定义域。不改变运行期合同 |
 | 消费特化与实例 | [test_aot_value_arguments.py](../../tests/python/test_aot_value_arguments.py)：`test_prepared_bitcode_specialization_keeps_shapes_and_instances_independent`、`test_prepared_real_function_arguments_have_their_own_layout` | shape/选定常量与实例内容分离；内部函数 ABI 独立。首项虽名为 bitcode，也已有 Vulkan 分支 |
 
 上述最小成对用例已补入原测试文件，CPU/CUDA/Vulkan 局部通过；这不是全语言/全格式资格，

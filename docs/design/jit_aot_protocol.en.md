@@ -111,6 +111,10 @@ descriptors passed through `ti.template()` have no independent callee ABI slot. 
 extraction retains inline lowering and the original reference semantics. Typed value arguments
 and resources recaptured through an owner remain eligible. Check task dependencies transitively:
 a wrapper containing synchronization/shared memory through another helper still belongs to its task.
+At production time, known boolean template arguments and literal defaults may exclude unreachable
+`ti.static` branches before classifying a wrapper. Unknown values, ordinary value parameters,
+reassigned template parameters and unresolved calls remain conservative. Consumers do not recheck
+source, and extracting a serial path does not relax the actual cooperative path.
 
 Current automatic boundaries still restrict AD, unknown callbacks/attribute effects, unproven
 dependencies and some return inference. Kernel-root parallel helpers must not become serial
@@ -242,6 +246,7 @@ checks only where affected.
 | Persistent units/errors | [test_aot_execution_context.py](../../tests/python/test_aot_execution_context.py): `test_bitcode_library_shares_real_function_and_validates_dependencies` | CUDA unit reuse, JIT numerical reference, instance isolation and missing/corrupt dependency rejection |
 | AOT construction preserves JIT | [test_aot_package.py](../../tests/python/test_aot_package.py): `test_package_bitcode_library_preserves_jit_functions` | Success/failure retirement, continued JIT and producer-side inline fallback; select this node only |
 | Caller references and task scope | Same file: `test_package_library_keeps_caller_array_templates_inline`, `test_package_library_keeps_shared_array_templates_inline`, `test_package_library_keeps_local_template_references_inline`, `test_package_library_keeps_transitive_task_context_inline` | CUDA package/JIT numerical checks: array/local template references and indirect synchronization stay inline; independent numerical helpers remain shareable. Does not extend explicit real_func ABI |
+| Proven unreachable cooperative branches | Same file: `test_package_library_extracts_proven_serial_task_branch`, `test_package_task_context_prunes_only_proven_template_calls`, `test_package_task_context_keeps_value_parameters_and_scoped_defaults` | CUDA package/JIT comparison covers default and forwarded False; syntax counterexamples retain unknown values, ordinary parameters and default definition scope. No runtime contract change |
 | Consumption and instances | [test_aot_value_arguments.py](../../tests/python/test_aot_value_arguments.py): `test_prepared_bitcode_specialization_keeps_shapes_and_instances_independent`, `test_prepared_real_function_arguments_have_their_own_layout` | Shape/selected constants versus contents and independent internal ABI; the first test also has a Vulkan branch despite its name |
 
 The small paired case is now in the existing file and passes locally on CPU/CUDA/Vulkan.

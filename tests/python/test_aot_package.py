@@ -231,6 +231,114 @@ class Model:
 
 
 @test_utils.test(arch=ti.cuda, offline_cache=False)
+def test_package_library_extracts_proven_serial_task_branch(tmp_path, monkeypatch):
+    from taichi_forge.aot._package_compilation import PackageCompilation
+
+    source = '''import taichi_forge as ti
+@ti.data_oriented
+class Model:
+    def __init__(self, n: int):
+        self.n = n
+        s = ti.experimental.ResourceScope(self)
+        s.out = s.field(ti.i32, shape=s.dim('n'))
+    @ti.func
+    def leaf(self, x: ti.i32, cooperative: ti.template() = False) -> ti.i32:
+        if ti.static(cooperative):
+            ti.simt.block.sync()
+        return x * 2
+    @ti.func
+    def inner(self, x: ti.i32, cooperative: ti.template() = False) -> ti.i32:
+        return self.leaf(x, cooperative)
+    @ti.func
+    def wrapper(self, x: ti.i32) -> ti.i32:
+        return self.inner(x) + self.inner(x + 1, False)
+    @ti.kernel
+    def step(self, amount: ti.i32):
+        for i in range(self.n):
+            self.out[i] = self.wrapper(i + amount)
+'''
+    seen = set()
+    original = PackageCompilation.library_function
+
+    def observe(compilation, function, args, **kwargs):
+        promoted = original(compilation, function, args, **kwargs)
+        if function.func.__name__ in ('wrapper', 'inner'):
+            seen.add(function.func.__name__)
+            assert promoted is not None
+        return promoted
+
+    monkeypatch.setattr(PackageCompilation, 'library_function', observe)
+    package = _source_package(tmp_path, monkeypatch, source)
+    output = tmp_path / 'sdk'
+    ti.aot.export_package(package, output, artifact_format='bc-library')
+    assert seen == {'wrapper', 'inner'}
+    with Runtime('cuda') as runtime, load_package(runtime, output) as code:
+        for n in (128, 257):
+            jit, aot = package.model.Model(n), code.host.Model(n)
+            for amount in (3, 9):
+                jit.step(amount)
+                aot.step(amount)
+                np.testing.assert_array_equal(aot.out.to_numpy(), jit.out.to_numpy())
+
+
+@pytest.mark.parametrize('invocation, expected', [
+    ('leaf(x)', False),
+    ('leaf(x, False)', False),
+    ('leaf(x, cooperative=False)', False),
+    ('leaf(x, True)', True),
+    ('leaf(x, flag)', True),
+    ('leaf(x, not False)', True),
+    ('leaf(x, **options)', True),
+])
+def test_package_task_context_prunes_only_proven_template_calls(invocation, expected):
+    from taichi_forge.aot._package_static import StaticPreparation
+    from taichi_forge.tools._compiled_host import decorator_resolver
+
+    source = '''import taichi_forge as ti
+@ti.func
+def device(x):
+    ti.simt.block.sync()
+    return x
+@ti.func
+def leaf(x, cooperative: ti.template() = False):
+    if ti.static(cooperative):
+        x = device(x)
+    return x
+@ti.func
+def wrapper(x):
+    return INVOCATION
+'''.replace('INVOCATION', invocation)
+    tree = ast.parse(source)
+    proof = StaticPreparation([('model', None, None, source, tree, decorator_resolver(tree), None, None)])
+    assert 'wrapper' in proof.task_context_functions
+    assert proof._function_task_context('model.wrapper', {}, set()) is expected
+
+
+@pytest.mark.parametrize('replacement', [
+    'cooperative: ti.i32 = False',
+    'cooperative: ti.template() = ENABLED',
+])
+def test_package_task_context_keeps_value_parameters_and_scoped_defaults(replacement):
+    from taichi_forge.aot._package_static import StaticPreparation
+    from taichi_forge.tools._compiled_host import decorator_resolver
+
+    source = '''import taichi_forge as ti
+ENABLED = True
+@ti.func
+def leaf(x, cooperative: ti.template() = False):
+    if ti.static(cooperative):
+        ti.simt.block.sync()
+    return x
+@ti.func
+def wrapper(x, ENABLED: ti.template()):
+    return leaf(x)
+'''.replace('cooperative: ti.template() = False', replacement)
+    tree = ast.parse(source)
+    proof = StaticPreparation([('model', None, None, source, tree, decorator_resolver(tree), None, None)])
+    assert proof._function_task_context('model.wrapper', {'ENABLED': False}, set())
+
+
+@test_utils.test(arch=ti.cuda, offline_cache=False)
 def test_package_library_keeps_caller_array_templates_inline(tmp_path, monkeypatch):
     from taichi_forge.lang._function_library import FunctionLibrary
     from taichi_forge.lang.any_array import AnyArray
