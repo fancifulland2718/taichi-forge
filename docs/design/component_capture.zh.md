@@ -163,6 +163,9 @@ Dense Field 的固定元素元数据 `n/m/ndim` 也随声明保留。`hasattr`/`
 原 `isinstance(field, ti.StructField/ti.MatrixField)` 也可用于已声明 Field 的类型分支，
 完整 StructField 的 `keys` 保留成员类型顺序并进入代码依赖检查。静态选出的成员先保留
 声明引用；只读 dtype 等类型信息不增加该成员的存储参数，真正索引时才接入原 ABI。
+完整可选 Dense 组的固定元素类型查询沿同一路径处理；字段缺失时仍能查询已声明的
+`dtype/n/m/ndim`，但不能因此读写缺失存储。条件构造的子 owner 则保留其分配 guard：
+读取该 owner 的入口只导出满足资源存在条件的实现，消费者缺失 owner 时拒绝调用。
 模型向量/矩阵的 `n/m` 继续使用动态元素轴，可在原静态循环写法中降低为运行时循环。
 这不执行应用类的实例检查或任意 Host 反射。CPU/CUDA 的定义包检查覆盖动态尺寸、
 标量/向量成员、整数成员跳过、NaN/Inf 检出与恢复及无数值源码消费。

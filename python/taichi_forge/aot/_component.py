@@ -664,6 +664,10 @@ class _ConditionalRecord(Record):
         object.__setattr__(self, "conditions", tuple(conditions))
 
 
+class _ConditionalOwnerRecord(_ConditionalRecord):
+    """A declared Host owner whose allocation guard admits required entries."""
+
+
 class _ChoiceRecord(Record):
     """A child implementation selected by declared Host construction guards."""
 
@@ -2234,10 +2238,10 @@ class _Capture:
                     self.component._symbolic_dimensions
                     and ctx is not None
                     and not ctx.is_in_static_scope()
-                    and isinstance(declaration, (_ConditionalDenseField, _ConditionalModelTensorField))
+                    and isinstance(declaration, (_ConditionalDenseField, _ConditionalModelTensorField, _ConditionalOwnerRecord))
                 ):
                     self.missing_resource = name
-                    raise TaichiCompilationError(f"Numerical entry requires Field self.{'.'.join(path)}")
+                    raise TaichiCompilationError(f"Numerical entry requires Field or owner self.{'.'.join(path)}")
                 return None
             if dynamic_record:
                 return _RecordReference(path)

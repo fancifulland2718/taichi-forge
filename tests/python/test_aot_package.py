@@ -10011,6 +10011,53 @@ def test_package_child_choices_preserve_optional_parent_branch(tmp_path, monkeyp
                     assert model.child is None
 
 
+@test_utils.test(arch=[ti.cpu, ti.cuda], offline_cache=False)
+@pytest.mark.parametrize("borrowed", [False, True])
+def test_package_required_conditional_owner_keeps_allocation_guard(tmp_path, monkeypatch, borrowed):
+    source = '''
+import taichi_forge as ti
+@ti.data_oriented
+class State:
+    def __init__(self, n: int):
+        self.n = n
+        scope = ti.experimental.ResourceScope(self)
+        scope.dim('n')
+        scope.values = scope.field(ti.i32, shape=scope.dim('n'), initialization='zero')
+@ti.data_oriented
+class Model:
+    def __init__(self, n: int, enabled: bool):
+        self.enabled = enabled
+        self.child = None
+        scope = ti.experimental.ResourceScope(self)
+        scope.static('enabled', choices=(False, True))
+        if self.enabled:
+            scope.child = State(n)
+    @ti.kernel
+    def required(self):
+        for i in self.child.values:
+            self.child.values[i] += i + 1
+'''
+    if borrowed:
+        source = source.replace(
+            '            scope.child = State(n)',
+            '            scope.state = State(n)\n'
+            "            scope.owner_reference('child', self.state)",
+        )
+    package = _source_package(tmp_path, monkeypatch, source)
+    normal = package.Model(7, True)
+    normal.required()
+    options = dict(artifact_format='bc-library') if ti.lang.impl.current_cfg().arch == ti.cuda else {}
+    manifest = ti.aot.export_package(package, tmp_path / 'sdk', **options)
+    assert sum(entry['definition'].endswith('.Model.required') for entry in manifest['entries'].values()) == 1
+    with Runtime(manifest['target']) as runtime, load_package(runtime, tmp_path / 'sdk') as code:
+        a, b = code.host.Model(7, True), code.host.Model(11, False)
+        a.required()
+        np.testing.assert_array_equal(a.child.values.to_numpy(), normal.child.values.to_numpy())
+        assert b.child is None
+        with pytest.raises(ValueError):
+            b.required()
+
+
 @test_utils.test(arch=ti.cpu, offline_cache=False)
 def test_package_nested_child_choices_keep_qualified_guards(tmp_path, monkeypatch):
     source = CHILD_CHOICES_SOURCE + """

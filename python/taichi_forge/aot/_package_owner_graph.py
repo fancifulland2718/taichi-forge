@@ -73,6 +73,7 @@ class OwnerGraph:
             StaticValue,
             _ChoiceRecord,
             _ConditionalArray,
+            _ConditionalOwnerRecord,
             _InputPresence,
             _OptionalArray,
         )
@@ -306,14 +307,18 @@ class OwnerGraph:
                 declarations[attribute] = Record(optional=item.get("optional", False))
                 continue
             if item["kind"] in ("owner", "owner_input"):
+                record = (
+                    _ConditionalOwnerRecord(item["conditions"].items())
+                    if item.get("conditions") else Record()
+                )
                 if item["kind"] == "owner_input":
-                    declarations[attribute] = Record(optional=bool(item.get("conditions")))
+                    declarations[attribute] = record
                     continue
                 value = child_values[attribute]
                 declarations[attribute] = (
                     _ChoiceRecord(item["choice_guards"].items(), optional=bool(item.get("conditions")))
                     if item.get("owner_alternatives")
-                    else Record(optional=bool(item.get("conditions")))
+                    else record
                 )
             elif item["kind"] == "static":
                 domain = tuple(producer_static(read_static_key(key)) for key in item["choices"])
@@ -447,7 +452,7 @@ def _compose(environment, schema, children):
                     changes["presence"] = names[value.presence]
                 value = replace(value, **changes)
             elif isinstance(value, _ConditionalRecord):
-                value = _ConditionalRecord(tuple((names[n], expected) for n, expected in value.conditions))
+                value = type(value)(tuple((names[n], expected) for n, expected in value.conditions))
             elif isinstance(value, _InputRecord):
                 value = _InputRecord(names[value.presence])
             elif isinstance(value, _ChoiceRecord):
