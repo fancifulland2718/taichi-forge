@@ -68,6 +68,15 @@ class PackageCompilation(FunctionLibrary):
             self.kernels[source] = kernel
         return SimpleNamespace(_primal=self.kernels[source], _kernel_owner=getattr(entry, "_kernel_owner", None))
 
+    def library_function(self, source, args, *, dependencies=None):
+        if (self.static_preparation is not None
+                and source.func.__name__ in self.static_preparation.task_context_functions):
+            # Direct syntax checks miss SIMT operations in inline callees.
+            # Keep the existing task boundary instead of extracting a wrapper
+            # whose transitive body requires that task's execution context.
+            return None
+        return super().library_function(source, args, dependencies=dependencies)
+
     def _release_functions(self):
         for function in self.functions.values():
             if function is not None:

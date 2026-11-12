@@ -109,15 +109,19 @@ class StaticPreparation:
         # their ordinary call names conservatively before moving a condition;
         # the absence of loop_config at the call site is not a legality proof.
         self.execution_functions = set()
+        self.task_context_functions = set()
         calls = {}
         for _, function, kind in functions:
             if any(kind(d) == "real_func" for d in function.decorator_list):
                 continue
             called = calls.setdefault(function.name, set())
             for node in ast.walk(function):
-                if isinstance(node, (ast.For, ast.While)) or (
+                task_context = (
                     isinstance(node, ast.Attribute) and node.attr in ("loop_config", "SharedArray", "simt")
-                ):
+                )
+                if task_context:
+                    self.task_context_functions.add(function.name)
+                if isinstance(node, (ast.For, ast.While)) or task_context:
                     self.execution_functions.add(function.name)
                 if isinstance(node, ast.Call):
                     called.add(getattr(node.func, "attr", getattr(node.func, "id", "")))
@@ -126,6 +130,15 @@ class StaticPreparation:
             if extra <= self.execution_functions:
                 break
             self.execution_functions.update(extra)
+        # Reuse the production closure's conservative call graph. A helper
+        # containing a barrier/shared allocation through another helper still
+        # belongs to its offloaded task. Serial loops alone do not impose this
+        # restriction on per-thread function units.
+        while True:
+            extra = {name for name, called in calls.items() if called & self.task_context_functions}
+            if extra <= self.task_context_functions:
+                break
+            self.task_context_functions.update(extra)
         for identity, function, kind in functions:
             parents = {id(child): node for node in ast.walk(function) for child in ast.iter_child_nodes(node)}
             uses = {False: {}, True: {}}

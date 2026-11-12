@@ -19,6 +19,67 @@ from taichi_forge_runtime.aot import Runtime, load_package
 
 
 @test_utils.test(arch=ti.cuda, offline_cache=False)
+def test_package_library_keeps_transitive_task_context_inline(tmp_path, monkeypatch):
+    from taichi_forge.aot._package_compilation import PackageCompilation
+
+    source = '''import taichi_forge as ti
+@ti.data_oriented
+class Model:
+    def __init__(self, n: int):
+        self.n = n
+        s = ti.experimental.ResourceScope(self)
+        s.scratch = s.field(ti.i32, shape=s.dim('n'))
+        s.out = s.field(ti.i32, shape=s.dim('n'))
+    @ti.func
+    def leaf(self, x: ti.i32, amount: ti.i32) -> ti.i32:
+        self.scratch[x] = x + amount
+        ti.simt.block.sync()
+        return self.scratch[(x // 128) * 128 + (x + 1) % 128]
+    @ti.func
+    def inner(self, x: ti.i32, amount: ti.i32) -> ti.i32:
+        return self.leaf(x, amount)
+    @ti.func
+    def wrapper(self, x: ti.i32, amount: ti.i32) -> ti.i32:
+        return self.inner(x, amount)
+    @ti.func
+    def independent(self, x: ti.i32) -> ti.i32:
+        return x * 2
+    @ti.kernel
+    def step(self, amount: ti.i32):
+        ti.loop_config(block_dim=128)
+        for i in range(self.n):
+            self.out[i] = self.independent(i) + self.wrapper(i, amount)
+'''
+    seen = set()
+    original = PackageCompilation.library_function
+
+    def observe(compilation, function, args, **kwargs):
+        promoted = original(compilation, function, args, **kwargs)
+        name = function.func.__name__
+        if name in ('wrapper', 'inner', 'leaf'):
+            seen.add(name)
+            assert promoted is None
+        elif name == 'independent':
+            seen.add(name)
+            assert promoted is not None
+        return promoted
+
+    monkeypatch.setattr(PackageCompilation, 'library_function', observe)
+    package = _source_package(tmp_path, monkeypatch, source)
+    output = tmp_path / 'sdk'
+    ti.aot.export_package(package, output, artifact_format='bc-library')
+    assert seen == {'wrapper', 'inner', 'leaf', 'independent'}
+    with Runtime('cuda') as runtime, load_package(runtime, output) as code:
+        for n in (128, 256):
+            jit, aot = package.model.Model(n), code.host.Model(n)
+            for amount in (3, 9):
+                jit.step(amount)
+                aot.step(amount)
+                for name in ('scratch', 'out'):
+                    np.testing.assert_array_equal(getattr(aot, name).to_numpy(), getattr(jit, name).to_numpy())
+
+
+@test_utils.test(arch=ti.cuda, offline_cache=False)
 def test_package_library_keeps_caller_array_templates_inline(tmp_path, monkeypatch):
     from taichi_forge.lang._function_library import FunctionLibrary
     from taichi_forge.lang.any_array import AnyArray
