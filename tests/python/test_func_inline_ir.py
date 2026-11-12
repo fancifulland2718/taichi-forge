@@ -11,6 +11,242 @@ def builds(profile, name):
     )
 
 
+def library_builds(profile, name):
+    return sum(
+        int(row["calls"]) for row in profile.python_events() if row["path"] == "python.func.real_transform:" + name
+    )
+
+
+@test_utils.test(arch=[ti.cpu, ti.cuda], offline_cache=False, jit_function_library=True)
+def test_jit_function_library_reuses_value_body_across_calls():
+    output = ti.field(ti.i32, shape=8)
+
+    @ti.func
+    def shared(value):
+        for j in ti.static(range(4)):
+            value += j
+        return value
+
+    @ti.kernel
+    def first():
+        for i in output:
+            value = i
+            for j in ti.static(range(8)):
+                value = shared(value)
+            output[i] = value
+
+    @ti.kernel
+    def second():
+        for i in output:
+            output[i] = shared(i) * 2
+
+    with ti.compile_profile() as profile:
+        first()
+        second()
+    assert library_builds(profile, "shared") == 2  # once per kernel, not per call
+    native = profile.records(include_python=False)
+    assert (
+        sum(int(row["calls"]) for row in native if row["path"].endswith("/cpp.compile.llvm.function_body_emit")) == 1
+    ), native
+    assert (
+        sum(int(row["calls"]) for row in native if row["path"].endswith("/cpp.compile.llvm.function_unit_reuse")) == 1
+    ), native
+    np.testing.assert_array_equal(output.to_numpy(), (np.arange(8) + 6) * 2)
+    first()
+    np.testing.assert_array_equal(output.to_numpy(), np.arange(8) + 48)
+
+
+@test_utils.test(arch=[ti.cpu, ti.cuda], offline_cache=False, jit_function_library=True)
+def test_jit_function_library_tracks_closure_and_keeps_callbacks():
+    output = ti.field(ti.i32, shape=4)
+    gain = 2
+    seen = []
+
+    def advance():
+        nonlocal gain
+        gain += 1
+
+    def observe():
+        seen.append(1)
+        return len(seen)
+
+    @ti.func
+    def shared(value):
+        value *= gain
+        return value
+
+    @ti.func
+    def callback(value):
+        value += ti.static(observe())
+        return value
+
+    @ti.kernel
+    def run():
+        for i in range(1):
+            output[0] = shared(i + 10)
+            ti.static(advance())
+            output[1] = shared(i + 10)
+            output[2] = callback(i)
+            output[3] = callback(i)
+
+    with ti.compile_profile() as profile:
+        run()
+    assert library_builds(profile, "shared") == 2
+    assert library_builds(profile, "callback") == 0
+    np.testing.assert_array_equal(output.to_numpy(), [20, 30, 1, 2])
+    assert seen == [1, 1]
+
+
+@test_utils.test(arch=[ti.cpu, ti.cuda], offline_cache=False, jit_function_library=True)
+def test_jit_function_library_preserves_tensor_copies():
+    vec = ti.types.vector(3, ti.f32)
+    mat = ti.types.matrix(3, 3, ti.f32)
+    output = vec.field(shape=4)
+
+    @ti.func
+    def shared(a: mat, v: vec) -> vec:
+        v[0] += 2
+        a[1, 1] += 3
+        return a @ v
+
+    @ti.kernel
+    def run():
+        for i in output:
+            a = ti.Matrix.identity(ti.f32, 3)
+            v = ti.Vector([i, i + 1, i + 2], dt=ti.f32)
+            output[i] = shared(a, v) + shared(a, v) + v
+
+    with ti.compile_profile() as profile:
+        run()
+    assert library_builds(profile, "shared") == 1
+    np.testing.assert_array_equal(output.to_numpy(), [[3 * i + 4, 9 * (i + 1), 3 * (i + 2)] for i in range(4)])
+
+
+@test_utils.test(arch=[ti.cpu, ti.cuda], offline_cache=False, jit_function_library=True)
+def test_jit_function_library_tracks_nested_owner_and_static_dependencies():
+    @ti.data_oriented
+    class Owner:
+        def __init__(self):
+            self.extra = False
+            self.data = ti.Vector.field(2, ti.f32, shape=4)
+
+    owner = Owner()
+    owner.data.fill(2)
+    output = ti.field(ti.f32, shape=4)
+    gain = 2
+
+    def advance():
+        nonlocal gain
+        gain = 3
+
+    @ti.func
+    def leaf(query, i, value):
+        value += query.data[i].dot(ti.Vector([gain, 1]))
+        if ti.static(query.extra):
+            value += query.absent[i]
+        return ti.max(value, 0)
+
+    @ti.func
+    def shared(query: ti.template(), i, value):
+        value += leaf(query, i, value)
+        return value
+
+    @ti.kernel
+    def run():
+        for i in range(4):
+            a = shared(owner, i, 1.0)
+            b = shared(owner, i, 2.0)
+            ti.static(advance())
+            output[i] = a + b + shared(owner, i, 3.0)
+
+    with ti.compile_profile() as profile:
+        run()
+    assert library_builds(profile, "shared") == 2
+    np.testing.assert_array_equal(output.to_numpy(), [32.0] * 4)
+
+
+@test_utils.test(arch=[ti.cpu, ti.cuda], offline_cache=False, jit_function_library=True)
+def test_jit_function_library_retains_kernel_root_parallel_loops():
+    output = ti.field(ti.i32, shape=8)
+
+    @ti.func
+    def parallel(value: ti.i32) -> ti.i32:
+        for i in output:
+            output[i] = i + value
+        return value
+
+    @ti.kernel
+    def run():
+        parallel(3)
+
+    with ti.compile_profile() as profile:
+        run()
+    assert library_builds(profile, "parallel") == 0
+    np.testing.assert_array_equal(output.to_numpy(), np.arange(8) + 3)
+
+
+@test_utils.test(arch=[ti.cpu, ti.cuda], offline_cache=False, jit_function_library=True)
+def test_jit_function_library_does_not_skip_python_attribute_effects():
+    seen = []
+
+    class Owner:
+        gain = 2
+
+        def __getattribute__(self, name):
+            if name == "gain":
+                seen.append(1)
+            return object.__getattribute__(self, name)
+
+    owner = Owner()
+    output = ti.field(ti.i32, shape=4)
+
+    @ti.func
+    def shared(query: ti.template(), value):
+        value += query.gain
+        return value
+
+    @ti.kernel
+    def run():
+        for i in output:
+            output[i] = shared(owner, i) + shared(owner, i)
+
+    with ti.compile_profile() as profile:
+        run()
+    assert library_builds(profile, "shared") == 0
+    assert seen == [1, 1]
+    np.testing.assert_array_equal(output.to_numpy(), 2 * np.arange(4) + 4)
+
+
+@pytest.mark.parametrize("mode", ["forward", "reverse"])
+@test_utils.test(arch=[ti.cpu, ti.cuda], offline_cache=False, jit_function_library=True)
+def test_jit_function_library_retains_autodiff_expansion(mode):
+    x = ti.field(ti.f32, shape=4, needs_grad=True, needs_dual=True)
+    y = ti.field(ti.f32, shape=4, needs_grad=True, needs_dual=True)
+    x.fill(0.25)
+
+    @ti.func
+    def shared(value):
+        value *= value
+        return value
+
+    @ti.kernel
+    def run():
+        for i in x:
+            y[i] = shared(shared(x[i]))
+
+    if mode == "forward":
+        with ti.ad.FwdMode(loss=y, param=x, seed=[1.0] * 4):
+            run()
+        derivative = y.dual.to_numpy()
+    else:
+        run()
+        y.grad.fill(1)
+        run.grad()
+        derivative = x.grad.to_numpy()
+    np.testing.assert_allclose(y.to_numpy(), 0.25**4)
+    np.testing.assert_allclose(derivative, 4 * 0.25**3)
+
+
 @test_utils.test(arch=[ti.cpu, ti.cuda, ti.vulkan], offline_cache=False, inline_ir_cache=True)
 def test_inline_ir_reuses_specializations_and_rebinds_locals():
     out = ti.field(ti.f32, shape=4)

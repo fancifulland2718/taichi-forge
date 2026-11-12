@@ -635,6 +635,8 @@ class ASTTransformer(Builder):
             return node.ptr
 
         compilation = getattr(ctx.deployment.kernel, "_package_compilation", None) if ctx.deployment else None
+        if compilation is None:
+            compilation = getattr(impl.get_runtime().current_kernel, '_jit_function_library', None)
         library = compilation is not None and compilation.function_library
         previous = compilation.thread_local_call if library else False
         if library:
@@ -840,10 +842,10 @@ class ASTTransformer(Builder):
                         argument_path,
                     )
                     value = obj if result else obj[0](*obj[1], _origin=obj[2])
-                    if getattr(ctx.func, '_aot_copy_value_arguments', False) and (
+                    if getattr(ctx.func, '_copy_value_arguments', False) and (
                         id(annotation) in primitive_types.type_ids or isinstance(annotation, MatrixType)
                     ):
-                        # A private AOT boundary retains ti.func's local value
+                        # A private library boundary retains ti.func's local value
                         # parameters, unlike explicit real_func/kernel inputs.
                         value = impl.expr_init_func(value)
                         if arg.arg in ctx.kernel_args:

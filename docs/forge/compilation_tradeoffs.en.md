@@ -202,9 +202,12 @@ IR duplication and recursion. Faster AST visits and IR rewrites reduce the
 cost of expansion, but do not remove either need.
 
 Forge caches a real function's frontend and Taichi IR by specialization and
-compile tier within a Program, rebuilding them after `ti.reset()`. LLVM still
-emits the function in each calling module; this is not a guarantee of compiling
-machine code only once across all kernels. Static loops inside the function
+compile tier within a Program, rebuilding them after `ti.reset()`. JIT and AOT
+now share the LLVM function-unit cache: compatible, task-independent functions
+can reuse serialized bitcode across calling modules. Direct SNode relocations,
+recursive closures and task-local dependencies retain ordinary emission.
+Each final kernel is self-contained and still undergoes backend optimization;
+this does not compile machine code only once across all kernels. Static loops inside the function
 still expand, and distinct `ti.template()` arguments still specialize it.
 Graph replay reduces repeated kernel submission work and complements this
 within-kernel function boundary.
@@ -224,6 +227,32 @@ cumulative frontend expansion time, not a measured runtime benefit. Treat it
 as experimental, not an engine-wide compile-time optimization. Measure explicit
 `real_func` changes with cold precompilation, first launch, and warm completed
 work separately; use `@ti.func` for small helpers unless evidence favors a change.
+
+### Experimental late-inlined JIT function units
+
+`ti.init(jit_function_library=True)` (or `TI_JIT_FUNCTION_LIBRARY=1`) opts into
+the package builder's existing typed function boundaries for ordinary `@ti.func`.
+The default is `False`. CPU/CUDA non-AD compilation can lower an eligible body
+once per kernel specialization, compose its LLVM function with callers, then
+inline it during LLVM optimization. It does not change the original decorator
+or enable the one-way `auto_real_function` policy.
+
+This first scope includes typed returns and unannotated terminal returns of
+scalar/vector/matrix value parameters. Value arguments retain private-copy
+semantics. Extraction requires a per-thread call context and known numerical
+dependencies; unknown Python callbacks, attribute-read effects, unsupported
+return inference and kernel-root parallel helpers retain ordinary expansion.
+AD and non-LLVM backends also retain that path. Eligibility is evaluated during
+compilation, with no new check or dispatch on warm calls. Compile profiling is
+optional; `function_body_emit` and `function_unit_reuse` distinguish LLVM body
+generation from imported units.
+
+These are in-memory units owned by the Program, not a new disk cache or a JIT
+TCM package. Cross-kernel frontend sharing and general SNode relocation are not
+provided. Late inlining can still increase final code size, and truly different
+static arguments/types still specialize. Compare cold compilation plus first
+completed call, warm completed work and memory on the actual workload before
+enabling it broadly.
 
 ## When to use `advanced_optimization=False`
 

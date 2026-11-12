@@ -376,6 +376,11 @@ class Func:
             function = compilation.library_function(self, args) if compilation is not None else None
             if function is not None:
                 return deployment.call_real_function(function, args)
+        elif not self.is_real_function:
+            library = getattr(impl.get_runtime().current_kernel, '_jit_function_library', None)
+            function = library.library_function(self, args) if library is not None else None
+            if function is not None:
+                return function(*args)
         if deployment is None and not self.is_real_function and not self._auto_promoted:
             if self._can_auto_promote() and self._should_auto_promote():
                 self._auto_promoted = True
@@ -651,6 +656,8 @@ class Func:
             is_real_function=self.is_real_function,
         )
         fn = impl.get_runtime().prog.create_function(key)
+        if getattr(self, '_jit_inline_function', False):
+            fn._set_llvm_inline(True)
 
         def func_body():
             old_callable = impl.get_runtime().compiling_callable
@@ -1810,6 +1817,12 @@ class Kernel:
             assert self.runtime.compiling_callable is None
             self.runtime.compiling_callable = kernel_cxx
             self._inline_ir_cache = {} if self.runtime.inline_ir_cache else None
+            self._jit_function_library = None
+            if (deployment is None and self.runtime.jit_function_library
+                    and self.autodiff_mode == AutodiffMode.NONE
+                    and impl.default_cfg().arch in (_ti_core.Arch.x64, _ti_core.Arch.cuda)):
+                from taichi_forge.lang._jit_function_library import JitFunctionLibrary
+                self._jit_function_library = JitFunctionLibrary()
             try:
                 ctx.ast_builder = kernel_cxx.ast_builder()
                 if range_one_to_one:
@@ -1832,6 +1845,7 @@ class Kernel:
                         )
             finally:
                 self._inline_ir_cache = None
+                self._jit_function_library = None
                 self._deployment_context = None
                 self.runtime.inside_kernel = False
                 self.runtime.current_kernel = None

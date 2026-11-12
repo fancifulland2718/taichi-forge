@@ -154,8 +154,10 @@ CFG 数据流的 kill 分析按所属局部存储对直接张量分量分组。�
 加速 AST 访问和 IR 改写可以降低展开成本，但没有消除这两个需求。
 
 Forge 在同一 Program 内按特化与编译档位缓存 real function 的前端和 Taichi IR，
-`ti.reset()` 后重新构建。LLVM 仍在调用它的各个模块中生成函数，因此不能保证跨所有
-kernel 的机器码只编译一次。函数内部的静态循环仍会展开，不同的 `ti.template()`
+`ti.reset()` 后重新构建。JIT 与 AOT 现共用 LLVM 函数单元缓存：目标相容且不依赖 task
+上下文的函数，可以跨调用模块复用序列化 bitcode。直接 SNode 重定位、递归闭包和
+task 局部依赖仍按原路径生成。最终 kernel 保持自包含，后端优化仍需执行，
+因此不保证跨所有 kernel 的机器码只编译一次。函数内部的静态循环仍会展开，不同的 `ti.template()`
 实参仍会产生特化。Graph replay 减少重复提交 kernel 的成本，与 kernel 内的函数边界互补。
 
 后端边界是 LLVM（CPU/CUDA），没有 Vulkan 实现；梯度 kernel 会拒绝 real function。
@@ -168,6 +170,24 @@ kernel 的机器码只编译一次。函数内部的静态循环仍会展开，�
 保持 `auto_real_function=False`。它根据累计前端展开时间进行单向提升，并不衡量运行期
 收益，应保留为实验能力。对显式 `real_func` 改动，分别测冷预编译、首次启动和暖态完成
 耗时；小辅助函数在没有收益证据时继续使用 `@ti.func`。
+
+### 实验性 JIT 函数单元与后期内联
+
+`ti.init(jit_function_library=True)`（或 `TI_JIT_FUNCTION_LIBRARY=1`）让普通
+`@ti.func` 使用包构建器已有的类型化函数边界，默认 `False`。CPU/CUDA 非 AD 编译中，
+合格函数体在每个 kernel 特化内降级一次，再将 LLVM 函数与调用方组合，最后由 LLVM
+内联。原装饰器不变，也不启用单向提升的 `auto_real_function` 策略。
+
+首批覆盖有返回类型标注，以及末尾返回标量/向量/矩阵数值参数的未标注函数；数值参数
+仍具有局部副本语义。提取要求调用位于单线程工作上下文，并能确定数值依赖；未知
+Python 回调、属性读取副作用、未支持的返回类型推断和 kernel 根部并行 helper 仍按原方式
+展开。AD 和非 LLVM 后端也保留原路径。准入仅在编译时判断，不增加暖态调用检查或调度。
+编译剖析按需开启，`function_body_emit` 与 `function_unit_reuse` 区分 LLVM 函数体生成
+和代码单元导入。
+
+这些是 Program 持有的内存单元，不新建磁盘缓存或 JIT TCM 包。目前不提供跨 kernel 的
+前端共享或通用 SNode 重定位。后期内联仍可能增大最终代码，不同真实静态参数和类型仍需
+特化；扩大使用前须在真实负载上对照冷编译加首次完成调用、暖态完成耗时及内存。
 
 ## 何时使用 `advanced_optimization=False`
 

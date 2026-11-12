@@ -35,6 +35,7 @@
 |---|---|---|
 | `compile_tier` | `ti.init()` 中为 `"fast"` | 当前源码的 `"fast"` 在 CPU/CUDA/AMDGPU 使用 LLVM O1，Vulkan 跳过 `spirv-opt`；`"balanced"` 与 `"full"` 保留已配置的后端等级。`full` 还允许未显式限制的高级全局简化迭代到不动点。应用层优先使用该选项。 |
 | `inline_ir_cache` | `False` | 实验性选项，在单次 kernel 编译内复用合格标量 `ti.func` 的 IR，再展开。也可用 `TI_INLINE_IR_CACHE=1` 开启；见[范围与取舍](cache_compile.zh.md#实验性内联函数-ir-复用)。 |
+| `jit_function_library` | `False` | 实验性 CPU/CUDA JIT 类型化 `ti.func` 函数体复用，在 LLVM 组合并内联。也可用 `TI_JIT_FUNCTION_LIBRARY=1` 开启；见[范围与取舍](compilation_tradeoffs.zh.md#实验性-jit-函数单元与后期内联)。 |
 | `advanced_optimization` | `fast` 为 `False`；显式初始化为 `balanced/full` 时为 `True` | 选择高级 IR 优化管线。显式参数或 `TI_ADVANCED_OPTIMIZATION` 覆盖按 tier 推导的默认值，参数优先于环境变量；每 kernel 的 tier 覆盖仍继承 Program 级的此开关。 |
 | `llvm_opt_level` | `3` | 非 `fast` tier 下显式指定 LLVM `-O` 等级（`0`–`3`，GPU 保留 O1 下限）；当前源码的 CPU/CUDA/AMDGPU `fast` 使用 O1。除非代表性 benchmark 证明有必要，否则优先使用 `compile_tier`。 |
 

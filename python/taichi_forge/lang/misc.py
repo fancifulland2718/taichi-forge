@@ -294,6 +294,7 @@ class _SpecialConfig:
         self.func_inline_depth_limit = 0
         # Experimental reuse of scalar ti.func IR within one kernel compilation.
         self.inline_ir_cache = False
+        self.jit_function_library = False
         # R4.a — toggle the PyTaichi.materialize() fast path on the kernel
         # hot call path. Default ON; set to False to restore the
         # vanilla-style behavior of running the full validate/check sequence
@@ -500,6 +501,7 @@ def init(
     env_spec.add("unrolling_kernel_hard_limit")
     env_spec.add("func_inline_depth_limit")
     env_spec.add("inline_ir_cache")
+    env_spec.add("jit_function_library")
     env_spec.add("materialize_fast_path")
     env_spec.add("kernel_specialization_limit", int)
 
@@ -545,6 +547,7 @@ def init(
         impl.get_runtime().unrolling_kernel_hard_limit = spec_cfg.unrolling_kernel_hard_limit
         impl.get_runtime().func_inline_depth_limit = spec_cfg.func_inline_depth_limit
         impl.get_runtime().inline_ir_cache = spec_cfg.inline_ir_cache
+        impl.get_runtime().jit_function_library = spec_cfg.jit_function_library
         impl.get_runtime()._materialize_fast_path = spec_cfg.materialize_fast_path
         impl.get_runtime().kernel_specialization_limit = spec_cfg.kernel_specialization_limit
         _logging.set_logging_level(spec_cfg.log_level.lower())

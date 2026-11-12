@@ -32,6 +32,7 @@ All defaults match upstream 1.7.4 unless noted.
 |---|---|---|
 | `compile_tier` | `"fast"` in `ti.init()` | In current source, `"fast"` uses LLVM O1 on CPU/CUDA/AMDGPU and skips `spirv-opt` on Vulkan. `"balanced"` and `"full"` retain configured backend levels. `full` also lets advanced global simplification reach a fixed point unless explicitly capped. Prefer this application-facing control. |
 | `inline_ir_cache` | `False` | Experimental kernel-local reuse of eligible scalar `ti.func` IR before inlining. Also accepts `TI_INLINE_IR_CACHE=1`; see [scope and tradeoffs](cache_compile.en.md#experimental-inline-function-ir-reuse). |
+| `jit_function_library` | `False` | Experimental CPU/CUDA JIT reuse of typed `ti.func` bodies, composed and inlined at LLVM. Also accepts `TI_JIT_FUNCTION_LIBRARY=1`; see [scope and tradeoffs](compilation_tradeoffs.en.md#experimental-late-inlined-jit-function-units). |
 | `advanced_optimization` | `False` for `fast`; `True` for explicit `balanced`/`full` initialization | Selects the advanced IR pipeline. An explicit keyword or `TI_ADVANCED_OPTIMIZATION` overrides the tier-derived default; keywords take precedence over environment values. Per-kernel tier overrides continue to inherit this Program-level flag. |
 | `llvm_opt_level` | `3` | Explicit LLVM `-O` level (`0`–`3`, with a GPU O1 floor) for non-`fast` tiers. Current CPU/CUDA/AMDGPU `fast` uses O1. Prefer `compile_tier` unless a representative benchmark justifies a backend-specific override. |
 
