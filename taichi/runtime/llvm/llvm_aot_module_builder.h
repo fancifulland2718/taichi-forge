@@ -7,7 +7,7 @@
 namespace taichi::lang {
 
 namespace LLVM {
-class AotFunctionCodeCache;
+class FunctionCodeCache;
 }
 
 class LlvmAotModuleBuilder : public AotModuleBuilder {
@@ -69,7 +69,7 @@ class LlvmAotModuleBuilder : public AotModuleBuilder {
   std::unique_ptr<KernelCompilationManager> streaming_compilation_manager_;
   std::map<std::string, std::string> sealed_bitcode_;
   std::map<std::string, std::string> sealed_code_units_;
-  std::shared_ptr<LLVM::AotFunctionCodeCache> function_code_cache_;
+  std::shared_ptr<LLVM::FunctionCodeCache> function_code_cache_;
   const CompileConfig &compile_config_;
   LlvmProgramImpl *prog_ = nullptr;
   DeviceCapabilityConfig caps_;

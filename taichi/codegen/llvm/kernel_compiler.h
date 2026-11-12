@@ -7,6 +7,8 @@
 namespace taichi::lang {
 namespace LLVM {
 
+class FunctionCodeCache;
+
 class KernelCompiler : public lang::KernelCompiler {
  public:
   struct Config {
@@ -25,6 +27,8 @@ class KernelCompiler : public lang::KernelCompiler {
 
  private:
   Config config_;
+  // Program-owned JIT reuse; no disk artifacts or executable resource leases.
+  std::shared_ptr<FunctionCodeCache> function_code_cache_;
 };
 
 }  // namespace LLVM

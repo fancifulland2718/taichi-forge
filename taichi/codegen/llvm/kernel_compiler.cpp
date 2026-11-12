@@ -10,11 +10,15 @@
 #include "taichi/runtime/llvm/cuda_lowering_target.h"
 #include "taichi/runtime/llvm/runtime_context_abi.h"
 #include "taichi/runtime/llvm/array_layout_abi.h"
+#include "taichi/runtime/llvm/function_code_cache.h"
+#include "taichi/analysis/offline_cache_util.h"
 
 namespace taichi::lang {
 namespace LLVM {
 
-KernelCompiler::KernelCompiler(Config config) : config_(std::move(config)) {
+KernelCompiler::KernelCompiler(Config config)
+    : config_(std::move(config)),
+      function_code_cache_(std::make_shared<FunctionCodeCache>()) {
 }
 
 KernelCompiler::IRNodePtr KernelCompiler::compile(
@@ -48,6 +52,12 @@ KernelCompiler::CKDPtr KernelCompiler::compile(
     IRNode &chi_ir) const {
   const auto &compile_config = request.config();
   const auto &device_caps = request.device_caps();
+  // AOT owns its transaction scope. JIT shares the same unit mechanism across
+  // kernel/task modules within this compiler's Program lifetime.
+  const bool jit = request.provenance().purpose == CompilePurpose::jit;
+  FunctionCodeScope functions(&kernel_def, jit ? function_code_cache_ : nullptr,
+      jit ? get_hashed_offline_cache_key_context(compile_config, device_caps, nullptr) +
+                kernel_def.optimization_spec_cache_key() : "");
   LLVM::CompiledKernelData::InternalData data;
   // Preserve runtime-only dependencies (e.g. listgen/GC), then merge the roots
   // introduced by final task lowering without another IR traversal.

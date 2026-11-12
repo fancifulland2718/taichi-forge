@@ -15,7 +15,7 @@
 #include "taichi/ir/statements.h"
 #include "taichi/ir/transforms.h"
 #include "taichi/runtime/llvm/aot_snode_relocation.h"
-#include "taichi/runtime/llvm/aot_function_code_cache.h"
+#include "taichi/runtime/llvm/function_code_cache.h"
 #include "taichi/program/extension.h"
 #include "taichi/runtime/program_impls/llvm/llvm_program.h"
 #include "taichi/codegen/llvm/struct_llvm.h"
@@ -3589,25 +3589,29 @@ void TaskCodeGenLLVM::visit(FuncCallStmt *stmt) {
     if (!cuda_root_binding_tree_ids.empty()) {
       argument_types.push_back(llvm::PointerType::get(*llvm_context, 0));
     }
-    const auto context = LLVM::aot_function_code_context(kernel);
+    const auto context = LLVM::function_code_context(kernel);
     const auto key = context.cache
         ? context.identity(*stmt->func, cuda_root_binding_tree_ids) : "";
     auto unit_lock = !key.empty() ? context.cache->lock_function(key)
                                   : std::unique_lock<std::mutex>{};
     const auto cached = !key.empty() ? context.cache->find(key) : nullptr;
     if (cached) {
-      auto *function = LLVM::import_aot_function_code(*module, *cached);
+      TI_COMPILE_PROFILER("cpp.compile.llvm.function_unit_reuse");
+      auto *function = LLVM::import_function_code(*module, *cached);
       TI_ERROR_IF(function->getFunctionType() != llvm::FunctionType::get(
                       llvm::Type::getVoidTy(*llvm_context), argument_types, false),
                   "Producer function unit call ABI mismatch");
       func_map.emplace(stmt->func, function);
     } else {
+      TI_COMPILE_PROFILER("cpp.compile.llvm.function_body_emit");
       if (context.cache)
         context.cache->record_body_emission();
       {
         auto guard =
             get_function_creation_guard(argument_types, stmt->func->get_name());
         guard.body->addFnAttr("taichi.aot.real_function");
+        if (stmt->func->llvm_inline())
+          guard.body->addFnAttr(llvm::Attribute::AlwaysInline);
         const Callable *old_callable = current_callable;
         current_callable = stmt->func;
         func_map.insert({stmt->func, guard.body});

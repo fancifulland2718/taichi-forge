@@ -13,13 +13,13 @@ class Kernel;
 
 namespace taichi::lang::LLVM {
 
-class AotFunctionTaskIndependence : public BasicStmtVisitor {
+class FunctionTaskIndependence : public BasicStmtVisitor {
  public:
   bool independent{true};
   std::unordered_set<Function *> visited;
   std::unordered_set<Function *> active;
   using BasicStmtVisitor::visit;
-  AotFunctionTaskIndependence() {
+  FunctionTaskIndependence() {
     allow_undefined_visitor = true;
     invoke_default_visitor = true;
   }
@@ -39,11 +39,11 @@ class AotFunctionTaskIndependence : public BasicStmtVisitor {
   }
 };
 
-// A producer transaction owns these serialized, typed functions. Ordinary JIT
-// and the persistent kernel cache keep self-contained modules. Reusing one
+// A producer transaction or JIT compiler owns these immutable, typed units.
+// The persistent kernel cache keeps self-contained modules. Reusing one
 // function skips LLVM body generation; it does not bypass resource analysis or
 // treat a caller's configuration as the identity of every function it calls.
-class AotFunctionCodeCache {
+class FunctionCodeCache {
  public:
   struct Entry {
     std::string symbol;
@@ -109,8 +109,8 @@ class AotFunctionCodeCache {
   std::uint64_t emissions_{0}, hits_{0}, bytes_{0};
 };
 
-struct AotFunctionCodeContext {
-  std::shared_ptr<AotFunctionCodeCache> cache;
+struct FunctionCodeContext {
+  std::shared_ptr<FunctionCodeCache> cache;
   std::string target;
 
   std::string identity(const Function &function,
@@ -120,7 +120,7 @@ struct AotFunctionCodeContext {
     // already have a typed function ABI and do not depend on instance storage.
     if (!body || !function.source_snode_tree_dependencies().empty())
       return {};
-    AotFunctionTaskIndependence proof;
+    FunctionTaskIndependence proof;
     function.ir->accept(&proof);
     if (!proof.independent)
       return {};
@@ -138,52 +138,52 @@ struct AotFunctionCodeContext {
   }
 };
 
-// Codegen tasks may run on worker threads. Bind the context to the private
+// Codegen tasks may run on worker threads. Bind the context to the compiling
 // kernel instead of using thread-local or process-global active build state.
-inline auto &aot_function_code_contexts() {
+inline auto &function_code_contexts() {
   static std::pair<std::mutex,
-      std::map<const Kernel *, AotFunctionCodeContext>> contexts;
+      std::map<const Kernel *, FunctionCodeContext>> contexts;
   return contexts;
 }
 
-inline AotFunctionCodeContext aot_function_code_context(const Kernel *kernel) {
-  auto &[mutex, contexts] = aot_function_code_contexts();
+inline FunctionCodeContext function_code_context(const Kernel *kernel) {
+  auto &[mutex, contexts] = function_code_contexts();
   std::lock_guard<std::mutex> lock(mutex);
   const auto found = contexts.find(kernel);
-  return found == contexts.end() ? AotFunctionCodeContext{} : found->second;
+  return found == contexts.end() ? FunctionCodeContext{} : found->second;
 }
 
-class AotFunctionCodeScope {
+class FunctionCodeScope {
  public:
-  AotFunctionCodeScope(const Kernel *kernel,
-                      std::shared_ptr<AotFunctionCodeCache> cache,
-                      std::string target) : kernel_(cache ? kernel : nullptr) {
+  FunctionCodeScope(const Kernel *kernel,
+                    std::shared_ptr<FunctionCodeCache> cache,
+                    std::string target) : kernel_(cache ? kernel : nullptr) {
     if (!kernel_)
       return;
-    auto &[mutex, contexts] = aot_function_code_contexts();
+    auto &[mutex, contexts] = function_code_contexts();
     std::lock_guard<std::mutex> lock(mutex);
-    TI_ERROR_IF(!contexts.emplace(kernel_, AotFunctionCodeContext{
+    TI_ERROR_IF(!contexts.emplace(kernel_, FunctionCodeContext{
                     std::move(cache), std::move(target)}).second,
-                "Concurrent AOT exports of the same private kernel");
+                "Concurrent function-code scopes for the same kernel");
   }
 
-  ~AotFunctionCodeScope() {
+  ~FunctionCodeScope() {
     if (!kernel_)
       return;
-    auto &[mutex, contexts] = aot_function_code_contexts();
+    auto &[mutex, contexts] = function_code_contexts();
     std::lock_guard<std::mutex> lock(mutex);
     contexts.erase(kernel_);
   }
 
-  AotFunctionCodeScope(const AotFunctionCodeScope &) = delete;
-  AotFunctionCodeScope &operator=(const AotFunctionCodeScope &) = delete;
+  FunctionCodeScope(const FunctionCodeScope &) = delete;
+  FunctionCodeScope &operator=(const FunctionCodeScope &) = delete;
 
  private:
   const Kernel *kernel_;
 };
 
-inline llvm::Function *import_aot_function_code(
-    llvm::Module &module, const AotFunctionCodeCache::Entry &entry) {
+inline llvm::Function *import_function_code(
+    llvm::Module &module, const FunctionCodeCache::Entry &entry) {
   if (auto *existing = module.getFunction(entry.symbol);
       existing && !existing->isDeclaration())
     return existing;

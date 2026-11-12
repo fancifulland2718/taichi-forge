@@ -19,7 +19,7 @@
 #include "taichi/runtime/llvm/aot_snode_relocation.h"
 #include "taichi/runtime/llvm/aot_snode_resources.h"
 #include "taichi/runtime/llvm/aot_code_units.h"
-#include "taichi/runtime/llvm/aot_function_code_cache.h"
+#include "taichi/runtime/llvm/function_code_cache.h"
 #include "taichi/analysis/offline_cache_util.h"
 #if defined(TI_WITH_CUDA)
 #include "taichi/runtime/cuda/jit_cuda.h"
@@ -56,7 +56,7 @@ void LlvmAotModuleBuilder::set_artifact_format(const std::string &format) {
   TI_ERROR_IF(format == "bc-library" && compile_config_.arch != Arch::cuda,
               "Experimental AOT code libraries currently require CUDA");
   function_code_cache_ = format == "bc-library"
-      ? std::make_shared<LLVM::AotFunctionCodeCache>() : nullptr;
+      ? std::make_shared<LLVM::FunctionCodeCache>() : nullptr;
 }
 
 void LlvmAotModuleBuilder::enable_streaming_exports() {
@@ -549,7 +549,7 @@ const LLVM::CompiledKernelData &LlvmAotModuleBuilder::compile_kernel(
       compile_options_);
   auto &manager = streaming_compilation_manager_ ? *streaming_compilation_manager_
                                                 : compilation_manager_;
-  LLVM::AotFunctionCodeScope functions(kernel, function_code_cache_,
+  LLVM::FunctionCodeScope functions(kernel, function_code_cache_,
       function_code_cache_
           ? get_hashed_offline_cache_key_context(request.config(),
                                                 request.device_caps(), nullptr) +

@@ -43,6 +43,15 @@ class Function : public Callable {
     return inline_returns_lvalue_;
   }
 
+  // Automatic JIT boundaries share lowering work but retain ti.func's final
+  // inline policy. Explicit real_func and AOT library functions keep theirs.
+  void set_llvm_inline(bool value) {
+    llvm_inline_ = value;
+  }
+  bool llvm_inline() const {
+    return llvm_inline_;
+  }
+
   [[nodiscard]] std::string get_name() const override;
 
   const std::optional<std::string> &try_get_ast_serialization_data() const {
@@ -72,6 +81,7 @@ class Function : public Callable {
  private:
   bool is_inline_template_{false};
   bool inline_returns_lvalue_{false};
+  bool llvm_inline_{false};
   IRStage ir_stage_{IRStage::None};
   std::optional<std::string> ast_serialization_data_;  // For generating AST-Key
   std::vector<int> source_snode_tree_dependencies_;

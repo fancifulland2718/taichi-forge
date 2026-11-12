@@ -33,6 +33,8 @@ void Function::set_function_body(const std::function<void()> &func) {
   std::ostringstream oss;
   gen_offline_cache_key(ir.get(), &oss, &source_snode_tree_dependencies_);
   ast_serialization_data_ = oss.str();
+  if (llvm_inline_)
+    *ast_serialization_data_ = "llvm_inline_v1:" + *ast_serialization_data_;
 }
 
 void Function::set_function_body(std::unique_ptr<IRNode> func_body) {
