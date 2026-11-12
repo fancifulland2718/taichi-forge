@@ -49,6 +49,12 @@ dimensions, then links, propagates constants and inlines. Ordinary numerical
 arguments stay live. Host/JIT declarations remain unchanged; consumers do not read
 the numerical AST. Type, layout, parallel-structure and unproven uses retain their
 necessary static variants. This does not eliminate every static combination.
+An assignment such as `result = point` into an existing numerical local is a
+value copy, not a Python alias. The classifier recognizes dominating scalar
+literals and fixed-dtype, fixed-shape `Vector.zero` / `Matrix.zero` initializers
+without static rebinding. Their numerical branches may share one implementation;
+the ordinary DSL still enforces assignment types and shapes. Resource/type aliases
+and unproven initializers retain the conservative rules.
 Shared units are extracted when sealing entries; units requiring final resource
 numbering wait for archive remapping. Host arrays still transfer on each invocation;
 reusing specialized code does not cache their contents.
@@ -113,8 +119,9 @@ inputs or restrict ordinary JIT specialization from actual arguments.
 
 ## Producing and consuming a package
 
-Use `ti.aot.check_package(module, arch="cuda", source_root="path/to/src")`
-to run the exporter's declaration preflight without constructing application
+During development, optionally use
+`ti.aot.check_package(module, arch="cuda", source_root="path/to/src")`
+to inspect the exporter's declarations without constructing application
 models, compiling numerical kernels or writing artifacts. Normal imports and
 backend initialization still occur. The JSON-serializable report lists source
 hashes, decorated definitions/types, template/owner requirements, target
@@ -122,6 +129,9 @@ selections, input sources and closures. Unsupported declarations raise the same
 `PackageExportError` as export instead of disappearing. A passed declaration
 check leaves compilation, Host projection and consumption marked `not_run`;
 module checks must still be followed by final complete export and consumption.
+This inspection is never called automatically by ordinary export or consumption.
+Export performs its own necessary declaration resolution; a separate inspection
+before every export would repeat that work.
 
 Declaration discovery deduplicates functions with their complete input-source
 contexts before analyzing their bodies, including repeated Graph calls. Every
@@ -173,7 +183,8 @@ import solver_api
 import renderer_api
 
 roots = (solver_api, renderer_api)
-report = ti.aot.check_package(roots, arch="cuda", source_root="path/to/src")
+# Optional development inspection, not required before export:
+# report = ti.aot.check_package(roots, arch="cuda", source_root="path/to/src")
 ti.aot.export_package(roots, "dist/engine_cuda", arch="cuda", source_root="path/to/src")
 ```
 

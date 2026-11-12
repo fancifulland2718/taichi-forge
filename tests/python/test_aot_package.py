@@ -470,6 +470,90 @@ class Model:
 
 
 @test_utils.test(arch=ti.cuda, offline_cache=False)
+@pytest.mark.parametrize('value_kind', ['scalar', 'vector', 'matrix'])
+def test_package_library_prepares_copies_into_numeric_locals(tmp_path, monkeypatch, value_kind):
+    initial, field, reduction = {
+        'scalar': ('0.0', 'field(ti.f32', 'result'),
+        'vector': ('ti.Vector.zero(ti.f32, 3)', 'vector_field(3, ti.f32', 'result.sum()'),
+        'matrix': ('ti.Matrix.zero(ti.f32, 2, 2)', 'matrix_field(2, 2, ti.f32', 'result.sum()'),
+    }[value_kind]
+    source = '''import taichi_forge as ti
+@ti.data_oriented
+class Model:
+    def __init__(self, n: int, enabled: bool):
+        self.n, self.enabled = n, enabled
+        scope = ti.experimental.ResourceScope(self)
+        scope.static('enabled', choices=(False, True))
+        scope.values = scope.FIELD, shape=scope.dim('n'))
+        scope.out = scope.field(ti.f32, shape=scope.dim('n'))
+    @ti.func
+    def selected(self, i):
+        result = INITIAL
+        if i > 0:
+            result += 1
+        if ti.static(self.enabled):
+            point = self.values[i]
+            result = point
+            point += 7
+        return REDUCTION
+    @ti.kernel
+    def step(self):
+        for i in range(self.n):
+            self.out[i] = self.selected(i)
+'''.replace('FIELD', field).replace('INITIAL', initial).replace('REDUCTION', reduction)
+    package = _source_package(tmp_path, monkeypatch, source)
+
+    def no_development_inspection(*args, **kwargs):
+        raise AssertionError('Normal export must not invoke optional check_package')
+
+    monkeypatch.setattr(ti.aot, 'check_package', no_development_inspection)
+    manifest = ti.aot.export_package(package, tmp_path / 'sdk', artifact_format='bc-library')
+    entries = [v for v in manifest['entries'].values() if v['definition'].endswith('.Model.step')]
+    assert len(entries) == 1
+    assert {v['name'] for v in entries[0]['captures'] if 'prepare_static' in v} == {'enabled'}
+    with Runtime('cuda') as runtime, load_package(runtime, tmp_path / 'sdk') as code:
+        owners = [(code.host.Model(n, enabled), package.model.Model(n, enabled))
+                  for n, enabled in ((3, False), (9, True))]
+        for aot, jit in owners:
+            for value in (2, -3):
+                shape = (aot.n, *{'scalar': (), 'vector': (3,), 'matrix': (2, 2)}[value_kind])
+                data = np.full(shape, value, dtype=np.float32)
+                aot.values.from_numpy(data)
+                jit.values.from_numpy(data)
+                aot.step()
+                jit.step()
+                np.testing.assert_array_equal(aot.out.to_numpy(), jit.out.to_numpy())
+                factor = {'scalar': 1, 'vector': 3, 'matrix': 4}[value_kind]
+                expected = np.full(aot.n, value * factor) if aot.enabled else (np.arange(aot.n) > 0) * factor
+                np.testing.assert_array_equal(aot.out.to_numpy(), expected)
+
+
+@pytest.mark.parametrize('initial,body', [
+    ('self.values', 'result = self.other'),
+    ('ti.static(self.values)', 'result = point'),
+    ('ti.Vector.zero(ti.f32, 3)', 'result = ti.static(self.values)\n        result = point'),
+    ('0', 'for result in ti.static(range(3)):\n            point += result\n        result = point'),
+    ('0', 'result: ti.i32 = 1\n        result = point'),
+    ('self.values; result = 0', 'result = point'),
+])
+def test_package_static_copy_proof_keeps_python_rebindings(initial, body):
+    from taichi_forge.aot._package_static import StaticPreparation
+    from taichi_forge.tools._compiled_host import decorator_resolver
+
+    source = '''import taichi_forge as ti
+@ti.func
+def selected(self, point):
+    result = INITIAL
+    if ti.static(self.flag):
+        BODY
+    return result
+'''.replace('INITIAL', initial).replace('BODY', body)
+    tree = ast.parse(source)
+    proof = StaticPreparation([('model', None, None, source, tree, decorator_resolver(tree), None, None)])
+    assert proof.entry_uses('model.selected')['flag'] != {'prepare_condition'}
+
+
+@test_utils.test(arch=ti.cuda, offline_cache=False)
 def test_package_library_prepares_inline_helper_schedules(tmp_path, monkeypatch):
     from itertools import product
     from taichi_forge.aot._component import _ComponentCode

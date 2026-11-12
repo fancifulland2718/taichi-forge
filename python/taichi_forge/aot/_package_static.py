@@ -22,6 +22,7 @@ class StaticPreparation:
         self._names = {}
         self._syntax = {}
         self._local_values = {}
+        self._numeric_locals = {}
         self._value_uses = {}
         self._ambiguous_names = set()
         functions = []
@@ -77,6 +78,7 @@ class StaticPreparation:
                    for node in ast.walk(function)):
                 aliases.clear()
             self._local_values[id(function)] = reads, stores, aliases
+            self._numeric_locals[id(function)] = self._numeric_assignments(function, parents, kind, stores)
         # A call name qualifies only when every definition with that name in
         # the source closure is a proven inline schedule. Recursive/unresolved
         # groups never bootstrap themselves into this set.
@@ -189,7 +191,58 @@ class StaticPreparation:
         return result
 
     @staticmethod
-    def _structural(node, kind, parents):
+    def _numeric_assignments(function, parents, kind, stores):
+        """Locals already materialized as DSL values, never Python aliases."""
+        parameters = {arg.arg for arg in (*function.args.posonlyargs, *function.args.args,
+                                         *function.args.kwonlyargs)}
+        if function.args.vararg:
+            parameters.add(function.args.vararg.arg)
+        if function.args.kwarg:
+            parameters.add(function.args.kwarg.arg)
+        if any(isinstance(part, (ast.Import, ast.ImportFrom, ast.Global, ast.Nonlocal))
+               or isinstance(part, (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda, ast.ClassDef))
+               and part is not function for part in ast.walk(function)):
+            return {}
+        result = {}
+        for statement in function.body:
+            if not (isinstance(statement, ast.Assign) and len(statement.targets) == 1
+                    and isinstance(statement.targets[0], ast.Name)):
+                continue
+            name, value = statement.targets[0].id, statement.value
+            numeric = isinstance(value, ast.Constant) and type(value.value) in (bool, int, float)
+            if isinstance(value, ast.Call) and not value.keywords:
+                shape_count = ({'Vector': 1, 'Matrix': 2}.get(kind(value.func.value))
+                               if isinstance(value.func, ast.Attribute) and value.func.attr == 'zero' else None)
+                root = value.func
+                while isinstance(root, ast.Attribute):
+                    root = root.value
+                if (shape_count is not None and len(value.args) == shape_count + 1
+                        and isinstance(root, ast.Name) and root.id not in parameters | stores.keys()
+                        and kind(value.args[0]) in ('i8', 'i16', 'i32', 'i64', 'u8', 'u16', 'u32', 'u64',
+                                                    'f16', 'f32', 'f64')
+                        and all(isinstance(arg, ast.Constant) and type(arg.value) is int and arg.value > 0
+                                for arg in value.args[1:])):
+                    numeric = True
+            if not numeric or name in parameters:
+                continue
+            # Normal later assignments call the existing value's _assign; a
+            # static assignment instead rebinds the Python symbol. Unknown
+            # binding forms (loop targets, imports, deletion, annotations) do
+            # not establish the same value identity.
+            valid = True
+            for store in stores.get(name, ()):
+                parent = parents.get(id(store))
+                if ((store.lineno, store.col_offset) < (statement.lineno, statement.col_offset)
+                        or not isinstance(parent, (ast.Assign, ast.AugAssign))
+                        or isinstance(parent, ast.Assign)
+                        and isinstance(parent.value, ast.Call) and kind(parent.value.func) == 'static'):
+                    valid = False
+                    break
+            if valid:
+                result[name] = statement.lineno
+        return result
+
+    def _structural(self, node, kind, parents):
         # These operations define types, Python objects, or execution structure.
         # Their branch alternatives cannot be represented by a scalar IR phi.
         fixed_cast_types = set()
@@ -229,9 +282,17 @@ class StaticPreparation:
                 return True
             if isinstance(part, ast.Assign) and any(isinstance(t, ast.Name) for t in part.targets):
                 # Local Python aliases can select functions/resources/types.
-                # Without a typed proof, preserve their original static scope.
+                # Copying into an established DSL local is a value assignment,
+                # however, and retains the ordinary _assign type/shape rules.
                 if isinstance(part.value, (ast.Name, ast.Attribute, ast.Tuple, ast.List, ast.Dict)):
-                    return True
+                    function = part
+                    while function is not None and not isinstance(function, ast.FunctionDef):
+                        function = parents.get(id(function))
+                    numeric = self._numeric_locals.get(id(function), {})
+                    if not (isinstance(part.value, ast.Name)
+                            and all(isinstance(t, ast.Name) and numeric.get(t.id, part.lineno) < part.lineno
+                                    for t in part.targets)):
+                        return True
         return False
 
     def _local_use(self, function, name, parents, kind, threaded, visiting):

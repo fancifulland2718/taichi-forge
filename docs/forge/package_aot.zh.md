@@ -33,6 +33,10 @@ Python/资源返回、静态重绑定及其他未能证明返回类型的函数�
 选项和模型尺寸准备代码，完成链接、常量传播和内联；普通数值参数仍可变化。
 原 Host/JIT 声明保持不变，消费端不读取这些数值定义的 AST。类型、布局、并行结构
 和无法证明安全的用途继续保留必要静态变体，不保证消除全部静态组合。
+向已建立的数值局部变量执行 `result = point` 是值复制，并非 Python 别名绑定。
+分类器识别此前直接初始化的标量字面量，以及固定 dtype/形状的 `Vector.zero` /
+`Matrix.zero`，且要求没有静态重绑定。相应数值分支可以共用一份实现，原 DSL
+仍检查赋值类型与形状；资源/类型别名和未能证明的初始化继续使用保守规则。
 共享单元在入口封口时提取并复用；需要最终资源编号的单元仍在归档重映射后提取。
 Host 数组仍按调用传输数据，不能因复用特化代码而缓存数组内容。
 
@@ -71,7 +75,9 @@ CUDA prepare 可在生成设备代码前删除由已固定参数证明为空、�
 
 ## 生产与消费
 
-可先调用 `ti.aot.check_package(module, arch="cuda", source_root="path/to/src")`。
+开发时可选调用 `ti.aot.check_package(module, arch="cuda", source_root="path/to/src")`。
+正常导出和消费不会自动调用它。导出本身仍需解析编译所需声明；每次导出前另外
+调用该检查会重复这部分工作，因此它不是必需的前置步骤。
 它复用正式导出的声明预检，解析全部选定模块、owner/继承、准备闭包和类型化输入，
 不构造应用模型、不编译数值 Kernel、不写输出文件；正常 import/init 仍会发生。
 返回可 JSON 序列化的来源 hash、装饰器定义与类型清单、模板/owner 要求、目标分支、
@@ -124,7 +130,8 @@ import solver_api
 import renderer_api
 
 roots = (solver_api, renderer_api)
-report = ti.aot.check_package(roots, arch="cuda", source_root="path/to/src")
+# 可选的开发期检查，不是导出前置步骤：
+# report = ti.aot.check_package(roots, arch="cuda", source_root="path/to/src")
 ti.aot.export_package(roots, "dist/engine_cuda", arch="cuda", source_root="path/to/src")
 ```
 
