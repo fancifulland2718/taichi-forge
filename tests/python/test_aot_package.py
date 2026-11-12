@@ -19,6 +19,65 @@ from taichi_forge_runtime.aot import Runtime, load_package
 
 
 @test_utils.test(arch=ti.cuda, offline_cache=False)
+def test_package_library_keeps_caller_array_templates_inline(tmp_path, monkeypatch):
+    from taichi_forge.lang._function_library import FunctionLibrary
+    from taichi_forge.lang.any_array import AnyArray
+
+    # A captured Field becomes a caller-owned array descriptor. Passing that
+    # descriptor as a template must not embed its argument index in a callee
+    # whose RuntimeContext has a different parameter layout.
+    source = '''import taichi_forge as ti
+@ti.func
+def accumulate(field: ti.template(), index: ti.i32, amount: ti.i32):
+    field[index] += amount
+@ti.data_oriented
+class Model:
+    def __init__(self, n: int):
+        self.n = n
+        s = ti.experimental.ResourceScope(self)
+        s.first = s.field(ti.i32, shape=s.dim('n'), initialization='zero')
+        s.second = s.field(ti.i32, shape=s.dim('n'), initialization='zero')
+    @ti.func
+    def update(self, i: ti.i32, amount: ti.i32):
+        accumulate(self.first, i, amount)
+        accumulate(self.second, i, amount + 1)
+        accumulate(self.first, i, 2)
+    @ti.kernel
+    def step(self, amount: ti.i32):
+        for i in range(self.n):
+            self.update(i, amount + i)
+'''
+    seen = []
+    original = FunctionLibrary.library_function
+
+    def observe(library, function, args, **kwargs):
+        promoted = original(library, function, args, **kwargs)
+        if function.func.__name__ == 'accumulate' and isinstance(args[0], AnyArray):
+            seen.append(True)
+            assert promoted is None, 'Caller-owned template array escaped its function ABI'
+        return promoted
+
+    monkeypatch.setattr(FunctionLibrary, 'library_function', observe)
+    package = _source_package(tmp_path, monkeypatch, source)
+    output = tmp_path / 'sdk'
+    manifest = ti.aot.export_package(package, output, artifact_format='bc-library')
+    assert seen
+    with Runtime(manifest['target']) as runtime, load_package(runtime, output) as code:
+        owners = []
+        for n in (3, 7):
+            jit, aot = package.model.Model(n), code.host.Model(n)
+            owners.append((jit, aot))
+            for amount in (4, 9):
+                jit.step(amount)
+                aot.step(amount)
+                for name in ('first', 'second'):
+                    np.testing.assert_array_equal(getattr(aot, name).to_numpy(), getattr(jit, name).to_numpy())
+        for jit, aot in owners:
+            for name in ('first', 'second'):
+                np.testing.assert_array_equal(getattr(aot, name).to_numpy(), getattr(jit, name).to_numpy())
+
+
+@test_utils.test(arch=ti.cuda, offline_cache=False)
 @pytest.mark.parametrize("helper", ["func", "real_func"])
 def test_package_library_reuses_llvm_functions_before_emission(tmp_path, monkeypatch, helper):
     from taichi_forge.aot._package_compilation import PackageCompilation

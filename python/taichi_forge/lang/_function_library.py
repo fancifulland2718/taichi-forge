@@ -85,15 +85,23 @@ class FunctionLibrary:
             return None
 
         from taichi_forge.lang._local_tensor import is_model_value
+        from taichi_forge.lang.any_array import AnyArray
         from taichi_forge.lang.expr import Expr
         from taichi_forge.lang.kernel_impl import Func, TaichiCallableTemplateMapper
         from taichi_forge.lang.kernel_arguments import KernelArgument
         from taichi_forge.lang.matrix import MatrixType, VectorType
         from taichi_forge.types import primitive_types
+        from taichi_forge.types.annotations import template
 
         arguments = list(source.arguments)
         signature = []
         for index, (argument, value) in enumerate(zip(arguments, args)):
+            if isinstance(argument.annotation, template) and isinstance(value, AnyArray):
+                # A template has no callee ABI slot. This descriptor contains
+                # the caller's external-array argument index, unlike resources
+                # accessed through an owner and recaptured in the callee.
+                # Keep ordinary inline lowering until it can be rebound.
+                return None
             if argument.annotation is not inspect.Parameter.empty:
                 continue
             # Model extents carry provenance used by type/resource construction;
@@ -129,7 +137,6 @@ class FunctionLibrary:
         if self.allow_spirv:
             from taichi_forge.lang import impl
             from taichi_forge._lib import core
-            from taichi_forge.types.annotations import template
 
             if impl.default_cfg().arch == core.Arch.vulkan:
                 # Pointer/ndarray/ref ABIs retain ordinary inline lowering.
