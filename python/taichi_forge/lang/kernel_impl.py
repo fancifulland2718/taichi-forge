@@ -302,14 +302,13 @@ class Func:
             self._real_function_cache_variants[variant] = variant_id
         return variant_id
 
-    def _can_auto_promote(self, arguments=None):
+    def _can_auto_promote(self, arguments=None, *, allow_spirv=False):
         """P9.A-2 (F2) — structural eligibility for auto-promotion.
 
         Conditions (all must hold):
         - Not already real_function and not pyfunc (pyfunc has dual-scope
           semantics; do not change its IR shape).
-        - Active backend is LLVM-based (LLVM is the only codegen with a
-          FuncCallStmt visitor).
+        - LLVM backend, or the explicitly admitted SPIR-V value-function ABI.
         - Caller kernel is not in autodiff (real_function has separate
           autodiff handling that we do not auto-engage).
         - All non-template parameters carry an explicit type annotation
@@ -324,7 +323,8 @@ class Func:
             return False
         if runtime.current_kernel.autodiff_mode != AutodiffMode.NONE:
             return False
-        if not _ti_core.arch_uses_llvm(impl.default_cfg().arch):
+        if not (_ti_core.arch_uses_llvm(impl.default_cfg().arch)
+                or (allow_spirv and impl.default_cfg().arch == _ti_core.Arch.vulkan)):
             return False
         for kernel_arg in self.arguments if arguments is None else arguments:
             anno = kernel_arg.annotation
@@ -657,7 +657,7 @@ class Func:
         )
         fn = impl.get_runtime().prog.create_function(key)
         if getattr(self, '_jit_inline_function', False):
-            fn._set_llvm_inline(True)
+            fn._set_backend_inline(True)
 
         def func_body():
             old_callable = impl.get_runtime().compiling_callable
@@ -1820,7 +1820,7 @@ class Kernel:
             self._jit_function_library = None
             if (deployment is None and self.runtime.jit_function_library
                     and self.autodiff_mode == AutodiffMode.NONE
-                    and impl.default_cfg().arch in (_ti_core.Arch.x64, _ti_core.Arch.cuda)):
+                    and impl.default_cfg().arch in (_ti_core.Arch.x64, _ti_core.Arch.cuda, _ti_core.Arch.vulkan)):
                 from taichi_forge.lang._jit_function_library import JitFunctionLibrary
                 self._jit_function_library = JitFunctionLibrary()
             try:

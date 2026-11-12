@@ -19,6 +19,8 @@
 #include "taichi/analysis/range_dispatch.h"
 #include "taichi/program/program.h"
 #include "taichi/program/kernel.h"
+#include "taichi/program/function.h"
+#include "taichi/system/profiler.h"
 #include "taichi/program/extension.h"
 #include "taichi/ir/statements.h"
 #include "taichi/ir/ir.h"
@@ -451,6 +453,7 @@ class TaskCodegen : public IRVisitor {
 
   Result run() {
     ir_->init_header();
+    emit_function_units(task_ir_);
     kernel_function_ = ir_->new_function();  // void main();
     ir_->debug_name(spv::OpName, kernel_function_, "main");
     task_attribs_.requested_grid_dim = task_ir_->grid_dim;
@@ -3418,6 +3421,14 @@ class TaskCodegen : public IRVisitor {
   }
 
   void visit(GlobalLoadStmt *stmt) override {
+    auto source_value = ir_->query_value(stmt->src->raw_name());
+    if (source_value.stype.flag == TypeKind::kPtr &&
+        source_value.stype.storage_class == spv::StorageClassFunction) {
+      auto value =
+          ir_->load_variable(source_value, ir_->value_type(stmt->ret_type));
+      ir_->register_value(stmt->raw_name(), value);
+      return;
+    }
     // G9.2 (2026-04-30): bit-pointer read path for quant_array.
     // Mirrors codegen_llvm.cpp:1609-1648 (`is_bit_pointer()` branch in
     // GlobalLoadStmt) -- load physical word, shift / mask / sign-extend,
@@ -3436,6 +3447,18 @@ class TaskCodegen : public IRVisitor {
   }
 
   void visit(ArgLoadStmt *stmt) override {
+    if (current_function_) {
+      auto value = function_arguments_.at(stmt->arg_id[0]);
+      if (stmt->arg_id.size() > 1) {
+        std::vector<int> indices(stmt->arg_id.begin() + 1, stmt->arg_id.end());
+        auto type =
+            current_function_->args_type->get_element_type(stmt->arg_id);
+        value = ir_->make_value(spv::OpCompositeExtract, ir_->value_type(type),
+                                value, indices);
+      }
+      ir_->register_value(stmt->raw_name(), value);
+      return;
+    }
     const auto arg_id = stmt->arg_id;
     const std::vector<int> indices_l(stmt->arg_id.begin(),
                                      stmt->arg_id.begin() + stmt->arg_depth);
@@ -3498,9 +3521,27 @@ class TaskCodegen : public IRVisitor {
     spirv::Value val = ir_->query_value(stmt->src->raw_name());
     if (val.stype.flag == TypeKind::kStruct) {
       const auto element_type =
-          ir_->from_taichi_type(stmt->element_type(), false);
+          val.stype.dt->is<lang::StructType>() || val.stype.dt->is<TensorType>()
+              ? ir_->value_type(stmt->ret_type.ptr_removed())
+              : ir_->from_taichi_type(stmt->element_type(), false);
       val = ir_->make_value(spv::OpCompositeExtract, element_type, val,
                             stmt->index);
+      if (stmt->ret_type->is<PointerType>()) {
+        auto pointer = ir_->alloca_variable(element_type);
+        ir_->store_variable(pointer, val);
+        val = pointer;
+      }
+      ir_->register_value(stmt->raw_name(), val);
+      return;
+    }
+    if (val.stype.flag == TypeKind::kPtr &&
+        val.stype.storage_class == spv::StorageClassFunction) {
+      auto type = ir_->value_type(stmt->ret_type.ptr_removed());
+      val = ir_->make_access_chain(
+          ir_->get_pointer_type(type, spv::StorageClassFunction), val,
+          stmt->index);
+      if (!stmt->ret_type->is<PointerType>())
+        val = ir_->load_variable(val, type);
       ir_->register_value(stmt->raw_name(), val);
       return;
     }
@@ -3577,6 +3618,18 @@ class TaskCodegen : public IRVisitor {
   }
 
   void visit(ReturnStmt *stmt) override {
+    if (current_function_) {
+      std::vector<Value> values;
+      for (auto *value : stmt->values)
+        values.push_back(ir_->query_value(value->raw_name()));
+      size_t index = 0;
+      auto result =
+          compose_function_value(current_function_->ret_type, values, index);
+      TI_ASSERT(index == values.size());
+      ir_->make_inst(spv::OpReturnValue, result);
+      gen_label_ = true;
+      return;
+    }
     TI_ASSERT(ctx_attribs_->has_rets());
     // The `PrimitiveType::i32` in this function call is a placeholder.
     mark_buffer_access(BufferType::Rets, BufferBind::kAccessWrite);
@@ -5365,7 +5418,90 @@ class TaskCodegen : public IRVisitor {
     gen_label_ = true;
   }
 
+  void visit(FuncCallStmt *stmt) override {
+    std::vector<Value> arguments;
+    for (auto *argument : stmt->args)
+      arguments.push_back(ir_->query_value(argument->raw_name()));
+    auto value = ir_->make_value(spv::OpFunctionCall,
+                                 ir_->value_type(stmt->func->ret_type),
+                                 function_units_.at(stmt->func), arguments);
+    ir_->register_value(stmt->raw_name(), value);
+  }
+
  private:
+  // The callable ABI flattens matrices/structs into scalar parameters, just
+  // like the frontend FuncCallStmt. Rebuild value aggregates inside the helper
+  // so ArgLoad/GetElement retain their existing typed semantics.
+  void flatten_function_types(DataType type, std::vector<SType> &types) {
+    if (auto structure = type->cast<lang::StructType>()) {
+      for (const auto &element : structure->elements())
+        flatten_function_types(element.type, types);
+    } else if (auto tensor = type->cast<TensorType>()) {
+      for (int i = 0; i < tensor->get_num_elements(); ++i)
+        flatten_function_types(tensor->get_element_type(), types);
+    } else {
+      TI_ASSERT(type->is<PrimitiveType>());
+      types.push_back(ir_->value_type(type));
+    }
+  }
+
+  Value compose_function_value(DataType type,
+                               const std::vector<Value> &values,
+                               size_t &index) {
+    std::vector<Value> members;
+    if (auto structure = type->cast<lang::StructType>()) {
+      for (const auto &element : structure->elements())
+        members.push_back(compose_function_value(element.type, values, index));
+    } else if (auto tensor = type->cast<TensorType>()) {
+      for (int i = 0; i < tensor->get_num_elements(); ++i)
+        members.push_back(
+            compose_function_value(tensor->get_element_type(), values, index));
+    } else {
+      return values.at(index++);
+    }
+    return ir_->make_value(spv::OpCompositeConstruct, ir_->value_type(type),
+                           members);
+  }
+
+  void emit_function_units(IRNode *root) {
+    auto calls = irpass::analysis::gather_statements(
+        root, [](Stmt *stmt) { return stmt->is<FuncCallStmt>(); });
+    for (auto *call : calls) {
+      auto *function = call->as<FuncCallStmt>()->func;
+      if (function_units_.count(function))
+        continue;
+      TI_ASSERT_INFO(
+          function->backend_inline(),
+          "SPIR-V function units require a proven thread-local value ABI");
+      TI_ASSERT_INFO(active_functions_.insert(function).second,
+                     "Recursive SPIR-V function units are not supported");
+      emit_function_units(function->ir.get());
+      active_functions_.erase(function);
+      TI_COMPILE_PROFILER("cpp.compile.spirv.function_body_emit");
+      std::vector<SType> parameters;
+      flatten_function_types(function->args_type, parameters);
+      auto result = ir_->value_type(function->ret_type);
+      auto symbol = ir_->new_function(result, parameters);
+      function_units_[function] = symbol;
+      auto arguments = ir_->start_function(symbol, result, parameters, true);
+      current_function_ = function;
+      size_t index = 0;
+      for (const auto &element : function->args_type->elements())
+        function_arguments_.push_back(
+            compose_function_value(element.type, arguments, index));
+      TI_ASSERT(index == arguments.size());
+      function->ir->accept(this);
+      TI_ASSERT_INFO(gen_label_, "SPIR-V value helper must end with a return");
+      ir_->make_inst(spv::OpFunctionEnd);
+      current_function_ = nullptr;
+      function_arguments_.clear();
+      gen_label_ = false;
+      root_stmts_.clear();
+      ptr_to_buffers_.clear();
+      ptr_to_chunk_idx_.clear();
+      bit_ptr_bit_offsets_.clear();
+    }
+  }
   void finish_block(spirv::Label target) {
     // A continue may terminate an if arm or an entire loop body. Emit the
     // fallthrough edge only when the body did not already emit its own edge.
@@ -7628,6 +7764,10 @@ class TaskCodegen : public IRVisitor {
   std::unordered_map<Stmt *, std::uint32_t> ray_query_result_masks_;
   std::vector<spirv::Value> shared_array_binds_;
   spirv::Value kernel_function_;
+  Function *current_function_{nullptr};
+  std::unordered_map<Function *, Value> function_units_;
+  std::unordered_set<Function *> active_functions_;
+  std::vector<Value> function_arguments_;
   spirv::Label kernel_return_label_;
   bool gen_label_{false};
 

@@ -12,6 +12,7 @@ class FunctionLibrary:
         self._function_templates = {}
         self.function_library = False
         self.thread_local_call = False
+        self.allow_spirv = False
 
     def library_function(self, source, args, *, dependencies=None):
         """Retain typed device boundaries without mutating JIT definitions.
@@ -116,7 +117,7 @@ class FunctionLibrary:
             )
             arguments[index] = KernelArgument(annotation, argument.name, argument.default)
             signature.append((index, str(dtype), shape))
-        if not source._can_auto_promote(arguments):
+        if not source._can_auto_promote(arguments, allow_spirv=self.allow_spirv):
             return None
         returns = source.return_type
         if projection:
@@ -125,6 +126,28 @@ class FunctionLibrary:
                 id(dtype) not in primitive_types.type_ids and not isinstance(dtype, MatrixType) for dtype in returns
             ):
                 return None
+        if self.allow_spirv:
+            from taichi_forge.lang import impl
+            from taichi_forge._lib import core
+            from taichi_forge.types.annotations import template
+
+            if impl.default_cfg().arch == core.Arch.vulkan:
+                # Pointer/ndarray/ref ABIs retain ordinary inline lowering.
+                # The shared SPIR-V ABI currently admits scalar/tensor values
+                # and compile-time template bindings only.
+                if (
+                    not returns
+                    or any(
+                        id(dtype) not in primitive_types.type_ids and not isinstance(dtype, MatrixType)
+                        for dtype in returns
+                    )
+                    or any(
+                        id(arg.annotation) not in primitive_types.type_ids
+                        and not isinstance(arg.annotation, (MatrixType, template))
+                        for arg in arguments
+                    )
+                ):
+                    return None
         identity = (source, tuple(signature)) if signature or projection else source
         if dependencies is not None:
             identity = (identity, dependencies)

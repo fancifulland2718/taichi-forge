@@ -3610,7 +3610,7 @@ void TaskCodeGenLLVM::visit(FuncCallStmt *stmt) {
         auto guard =
             get_function_creation_guard(argument_types, stmt->func->get_name());
         guard.body->addFnAttr("taichi.aot.real_function");
-        if (stmt->func->llvm_inline())
+        if (stmt->func->backend_inline())
           guard.body->addFnAttr(llvm::Attribute::AlwaysInline);
         const Callable *old_callable = current_callable;
         current_callable = stmt->func;

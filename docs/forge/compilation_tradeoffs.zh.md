@@ -174,18 +174,22 @@ task 局部依赖仍按原路径生成。最终 kernel 保持自包含，后端�
 ### 实验性 JIT 函数单元与后期内联
 
 `ti.init(jit_function_library=True)`（或 `TI_JIT_FUNCTION_LIBRARY=1`）让普通
-`@ti.func` 使用包构建器已有的类型化函数边界，默认 `False`。CPU/CUDA 非 AD 编译中，
-合格函数体在每个 kernel 特化内降级一次，再将 LLVM 函数与调用方组合，最后由 LLVM
-内联。原装饰器不变，也不启用单向提升的 `auto_real_function` 策略。
+`@ti.func` 使用包构建器已有的类型化函数边界，默认 `False`。CPU/CUDA/Vulkan 非 AD 编译中，
+合格函数体在每个 kernel 特化内降级一次，再与调用方组合。CPU/CUDA 在 LLVM 中后期
+内联；Vulkan 每个任务模块生成一份类型化 SPIR-V 函数体，以 `OpFunctionCall` 引用，
+带内联提示交给 SPIR-V 优化器或驱动。原装饰器不变，也不启用单向提升的 `auto_real_function` 策略。
 
 首批覆盖有返回类型标注，以及末尾返回标量/向量/矩阵数值参数的未标注函数；数值参数
 仍具有局部副本语义。提取要求调用位于单线程工作上下文，并能确定数值依赖；未知
 Python 回调、属性读取副作用、未支持的返回类型推断和 kernel 根部并行 helper 仍按原方式
-展开。AD 和非 LLVM 后端也保留原路径。准入仅在编译时判断，不增加暖态调用检查或调度。
+展开。AD 和其他后端也保留原路径。Vulkan 的共享边界支持标量、固定向量/矩阵值、
+元组返回及模板绑定的字段/owner；数组/引用参数仍内联，不据此扩展显式 `real_func` 的
+Vulkan 支持范围。准入仅在编译时判断，不增加暖态调用检查或调度。
 编译剖析按需开启，`function_body_emit` 与 `function_unit_reuse` 区分 LLVM 函数体生成
-和代码单元导入。
+和代码单元导入；`cpp.compile.spirv.function_body_emit` 记录 Vulkan 函数体生成。
 
-这些是 Program 持有的内存单元，不新建磁盘缓存或 JIT TCM 包。目前不提供跨 kernel 的
+CPU/CUDA 的可复用 LLVM 单元由 Program 持有；Vulkan 当前共享范围是单个任务模块，
+不提供跨模块 SPIR-V 代码缓存。两者均不新建磁盘缓存或 JIT TCM 包。目前不提供跨 kernel 的
 前端共享或通用 SNode 重定位。后期内联仍可能增大最终代码，不同真实静态参数和类型仍需
 特化；扩大使用前须在真实负载上对照冷编译加首次完成调用、暖态完成耗时及内存。
 

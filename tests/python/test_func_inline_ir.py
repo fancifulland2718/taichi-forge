@@ -17,7 +17,128 @@ def library_builds(profile, name):
     )
 
 
-@test_utils.test(arch=[ti.cpu, ti.cuda], offline_cache=False, jit_function_library=True)
+@pytest.mark.parametrize("tier", ["fast", "full"])
+@test_utils.test(arch=[ti.cpu, ti.cuda, ti.vulkan], offline_cache=False, jit_function_library=True)
+def test_jit_function_library_nested_control_flow_and_tuple(tier):
+    output = ti.Vector.field(2, ti.i32, shape=8)
+
+    @ti.func
+    def leaf(value: ti.i32) -> ti.i32:
+        result = 0
+        j = 0
+        while j < value:
+            j += 1
+            if j == 3:
+                continue
+            if j > 5:
+                break
+            result += j
+        return result
+
+    @ti.func
+    def shared(value: ti.i32) -> (ti.i32, ti.i32):
+        a = leaf(value)
+        b = leaf(value + 1)
+        return a, b
+
+    @ti.kernel(opt_level=tier)
+    def run():
+        for i in output:
+            a, b = shared(i)
+            output[i] = ti.Vector([a, b])
+
+    with ti.compile_profile() as profile:
+        run()
+    assert library_builds(profile, "shared") == 1
+    assert library_builds(profile, "leaf") == 1
+    sums = [sum(j for j in range(1, min(i, 5) + 1) if j != 3) for i in range(9)]
+    np.testing.assert_array_equal(output.to_numpy(), list(zip(sums[:-1], sums[1:])))
+
+
+@test_utils.test(arch=ti.vulkan, offline_cache=False, jit_function_library=True, compile_tier="fast")
+def test_jit_function_library_spirv_retains_one_typed_body(tmp_path):
+    output = ti.field(ti.i32, shape=8)
+
+    @ti.func
+    def shared(value: ti.i32) -> ti.i32:
+        return value * value + 1
+
+    @ti.kernel
+    def run():
+        for i in output:
+            value = i
+            for j in ti.static(range(8)):
+                value = shared(value) % 97
+            output[i] = value
+
+    run()
+    module = ti.aot.Module(ti.vulkan)
+    module.add_kernel(run)
+    module.save(str(tmp_path))
+    modules = list(tmp_path.glob("*.spv"))
+    assert len(modules) == 1
+    words = np.frombuffer(modules[0].read_bytes(), dtype="<u4")
+    opcodes = []
+    offset = 5
+    while offset < len(words):
+        word = int(words[offset])
+        opcodes.append(word & 0xFFFF)
+        offset += word >> 16
+    assert offset == len(words)
+    assert opcodes.count(54) == 2  # OpFunction: main plus one helper
+    assert opcodes.count(57) == 8  # OpFunctionCall: eight references
+
+
+@test_utils.test(arch=ti.vulkan, offline_cache=False, jit_function_library=True)
+def test_jit_function_library_spirv_keeps_array_abi_inline():
+    output = ti.ndarray(ti.i32, shape=8)
+
+    @ti.func
+    def shared(data: ti.types.ndarray(), i: ti.i32) -> ti.i32:
+        data[i] = i + 1
+        return data[i]
+
+    @ti.kernel
+    def run(data: ti.types.ndarray()):
+        for i in range(8):
+            data[i] = shared(data, i) + 1
+
+    with ti.compile_profile() as profile:
+        run(output)
+    assert library_builds(profile, "shared") == 0
+    np.testing.assert_array_equal(output.to_numpy(), np.arange(8) + 2)
+
+
+@test_utils.test(arch=[ti.cpu, ti.cuda, ti.vulkan], offline_cache=False, jit_function_library=True)
+def test_jit_function_library_keeps_field_state_and_bindings():
+    left = ti.field(ti.i32, shape=8)
+    right = ti.field(ti.i32, shape=8)
+    output = ti.field(ti.i32, shape=8)
+    left.fill(1)
+    right.fill(10)
+
+    @ti.func
+    def advance(data: ti.template(), i: ti.i32) -> ti.i32:
+        data[i] += 1
+        return data[i]
+
+    @ti.kernel
+    def run():
+        for i in output:
+            a = advance(left, i)
+            b = advance(right, i)
+            c = advance(left, i)
+            output[i] = a * 100 + b * 10 + c
+
+    with ti.compile_profile() as profile:
+        run()
+    assert library_builds(profile, "advance") == 2
+    np.testing.assert_array_equal(output.to_numpy(), [313] * 8)
+    np.testing.assert_array_equal(left.to_numpy(), [3] * 8)
+    np.testing.assert_array_equal(right.to_numpy(), [11] * 8)
+
+
+@test_utils.test(arch=[ti.cpu, ti.cuda, ti.vulkan], offline_cache=False, jit_function_library=True)
 def test_jit_function_library_reuses_value_body_across_calls():
     output = ti.field(ti.i32, shape=8)
 
@@ -45,18 +166,27 @@ def test_jit_function_library_reuses_value_body_across_calls():
         second()
     assert library_builds(profile, "shared") == 2  # once per kernel, not per call
     native = profile.records(include_python=False)
-    assert (
-        sum(int(row["calls"]) for row in native if row["path"].endswith("/cpp.compile.llvm.function_body_emit")) == 1
-    ), native
-    assert (
-        sum(int(row["calls"]) for row in native if row["path"].endswith("/cpp.compile.llvm.function_unit_reuse")) == 1
-    ), native
+    if ti.lang.impl.current_cfg().arch == ti.vulkan:
+        # One SPIR-V body per module, despite eight calls in the first kernel.
+        assert (
+            sum(int(row["calls"]) for row in native if row["path"].endswith("/cpp.compile.spirv.function_body_emit"))
+            == 2
+        ), native
+    else:
+        assert (
+            sum(int(row["calls"]) for row in native if row["path"].endswith("/cpp.compile.llvm.function_body_emit"))
+            == 1
+        ), native
+        assert (
+            sum(int(row["calls"]) for row in native if row["path"].endswith("/cpp.compile.llvm.function_unit_reuse"))
+            == 1
+        ), native
     np.testing.assert_array_equal(output.to_numpy(), (np.arange(8) + 6) * 2)
     first()
     np.testing.assert_array_equal(output.to_numpy(), np.arange(8) + 48)
 
 
-@test_utils.test(arch=[ti.cpu, ti.cuda], offline_cache=False, jit_function_library=True)
+@test_utils.test(arch=[ti.cpu, ti.cuda, ti.vulkan], offline_cache=False, jit_function_library=True)
 def test_jit_function_library_tracks_closure_and_keeps_callbacks():
     output = ti.field(ti.i32, shape=4)
     gain = 2
@@ -97,8 +227,9 @@ def test_jit_function_library_tracks_closure_and_keeps_callbacks():
     assert seen == [1, 1]
 
 
-@test_utils.test(arch=[ti.cpu, ti.cuda], offline_cache=False, jit_function_library=True)
-def test_jit_function_library_preserves_tensor_copies():
+@pytest.mark.parametrize("tier", ["fast", "full"])
+@test_utils.test(arch=[ti.cpu, ti.cuda, ti.vulkan], offline_cache=False, jit_function_library=True)
+def test_jit_function_library_preserves_tensor_copies(tier):
     vec = ti.types.vector(3, ti.f32)
     mat = ti.types.matrix(3, 3, ti.f32)
     output = vec.field(shape=4)
@@ -109,7 +240,7 @@ def test_jit_function_library_preserves_tensor_copies():
         a[1, 1] += 3
         return a @ v
 
-    @ti.kernel
+    @ti.kernel(opt_level=tier)
     def run():
         for i in output:
             a = ti.Matrix.identity(ti.f32, 3)
@@ -122,7 +253,7 @@ def test_jit_function_library_preserves_tensor_copies():
     np.testing.assert_array_equal(output.to_numpy(), [[3 * i + 4, 9 * (i + 1), 3 * (i + 2)] for i in range(4)])
 
 
-@test_utils.test(arch=[ti.cpu, ti.cuda], offline_cache=False, jit_function_library=True)
+@test_utils.test(arch=[ti.cpu, ti.cuda, ti.vulkan], offline_cache=False, jit_function_library=True)
 def test_jit_function_library_tracks_nested_owner_and_static_dependencies():
     @ti.data_oriented
     class Owner:
@@ -165,7 +296,7 @@ def test_jit_function_library_tracks_nested_owner_and_static_dependencies():
     np.testing.assert_array_equal(output.to_numpy(), [32.0] * 4)
 
 
-@test_utils.test(arch=[ti.cpu, ti.cuda], offline_cache=False, jit_function_library=True)
+@test_utils.test(arch=[ti.cpu, ti.cuda, ti.vulkan], offline_cache=False, jit_function_library=True)
 def test_jit_function_library_retains_kernel_root_parallel_loops():
     output = ti.field(ti.i32, shape=8)
 
@@ -185,7 +316,7 @@ def test_jit_function_library_retains_kernel_root_parallel_loops():
     np.testing.assert_array_equal(output.to_numpy(), np.arange(8) + 3)
 
 
-@test_utils.test(arch=[ti.cpu, ti.cuda], offline_cache=False, jit_function_library=True)
+@test_utils.test(arch=[ti.cpu, ti.cuda, ti.vulkan], offline_cache=False, jit_function_library=True)
 def test_jit_function_library_does_not_skip_python_attribute_effects():
     seen = []
 
@@ -218,7 +349,7 @@ def test_jit_function_library_does_not_skip_python_attribute_effects():
 
 
 @pytest.mark.parametrize("mode", ["forward", "reverse"])
-@test_utils.test(arch=[ti.cpu, ti.cuda], offline_cache=False, jit_function_library=True)
+@test_utils.test(arch=[ti.cpu, ti.cuda, ti.vulkan], offline_cache=False, jit_function_library=True)
 def test_jit_function_library_retains_autodiff_expansion(mode):
     x = ti.field(ti.f32, shape=4, needs_grad=True, needs_dual=True)
     y = ti.field(ti.f32, shape=4, needs_grad=True, needs_dual=True)

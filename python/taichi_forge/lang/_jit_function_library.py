@@ -172,6 +172,7 @@ class JitFunctionLibrary(FunctionLibrary):
     def __init__(self):
         super().__init__()
         self.function_library = True
+        self.allow_spirv = True
         self._syntax = {}
 
     def _dependencies(self, source, bindings, active):

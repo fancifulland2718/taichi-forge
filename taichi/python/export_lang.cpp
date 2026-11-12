@@ -7931,7 +7931,7 @@ void export_lang(py::module &m) {
            &Function::insert_acceleration_structure_param)
       .def("insert_ret", &Function::insert_ret)
       .def("set_inline_body", &Function::set_inline_body)
-      .def("_set_llvm_inline", &Function::set_llvm_inline)
+      .def("_set_backend_inline", &Function::set_backend_inline)
       .def("set_function_body",
            py::overload_cast<const std::function<void()> &>(
                &Function::set_function_body))

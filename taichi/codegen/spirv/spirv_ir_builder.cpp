@@ -296,9 +296,84 @@ std::vector<uint32_t> IRBuilder::finalize() {
   data.insert(data.end(), names_.begin(), names_.end());
   data.insert(data.end(), decorate_.begin(), decorate_.end());
   data.insert(data.end(), global_.begin(), global_.end());
+  data.insert(data.end(), completed_functions_.begin(),
+              completed_functions_.end());
   data.insert(data.end(), func_header_.begin(), func_header_.end());
   data.insert(data.end(), function_.begin(), function_.end());
   return data;
+}
+
+Value IRBuilder::new_function(const SType &result,
+                              const std::vector<SType> &parameters) {
+  std::vector<uint32_t> key{result.id};
+  for (const auto &parameter : parameters)
+    key.push_back(parameter.id);
+  auto found = function_type_tbl_.find(key);
+  if (found == function_type_tbl_.end()) {
+    SType type;
+    type.id = id_counter_++;
+    type.flag = TypeKind::kFunc;
+    declare_global(spv::OpTypeFunction, type, key);
+    found = function_type_tbl_.emplace(key, type).first;
+  }
+  return new_value(found->second, ValueKind::kFunction);
+}
+
+std::vector<Value> IRBuilder::start_function(
+    const Value &func,
+    const SType &result,
+    const std::vector<SType> &parameters,
+    bool inline_hint) {
+  completed_functions_.insert(completed_functions_.end(), func_header_.begin(),
+                              func_header_.end());
+  completed_functions_.insert(completed_functions_.end(), function_.begin(),
+                              function_.end());
+  func_header_.clear();
+  function_.clear();
+  value_name_tbl_.clear();
+  ib_.begin(spv::OpFunction)
+      .add_seq(result, func,
+               inline_hint ? spv::FunctionControlInlineMask
+                           : spv::FunctionControlMaskNone,
+               func.stype)
+      .commit(&func_header_);
+  std::vector<Value> values;
+  for (const auto &type : parameters) {
+    auto value = new_value(type, ValueKind::kNormal);
+    ib_.begin(spv::OpFunctionParameter)
+        .add_seq(type, value)
+        .commit(&func_header_);
+    values.push_back(value);
+  }
+  auto label = new_label();
+  ib_.begin(spv::OpLabel).add_seq(label).commit(&func_header_);
+  curr_label_ = label;
+  return values;
+}
+
+SType IRBuilder::value_type(const DataType &dt) {
+  if (dt->is<PrimitiveType>())
+    return get_primitive_type(dt);
+  const auto key = static_cast<const Type *>(dt);
+  if (auto found = value_type_tbl_.find(key); found != value_type_tbl_.end())
+    return found->second;
+  std::vector<SType> members;
+  if (auto type = dt->cast<lang::StructType>()) {
+    for (const auto &element : type->elements())
+      members.push_back(value_type(element.type));
+  } else if (auto type = dt->cast<TensorType>()) {
+    members.assign(type->get_num_elements(),
+                   value_type(type->get_element_type()));
+  } else {
+    TI_ERROR("Unsupported SPIR-V function value type: {}", dt->to_string());
+  }
+  SType type;
+  type.id = id_counter_++;
+  type.dt = dt;
+  type.flag = TypeKind::kStruct;
+  declare_global(spv::OpTypeStruct, type, members);
+  value_type_tbl_[key] = type;
+  return type;
 }
 
 void IRBuilder::init_pre_defs() {

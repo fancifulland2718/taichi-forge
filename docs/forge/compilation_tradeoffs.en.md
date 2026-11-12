@@ -232,9 +232,11 @@ work separately; use `@ti.func` for small helpers unless evidence favors a chang
 
 `ti.init(jit_function_library=True)` (or `TI_JIT_FUNCTION_LIBRARY=1`) opts into
 the package builder's existing typed function boundaries for ordinary `@ti.func`.
-The default is `False`. CPU/CUDA non-AD compilation can lower an eligible body
-once per kernel specialization, compose its LLVM function with callers, then
-inline it during LLVM optimization. It does not change the original decorator
+The default is `False`. CPU/CUDA/Vulkan non-AD compilation can lower an eligible
+body once per kernel specialization, then compose it with callers. CPU/CUDA
+inline during LLVM optimization. Vulkan emits one typed SPIR-V function body per
+task module, references it with `OpFunctionCall`, and supplies an inline hint to
+the SPIR-V optimizer or driver. It does not change the original decorator
 or enable the one-way `auto_real_function` policy.
 
 This first scope includes typed returns and unannotated terminal returns of
@@ -242,13 +244,18 @@ scalar/vector/matrix value parameters. Value arguments retain private-copy
 semantics. Extraction requires a per-thread call context and known numerical
 dependencies; unknown Python callbacks, attribute-read effects, unsupported
 return inference and kernel-root parallel helpers retain ordinary expansion.
-AD and non-LLVM backends also retain that path. Eligibility is evaluated during
+AD and other backends retain that path. Vulkan shared boundaries support scalar
+and fixed vector/matrix values, tuple returns and template-bound fields/owners.
+Array/reference parameters stay inline; this does not expand explicit
+`real_func` support on Vulkan. Eligibility is evaluated during
 compilation, with no new check or dispatch on warm calls. Compile profiling is
 optional; `function_body_emit` and `function_unit_reuse` distinguish LLVM body
-generation from imported units.
+generation from imported units; `cpp.compile.spirv.function_body_emit` records
+Vulkan function body emission.
 
-These are in-memory units owned by the Program, not a new disk cache or a JIT
-TCM package. Cross-kernel frontend sharing and general SNode relocation are not
+Reusable LLVM units are owned by the Program. Vulkan currently shares within
+one task module, without a cross-module SPIR-V code cache. Neither path creates
+a new disk cache or a JIT TCM package. Cross-kernel frontend sharing and general SNode relocation are not
 provided. Late inlining can still increase final code size, and truly different
 static arguments/types still specialize. Compare cold compilation plus first
 completed call, warm completed work and memory on the actual workload before

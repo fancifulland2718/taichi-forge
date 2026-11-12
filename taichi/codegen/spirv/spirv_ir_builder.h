@@ -1,6 +1,7 @@
 #pragma once
 
 #include <array>
+#include <map>
 #include <unordered_map>
 #include <unordered_set>
 
@@ -171,14 +172,8 @@ class InstrBuilder {
   ADD(uint32_t, v);
 #undef ADD
 
-  InstrBuilder &add(const std::vector<uint32_t> &v) {
-    for (const auto &v0 : v) {
-      add(v0);
-    }
-    return *this;
-  }
-
-  InstrBuilder &add(const std::vector<int> &v) {
+  template <typename T>
+  InstrBuilder &add(const std::vector<T> &v) {
     for (const auto &v0 : v) {
       add(v0);
     }
@@ -486,11 +481,12 @@ class IRBuilder {
                    const std::vector<Value> &args,
                    BufferFormat format);
 
-  // Declare a new function
-  // NOTE: only support void kernel function, i.e. main
+  // Declare a new function. Typed helpers share one body in the module;
+  // inlining is a backend decision after composition.
   Value new_function() {
     return new_value(t_void_func_, ValueKind::kFunction);
   }
+  Value new_function(const SType &result, const std::vector<SType> &parameters);
 
   std::vector<Value> global_values;
 
@@ -534,15 +530,15 @@ class IRBuilder {
 
   // Start function scope
   void start_function(const Value &func) {
-    // add function declaration to the header
-    ib_.begin(spv::OpFunction)
-        .add_seq(t_void_, func, 0, t_void_func_)
-        .commit(&func_header_);
-
-    spirv::Label start_label = this->new_label();
-    ib_.begin(spv::OpLabel).add_seq(start_label).commit(&func_header_);
-    curr_label_ = start_label;
+    start_function(func, t_void_, {}, false);
   }
+  std::vector<Value> start_function(const Value &func,
+                                    const SType &result,
+                                    const std::vector<SType> &parameters,
+                                    bool inline_hint);
+
+  // Value aggregates have no buffer layout decorations.
+  SType value_type(const DataType &dt);
 
   // Declare gl compute shader related methods
   void set_work_group_size(const std::array<int, 3> group_size);
@@ -797,6 +793,8 @@ class IRBuilder {
       const_tbl_;
   // map from raw_name(string) to Value
   std::unordered_map<std::string, Value> value_name_tbl_;
+  std::map<std::vector<uint32_t>, SType> function_type_tbl_;
+  std::unordered_map<const Type *, SType> value_type_tbl_;
 
   // Header segment, include import
   std::vector<uint32_t> header_;
@@ -820,6 +818,7 @@ class IRBuilder {
   std::vector<uint32_t> decorate_;
   // Global segment: types, variables, types
   std::vector<uint32_t> global_;
+  std::vector<uint32_t> completed_functions_;
   // Function header segment
   std::vector<uint32_t> func_header_;
   // Main Function segment
