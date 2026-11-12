@@ -126,7 +126,7 @@ def _candidates(sources, imported):
     return candidates
 
 
-def _guard_returns(body, module, fail):
+def _guard_returns(body, module, fail, *, validate=True):
     """Make fallthrough resource conditions explicit, preserving Host returns."""
     for index, statement in enumerate(body):
         if (
@@ -143,9 +143,9 @@ def _guard_returns(body, module, fail):
             # The original predicate and return still execute normally. Only
             # the lexical placement of the remaining statements changes, so
             # the existing resource parser validates their actual guard.
-            statement.orelse = _guard_returns(body[index + 1 :], module, fail)
+            statement.orelse = _guard_returns(body[index + 1 :], module, fail, validate=validate)
             return [*body[:index], statement]
-        if any(
+        if validate and any(
             isinstance(node, ast.Return) and not (node is statement and index == len(body) - 1)
             for node in ast.walk(statement)
         ):

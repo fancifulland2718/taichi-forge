@@ -266,7 +266,13 @@ def resolve_owners(sources, imported, owner_schema, fail):
                 methods, key=lambda item: (-cls.__mro__.index(item[0]), item[4].lineno)
             ):
                 schema = owner_schema(
-                    origin, base_node, base_kind, vars(imported[origin]), functions=[method], earlier=schema
+                    origin,
+                    base_node,
+                    base_kind,
+                    vars(imported[origin]),
+                    functions=[method],
+                    earlier=schema,
+                    owner_class=cls,
                 )
                 if base is not cls:
                     local = {

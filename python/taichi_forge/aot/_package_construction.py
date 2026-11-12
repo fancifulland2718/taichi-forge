@@ -365,6 +365,14 @@ def discover_construction_methods(tree, namespace, module, fail, kind):
                 for n in ast.walk(method)
             ):
                 fail(module, method, "Preparation resource allocations require explicit group contexts")
+            # Match free Host preparation: allocations after a bare return
+            # guard belong to its fallthrough branch, not an unconditional
+            # owner layout. Keep the same predicate and ordinary Host return.
+            from ._package_preparations import _guard_returns
+
+            # Existing owner methods also allow Host result returns and nested
+            # helpers. Do not impose free-preparation admission on those forms.
+            method.body = _guard_returns(method.body, module, fail, validate=False)
             method._package_preparation_method = True
             method._package_construction_order = len(selected) + method.lineno
             facts.append(

@@ -22226,7 +22226,7 @@ class Model:
         load_package(runtime, tmp_path / 'sdk')
 
 
-@pytest.mark.parametrize("mixed", [False, True, "conditional_extent"])
+@pytest.mark.parametrize("mixed", [False, True, "conditional_extent", "early_return", "early_return_free_domain"])
 @test_utils.test(arch=[ti.cpu, ti.cuda], offline_cache=False)
 def test_package_boolean_workspace_reuses_code_without_allocating_absent_groups(
     tmp_path, monkeypatch, mixed
@@ -22264,6 +22264,33 @@ class Model:
         b.dispatch(self.step)
         return b.compile()
 """
+    returns_early = mixed in ("early_return", "early_return_free_domain")
+    if returns_early:
+        source = source.replace(
+            "@ti.data_oriented\nclass Model:",
+            "class Prepared:\n"
+            "    def prepare(self, unused):\n"
+            "        def status():\n"
+            "            return 'prepared'\n"
+            "        if not self.enabled:\n"
+            "            return\n"
+            "        with resource_group(self, 'optional', initialization='zero') as fields:\n"
+            "            fields.workspace = fields.field(ti.i32, shape=fields.dim('n'))\n"
+            "        return status()\n"
+            "@ti.data_oriented\nclass Model(Prepared):",
+        )
+        source = source.replace(
+            "        if self.enabled:\n            with resource_group(self, 'optional', initialization='zero') as fields:\n                fields.workspace = fields.field(ti.i32, shape=fields.dim('n'))",
+            "        self.prepare_status = self.prepare(None)",
+        )
+        if mixed == "early_return_free_domain":
+            source = source.replace("        s.static('enabled', choices=(False, True))", "        configure(self)")
+            source += (
+                "\ndef configure(owner):\n"
+                "    scope = ti.experimental.ResourceScope(owner)\n"
+                "    scope.static('enabled', choices=(False, True))\n"
+            )
+        mixed = False
     if mixed is True:
         source = source.replace(
             "        if self.enabled:\n            with resource_group(self, 'optional', initialization='zero') as fields:\n",
@@ -22305,6 +22332,8 @@ class Model:
         load_package(runtime, tmp_path / "sdk") as code,
     ):
         a, b = code.host.model.Model(7, True), code.host.model.Model(19, False)
+        if returns_early:
+            assert a.prepare_status == 'prepared' and b.prepare_status is None
         assert not hasattr(b, "workspace")
         assert len(b._forge_package_field_groups) == (2 if mixed is True else 1)
         a.step()
