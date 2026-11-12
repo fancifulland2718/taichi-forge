@@ -1814,6 +1814,8 @@ def _export_package(package, output, *, arch, caps, source_root, compilation, ar
                 manifest["version"] = max(56, manifest["version"])
             if any(item.get("source_policy") for item in schema.values()):
                 manifest["version"] = max(73, manifest["version"])
+            if any(item.get("source_policy", {}).get("presence") for item in schema.values()):
+                manifest["version"] = max(82, manifest["version"])
             if any(item["kind"] == "ndarray" and item.get("dtype_policy") for item in schema.values()):
                 manifest["version"] = max(77, manifest["version"])
             if any(item.get("dynamic_storage_condition") for item in schema.values()):

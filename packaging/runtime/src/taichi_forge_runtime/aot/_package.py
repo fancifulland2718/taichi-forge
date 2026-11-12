@@ -659,6 +659,8 @@ class _ModuleBinding:
             if type(selected) is not bool:
                 raise ValueError("Borrow source selection requires a boolean configuration")
             contract = {**contract, "source_path": policy["if_true" if selected else "if_false"]}
+            if "presence" in policy:
+                contract["source_presence"] = policy["presence"]["if_true" if selected else "if_false"]
         if (
             not (construction is not None and construction[0] is self.package and construction[2] is scope._root)
             and contract.get("binding_phase") != "preparation"
@@ -1795,6 +1797,7 @@ class LoadedPackage:
                 79,
                 80,
                 81,
+                82,
             )
             or self.manifest.get("kind") != "forge_definition_package_prototype"
         ):
@@ -1833,6 +1836,12 @@ class LoadedPackage:
             member.get("source_policy") for owner in self.manifest["owners"].values() for member in owner.values()
         ):
             raise ValueError("Borrow source selection requires definition package format 73")
+        if self.manifest["version"] < 82 and any(
+            member.get("source_policy", {}).get("presence")
+            for owner in self.manifest["owners"].values()
+            for member in owner.values()
+        ):
+            raise ValueError("Borrow source presence selection requires definition package format 82")
         if self.manifest["version"] < 76 and any(
             "condition_path" in policy for contract in self.manifest.get("field_groups", {}).values()
             for kind in ("shapes", "dtypes") for policy in contract.get(kind, {}).values()

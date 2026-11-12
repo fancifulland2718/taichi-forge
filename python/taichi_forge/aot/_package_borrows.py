@@ -104,15 +104,18 @@ def declaration(call, scope_path, schema, dimension, fail, *, preparation=False,
             fail(expression, "Borrow source selection requires an unconditional declared boolean static")
         sources = []
         for branch in (expression.body, expression.orelse):
+            path, root = [], branch
+            while isinstance(root, ast.Attribute):
+                path.insert(0, root.attr)
+                root = root.value
             if not (
-                isinstance(branch, ast.Attribute)
-                and isinstance(branch.value, ast.Name)
-                and branch.value.id == "self"
-                and branch.attr.isidentifier()
-                and not branch.attr.startswith("__")
+                path
+                and isinstance(root, ast.Name)
+                and root.id == "self"
+                and all(part.isidentifier() and not part.startswith("__") for part in path)
             ):
-                fail(branch, "Borrow source alternatives require direct fields on the same owner")
-            sources.append([branch.attr])
+                fail(branch, "Borrow source alternatives require declared Field paths")
+            sources.append(path)
         source_policy = dict(condition=test.attr, if_true=sources[0], if_false=sources[1])
         expression = expression.body if read_static_key(guard["choices"][0]) else expression.orelse
     path, node = [], expression
@@ -209,14 +212,19 @@ def project(owner, environment, schema):
     declarations, paths = dict(environment.declarations), dict(environment._paths)
     source_paths = dict(environment._source_scope_paths)
     constraints = dict(environment._constraints)
-    for name, item in schema.items():
-        if item["kind"] != "borrowed_field" or name in source_paths:
-            continue
-        path = tuple(item["source_path"])
-        source_name = _capture_id(path)
-        if source_name not in declarations:
-            raise ValueError("Borrowed source member is absent from its declared Field type")
-        source = next(
+
+    def original_path(path):
+        visited = set()
+        while _capture_id(path) in source_paths:
+            if path in visited:
+                raise ValueError("Borrowed Field source aliases are cyclic")
+            visited.add(path)
+            path = tuple(source_paths[_capture_id(path)])
+        return path
+
+    def allocation(path):
+        path = original_path(path)
+        return next(
             (
                 part
                 for key, part in schema.items()
@@ -229,20 +237,58 @@ def project(owner, environment, schema):
             ),
             None,
         )
+
+    def through_input(path):
+        return any(
+            part["kind"] == "owner_input" and path[: len(part.get("path", (key,)))] == tuple(part.get("path", (key,)))
+            for key, part in schema.items()
+        )
+
+    def presence(source, guards):
+        return [
+            dict(
+                path=list(paths[key]),
+                expected=expected,
+                **({"record": True} if isinstance(declarations[key], Record) else {}),
+            )
+            for key, expected in sorted(source.get("conditions", {}).items())
+            if guards.get(key) is not expected
+        ]
+
+    for name, item in schema.items():
+        if item["kind"] != "borrowed_field" or name in source_paths:
+            continue
+        path = tuple(item["source_path"])
+        source_name = _capture_id(path)
+        if "source_policy" in item:
+            policy = item["source_policy"]
+            branch_presence = {}
+            for branch, expected in (("if_true", True), ("if_false", False)):
+                branch_path = tuple(policy[branch])
+                original = allocation(branch_path)
+                guards = {**item.get("conditions", {}), policy["condition"]: expected}
+                if original is None or _capture_id(branch_path) not in declarations:
+                    raise ValueError("Borrow source alternatives require declared original fields")
+                if not through_input(branch_path) and any(
+                    guards.get(key) is not value for key, value in original.get("conditions", {}).items()
+                ):
+                    raise ValueError("Borrow source alternatives require original allocation presence guards")
+                branch_presence[branch] = presence(original, guards) if through_input(branch_path) else []
+            if any(branch_presence.values()):
+                policy["presence"] = branch_presence
+        if source_name not in declarations:
+            raise ValueError("Borrowed source member is absent from its declared Field type: " + ".".join(path))
+        source = allocation(path)
         if source is None:
             raise ValueError("Borrowed Field requires a declared original allocation")
-        if ("input_parameter" in item or "input_method" in item) and source.get("conditions"):
+        if original_path(path) != path and (
+            source.get("conditions") or getattr(declarations[source_name], "conditions", ())
+        ):
+            raise ValueError("Forwarded conditional borrows require their explicit allocation source")
+        if ("input_parameter" in item or "input_method" in item or through_input(path)) and source.get("conditions"):
             # An actual Field argument proves existence, not a numerical option.
             # Retain the source predicate as admission on its allocation owner.
-            item["source_presence"] = [
-                dict(
-                    path=list(paths[key]),
-                    expected=expected,
-                    **({"record": True} if isinstance(declarations[key], Record) else {}),
-                )
-                for key, expected in sorted(source["conditions"].items())
-                if item.get("conditions", {}).get(key) is not expected
-            ]
+            item["source_presence"] = presence(source, {**item.get("conditions", {}), **item.get("source_guards", {})})
         elif any(
             {**item.get("conditions", {}), **item.get("source_guards", {})}.get(key) is not expected
             for key, expected in source.get("conditions", {}).items()
@@ -253,7 +299,8 @@ def project(owner, environment, schema):
             raise ValueError("Source declaration helper excludes whole StructField inputs")
         if whole_struct and item["dimensions"]:
             raise ValueError("Whole StructField borrowing retains its original source namespace")
-        namespace = path[:-2] if source.get("struct_field") and not whole_struct else path[:-1]
+        original = original_path(path)
+        namespace = original[:-2] if source.get("struct_field") and not whole_struct else original[:-1]
         checks = dict(item.get("constraints", {}))
         for dimension, expression in item["dimensions"].items():
             original = _capture_id((*namespace, dimension))
@@ -284,7 +331,9 @@ def project(owner, environment, schema):
             alias_name = name if member is None else _capture_id((*target_path, member))
             alias_path = target_path if member is None else (*target_path, member)
             original_name = source_name if member is None else _capture_id((*path, member))
+            inherited_guards = dict(getattr(declarations[original_name], "conditions", ()))
             _source_scope_alias(declarations, paths, source_paths, alias_name, alias_path, original_name)
+            source_paths[alias_name] = original_path(tuple(paths[original_name]))
             if item.get("source_presence"):
                 original = declarations[alias_name]
                 declarations[alias_name] = (
@@ -292,7 +341,7 @@ def project(owner, environment, schema):
                     if isinstance(original, _ModelTensorField)
                     else DenseField(original.dtype, original.shape, original.group)
                 )
-            guards = {**item.get("conditions", {}), **item.get("source_guards", {})}
+            guards = {**inherited_guards, **item.get("conditions", {}), **item.get("source_guards", {})}
             if guards:
                 original = declarations[alias_name]
                 conditions = tuple(sorted(guards.items()))

@@ -165,13 +165,8 @@ class OwnerGraph:
         for attribute, item in schema.items():
             if "source_policy" in item:
                 policy = item["source_policy"]
-                for branch, expected in (("if_true", True), ("if_false", False)):
-                    source = schema.get(policy[branch][0], {})
-                    guards = {**item.get("conditions", {}), policy["condition"]: expected}
-                    if source.get("kind") != "dense_field" or any(
-                        guards.get(key) is not value for key, value in source.get("conditions", {}).items()
-                    ):
-                        raise ValueError("Borrow source alternatives require original fields and their presence guards")
+                # Validate both complete allocation paths after child schemas
+                # have been composed, including StructField members.
                 selected = static_values[policy["condition"]]
                 item["source_path"] = policy["if_true" if selected else "if_false"]
                 item["source_guards"] = {policy["condition"]: selected}
@@ -244,14 +239,47 @@ class OwnerGraph:
                     for selected_path, value in (choices or {}).items():
                         if selected_path[:len(source_path)] == source_path:
                             child_choices[(*input_path, *selected_path[len(source_path):])] = value
+                child_paths = source_children.get(attribute) or (
+                    (tuple(schema[item["field_input"]]["source_member"]),) if "field_input" in item else None
+                )
+                if child_paths is None and item["kind"] == "owner_input":
+                    prefix = tuple(item.get("path", (attribute,)))
+                    borrowed = []
+                    for declaration in schema.values():
+                        if declaration["kind"] != "borrowed_field":
+                            continue
+                        policy = declaration.get("source_policy")
+                        candidates = (
+                            (policy["if_true"], policy["if_false"]) if policy else (declaration["source_path"],)
+                        )
+                        borrowed.extend(
+                            tuple(candidate[len(prefix) :])
+                            for candidate in candidates
+                            if tuple(candidate[: len(prefix)]) == prefix and len(candidate) > len(prefix)
+                        )
+                    if any(child_schema.get(p[0], {}).get("kind") == "owner" for p in borrowed):
+                        # Keep the existing input view, and include only the
+                        # owned allocations explicitly borrowed through it.
+                        # Do not construct the input's unrelated solver graph.
+                        child_paths = tuple(
+                            dict.fromkeys(
+                                [
+                                    *(
+                                        tuple(part.get("path", (key,)))
+                                        for key, part in child_schema.items()
+                                        if part["kind"] != "owner"
+                                    ),
+                                    *borrowed,
+                                ]
+                            )
+                        )
                 value, _, child, expanded = self.construct(
                     item["owner_type"],
                     resource_only=resource_only or item["kind"] == "owner_input",
                     references=references,
                     choices=child_choices,
                     path=(*path, attribute),
-                    resource_paths=source_children.get(attribute)
-                    or ((tuple(schema[item["field_input"]]["source_member"]),) if "field_input" in item else None),
+                    resource_paths=child_paths,
                 )
                 children[attribute] = (child, expanded)
                 child_values[attribute] = value
@@ -450,6 +478,18 @@ def _compose(environment, schema, children):
                     "condition": names[policy["condition"]],
                     "if_true": [attribute, *policy["if_true"]],
                     "if_false": [attribute, *policy["if_false"]],
+                    **(
+                        {
+                            "presence": {
+                                branch: [
+                                    {**predicate, "path": [attribute, *predicate["path"]]} for predicate in predicates
+                                ]
+                                for branch, predicates in policy["presence"].items()
+                            }
+                        }
+                        if "presence" in policy
+                        else {}
+                    ),
                 }
                 transformed["source_guards"] = {names[n]: expected for n, expected in item["source_guards"].items()}
             if "input_presence_attribute" in item:

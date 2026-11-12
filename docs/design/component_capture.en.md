@@ -1025,6 +1025,21 @@ or enter its ABI. Existing complete dimension mappings still support standalone
 borrowers. CPU/CUDA tests cover both modes, new layout-only capacities and
 pre-execution rejection of mismatched target counts.
 
+Definition packages can explicitly select a declared input owner's child Field
+or StructField member, for example
+`self.storage.rows.shared.value if self.row else self.storage.geometry.shared.value`.
+The selector must be a declared boolean static. Each source retains its original
+layout, dimensions and allocation-presence predicates; different children are
+not assumed to have the same layout. Format 82 selects the matching presence
+predicates during construction. Existing preparation bindings still apply, with
+no new per-step scan. Build witnesses include the child allocations required by
+the borrow, without recursively constructing unrelated input solvers. A fixed
+source view can be borrowed again while preserving its original allocation;
+forwarding another conditional selection currently requires an explicit original
+allocation path. Small CPU/CUDA tests cover both layouts, new sizes, independent
+instances, source-free consumption and invalid presence predicates. They do not
+qualify a complete engine.
+
 An original initializer recording can join the same owner's step recording:
 `component.compile_graph(owner.record_step, initializer=owner.record_initialize)`.
 Both phases share capture and resource closure, including initializer-only SNode

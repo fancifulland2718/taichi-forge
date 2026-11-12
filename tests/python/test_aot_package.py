@@ -9282,6 +9282,145 @@ def test_package_borrow_choices_reject_unproven_sources(tmp_path, monkeypatch, c
     assert sys.modules["definition_fixture.model"].constructors == 0
 
 
+NESTED_BORROW_CHOICES_SOURCE = """
+import taichi_forge as ti
+@ti.data_oriented
+class Geometry:
+    def __init__(self, n: int):
+        self.n = n
+        s = ti.experimental.ResourceScope(self)
+        s.shared = s.struct_field(dict(value=ti.i32), shape=s.dim('n'), initialization='zero')
+@ti.data_oriented
+class Rows:
+    def __init__(self, n: int):
+        self.n = n
+        s = ti.experimental.ResourceScope(self)
+        s.shared = s.struct_field(dict(padding=ti.types.vector(3, ti.f32), value=ti.i32),
+                                  shape=s.dim('n') * 2, initialization='zero')
+@ti.data_oriented
+class Storage:
+    def __init__(self, n: int, row: bool):
+        self.row = row
+        s = ti.experimental.ResourceScope(self)
+        s.static('row', choices=(False, True))
+        s.control = Geometry(n)
+        if self.row:
+            s.rows = Rows(n)
+        else:
+            s.geometry = Geometry(n)
+@ti.data_oriented
+class Model:
+    def __init__(self, storage: Storage, row: bool):
+        self.row = row
+        s = ti.experimental.ResourceScope(self)
+        s.owner_reference('storage', storage)
+        s.static('row', choices=(False, True))
+        s.borrow('selected', self.storage.rows.shared.value if self.row else self.storage.geometry.shared.value,
+                 source_scope=True)
+        s.borrow('common', self.storage.control.shared.value, source_scope=True)
+    @ti.kernel
+    def step(self, bias: ti.i32):
+        for i in self.selected:
+            self.selected[i] += i + bias
+@ti.data_oriented
+class Forward:
+    def __init__(self, model: Model):
+        s = ti.experimental.ResourceScope(self)
+        s.owner_reference('model', model)
+        s.borrow('selected', self.model.common, source_scope=True)
+    @ti.kernel
+    def step(self, bias: ti.i32):
+        for i in self.selected:
+            self.selected[i] += i + bias
+"""
+
+
+@test_utils.test(arch=[ti.cpu, ti.cuda], offline_cache=False)
+def test_package_borrow_choices_through_input_children(tmp_path, monkeypatch):
+    package = _source_package(
+        tmp_path, monkeypatch, NESTED_BORROW_CHOICES_SOURCE, initializer="from .model import Model, Storage\n"
+    )
+    manifest = ti.aot.export_package(package, tmp_path / "sdk")
+    steps = [e for e in manifest["entries"].values() if "definition_fixture.model.Model.step" in e["definitions"]]
+    assert len(steps) == 2  # Two actual source layouts, not independent flag products.
+    with Runtime(manifest["target"]) as runtime, load_package(runtime, tmp_path / "sdk") as code:
+        retained = []
+        for row, n in ((False, 7), (True, 11)):
+            original = package.Model(package.Storage(n, row), row)
+            storage = code.host.Storage(n, row)
+            model = code.host.Model(storage, row)
+            assert not hasattr(storage, "geometry" if row else "rows")
+            original.step(3)
+            model.step(3)
+            np.testing.assert_array_equal(model.selected.to_numpy(), original.selected.to_numpy())
+            original_forward = package.model.Forward(original)
+            forward = code.host.model.Forward(model)
+            original_forward.step(2)
+            forward.step(2)
+            np.testing.assert_array_equal(model.common.to_numpy(), original.common.to_numpy())
+            retained.append((model, model.selected.to_numpy()))
+        for model, values in retained:
+            np.testing.assert_array_equal(model.selected.to_numpy(), values)
+        # A mismatched allocation predicate must not become a valid input just
+        # because the selected Field is still reachable through the Host object.
+        wrong_storage = code.host.Storage(5, True)
+        wrong_storage.row = False
+        with pytest.raises(ValueError, match="allocation presence changed"):
+            code.host.Model(wrong_storage, True)
+    probe = tmp_path / "consume_nested_borrow.py"
+    probe.write_text(
+        textwrap.dedent("""
+        import importlib.abc
+        import sys
+        import numpy as np
+        class NoSource(importlib.abc.MetaPathFinder):
+            def find_spec(self, fullname, path=None, target=None):
+                if fullname.split('.')[0] in ('taichi', 'taichi_forge', 'definition_fixture'):
+                    raise AssertionError(fullname)
+        sys.meta_path.insert(0, NoSource())
+        from taichi_forge_runtime.aot import Runtime, load_package
+        with Runtime(sys.argv[2]) as runtime, load_package(runtime, sys.argv[1]) as code:
+            for row, n in ((False, 3), (True, 5)):
+                storage = code.host.Storage(n, row)
+                model = code.host.Model(storage, row)
+                model.step(2)
+                np.testing.assert_array_equal(model.selected.to_numpy(), np.arange(n * (2 if row else 1)) + 2)
+                code.host.model.Forward(model).step(4)
+                np.testing.assert_array_equal(model.common.to_numpy(), np.arange(n) + 4)
+        print('NESTED_BORROW_SOURCE_FREE_OK')
+    """),
+        encoding="utf8",
+    )
+    result = subprocess.run(
+        [sys.executable, "-B", str(probe), str(tmp_path / "sdk"), manifest["target"]],
+        cwd=tmp_path,
+        capture_output=True,
+        text=True,
+        timeout=90,
+        env=dict(
+            os.environ,
+            PYTHONDONTWRITEBYTECODE="1",
+            PYTHONPATH=str(Path(__file__).resolve().parents[2] / "packaging/runtime/src"),
+            TAICHI_NATIVE_RUNTIME_DIR=str(Path(utils._loaded_native_runtime_path).parent),
+            TAICHI_RUNTIME_DIR=utils._runtime_bitcode_dir(),
+        ),
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert "NESTED_BORROW_SOURCE_FREE_OK" in result.stdout
+    manifest["version"] = 81
+    (tmp_path / "sdk/package.json").write_text(json.dumps(manifest), encoding="utf8")
+    with Runtime(manifest["target"]) as runtime, pytest.raises(ValueError, match="format 82"):
+        load_package(runtime, tmp_path / "sdk")
+
+
+@test_utils.test(arch=ti.cpu, offline_cache=False)
+def test_package_rejects_unresolved_conditional_reborrow(tmp_path, monkeypatch):
+    source = NESTED_BORROW_CHOICES_SOURCE.replace("self.model.common,", "self.model.selected,")
+    package = _source_package(tmp_path, monkeypatch, source)
+    with pytest.raises(ValueError, match="Forwarded conditional borrows"):
+        ti.aot.export_package(package, tmp_path / "sdk")
+
+
 CHILD_CHOICES_SOURCE = """
 import taichi_forge as ti
 constructors = 0
