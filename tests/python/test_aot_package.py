@@ -9448,6 +9448,56 @@ def test_package_required_resource_can_select_nondefault_borrow_layout(tmp_path,
             unsupported.step(4)
 
 
+@pytest.mark.parametrize("related", [False, True])
+@test_utils.test(arch=[ti.cpu, ti.cuda], offline_cache=False)
+def test_package_borrowed_model_tensor_copy_uses_declared_extent_relation(tmp_path, monkeypatch, related):
+    source = """
+import taichi_forge as ti
+@ti.data_oriented
+class Storage:
+    def __init__(self, width: int):
+        self.width = width
+        s = ti.experimental.ResourceScope(self)
+        s.dim('width')
+        s.values = s.field(ti.types.vector(self.width, ti.f32), shape=1, initialization='zero')
+@ti.data_oriented
+class Model:
+    def __init__(self, a: Storage, b: Storage, width: int):
+        self.width = width
+        s = ti.experimental.ResourceScope(self)
+        s.dim('width')
+        s.owner_reference('a', a)
+        s.owner_reference('b', b)
+        s.borrow('left', self.a.values, source_scope=True, dimensions={'width': s.dim('width')})
+        s.borrow('right', self.b.values, source_scope=True, dimensions={'width': s.dim('width')})
+    @ti.kernel
+    def step(self, value: ti.f32):
+        temporary = ti.Vector.zero(ti.f32, self.width)
+        temporary[0] = value
+        self.left[0] = temporary
+        self.right[0] = self.left[0]
+"""
+    if not related:
+        source = source.replace(", dimensions={'width': s.dim('width')}", "")
+    package = _source_package(tmp_path, monkeypatch, source)
+    if not related:
+        with pytest.raises(ti.aot.PackageExportError, match="matching element type and extent relations"):
+            ti.aot.export_package(package, tmp_path / "sdk")
+        return
+    manifest = ti.aot.export_package(package, tmp_path / "sdk")
+    assert sum(e["definition"].endswith("Model.step") for e in manifest["entries"].values()) == 1
+    with Runtime(manifest["target"]) as runtime, load_package(runtime, tmp_path / "sdk") as code:
+        for width in (3, 7):
+            original = package.model.Model(package.model.Storage(width), package.model.Storage(width), width)
+            model = code.host.model.Model(code.host.model.Storage(width), code.host.model.Storage(width), width)
+            original.step(4.0)
+            model.step(4.0)
+            np.testing.assert_array_equal(model.right.to_numpy(), original.right.to_numpy())
+        with pytest.raises(ValueError):
+            wrong = code.host.model.Model(code.host.model.Storage(3), code.host.model.Storage(7), 3)
+            wrong.step(4.0)
+
+
 CHILD_CHOICES_SOURCE = """
 import taichi_forge as ti
 constructors = 0

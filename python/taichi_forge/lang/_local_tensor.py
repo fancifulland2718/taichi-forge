@@ -156,7 +156,42 @@ class ModelTensor:
                     return resolve(declaration.expression, (*visiting, args[0]))
             return (op, *args) if op in ("dim", "const") else (op, *(resolve(arg, visiting) for arg in args))
 
-        return tuple(resolve(extent(size)) for size in self.shape)
+        # Borrowing can relate dimensions from independent owner namespaces.
+        # Only active, explicitly bidirectional inequalities prove equality;
+        # equal producer witness sizes and one-way bounds are insufficient.
+        constraints = deployment.component._constraints.values()
+        bounds = {
+            (resolve(item["spec"]["left"]), resolve(item["spec"]["right"]))
+            for item in constraints
+            if item["spec"]["when"] in deployment.used
+        }
+        representatives = {}
+
+        def find(value):
+            while value in representatives:
+                value = representatives[value]
+            return value
+
+        def order(value):
+            return (len(repr(value)), repr(value))
+
+        for left, right in bounds:
+            if (right, left) in bounds:
+                left, right = find(left), find(right)
+                if left != right:
+                    first, second = sorted((left, right), key=order)
+                    representatives[second] = first
+
+        def canonical(value):
+            value = find(value)
+            op, *args = value
+            if op in ("dim", "const"):
+                return value
+            normalized = (op, *(canonical(arg) for arg in args))
+            result = find(normalized)
+            return canonical(result) if result != normalized else normalized
+
+        return tuple(canonical(resolve(extent(size))) for size in self.shape)
 
     def _visit(self, value):
         from taichi_forge._lib import core

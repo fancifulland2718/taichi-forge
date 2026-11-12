@@ -1047,6 +1047,13 @@ are never exported as no-ops or admitted for consumption. Selection order does
 not change the valid entry set; this affects build exploration only, with no new
 runtime checks.
 
+Whole model-vector/matrix assignments can use active borrow contracts with
+bidirectional dimension bounds to prove equal extents across owner namespaces.
+One-way capacity bounds, unused resource contracts and coincidentally equal
+producer sizes do not establish equality. Existing binding constraints still
+validate actual inputs. This is compile-time type checking, without new runtime
+scans or per-DOF implementations.
+
 An original initializer recording can join the same owner's step recording:
 `component.compile_graph(owner.record_step, initializer=owner.record_initialize)`.
 Both phases share capture and resource closure, including initializer-only SNode
