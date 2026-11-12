@@ -3701,9 +3701,12 @@ class Model:
 
 
 @test_utils.test(arch=[ti.cpu, ti.cuda], offline_cache=False)
-@pytest.mark.parametrize('source_form', ['direct', 'mapping', 'prepared', 'preparation', 'tuple', 'generator'])
+@pytest.mark.parametrize('source_form', ['direct', 'repeated', 'mapping', 'prepared', 'preparation', 'tuple', 'generator'])
 def test_package_write_inventory_resolves_before_its_own_checkpoint(tmp_path, monkeypatch, source_form):
     source = CYCLIC_WRITE_INVENTORY_SOURCE
+    if source_form == 'repeated':
+        source = source.replace('        append_step(self, builder)\n',
+                                '        append_step(self, builder)\n' * 16)
     if source_form == 'generator':
         source = source.replace('def append_step(solver, builder):\n    builder.dispatch(solver.step)', '''
 def single(solver):
@@ -3806,6 +3809,33 @@ def append_step(solver, builder):
                  TAICHI_RUNTIME_DIR=utils._runtime_bitcode_dir()))
     assert result.returncode == 0, result.stdout + result.stderr
     assert 'CHECKPOINT_INVENTORY_SOURCE_FREE_OK' in result.stdout
+
+
+@test_utils.test(arch=ti.cpu, offline_cache=False)
+def test_package_input_analysis_reuses_repeated_dispatch_contexts(tmp_path, monkeypatch):
+    import cProfile
+
+    counts = []
+    for repeats in (1, 32):
+        root = tmp_path / str(repeats)
+        root.mkdir()
+        source = CYCLIC_WRITE_INVENTORY_SOURCE.replace(
+            '        append_step(self, builder)\n', '        append_step(self, builder)\n' * repeats
+        )
+        package = _source_package(root, monkeypatch, source)
+        with cProfile.Profile() as profile:
+            assert ti.aot.check_package(package)['declaration_check'] == 'passed'
+        # Measure analysis work, not a flaky wall-clock limit. Repeating the
+        # same Graph edge does not add another function/input source context.
+        counts.append(sum(
+            entry.callcount for entry in profile.getstats()
+            if getattr(entry.code, 'co_name', None) == 'build_context'
+            and entry.code.co_filename.endswith('_package_function_inputs.py')
+        ))
+        assert package.model.constructors == 0
+        assert ti.lang.impl.get_runtime().get_num_compiled_functions() == 0
+    assert counts[0] > 0
+    assert counts[1] == counts[0], counts
 
 
 @test_utils.test(arch=ti.cpu, offline_cache=False)
@@ -17193,6 +17223,25 @@ def _free_preparation_source():
     body = "    def prepare(self, n: int, fail=False):\n        prepare(self, n, fail=fail)\n"
     body += "    def prepare_again(self, n):\n        prepare(self, n)\n"
     return model[:start] + body + model[end:] + "\n" + prepare + "\nclass Alternate(Model):\n    pass\n"
+
+
+@test_utils.test(arch=ti.cpu, offline_cache=False)
+@pytest.mark.parametrize('unproven', [False, True])
+def test_package_repeated_preparation_retains_each_call_site(tmp_path, monkeypatch, unproven):
+    model = _free_preparation_source().replace(
+        '    def prepare_again(self, n):\n        prepare(self, n)\n',
+        ''.join(f'    def prepare_again_{i}(self, n):\n        prepare(self, n)\n' for i in range(8)),
+    )
+    if unproven:
+        model += '\ndef unknown_owner():\n    prepare(object(), 3)\n'
+    package, _ = _resource_context_fixture(tmp_path, monkeypatch, model=model)
+    if unproven:
+        with pytest.raises(ti.aot.PackageExportError, match='preparation call has no proven owner receiver'):
+            ti.aot.check_package(package)
+    else:
+        assert ti.aot.check_package(package)['declaration_check'] == 'passed'
+    assert package.model.preparations == 0
+    assert ti.lang.impl.get_runtime().get_num_compiled_functions() == 0
 
 
 @pytest.mark.parametrize("single_choice", [False, True])

@@ -123,6 +123,12 @@ selections, input sources and closures. Unsupported declarations raise the same
 check leaves compilation, Host projection and consumption marked `not_run`;
 module checks must still be followed by final complete export and consumption.
 
+Declaration discovery deduplicates functions with their complete input-source
+contexts before analyzing their bodies, including repeated Graph calls. Every
+preparation call site still receives its coverage check, and different owner or
+resource sources remain distinct. Deduplication is local to one discovery pass;
+it does not reuse facts across declaration updates or add consumer-side checks.
+
 Export an imported source package, selecting the backend explicitly:
 
 ```python

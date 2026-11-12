@@ -1250,6 +1250,25 @@ def discover(sources, imported, *, preparation_receivers=None, resource_inventor
     while pending:
         function, arguments, chain, call_site = pending.popleft()
         identity = (function, tuple(sorted(arguments.items())))
+        module = functions[function][0]
+        # Call-site coverage is per incoming edge, but source facts are per
+        # function/input context. In particular, repeated Graph dispatches must
+        # not rebuild the same lexical and resource analysis before this guard.
+        if preparation_receivers is not None and function in preparation_receivers:
+            receivers = [(key, item.identity) for key, item in arguments.items() if isinstance(item, _Owner)]
+            if not receivers:
+                # An ordinary Host wrapper can forward an external owner to an
+                # already declared allocation entry. Check that boundary below;
+                # an unknown caller never establishes a new receiver contract.
+                continue
+            if len(receivers) != 1:
+                raise ValueError(f"{module}:{functions[function][1].lineno}: preparation requires one proven owner")
+            preparation_receivers[function].add(receivers[0])
+            if call_site is not None:
+                covered.add(call_site)
+        if identity in visited:
+            continue
+        visited.add(identity)
         value, target, nodes, module, source_only_calls = build_context(function, arguments, (function,))
         for owner, name, item in requested.get(function, ()):
             parameter, expression = request_sources[id(item)]
@@ -1268,23 +1287,6 @@ def discover(sources, imported, *, preparation_receivers=None, resource_inventor
                         len(candidate.path) == 1 or source.get("struct_field") and len(candidate.path) == 2
                     ):
                         binding_domains.setdefault((owner, name), set()).add((candidate.owner.identity, candidate.path))
-        if preparation_receivers is not None and function in preparation_receivers:
-            receivers = [(key, item.identity) for key, item in arguments.items() if isinstance(item, _Owner)]
-            if not receivers:
-                # An ordinary Host wrapper can forward an external owner to an
-                # already declared allocation entry. Check that boundary below;
-                # an unknown caller never establishes a new receiver contract.
-                continue
-            if len(receivers) != 1:
-                raise ValueError(f"{module}:{functions[function][1].lineno}: preparation requires one proven owner")
-            else:
-                preparation_receivers[function].add(receivers[0])
-                if call_site is not None:
-                    covered.add(call_site)
-        if identity in visited:
-            continue
-        visited.add(identity)
-
         def inventory_input(item):
             if isinstance(item, _Resource):
                 inventory.add((item.owner.identity, item.path))
