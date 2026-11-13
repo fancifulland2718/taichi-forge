@@ -8,6 +8,7 @@ namespace taichi::lang {
 
 namespace LLVM {
 class FunctionCodeCache;
+class AotIRFinalizer;
 }
 
 class LlvmAotModuleBuilder : public AotModuleBuilder {
@@ -21,6 +22,9 @@ class LlvmAotModuleBuilder : public AotModuleBuilder {
             const std::string &filename) const override;
 
   void set_artifact_format(const std::string &format) override;
+  // Internal qualification switch; production remains unchanged until the
+  // cleaned artifacts have passed prepare and runtime qualification.
+  void set_ir_cleanup_for_testing(bool enabled);
   void enable_streaming_exports() override;
   std::map<std::string, std::uint64_t> streaming_export_statistics() override;
   std::map<int, int> exported_snode_tree_bindings() const override {
@@ -70,6 +74,7 @@ class LlvmAotModuleBuilder : public AotModuleBuilder {
   std::map<std::string, std::string> sealed_bitcode_;
   std::map<std::string, std::string> sealed_code_units_;
   std::shared_ptr<LLVM::FunctionCodeCache> function_code_cache_;
+  std::shared_ptr<LLVM::AotIRFinalizer> ir_finalizer_;
   const CompileConfig &compile_config_;
   LlvmProgramImpl *prog_ = nullptr;
   DeviceCapabilityConfig caps_;

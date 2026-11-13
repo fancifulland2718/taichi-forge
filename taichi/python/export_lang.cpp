@@ -20,6 +20,7 @@
 #include "taichi/rhi/cuda/cuda_capability.h"
 
 #if TI_WITH_LLVM
+#include "taichi/runtime/llvm/llvm_aot_module_builder.h"
 #include "llvm/Config/llvm-config.h"
 #endif
 
@@ -5915,6 +5916,16 @@ void export_lang(py::module &m) {
   py::class_<AotModuleBuilder>(m, "AotModuleBuilder")
       .def("set_compile_options", &AotModuleBuilder::set_compile_options)
       .def("set_artifact_format", &AotModuleBuilder::set_artifact_format)
+#if TI_WITH_LLVM
+      .def("_set_ir_cleanup_for_testing",
+           [](AotModuleBuilder &builder, bool enabled) {
+             auto *llvm_builder =
+                 dynamic_cast<LlvmAotModuleBuilder *>(&builder);
+             TI_ERROR_IF(!llvm_builder,
+                         "AOT IR cleanup requires an LLVM builder");
+             llvm_builder->set_ir_cleanup_for_testing(enabled);
+           })
+#endif
       .def("add_field", &AotModuleBuilder::add_field)
       .def("add_ndarray_layout", &AotModuleBuilder::add_ndarray_layout)
       .def("add", &AotModuleBuilder::add)

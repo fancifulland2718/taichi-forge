@@ -14,7 +14,8 @@ from tests import test_utils
 
 
 @test_utils.test(arch=ti.cuda, offline_cache=False)
-def test_bitcode_library_shares_real_function_and_validates_dependencies(tmp_path):
+@pytest.mark.parametrize("cleanup", [False, True])
+def test_bitcode_library_shares_real_function_and_validates_dependencies(tmp_path, cleanup):
     import numpy as np
     from zipfile import ZipFile, ZIP_DEFLATED
     from taichi_forge_runtime.aot import Runtime
@@ -37,10 +38,23 @@ def test_bitcode_library_shares_real_function_and_validates_dependencies(tmp_pat
             data[i] = shared(data[i], bias) + 1
 
     module = ti.aot.Module(artifact_format="bc-library")
+    if cleanup:
+        module._aot_builder._set_ir_cleanup_for_testing(True)
     module.add_kernel(first)
     module.add_kernel(second)
     artifact = tmp_path / "library.tcm"
     module.archive(str(artifact))
+    if cleanup:
+        stats = module._aot_builder._streaming_export_statistics()
+        assert stats['aot_cleaned_units'] == 1
+        assert stats['aot_cleaned_roots'] == 2
+        assert stats['aot_unit_finalization_hits'] == 1
+        # A second save reuses finalized bodies and recomputes no Pass chain.
+        module.archive(str(tmp_path / 'again.tcm'))
+        again = module._aot_builder._streaming_export_statistics()
+        assert again['aot_cleaned_units'] == 1
+        assert again['aot_cleaned_roots'] == 2
+        assert again['aot_root_finalization_hits'] == 2
     with ZipFile(artifact) as archive:
         units = [name for name in archive.namelist() if name.startswith("code_units/")]
         assert len(units) == 1  # Actual shared storage, not two equal copies.

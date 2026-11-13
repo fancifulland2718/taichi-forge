@@ -1556,13 +1556,20 @@ class Model:
 
 @test_utils.test(arch=ti.cuda, offline_cache=False)
 @pytest.mark.parametrize("fail_export", [False, True])
-def test_package_bitcode_library_preserves_jit_functions(tmp_path, monkeypatch, fail_export):
+@pytest.mark.parametrize("cleanup", [False, True])
+def test_package_bitcode_library_preserves_jit_functions(tmp_path, monkeypatch, fail_export, cleanup):
     from taichi_forge.aot._package_compilation import PackageCompilation
 
     original_compile = PackageCompilation.compile
     original_release = PackageCompilation._release_functions
+    original_attach = PackageCompilation.attach
     sealed_units = []
     retired = []
+
+    def attach(transaction, module, **kwargs):
+        if cleanup:
+            module._aot_builder._set_ir_cleanup_for_testing(True)
+        return original_attach(transaction, module, **kwargs)
 
     def release(transaction):
         definitions = [native for function in transaction.functions.values() if function is not None
@@ -1579,6 +1586,7 @@ def test_package_bitcode_library_preserves_jit_functions(tmp_path, monkeypatch, 
 
     monkeypatch.setattr(PackageCompilation, 'compile', observe)
     monkeypatch.setattr(PackageCompilation, '_release_functions', release)
+    monkeypatch.setattr(PackageCompilation, 'attach', attach)
     source = '''import taichi_forge as ti
 @ti.data_oriented
 class Model:

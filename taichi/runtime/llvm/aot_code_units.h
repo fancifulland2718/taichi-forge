@@ -19,16 +19,42 @@ namespace taichi::lang::LLVM {
 inline constexpr char kCodeUnits[] = "taichi.aot.code_units.v1";
 inline constexpr char kRealFunctionUnit[] = "taichi.aot.real_function";
 
+struct CodeUnitArtifact {
+  std::string symbol;
+  std::string digest;
+  std::string filename;
+  std::string bytes;
+};
+
+// The module is already a normalized private copy. AOT finalization may run
+// here, before either the exported symbol or the content digest is published.
+inline CodeUnitArtifact encode_code_unit(llvm::Module &unit) {
+  std::string canonical;
+  llvm::raw_string_ostream canonical_stream(canonical);
+  encode_llvm_module(unit, canonical_stream, LLVMModuleEncoding::bitcode);
+  CodeUnitArtifact result;
+  result.symbol = "__ti_unit_" + aot_artifact_sha256(canonical);
+  unit.getFunction("__ti_unit_0")->setName(result.symbol);
+  llvm::raw_string_ostream stream(result.bytes);
+  encode_llvm_module(unit, stream, LLVMModuleEncoding::bitcode);
+  result.digest = aot_artifact_sha256(result.bytes);
+  result.filename = "code_units/" + result.digest + ".bc";
+  return result;
+}
+
+using CodeUnitFinalizer = std::function<CodeUnitArtifact(llvm::Module &)>;
+
 // Prototype library representation: a typed real-function closure is stored
 // once, independently of its callers. Only local symbols are canonicalized;
 // external symbols, target, layout, attributes and module ABI flags remain.
-inline void export_code_units(llvm::Module &module,
-                              const std::function<void(const std::string &,
-                                                       const std::string &)> &emit,
-                              bool allow_resource_relocations = true,
-                              llvm::Function *selected_root = nullptr,
-                              bool rewrite_caller = true,
-                              std::string *selected_symbol = nullptr) {
+inline void export_code_units(
+    llvm::Module &module,
+    const std::function<void(const std::string &, const std::string &)> &emit,
+    bool allow_resource_relocations = true,
+    llvm::Function *selected_root = nullptr,
+    bool rewrite_caller = true,
+    std::string *selected_symbol = nullptr,
+    const CodeUnitFinalizer &finalize = {}) {
   std::vector<llvm::Function *> roots;
   for (auto &function : module)
     if (!function.isDeclaration() && function.hasFnAttribute(kRealFunctionUnit) &&
@@ -178,21 +204,13 @@ inline void export_code_units(llvm::Module &module,
     for (auto *type : unit->getIdentifiedStructTypes())
       if (!type->isOpaque())
         type->setName("__ti_unit_type_" + std::to_string(type_index++));
-    std::string canonical;
-    llvm::raw_string_ostream canonical_stream(canonical);
-    encode_llvm_module(*unit, canonical_stream, LLVMModuleEncoding::bitcode);
-    const auto identity = aot_artifact_sha256(canonical);
-    auto *exported = unit->getFunction("__ti_unit_0");
-    const auto symbol = "__ti_unit_" + identity;
+    const auto artifact = finalize ? finalize(*unit) : encode_code_unit(*unit);
+    const auto &symbol = artifact.symbol;
     if (selected_symbol)
       *selected_symbol = symbol;
-    exported->setName(symbol);
-    std::string bytes;
-    llvm::raw_string_ostream stream(bytes);
-    encode_llvm_module(*unit, stream, LLVMModuleEncoding::bitcode);
-    const auto digest = aot_artifact_sha256(bytes);
-    const auto filename = "code_units/" + digest + ".bc";
-    emit(filename, bytes);
+    const auto &filename = artifact.filename;
+    const auto &digest = artifact.digest;
+    emit(filename, artifact.bytes);
     if (!rewrite_caller) {
       unit.reset();
       continue;

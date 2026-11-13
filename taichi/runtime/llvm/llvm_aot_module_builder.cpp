@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <fstream>
+#include <set>
 #include "llvm/Transforms/Utils/Cloning.h"
 #include "taichi/runtime/program_impls/llvm/llvm_program.h"
 #include "taichi/runtime/llvm/aot_graph_data.h"
@@ -20,6 +21,8 @@
 #include "taichi/runtime/llvm/aot_snode_resources.h"
 #include "taichi/runtime/llvm/aot_code_units.h"
 #include "taichi/runtime/llvm/function_code_cache.h"
+#include "taichi/runtime/llvm/aot_ir_finalizer.h"
+#include "taichi/runtime/llvm/llvm_module_options.h"
 #include "taichi/analysis/offline_cache_util.h"
 #if defined(TI_WITH_CUDA)
 #include "taichi/runtime/cuda/jit_cuda.h"
@@ -27,6 +30,16 @@
 #endif
 
 namespace taichi::lang {
+
+namespace {
+void prepare_cleanup_layout(llvm::Module &module, Arch arch) {
+  const auto layout = TaichiLLVMContext::get_data_layout(arch);
+  TI_ERROR_IF(
+      !module.getDataLayoutStr().empty() && module.getDataLayout() != layout,
+      "AOT cleanup target/layout mismatch");
+  module.setDataLayout(layout);
+}
+}  // namespace
 
 LlvmAotModuleBuilder::LlvmAotModuleBuilder(
     KernelCompilationManager &compilation_manager,
@@ -45,6 +58,8 @@ LlvmAotModuleBuilder::LlvmAotModuleBuilder(
 void LlvmAotModuleBuilder::set_artifact_format(const std::string &format) {
   TI_ERROR_IF(compile_options_frozen_,
               "AOT artifact format must be selected before exporting kernels.");
+  TI_ERROR_IF(ir_finalizer_ && format != "bc" && format != "bc-library",
+              "AOT IR cleanup requires bitcode");
   TI_ERROR_IF(format != "bc" && format != "bc-library" && !LLVM::is_cuda_aot_artifact_format(format),
               "Unsupported LLVM AOT artifact format '{}'", format);
   TI_ERROR_IF(LLVM::is_cuda_aot_artifact_format(format) &&
@@ -57,6 +72,15 @@ void LlvmAotModuleBuilder::set_artifact_format(const std::string &format) {
               "Experimental AOT code libraries currently require CUDA");
   function_code_cache_ = format == "bc-library"
       ? std::make_shared<LLVM::FunctionCodeCache>() : nullptr;
+}
+
+void LlvmAotModuleBuilder::set_ir_cleanup_for_testing(bool enabled) {
+  TI_ERROR_IF(compile_options_frozen_,
+              "AOT cleanup must be selected before exporting kernels");
+  TI_ERROR_IF(
+      enabled && artifact_format_ != "bc" && artifact_format_ != "bc-library",
+      "AOT IR cleanup requires bitcode");
+  ir_finalizer_ = enabled ? std::make_shared<LLVM::AotIRFinalizer>() : nullptr;
 }
 
 void LlvmAotModuleBuilder::enable_streaming_exports() {
@@ -75,12 +99,26 @@ void LlvmAotModuleBuilder::seal_kernel_export_per_backend(
   auto &compiled = cache_.kernels.at(name).compiled_data;
   if (compiled.module) {
     if (artifact_format_ == "bc-library") {
-      LLVM::export_code_units(*compiled.module,
-          [&](const std::string &unit, const std::string &bytes) {
-            const auto [item, inserted] = sealed_code_units_.emplace(unit, bytes);
-            TI_ERROR_IF(!inserted && item->second != bytes,
-                        "Conflicting AOT code unit {}", unit);
-          }, false);
+      if (ir_finalizer_) {
+        // This module is already an AOT-owned clone (add_kernel_impl). Only
+        // argument-only units can be finalized before resource relocation.
+        prepare_cleanup_layout(*compiled.module, compile_config_.arch);
+        ir_finalizer_->export_units(
+            *compiled.module,
+            LLVMModuleOptions::read(*compiled.module, compile_config_)
+                    .opt_level > 0,
+            false);
+      } else {
+        LLVM::export_code_units(
+            *compiled.module,
+            [&](const std::string &unit, const std::string &bytes) {
+              const auto [item, inserted] =
+                  sealed_code_units_.emplace(unit, bytes);
+              TI_ERROR_IF(!inserted && item->second != bytes,
+                          "Conflicting AOT code unit {}", unit);
+            },
+            false);
+      }
     }
     std::string bytes;
     llvm::raw_string_ostream output(bytes);
@@ -99,7 +137,8 @@ void LlvmAotModuleBuilder::seal_kernel_export_per_backend(
 std::map<std::string, std::uint64_t>
 LlvmAotModuleBuilder::streaming_export_statistics() {
   if (!streaming_compilation_manager_)
-    return {};
+    return ir_finalizer_ ? ir_finalizer_->statistics()
+                         : std::map<std::string, std::uint64_t>{};
   const auto stats =
       streaming_compilation_manager_->executable_lifecycle_statistics(false);
   std::uint64_t resident = 0, bytes = 0;
@@ -121,6 +160,11 @@ LlvmAotModuleBuilder::streaming_export_statistics() {
           {"memory_cache_hits", stats.memory_cache_hits + stats.loaded_cache_hits}};
   if (function_code_cache_)
     result.merge(function_code_cache_->statistics());
+  if (ir_finalizer_) {
+    result.erase("shared_code_units");
+    result.erase("serialized_code_unit_bytes");
+    result.merge(ir_finalizer_->statistics());
+  }
   return result;
 }
 
@@ -213,6 +257,7 @@ void LlvmAotModuleBuilder::dump(const std::string &output_dir,
     local.tree_id = tree_mapping.at(producer);
     metadata.initial_root_data.push_back(std::move(local));
   }
+  std::set<std::string> emitted_units;
   auto prepare_module = [&](LlvmOfflineCache::KernelCacheData &kernel) {
     auto module = load_kernel_module(kernel.kernel_key,
                                      kernel.compiled_data.module_context_owner);
@@ -222,7 +267,24 @@ void LlvmAotModuleBuilder::dump(const std::string &output_dir,
       // Unsupported layouts/tasks and legacy targets retain embedded IDs.
       LLVM::resolve_aot_tree_ids(*module, tree_mapping);
     }
-    if (artifact_format_ == "bc-library")
+    if (ir_finalizer_) {
+      prepare_cleanup_layout(*module, compile_config_.arch);
+      const bool optimize =
+          LLVMModuleOptions::read(*module, compile_config_).opt_level > 0;
+      if (artifact_format_ == "bc-library")
+        ir_finalizer_->export_units(*module, optimize, true);
+      ir_finalizer_->finalize_root(module, optimize);
+      ir_finalizer_->emit_dependencies(*module, [&](const std::string &name,
+                                                    const std::string &bytes) {
+        if (!emitted_units.insert(name).second)
+          return;
+        taichi::create_directories(taichi::join_path(output_dir, "code_units"));
+        std::ofstream output(taichi::join_path(output_dir, name),
+                             std::ios::binary);
+        output.write(bytes.data(), bytes.size());
+        TI_ERROR_IF(!output, "Cannot write finalized AOT code unit {}", name);
+      });
+    } else if (artifact_format_ == "bc-library")
       LLVM::export_code_units(*module, output_dir);
     return module;
   };

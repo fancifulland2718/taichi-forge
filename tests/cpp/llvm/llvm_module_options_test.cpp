@@ -8,6 +8,7 @@
 #include "llvm/Support/SourceMgr.h"
 #include "taichi/codegen/llvm/compiled_kernel_data.h"
 #include "taichi/runtime/llvm/llvm_module_options.h"
+#include "taichi/runtime/llvm/aot_ir_finalizer.h"
 
 namespace taichi::lang {
 
@@ -145,6 +146,141 @@ TEST(LLVMModuleOptions, CpuFastTierEliminatesPrivateAggregateTraffic) {
   config.compile_tier = "balanced";
   config.llvm_opt_level = 0;
   EXPECT_EQ(LLVMModuleOptions::from_config(config).opt_level, 0);
+}
+
+TEST(LLVMAotFinalization, SharesUnitsAndPrunesDeadTransitiveDependencies) {
+  llvm::LLVMContext context;
+  llvm::SMDiagnostic error;
+  auto original = llvm::parseAssemblyString(R"(
+    target datalayout = "e-p:64:64-i64:64-n16:32:64"
+    target triple = "nvptx64-nvidia-cuda"
+    declare void @observable(i32)
+    define internal i32 @leaf(i32 %x) "taichi.aot.real_function" {
+      %s = alloca i32
+      store i32 %x, ptr %s
+      %v = load i32, ptr %s
+      %r = add i32 %v, 1
+      ret i32 %r
+    }
+    define internal void @parent(i32 %x) "taichi.aot.real_function" {
+      br i1 false, label %dead, label %live
+    dead:
+      %r = call i32 @leaf(i32 %x)
+      call void @observable(i32 %r)
+      br label %live
+    live:
+      call void @observable(i32 %x)
+      ret void
+    }
+    define void @entry(i32 %x) {
+      call void @parent(i32 %x)
+      ret void
+    }
+  )",
+                                            error, context);
+  ASSERT_NE(original, nullptr);
+  LLVM::AotIRFinalizer finalizer;
+  auto first = llvm::CloneModule(*original);
+  finalizer.export_units(*first, true, false);  // streaming seal
+  auto second = llvm::CloneModule(*original);
+  finalizer.export_units(*second, true, true);  // ordinary dump
+  EXPECT_EQ(finalizer.statistics().at("aot_cleaned_units"), 2);
+  EXPECT_EQ(finalizer.statistics().at("aot_unit_finalization_hits"), 2);
+  finalizer.finalize_root(first, true);
+  finalizer.finalize_root(second, true);
+  EXPECT_EQ(finalizer.statistics().at("aot_cleaned_roots"), 1);
+  EXPECT_EQ(finalizer.statistics().at("aot_root_finalization_hits"), 1);
+  ASSERT_NE(first->getNamedMetadata(LLVM::kCodeUnits), nullptr);
+  EXPECT_EQ(first->getNamedMetadata(LLVM::kCodeUnits)->getNumOperands(), 1);
+  int emitted = 0;
+  finalizer.emit_dependencies(*first, [&](const auto &name, const auto &bytes) {
+    ++emitted;
+    EXPECT_EQ(name, "code_units/" + LLVM::aot_artifact_sha256(bytes) + ".bc");
+    auto decoded = decode_llvm_module(llvm::MemoryBufferRef(bytes, name),
+                                      context, LLVMModuleEncoding::bitcode);
+    ASSERT_TRUE(bool(decoded));
+    EXPECT_FALSE(llvm::verifyModule(**decoded));
+    EXPECT_EQ((*decoded)->getDataLayout(), first->getDataLayout());
+    EXPECT_NE((*decoded)->getNamedMetadata("taichi.aot.cleanup.v1"), nullptr);
+    for (const auto &f : **decoded)
+      if (f.isDeclaration() && !f.use_empty())
+        EXPECT_EQ(f.getName(), "observable");
+  });
+  EXPECT_EQ(emitted, 1);
+  EXPECT_FALSE(llvm::verifyModule(*first));
+  EXPECT_FALSE(original->getFunction("leaf")->isDeclaration());
+  EXPECT_TRUE(llvm::isa<llvm::AllocaInst>(
+      original->getFunction("leaf")->front().front()));
+  EXPECT_EQ(original->getNamedMetadata("taichi.aot.cleanup.v1"), nullptr);
+}
+
+TEST(LLVMAotFinalization, PreservesEffectsNumericFlagsAndDisabledOptimization) {
+  llvm::LLVMContext context;
+  llvm::SMDiagnostic error;
+  auto source = llvm::parseAssemblyString(R"(
+    target datalayout = "e-p:64:64-i64:64-n16:32:64"
+    declare void @escape(ptr)
+    define float @entry(float %x, ptr %device, i32 %n) {
+      %slot = alloca float
+      %index = alloca i32
+      %escaped = alloca i32
+      store float %x, ptr %slot
+      store i32 0, ptr %index
+      call void @escape(ptr %escaped)
+      br label %loop
+    loop:
+      %i = load i32, ptr %index
+      %more = icmp slt i32 %i, %n
+      br i1 %more, label %body, label %end
+    body:
+      %next = add i32 %i, 1
+      store i32 %next, ptr %index
+      br label %loop
+    end:
+      %v = load float, ptr %slot
+      %iterations = sitofp i32 %i to float
+      %sum = fadd float %v, %iterations
+      store volatile float %sum, ptr %device
+      %old = atomicrmw add ptr %escaped, i32 1 monotonic
+      ret float %sum
+    }
+    !forge.contract = !{!0}
+    !0 = !{!"preserve"}
+  )",
+                                          error, context);
+  ASSERT_NE(source, nullptr);
+  LLVM::AotIRFinalizer finalizer;
+  auto disabled = llvm::CloneModule(*source);
+  finalizer.finalize_root(disabled, false);
+  EXPECT_TRUE(llvm::isa<llvm::AllocaInst>(
+      disabled->getFunction("entry")->front().front()));
+  EXPECT_EQ(disabled->getNamedMetadata("taichi.aot.cleanup.v1"), nullptr);
+  auto cleaned = llvm::CloneModule(*source);
+  finalizer.finalize_root(cleaned, true);
+  EXPECT_FALSE(llvm::verifyModule(*cleaned));
+  EXPECT_NE(cleaned->getNamedMetadata("forge.contract"), nullptr);
+  int allocas = 0, atomics = 0, volatile_stores = 0, additions = 0, calls = 0,
+      phis = 0;
+  for (auto &b : *cleaned->getFunction("entry"))
+    for (auto &i : b) {
+      allocas += llvm::isa<llvm::AllocaInst>(i);
+      atomics += llvm::isa<llvm::AtomicRMWInst>(i);
+      calls += llvm::isa<llvm::CallInst>(i);
+      phis += llvm::isa<llvm::PHINode>(i);
+      if (auto *store = llvm::dyn_cast<llvm::StoreInst>(&i))
+        volatile_stores += store->isVolatile();
+      if (i.getOpcode() == llvm::Instruction::FAdd) {
+        ++additions;
+        EXPECT_FALSE(i.getFastMathFlags().any());
+      }
+    }
+  EXPECT_EQ(allocas, 1);
+  EXPECT_EQ(atomics, 1);
+  EXPECT_EQ(volatile_stores, 1);
+  EXPECT_EQ(additions, 1);
+  EXPECT_EQ(calls, 1);
+  EXPECT_GT(phis, 0);
+  EXPECT_EQ(finalizer.statistics().at("aot_cleaned_roots"), 1);
 }
 
 }  // namespace taichi::lang
