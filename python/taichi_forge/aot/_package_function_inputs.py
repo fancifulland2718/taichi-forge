@@ -244,6 +244,19 @@ def discover(sources, imported, *, preparation_receivers=None, resource_inventor
     from taichi_forge.lang.matrix import MatrixField
     from taichi_forge.lang.struct import StructField
 
+    descriptors = {}
+
+    def static_member(cls, name, default=None):
+        # Discovery neither executes models nor mutates their classes. Resolve
+        # inherited descriptors once per pass, without invoking descriptors.
+        # A later pass starts fresh after declaration/source normalization.
+        # Use identity without executing a custom metaclass hash/equality.
+        # Retain the class with its descriptor so identities cannot be reused.
+        key = id(cls), name
+        if key not in descriptors:
+            descriptors[key] = cls, inspect.getattr_static(cls, name, default)
+        return descriptors[key][1]
+
     owners, classes, functions, kernels, kernel_definitions = {}, {}, {}, {}, {}
     cached_sources = set()
     member_writes = {}
@@ -294,7 +307,7 @@ def discover(sources, imported, *, preparation_receivers=None, resource_inventor
                 entry = namespace.get(definition["node"].name)
             else:
                 cls = namespace.get(source_class(tree, definition["owner"]))
-                entry = inspect.getattr_static(cls, definition["node"].name, None) if inspect.isclass(cls) else None
+                entry = static_member(cls, definition["node"].name, None) if inspect.isclass(cls) else None
             if resource_inventory is not None and inspect.isfunction(entry):
                 functions[entry] = (module, definition["node"])
             kernel = getattr(entry, "_primal", None)
@@ -346,7 +359,7 @@ def discover(sources, imported, *, preparation_receivers=None, resource_inventor
                 method, receiver, restore = preparation
                 expression = restore.visit(copy.deepcopy(item["input_expression"]))
             else:
-                method = inspect.getattr_static(classes[identity], item["input_method"], None)
+                method = static_member(classes[identity], item["input_method"], None)
                 receiver, expression = "self", item["input_expression"]
             if method not in functions:
                 raise ValueError("Prepared input method is outside its ordinary source definition: "
@@ -385,7 +398,7 @@ def discover(sources, imported, *, preparation_receivers=None, resource_inventor
     inventory = set()
     if resource_inventory is not None:
         identity, method = resource_inventory
-        function = inspect.getattr_static(classes[identity], method, None)
+        function = static_member(classes[identity], method, None)
         if function not in functions or function in kernels:
             raise ValueError("Write inventory requires an ordinary recording definition: " + identity + "." + method)
         try:
@@ -406,7 +419,7 @@ def discover(sources, imported, *, preparation_receivers=None, resource_inventor
         if result is None and isinstance(expression, ast.Attribute):
             cls = _source_value(expression.value, namespace)
             if inspect.isclass(cls):
-                result = inspect.getattr_static(cls, expression.attr, None)
+                result = static_member(cls, expression.attr, None)
         return result
 
     namespaces = {}
@@ -446,7 +459,7 @@ def discover(sources, imported, *, preparation_receivers=None, resource_inventor
         if resource_inventory is not None and len(alternatives) > 1 and all(kind in owners for kind in alternatives):
             root, path = owner.root or owner.identity, (*owner.path, name)
             return _Choice((root, path), tuple(_Owner(kind, root, path) for kind in alternatives))
-        if resource_inventory is not None and isinstance(inspect.getattr_static(classes[owner.identity], name, None), property):
+        if resource_inventory is not None and isinstance(static_member(classes[owner.identity], name, None), property):
             inventory.add((owner.identity, ()))
         if resource_inventory is not None and (
             item.get("kind") == "host_owner_sequence"
@@ -478,7 +491,7 @@ def discover(sources, imported, *, preparation_receivers=None, resource_inventor
         if item is not None:
             return item
         if isinstance(receiver, _Owner):
-            method = inspect.getattr_static(classes[receiver.identity], name, None)
+            method = static_member(classes[receiver.identity], name, None)
             if resource_inventory is not None and type(method) is staticmethod and method.__func__ in functions:
                 return _Host(method.__func__)
             if inspect.isfunction(method) and method in kernels:
@@ -486,7 +499,7 @@ def discover(sources, imported, *, preparation_receivers=None, resource_inventor
             if resource_inventory is not None and inspect.isfunction(method) and method in functions:
                 return _Host(method, receiver)
         if resource_inventory is not None and isinstance(receiver, _Record):
-            method = inspect.getattr_static(receiver.cls, name, None)
+            method = static_member(receiver.cls, name, None)
             if inspect.isfunction(method) and method in functions:
                 return _Host(method, receiver)
         return None
@@ -786,7 +799,7 @@ def discover(sources, imported, *, preparation_receivers=None, resource_inventor
                 if isinstance(part.func, ast.Attribute):
                     receiver = declared_receiver(part.func.value)
                     if isinstance(receiver, _Owner):
-                        resolved = inspect.getattr_static(classes[receiver.identity], part.func.attr, None)
+                        resolved = static_member(classes[receiver.identity], part.func.attr, None)
                 known = (
                     (inspect.isfunction(resolved) and (resolved in functions or resolved in kernels))
                     or _plain_record(resolved)
@@ -1185,7 +1198,7 @@ def discover(sources, imported, *, preparation_receivers=None, resource_inventor
                     receiver = value(expression.value, visiting, bindings)
                     if isinstance(receiver, _Owner):
                         cls = classes[receiver.identity]
-                        method = inspect.getattr_static(cls, expression.attr, None)
+                        method = static_member(cls, expression.attr, None)
                         if inspect.isfunction(method) and (method in functions or method in kernels):
                             return method, receiver
                 return None, None
@@ -1233,7 +1246,7 @@ def discover(sources, imported, *, preparation_receivers=None, resource_inventor
                 if (expression.attr in owners[receiver.identity]
                         or any(expression.attr in member_writes.get(base, ()) for base in cls.__mro__)):
                     return None
-                descriptor = inspect.getattr_static(cls, expression.attr, None)
+                descriptor = static_member(cls, expression.attr, None)
                 if type(descriptor) is functools.cached_property and descriptor.func in cached_sources:
                     return descriptor.func
             return None

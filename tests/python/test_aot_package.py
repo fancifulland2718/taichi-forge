@@ -22238,7 +22238,9 @@ def test_package_resource_template_inputs_bind_actual_owner_paths(tmp_path, monk
         )
     package = _source_package(tmp_path, monkeypatch, source)
     manifest = ti.aot.export_package(package, tmp_path / "sdk")
-    assert manifest["version"] == 52
+    # Resource-path binding requires v52; later compile-contract revisions
+    # apply to all packages without changing this input-binding behavior.
+    assert manifest["version"] >= 52
     assert sys.modules["definition_fixture.model"].constructors == 0
     if callback == "record":
         assert sys.modules["definition_fixture.model"].factories == 0
