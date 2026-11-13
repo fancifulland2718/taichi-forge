@@ -438,9 +438,9 @@ class DenseField:
         return NdarrayType(dtype=self.dtype, ndim=len(self.shape))
 
     def validate(self, field):
-        from taichi_forge.lang._storage_view import describe_storage
+        from taichi_forge.lang._storage_view import _describe_field_layout
 
-        description = describe_storage(field)
+        description = _describe_field_layout(field)
         if not description.supported or not (
             description.properties["ndarray_abi_compatible"]
             or description.properties["single_record_stride_compatible"]
@@ -462,9 +462,9 @@ class _ModelTensorField(DenseField):
     element_shape: tuple
 
     def validate(self, field):
-        from taichi_forge.lang._storage_view import describe_storage
+        from taichi_forge.lang._storage_view import _describe_field_layout
 
-        description = describe_storage(field)
+        description = _describe_field_layout(field)
         if (
             not description.supported
             or description.properties["has_negative_stride"]

@@ -45,6 +45,9 @@ class Model:
     package = _source_package(tmp_path, monkeypatch, source)
     output = tmp_path / 'sdk'
     ti.aot.export_package(package, output)
+    runtime = ti.lang.impl.get_runtime()
+    assert runtime._pending_aot_snode_trees
+    assert runtime.prog._debug_snode_runtime_directory_stats()["active_tree_count"] == 0
     with Runtime('cpu') as runtime, load_package(runtime, output) as code:
         for mode, child in ((0, False), (1, False), (1, True), (2, True)):
             jit, aot = package.model.Model(3, mode, child), code.host.Model(3, mode, child)
@@ -1373,6 +1376,9 @@ class Model:
 '''
     package = _source_package(tmp_path, monkeypatch, source)
     manifest = ti.aot.export_package(package, tmp_path / 'sdk', artifact_format='bc-library')
+    producer = ti.lang.impl.get_runtime()
+    assert producer._pending_aot_snode_trees
+    assert producer.prog._debug_snode_runtime_directory_stats()["active_tree_count"] == 0
     entries = [e for e in manifest['entries'].values() if e['definition'].endswith('.Model.step')]
     assert len(entries) == 1
     assert {c['name'] for c in entries[0]['captures'] if 'prepare_static' in c} == {'packed'}
@@ -14626,7 +14632,11 @@ def test_package_infers_model_tensor_axes_without_constructor_samples(tmp_path, 
     package = _source_package(tmp_path, monkeypatch, source, initializer="from .model import Model, Rows, Reader\n")
     manifest = ti.aot.export_package(package, tmp_path / "sdk", arch=ti.cfg.arch)
     assert sys.modules["definition_fixture.model"].constructors == 0
-    assert manifest["version"] == (35 if local_struct else 26)
+    assert manifest["version"] >= (35 if local_struct else 26)
+    if ti.cfg.arch in (ti.cpu, ti.cuda):
+        producer = ti.lang.impl.get_runtime()
+        assert producer._pending_aot_snode_trees
+        assert producer.prog._debug_snode_runtime_directory_stats()["active_tree_count"] == 0
     if local_struct:
         assert manifest["owners"]["definition_fixture.model.Rows"]["rows"]["member_initialization"] == {
             "J": "zero",

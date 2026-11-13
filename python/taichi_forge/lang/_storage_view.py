@@ -210,8 +210,8 @@ def _current_program():
     return program
 
 
-def _describe_field(field, access):
-    impl.get_runtime().materialize()
+def _describe_field(field, access, *, for_aot=False):
+    impl.get_runtime().materialize(for_aot=for_aot)
     program = _current_program()
     if isinstance(field, ScalarField):
         components = (field.snode.ptr,)
@@ -288,6 +288,20 @@ def describe_storage(obj, *, access="readwrite"):
     if field_result is not None:
         return StorageDescription(field_result)
     return StorageDescription(_failure_reason="kUnsupportedStorageKind")
+
+
+def _describe_field_layout(field):
+    """Validate AOT Fields without allocating LLVM build-witness storage.
+
+    LLVM descriptors use the compiled SNode offsets and generation. Pointer
+    resolution remains in the ordinary storage/binding path; GFX retains its
+    existing device-pointer qualification.
+    """
+    if isinstance(field, (ScalarField, MatrixField)) and impl.current_cfg().arch in (
+        _ti_core.Arch.x64, _ti_core.Arch.arm64, _ti_core.Arch.cuda
+    ):
+        return StorageDescription(_describe_field(field, "readwrite", for_aot=True))
+    return describe_storage(field)
 
 
 def _flatten_storage_to_scalar_vector(description):

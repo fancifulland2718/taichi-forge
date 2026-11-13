@@ -901,6 +901,8 @@ def test_aot_export_then_jit_field_storage(tmp_path, graph_first):
 
 @test_utils.test(arch=[ti.cpu, ti.cuda], offline_cache=False)
 def test_aot_compile_only_tree_retirement_and_host_access():
+    from taichi_forge.aot._component import DenseField
+
     value = ti.field(ti.f32)
     builder = ti.FieldsBuilder()
     builder.dense(ti.i, 4).place(value)
@@ -913,6 +915,11 @@ def test_aot_compile_only_tree_retirement_and_host_access():
     current = builder._finalize_for_aot()
     assert current.id == old_id
     runtime = ti.lang.impl.get_runtime()
+    declaration = DenseField(ti.f32, (4,), "values")
+    assert declaration.validate(replacement).supported
+    assert runtime.prog._debug_snode_runtime_directory_stats()["active_tree_count"] == 0
+    with pytest.raises(RuntimeError, match="SNodeTree has been destroyed"):
+        declaration.validate(value)
     with pytest.raises(RuntimeError, match="inactive SNodeTree"):
         runtime.prog._materialize_compiled_snode_tree(old_id, old_generation)
     # Host access must resume storage too; skip the retired queued wrapper.
