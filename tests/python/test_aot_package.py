@@ -5524,6 +5524,118 @@ def test_package_field_like_rejects_unproved_layouts(tmp_path, monkeypatch, fail
     assert not (tmp_path / "sdk").exists()
 
 
+def test_package_allocation_slice_preserves_layout_dependencies():
+    from taichi_forge.aot._package_resource_slice import AllocationSchema
+
+    schema = {
+        "unrelated": {"kind": "borrowed_field", "source_path": ["missing"]},
+        "origin": {"kind": "owner_input"},
+        "origin_n": {"kind": "owner_dim", "path": ["origin", "n"]},
+        "origin_mode": {"kind": "static", "path": ["origin", "mode"]},
+        "buffer": {"kind": "record"},
+        "capacity": {"kind": "dimension"},
+        "extent": {"kind": "dimension", "expression": ["add", "capacity", 1]},
+        "left": {
+            "kind": "dense_field", "path": ["buffer", "left"], "group": "joint",
+            "shape": ["extent"], "type_node": ast.parse("self.origin.n", mode="eval").body,
+        },
+        "right": {
+            "kind": "dense_field", "path": ["buffer", "right"], "group": "joint",
+            "shape_policy": {"condition_path": ["origin", "mode"], "if_true": ["capacity"], "if_false": [1]},
+        },
+        "particles": {"kind": "dense_field", "group": "particles", "struct_field": True},
+        "flag": {"kind": "static"},
+        "borrow": {
+            "kind": "borrowed_field",
+            "source_policy": {"condition": "flag", "if_true": ["buffer", "left"], "if_false": ["buffer", "right"]},
+        },
+    }
+    index = AllocationSchema(schema)
+    expected = [key for key in schema if key not in {"unrelated", "particles", "flag", "borrow"}]
+    for member in ("left", "right"):
+        selected, children = index.select([("buffer", member)])
+        assert list(selected) == expected  # Native placement retains declaration order.
+        assert children == {"origin": {("n",), ("mode",)}}
+    selected, children = index.select([("borrow",)])
+    assert list(selected) == [*expected, "flag", "borrow"]
+    assert children == {"origin": {("n",), ("mode",)}}
+    selected, children = index.select([("particles", "position")])
+    assert list(selected) == ["particles"]
+    assert children == {}
+    for path, message in (
+        (("missing",), "no declared resource path"),
+        (("origin",), "concrete member"),
+        (("buffer", "left", "bad"), "not a declared Field member"),
+        (("unrelated",), "no declared resource path"),
+    ):
+        with pytest.raises(ValueError, match=message):
+            index.select([path])
+    assert list(index.select([("buffer", "left")])[0]) == expected
+
+
+def test_package_allocation_slice_releases_temporary_schema_without_gc():
+    import gc
+    import weakref
+    from taichi_forge.aot._package_resource_slice import allocation_schema
+
+    class Schema(dict):
+        pass
+
+    automatic = gc.isenabled()
+    gc.disable()
+    try:
+        schema = Schema(n={"kind": "dimension"}, value={"kind": "dense_field", "shape": ["n"]})
+        reference = weakref.ref(schema)
+        selected, _ = allocation_schema(schema, [("value",)])
+        assert list(selected) == ["n", "value"]
+        del schema, selected
+        assert reference() is None
+    finally:
+        if automatic:
+            gc.enable()
+
+
+@pytest.mark.parametrize("failure", [False, True])
+def test_package_host_projection_releases_build_references_without_gc(failure):
+    import gc
+    import weakref
+    from taichi_forge.aot._package import PackageExportError, _host_projection
+    from taichi_forge.tools._compiled_host import decorator_resolver
+
+    class Token:
+        pass
+
+    class Namespace(dict):
+        pass
+
+    def project():
+        tree = ast.parse("import taichi_forge as ti\nanswer = " + ("ti.unknown()" if failure else "42"))
+        tree._package_factory_declarations = []
+        namespace, builder, owner = Namespace(ti=ti), Token(), Token()
+        references = [weakref.ref(value) for value in (tree, namespace, builder, owner)]
+        try:
+            text, _, _ = _host_projection(
+                "sample", tree, decorator_resolver(tree), {}, [], {}, "sample", set(), False,
+                namespace, builder, construction_schema=lambda identity, retained=owner: {},
+            )
+        except PackageExportError:
+            assert failure
+        else:
+            assert not failure
+            assert "answer = 42" in text
+        # The producer must only release its own references, including on error.
+        assert namespace["ti"] is ti and len(tree.body) == 2
+        return references
+
+    automatic = gc.isenabled()
+    gc.disable()
+    try:
+        assert all(reference() is None for reference in project())
+    finally:
+        if automatic:
+            gc.enable()
+
+
 @pytest.mark.parametrize(
     "kind", ["vector", "derived_vector", "owner_dimension_vector", "owner_dtype", "struct", "struct_helper", "struct_rejected_helper", "invalid_type", "invalid_value"]
 )

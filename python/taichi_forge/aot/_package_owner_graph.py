@@ -37,6 +37,7 @@ class OwnerGraph:
         self.imported, self.module = imported, module
         self._contexts = {}
         self._resource_contexts = {}
+        self._allocation_schemas = {}
         self.definitions = {
             name + "." + owner: (name, source_class(tree, owner), copy.deepcopy(schema))
             for name, _, _, _, tree, _, schemas, _ in sources
@@ -86,9 +87,11 @@ class OwnerGraph:
         schema = original
         source_children = {}
         if resource_paths is not None:
-            from ._package_resource_slice import allocation_schema
+            from ._package_resource_slice import AllocationSchema
 
-            schema, source_children = allocation_schema(schema, resource_paths)
+            if identity not in self._allocation_schemas:
+                self._allocation_schemas[identity] = AllocationSchema(original)
+            schema, source_children = self._allocation_schemas[identity].select(resource_paths)
         resource_key = None
         if resource_only:
             token = identity, None if resource_paths is None else tuple(sorted(resource_paths))

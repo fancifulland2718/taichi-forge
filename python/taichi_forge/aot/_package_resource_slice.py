@@ -3,15 +3,44 @@
 import ast
 
 
+class AllocationSchema:
+    """Index one build-owned declaration snapshot, never resource instances.
+
+    OwnerGraph keeps the source immutable and copies the selected declarations
+    before applying choices. Indices may therefore be reused by all borrowed
+    members without merging their input slots or native allocation identities.
+    """
+
+    def __init__(self, schema):
+        self.schema = schema
+        self.paths, self.records, self.groups = {}, {}, {}
+        for key, item in schema.items():
+            path = tuple(item.get("path", (key,)))
+            self.paths.setdefault(path, []).append(key)
+            if item["kind"] == "record":
+                self.records.setdefault(path, []).append(key)
+            if item["kind"] == "dense_field":
+                self.groups.setdefault(item.get("group", "fields"), []).append(key)
+
+    def select(self, source_paths):
+        return _allocation_schema(self, source_paths)
+
+
 def allocation_schema(schema, source_paths):
+    return AllocationSchema(schema).select(source_paths)
+
+
+def _allocation_schema(index, source_paths):
+    schema = index.schema
     selected, pending, children = set(), [], {}
+    expanded_groups = set()
 
     def require_path(path):
         path = tuple(path)
         matches = [
-            (key, tuple(item.get("path", (key,))))
-            for key, item in schema.items()
-            if path[: len(item.get("path", (key,)))] == tuple(item.get("path", (key,)))
+            (key, path[:length])
+            for length in range(len(path) + 1)
+            for key in index.paths.get(path[:length], ())
         ]
         if not matches:
             raise ValueError("Borrowed allocation dependency has no declared resource path: " + ".".join(path))
@@ -37,14 +66,17 @@ def allocation_schema(schema, source_paths):
             pending.append(key)
 
     def expression_dependencies(value):
-        if isinstance(value, str):
-            require(value)
-        elif isinstance(value, (list, tuple)):
-            for child in value:
-                expression_dependencies(child)
-        elif isinstance(value, dict):
-            for child in value.values():
-                expression_dependencies(child)
+        # A recursive local function retains itself and, through require(),
+        # the source schema until cyclic GC. Keep this temporary walk acyclic.
+        values = [value]
+        while values:
+            value = values.pop()
+            if isinstance(value, str):
+                require(value)
+            elif isinstance(value, (list, tuple)):
+                values.extend(reversed(value))
+            elif isinstance(value, dict):
+                values.extend(reversed(tuple(value.values())))
 
     for path in source_paths:
         require_path(path)
@@ -52,9 +84,8 @@ def allocation_schema(schema, source_paths):
         key = pending.pop()
         item = schema[key]
         path = tuple(item.get("path", (key,)))
-        for parent, declaration in schema.items():
-            prefix = tuple(declaration.get("path", (parent,)))
-            if declaration["kind"] == "record" and len(prefix) < len(path) and path[: len(prefix)] == prefix:
+        for length in range(len(path)):
+            for parent in index.records.get(path[:length], ()):
                 require(parent)
         for condition in item.get("conditions", {}):
             require(condition)
@@ -79,10 +110,10 @@ def allocation_schema(schema, source_paths):
         if item["kind"] == "dense_field":
             # Native group placement includes siblings even when only one Field
             # is borrowed. Keep that ABI, including its original declaration order.
-            for sibling, declaration in schema.items():
-                if declaration["kind"] == "dense_field" and declaration.get("group", "fields") == item.get(
-                    "group", "fields"
-                ):
+            group = item.get("group", "fields")
+            if group not in expanded_groups:
+                expanded_groups.add(group)
+                for sibling in index.groups[group]:
                     require(sibling)
         nodes = [item["type_node"]] if "type_node" in item else []
         nodes.extend(ast.parse(source, mode="eval").body for source in item.get("dimension_sources", {}).values())

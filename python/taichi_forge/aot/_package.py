@@ -1368,40 +1368,49 @@ def _host_projection(
                 )
             return self.generic_visit(node)
 
-    projector = Project()
-    projected = projector.visit(copy.deepcopy(tree))
-    factory_definitions = {fact["definition"] for fact in tree._package_factory_declarations}
-    loaded_names = {n.id for n in ast.walk(projected) if isinstance(n, ast.Name) and isinstance(n.ctx, ast.Load)}
+    try:
+        projector = Project()
+        projected = projector.visit(copy.deepcopy(tree))
+        factory_definitions = {fact["definition"] for fact in tree._package_factory_declarations}
+        loaded_names = {n.id for n in ast.walk(projected) if isinstance(n, ast.Name) and isinstance(n.ctx, ast.Load)}
 
-    class DeclarationImports(ast.NodeTransformer):
-        def visit_ImportFrom(self, node):
-            retained = []
-            for alias in node.names:
-                local = alias.asname or alias.name
-                value = namespace.get(local)
-                definition = (value.__module__ + "." + value.__qualname__) if inspect.isfunction(value) else None
-                if local in loaded_names or definition not in factory_definitions:
-                    retained.append(alias)
-            node.names = retained
-            return node if retained else None
+        class DeclarationImports(ast.NodeTransformer):
+            def visit_ImportFrom(self, node):
+                retained = []
+                for alias in node.names:
+                    local = alias.asname or alias.name
+                    value = namespace.get(local)
+                    definition = (value.__module__ + "." + value.__qualname__) if inspect.isfunction(value) else None
+                    if local in loaded_names or definition not in factory_definitions:
+                        retained.append(alias)
+                node.names = retained
+                return node if retained else None
 
-    projected = DeclarationImports().visit(projected)
-    # Preserve future-import placement and the original module docstring.
-    position = 0
-    for node in projected.body:
-        if (isinstance(node, ast.ImportFrom) and node.module == "__future__") or (
-            isinstance(node, ast.Expr) and isinstance(node.value, ast.Constant) and isinstance(node.value.value, str)
-        ):
-            position += 1
-        else:
-            break
-    projected.body[position:position] = ast.parse(
-        f"from taichi_forge_runtime.aot._package import bind_module as {_PREFIX}bind\n"
-        f"{_PREFIX}runtime = {_PREFIX}bind(__name__)\n"
-    ).body
-    ast.fix_missing_locations(projected)
-    compile(projected, f"<projected-host:{module}>", "exec")
-    return ast.unparse(projected) + "\n", projector.minimum_version, projector.producer_only
+        projected = DeclarationImports().visit(projected)
+        # Preserve future-import placement and the original module docstring.
+        position = 0
+        for node in projected.body:
+            if (isinstance(node, ast.ImportFrom) and node.module == "__future__") or (
+                isinstance(node, ast.Expr) and isinstance(node.value, ast.Constant) and isinstance(node.value.value, str)
+            ):
+                position += 1
+            else:
+                break
+        projected.body[position:position] = ast.parse(
+            f"from taichi_forge_runtime.aot._package import bind_module as {_PREFIX}bind\n"
+            f"{_PREFIX}runtime = {_PREFIX}bind(__name__)\n"
+        ).body
+        ast.fix_missing_locations(projected)
+        compile(projected, f"<projected-host:{module}>", "exec")
+        return ast.unparse(projected) + "\n", projector.minimum_version, projector.producer_only
+    finally:
+        # Local transformer classes form cycles (including their MRO). Their
+        # method closures must not pin the complete declaration/owner graph or
+        # native builder until a later full GC, including on projection failure.
+        # Only drop our references; caller-owned schemas and resources stay intact.
+        tree = definitions = definitions_at = numerical = None
+        owners = context_schemas = binding_schemas = input_families = None
+        namespace = builder = host_contexts = construction_schema = None
 
 
 def _preflight_package(package, *, arch=None, source_root=None):
