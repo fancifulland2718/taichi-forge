@@ -22770,7 +22770,17 @@ class Model:
         np.testing.assert_array_equal(b.out.to_numpy(), 1)
 
 
-@pytest.mark.parametrize("mixed", [False, True, "conditional_extent", "early_return", "early_return_free_domain"])
+@pytest.mark.parametrize(
+    "mixed",
+    [
+        False,
+        True,
+        "conditional_extent",
+        "early_return",
+        "early_return_free_domain",
+        "early_return_free_allocator",
+    ],
+)
 @test_utils.test(arch=[ti.cpu, ti.cuda], offline_cache=False)
 def test_package_boolean_workspace_reuses_code_without_allocating_absent_groups(
     tmp_path, monkeypatch, mixed
@@ -22808,8 +22818,11 @@ class Model:
         b.dispatch(self.step)
         return b.compile()
 """
-    returns_early = mixed in ("early_return", "early_return_free_domain")
+    returns_early = mixed in (
+        "early_return", "early_return_free_domain", "early_return_free_allocator"
+    )
     if returns_early:
+        free_allocator = mixed == "early_return_free_allocator"
         source = source.replace(
             "@ti.data_oriented\nclass Model:",
             "class Prepared:\n"
@@ -22833,6 +22846,17 @@ class Model:
                 "\ndef configure(owner):\n"
                 "    scope = ti.experimental.ResourceScope(owner)\n"
                 "    scope.static('enabled', choices=(False, True))\n"
+            )
+        if free_allocator:
+            source = source.replace("class Model(Prepared):", "class Model:")
+            source = source.replace("self.prepare(None)", "allocate_optional(self)")
+            source += (
+                "\ndef allocate_optional(owner):\n"
+                "    if not owner.enabled:\n"
+                "        return\n"
+                "    with resource_group(owner, 'optional', initialization='zero') as fields:\n"
+                "        fields.workspace = fields.field(ti.i32, shape=fields.dim('n'))\n"
+                "    return 'prepared'\n"
             )
         mixed = False
     if mixed is True:
