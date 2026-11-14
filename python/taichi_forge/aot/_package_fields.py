@@ -164,6 +164,7 @@ def construct_fields(
     )
     from taichi_forge_runtime._dimensions import evaluate_extent
     from ._package_records import read_member, write_member
+    from taichi_forge.lang.util import _declaration_traceback
 
     fields = dict(
         sorted(
@@ -175,6 +176,12 @@ def construct_fields(
     # constructor sample. Resolve aliases before allocating any witness Field.
     type_nodes = {key: item["type_node"] for key, item in schema.items() if "type_node" in item}
 
+    # These private, compile-only fields are never user allocations. Preserve
+    # their declaration origin instead of saving thousands of identical producer
+    # stacks (one per scalar lane, adjoint and Dense node).
+    traceback_token = _declaration_traceback.set(
+        f"  AOT layout witness for {module}.{type(owner).__name__}\n"
+    )
     try:
         def owner_dtype(expression):
             from taichi_forge_runtime._static_values import read_static_key
@@ -414,6 +421,17 @@ def construct_fields(
                 values[group] = {}
         for position, (kind, name, item, dtype, concrete, axes) in sorted(events.items()):
             group = item.get("group", "fields")
+            if group not in reused:
+                origin = item.get("declaration_module", module)
+                source = (
+                    vars(imported_modules[origin])
+                    if imported_modules is not None and origin in imported_modules else namespace
+                )
+                declaring_owner = item.get("declaration_owner", type(owner).__name__)
+                _declaration_traceback.set(
+                    f'  File "{source.get("__file__", origin)}", line {position[0]}, '
+                    f'in AOT layout witness {origin}.{declaring_owner}.{name}\n'
+                )
             if kind == "placement":
                 if group not in reused:
                     placements[position[:2]] = builders[group].dense(axes, tuple(concrete))
@@ -495,6 +513,7 @@ def construct_fields(
                 witnesses[keys[group]] = values[group], tree
         return declarations
     finally:
+        _declaration_traceback.reset(traceback_token)
         # Recursive dtype and dimension resolvers are construction-only. Their
         # cells otherwise retain the owner, schema and source namespaces until
         # cyclic GC, even for a dimension-only owner or a failed allocation.

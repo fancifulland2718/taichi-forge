@@ -1,4 +1,5 @@
 import functools
+from contextvars import ContextVar
 import os
 import traceback
 import warnings
@@ -370,7 +371,16 @@ def warning(msg, warning_type=UserWarning, stacklevel=1, print_stack=True):
     warnings.warn(Fore.YELLOW + Style.BRIGHT + msg + Style.RESET_ALL, warning_type)
 
 
+# Synthetic producer allocations have a source declaration, not a user Python
+# allocation frame. A scoped override lets all tensor lanes share that origin
+# without repeatedly walking and formatting the same compiler call stack.
+_declaration_traceback = ContextVar("_declaration_traceback", default=None)
+
+
 def get_traceback(stacklevel=1):
+    declaration = _declaration_traceback.get()
+    if declaration is not None:
+        return declaration
     s = traceback.extract_stack()[: -1 - stacklevel]
     return "".join(traceback.format_list(s))
 

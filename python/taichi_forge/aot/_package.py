@@ -1370,7 +1370,31 @@ def _host_projection(
 
     try:
         projector = Project()
-        projected = projector.visit(copy.deepcopy(tree))
+        # Numerical bodies become descriptors (or disappear) in visit_FunctionDef.
+        # Do not clone their potentially large IR syntax just to discard it. Walk
+        # only retained scopes, using the same definition locations as projection;
+        # error interfaces and normalized Host preparations still need their bodies.
+        memo = {}
+        pending = [tree] if definitions_at else []
+        while pending:
+            node = pending.pop()
+            definition = (
+                definitions_at.get((node.lineno, node.col_offset))
+                if isinstance(node, ast.FunctionDef) else None
+            )
+            if (
+                definition is not None and not definition.get("error_interface")
+                and getattr(node, "_package_free_preparation", None) is None
+            ):
+                memo[id(node.body)] = []
+            else:
+                pending.extend(ast.iter_child_nodes(node))
+        # Module-level analysis tables are read from the producer tree above;
+        # only syntax and annotations on retained child nodes enter the Host copy.
+        host_tree = ast.Module(body=tree.body, type_ignores=tree.type_ignores)
+        host_tree = copy.deepcopy(host_tree, memo)
+        memo.clear()
+        projected = projector.visit(host_tree)
         factory_definitions = {fact["definition"] for fact in tree._package_factory_declarations}
         loaded_names = {n.id for n in ast.walk(projected) if isinstance(n, ast.Name) and isinstance(n.ctx, ast.Load)}
 

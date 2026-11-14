@@ -5873,6 +5873,47 @@ def test_package_field_witness_releases_construction_references_without_gc(failu
 
 
 @pytest.mark.parametrize("failure", [False, True])
+@test_utils.test(arch=ti.cpu, offline_cache=False)
+def test_package_witness_tracebacks_use_declarations_and_restore_caller(monkeypatch, failure):
+    from types import SimpleNamespace
+    from taichi_forge.aot._package_fields import construct_fields
+    from taichi_forge.lang import util
+
+    owner, trees = SimpleNamespace(), []
+    schema = {"values": dict(
+        kind="dense_field", type_node=ast.parse("ti.types.vector(4, ti.f32)", mode="eval").body,
+        shape=[0 if failure else 3], allocation=[42, 8], dimension_sources={},
+        declaration_module="sample", declaration_owner="Model",
+    )}
+
+    def unexpected_stack(*args, **kwargs):
+        raise AssertionError("Synthetic allocation walked the producer stack")
+
+    try:
+        with monkeypatch.context() as patch:
+            patch.setattr(util.traceback, "extract_stack", unexpected_stack)
+            try:
+                construct_fields(owner, schema, {"ti": ti, "__file__": "sample.py"}, "sample", field_trees=trees)
+            except ValueError as error:
+                assert failure and "Field extents" in str(error)
+            else:
+                assert not failure and len(trees) == 1
+                members = owner.values._get_field_members()
+                origin = members[0].declaration_tb
+                assert 'File "sample.py", line 42' in origin
+                assert "AOT layout witness sample.Model.values" in origin
+                assert all(member.declaration_tb is origin for member in members)
+        # Both success and rejection must restore normal user diagnostics.
+        normal = ti.field(ti.i32, shape=1)
+        assert "test_package_witness_tracebacks" in normal._get_field_members()[0].declaration_tb
+        normal[0] = 7
+        assert normal[0] == 7
+    finally:
+        for tree in trees:
+            tree.destroy()
+
+
+@pytest.mark.parametrize("failure", [False, True])
 def test_package_type_resolution_releases_build_references_without_gc(failure):
     import gc
     import weakref
@@ -5953,6 +5994,45 @@ def test_package_host_projection_releases_build_references_without_gc(failure):
     finally:
         if automatic:
             gc.enable()
+
+
+@pytest.mark.parametrize("kind", ["kernel", "pyfunc", "func", "real_func", "closure"])
+def test_package_host_projection_does_not_copy_discarded_numerical_bodies(kind):
+    from taichi_forge.aot._package import _host_projection
+    from taichi_forge.tools._compiled_host import decorator_resolver
+
+    class NumericalBody(list):
+        def __deepcopy__(self, memo):
+            raise AssertionError("Host projection copied a discarded numerical body")
+
+    tree = ast.parse("""
+def factory(bias):
+    def numerical(x):
+        return x * x + bias
+    return numerical
+""")
+    tree._package_factory_declarations = []
+    node = tree.body[0].body[0]
+    node.body = NumericalBody(node.body)
+    original = ast.dump(tree, include_attributes=True)
+    definition = dict(name="factory.numerical", node=node, kind=kind, owner=None)
+    if kind == "closure":
+        definition.update(closure_definition=True, closure_names=["bias"])
+    text, _, _ = _host_projection(
+        "sample", tree, decorator_resolver(tree), {}, [definition],
+        {definition["name"]: {"symbol": "entry_symbol"}}, "sample", set(), False, {}, None,
+    )
+    assert "return x * x" not in text
+    assert "def factory(bias):" in text and "return numerical" in text
+    if kind == "closure":
+        assert "closure_entry('sample.factory.numerical', {'bias': bias})" in text
+    elif kind in ("kernel", "pyfunc"):
+        assert "entry('entry_symbol')" in text
+    else:
+        assert "def numerical" not in text
+    # Projection must not consume or edit the producer's numerical syntax.
+    assert ast.dump(tree, include_attributes=True) == original
+    assert len(node.body) == 1
 
 
 @pytest.mark.parametrize(
