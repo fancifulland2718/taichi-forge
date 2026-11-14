@@ -2173,6 +2173,25 @@ def _export_package(package, output, *, arch, caps, source_root, compilation, ar
                     **{key: reduce(getattr, path, receiver) for key, path in definition["function_resources"].items()},
                 }
 
+            def validate_capture(code, capture_owner, capture_environment, capture_schema):
+                if "closure_environment" in definition and any(
+                    capture_schema[key].get("owner_alternatives")
+                    for key in owner_bindings(capture_environment, capture_schema, code.used)
+                ):
+                    _fail(name, node, "Closure factory using a child implementation choice requires its own typed root")
+                condition_values = {**code.static, **{key: static_key(value) for key, value in code.objects.items()}}
+                for attribute in {key for key, _ in code.contract["captures"]} | code.static.keys():
+                    resource = capture_schema.get(attribute, {})
+                    if (resource.get("external") or resource.get("dynamic_input_storage")) and attribute in code.dynamic:
+                        continue
+                    if any(condition_values.get(key) != static_key(value)
+                           for key, value in resource.get("conditions", {}).items()):
+                        _fail(
+                            name,
+                            node,
+                            f"Conditional resource {attribute!r} requires its declared static guard in the numerical entry",
+                        )
+
             try:
                 if "closure_environment" not in definition and any(
                     item.get("owner_alternatives")
@@ -2184,6 +2203,7 @@ def _export_package(package, output, *, arch, caps, source_root, compilation, ar
                     contexts = compile_owner_variants(
                         owner_graph, name + "." + owner_name, entry, values, template_args=template_arguments,
                         on_compiled=compilation.compile,
+                        validate_capture=validate_capture,
                     )
                 else:
                     contexts = [
@@ -2196,6 +2216,7 @@ def _export_package(package, output, *, arch, caps, source_root, compilation, ar
                             compilation_schema,
                             template_args=template_arguments(owner),
                             on_compiled=compilation.compile,
+                            validate_capture=validate_capture,
                         )
                     ]
             except Exception as error:
@@ -2206,11 +2227,6 @@ def _export_package(package, output, *, arch, caps, source_root, compilation, ar
                 if compilation.static_preparation is not None:
                     environment, compilation_schema, _ = compilation.static_preparation.project(
                         environment, compilation_schema, code.kernel)
-                if "closure_environment" in definition and any(
-                    compilation_schema[key].get("owner_alternatives")
-                    for key in owner_bindings(environment, compilation_schema, code.used)
-                ):
-                    _fail(name, node, "Closure factory using a child implementation choice requires its own typed root")
                 for key, item in compilation_schema.items():
                     previous = family_schema.get(key)
                     if previous is not None and item["kind"] == previous["kind"] == "static":
@@ -2226,19 +2242,6 @@ def _export_package(package, output, *, arch, caps, source_root, compilation, ar
                     family_schema[key] = item
                 family_paths.update(environment._paths)
                 condition_values = {**code.static, **{key: static_key(value) for key, value in code.objects.items()}}
-                for attribute in {key for key, _ in code.contract["captures"]} | code.static.keys():
-                    required = compilation_schema.get(attribute, {}).get("conditions", {})
-                    if (
-                        compilation_schema.get(attribute, {}).get("external")
-                        or compilation_schema.get(attribute, {}).get("dynamic_input_storage")
-                    ) and attribute in code.dynamic:
-                        continue
-                    if any(condition_values.get(key) != static_key(value) for key, value in required.items()):
-                        _fail(
-                            name,
-                            node,
-                            f"Conditional resource {attribute!r} requires its declared static guard in the numerical entry",
-                        )
                 # Sharing is decided by the compiler object/key and its actual
                 # ABI/dependency guards, never by a semantic hash alone.
                 bound_used = {
@@ -2397,28 +2400,7 @@ def _export_package(package, output, *, arch, caps, source_root, compilation, ar
                     else None
                 )
                 identity = (code.kernel, code.key)
-                if identity in shared_entries:
-                    entry_manifest = shared_entries[identity]
-                    if definition_name not in entry_manifest["definitions"]:
-                        entry_manifest["definitions"].append(definition_name)
-                    if entry_manifest.get("admission") != admission:
-                        # The compiler's code/ABI identity is already equal.
-                        # Instance type/provenance checks are a separate logical
-                        # entry, never a reason to export that code again.
-                        binding = dict(code=entry_manifest["symbol"], admission=admission)
-                        binding_symbol = (
-                            "binding_" + hashlib.sha256(json.dumps(binding, sort_keys=True).encode()).hexdigest()
-                        )
-                        manifest.setdefault("entry_bindings", {})[binding_symbol] = binding
-                        manifest["version"] = max(47, manifest["version"])
-                        entry_manifest = {**entry_manifest, "symbol": binding_symbol}
-                        entry_manifest.pop("admission", None)
-                else:
-                    # Semantic capture identity alone does not describe the
-                    # per-kernel compilation policy. Target and module options
-                    # are common to this export; the decorator override is not.
-                    compile_options = {"opt_level": code.kernel.opt_level}
-                    symbol = compilation.symbol(code)
+                if identity not in shared_entries or getattr(code, "_package_rebound_dense_slots", False):
                     capture = [
                         {
                             "name": capture_name,
@@ -2475,6 +2457,42 @@ def _export_package(package, output, *, arch, caps, source_root, compilation, ar
                             relations = dimension_relations(environment, (item["name"],))
                             if environment._derived_attributes.intersection(relations):
                                 item["dimension_relations"] = relations
+                else:
+                    capture = shared_entries[identity]["captures"]
+                if identity in shared_entries:
+                    entry_manifest = shared_entries[identity]
+                    if definition_name not in entry_manifest["definitions"]:
+                        entry_manifest["definitions"].append(definition_name)
+                    projected_captures = entry_manifest["captures"] != capture
+                    if projected_captures:
+                        layout_keys = {"layout_owner_path", "layout_member"}
+                        if len(capture) != len(entry_manifest["captures"]) or any(
+                            {key: value for key, value in original.items() if key not in layout_keys}
+                            != {key: value for key, value in current.items() if key not in layout_keys}
+                            for original, current in zip(entry_manifest["captures"], capture)
+                        ):
+                            raise PackageExportError("Shared numerical capture binding changed its parameter contract")
+                    if entry_manifest.get("admission") != admission or projected_captures:
+                        # The compiler's code/ABI identity is already equal.
+                        # Instance type/provenance checks are a separate logical
+                        # entry, never a reason to export that code again.
+                        binding = dict(code=entry_manifest["symbol"], admission=admission)
+                        if projected_captures:
+                            binding["captures"] = capture
+                            manifest["version"] = max(84, manifest["version"])
+                        binding_symbol = (
+                            "binding_" + hashlib.sha256(json.dumps(binding, sort_keys=True).encode()).hexdigest()
+                        )
+                        manifest.setdefault("entry_bindings", {})[binding_symbol] = binding
+                        manifest["version"] = max(47, manifest["version"])
+                        entry_manifest = {**entry_manifest, "symbol": binding_symbol}
+                        entry_manifest.pop("admission", None)
+                else:
+                    # Semantic capture identity alone does not describe the
+                    # per-kernel compilation policy. Target and module options
+                    # are common to this export; the decorator override is not.
+                    compile_options = {"opt_level": code.kernel.opt_level}
+                    symbol = compilation.symbol(code)
                     entry_manifest = dict(
                         symbol=symbol,
                         definition=definition_name,

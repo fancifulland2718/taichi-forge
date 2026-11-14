@@ -1428,6 +1428,15 @@ create code copies. Late optional-owner binding, model-selected owner types and
 arbitrary reflective factories remain outside this slice; it does not qualify
 complete TAA/EFC definition export.
 
+Format 84 lets a logical binding project the source layout path and member name
+of a Dense capture. A private package compilation can reuse frontend capture
+when element type, rank, compact/affine parameter ABI, alias relationships and
+static dependencies agree. Each source retains its own allocation, dimension
+and admission contract. Consumers allow only those two layout-location fields
+to differ; incompatible slot counts, order, names or other parameter facts
+reject. Ordinary JIT does not enable this cross-source reuse. Model tensors,
+explicit dimension parameters and workspaces retain the original matching rules.
+
 `ti.aot.written_resources(owner, owner.record)` inspects possible writes of a
 normal Graph during cold preparation and returns the original resource objects.
 JIT reuses Component compiler effect analysis; definition export retains the same

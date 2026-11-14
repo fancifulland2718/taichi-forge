@@ -1709,10 +1709,29 @@ class Component:
                 if (
                     code.call_signature == _used_template_signature(signature, code.static_templates)
                     and all(resource_templates.get(slot) == name for slot, name in code.resource_templates.items())
-                    and code.matches(self, owner, layouts=layouts)
                 ):
-                    code.validate_bindings(self, owner)
-                    return code
+                    if code.matches(self, owner, layouts=layouts):
+                        code.validate_bindings(self, owner)
+                        if (getattr(kernel, "_package_compilation", None) is not None
+                                and any(code.capture_source_paths.get(name) != self._source_scope_paths.get(name)
+                                        for name in code.dynamic)):
+                            # Exact dependency/ABI/layout matching already
+                            # proves this implementation. Its source member
+                            # projection still belongs to the current binding.
+                            import copy
+
+                            bound = copy.copy(code)
+                            bound.capture_source_paths = {
+                                name: self._source_scope_paths[name]
+                                for name in code.dynamic if name in self._source_scope_paths
+                            }
+                            bound._package_rebound_dense_slots = True
+                            return bound
+                        return code
+                    if getattr(kernel, "_package_compilation", None) is not None:
+                        bound = code.rebind_dense_slots(self, owner, layouts=layouts)
+                        if bound is not None:
+                            return bound
             context = _Capture(self, owner, kernel, signature, entry_path)
             # No self identity or runtime value enters the template mapper.
             key = (kernel.func, "component_" + str(len(kernel._component_candidates)), kernel.autodiff_mode)
@@ -2913,6 +2932,11 @@ class _ComponentCode:
         # Copy plain dependency facts, never the lowering context/owner/Exprs.
         self.entry_definition = context.entry_definition
         self.used = dict(context.used)
+        self.capture_paths = {name: context.component._paths[name] for name in context.used}
+        self.capture_source_paths = {
+            name: context.component._source_scope_paths[name]
+            for name in context.dynamic if name in context.component._source_scope_paths
+        }
         self.static = dict(context.static)
         self.objects = dict(context.objects)
         self.resource_conditions = dict(context.resource_conditions)
@@ -2962,6 +2986,121 @@ class _ComponentCode:
             declaration = component.declarations[name]
             if isinstance(declaration, (Array, DenseField)):
                 declaration.validate(value)
+
+    def rebind_dense_slots(self, component, owner, *, layouts):
+        """Reuse a private package implementation with a new allocation contract.
+
+        Dense captures already lower to descriptor slots. Their source group,
+        member selectors and extent relations belong to each binding, whereas
+        element/rank, compact-versus-affine ABI and alias topology constrain the
+        implementation. Rebuild those allocation facts without lowering the
+        numerical body. No producer AST, owner or Field survives this operation.
+
+        This deliberately excludes model tensors and explicit dimension slots:
+        their symbolic extents can affect workspace and launch specialization.
+        Ordinary Component/JIT candidates keep their original ownership rules.
+        """
+        import copy
+
+        if not self.dynamic or self.fixed_groups or self.workspaces or self.model_static_ranges:
+            return None
+        if any(self.used[name][0] != "dense_field" for name in self.dynamic):
+            return None
+        fields = {name for name, schema in self.used.items() if schema[0] == "dense_field"}
+        if fields != self.member_paths.keys():
+            return None  # A metadata-only Field has no proved descriptor/alias slot.
+        used = {}
+        axes, reverse_axes = {}, {}
+        for name, schema in self.used.items():
+            if schema[0] == "dimension":
+                continue  # Rebuilt below from the current allocation relations.
+            declaration = component.declarations.get(name)
+            if declaration is None or component._paths[name] != self.capture_paths[name]:
+                return None
+            if name not in fields:
+                if declaration.schema != schema:
+                    return None
+            else:
+                if not isinstance(declaration, DenseField) or isinstance(declaration, _ModelTensorField):
+                    return None
+                actual = declaration.schema
+                if actual[0:2] != schema[0:2] or len(actual[2]) != len(schema[2]):
+                    return None
+                for old, new in zip(schema[2], actual[2]):
+                    if isinstance(old, str) and isinstance(new, str):
+                        if axes.setdefault(old, new) != new or reverse_axes.setdefault(new, old) != old:
+                            return None
+                    elif old != new:
+                        return None
+            if getattr(declaration, "conditions", ()) != self.resource_conditions.get(name, ()):
+                return None
+            used[name] = declaration.schema
+
+        # Most candidates differ in element/rank or a static algorithm choice.
+        # Reject those before parsing the full allocation contract or querying
+        # native layouts, just as the ordinary dependency matcher does.
+        for name, value in self.static.items():
+            if _static_value(component.read(owner, name)) != value:
+                return None
+        contract = self.contract
+        if contract.get("model_shared_arrays") or contract.get("model_blocks"):
+            return None
+
+        bound = copy.copy(self)
+        bound.used, bound.groups, bound.member_paths = used, {}, {}
+
+        def dimension(name):
+            declaration = component.declarations[name]
+            _dimension_value(component, owner, name)
+            if name in used:
+                return
+            used[name] = declaration.schema
+            if declaration.capacity:
+                dimension(declaration.capacity)
+            for dependency in extent_dependencies(declaration.expression) if declaration.expression else ():
+                dimension(dependency)
+
+        access = dict(contract.get("dense_access", ()))
+        for name in sorted(fields):
+            declaration = component.declarations[name]
+            value = component.read(owner, name)
+            description = declaration.validate(value)
+            schema, members, dimensions, _ = layouts.dense(declaration.group)
+            bound.groups[declaration.group] = schema
+            bound.member_paths[name] = (declaration.group, members[name])
+            for dim in dimensions:
+                dimension(dim)
+            if name in self.dynamic:
+                compact = json.loads(schema)["version"] == 1 and _extent_invariant_compact_member(value, description)
+                if access.get(name) != ("compact" if compact else "affine"):
+                    return None
+        # Multiple names may have lowered to one argument. Keep both equality
+        # and inequality of those native member selectors, including aliases
+        # that were omitted from dynamic after their first use.
+        old_aliases, new_aliases = {}, {}
+        for name in sorted(fields):
+            old, new = self.member_paths[name], bound.member_paths[name]
+            if old_aliases.setdefault(old, new) != new or new_aliases.setdefault(new, old) != old:
+                return None
+        bound.capture_paths = {name: component._paths[name] for name in used}
+        bound.capture_source_paths = {
+            name: component._source_scope_paths[name] for name in self.dynamic if name in component._source_scope_paths
+        }
+        if not bound.matches(component, owner, layouts=layouts):
+            return None
+        bound.validate_bindings(component, owner)
+        contract.update(
+            captures=[(name, used[name]) for name in self.dynamic],
+            groups=bound.groups,
+            members=bound.member_paths,
+            dimensions={name: schema for name, schema in used.items() if schema[0] == "dimension"},
+            declaration_sources={name: component._sources[name] for name in used if name in component._sources},
+        )
+        if "access_paths" in contract:
+            contract["access_paths"] = bound.capture_paths
+        bound._contract = json.dumps(contract)
+        bound._package_rebound_dense_slots = True
+        return bound
 
     def export(self, module, name):
         """Export this compiled entry and its capture projection, without state.

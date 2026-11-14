@@ -20128,9 +20128,36 @@ def test_package_conditional_values_and_domains_follow_actual_guards(tmp_path, m
     assert "CONDITIONAL_VALUES_SOURCE_FREE_OK" in result.stdout
 
 
+@pytest.mark.parametrize("declared", [False, True])
+def test_package_static_domain_rejection_precedes_backend_export(declared):
+    from types import SimpleNamespace
+    from taichi_forge.aot._package_variants import compile_static_variants
+
+    exported = []
+    code = SimpleNamespace(static={"unknown": ("bool", True)}, objects={})
+    environment = SimpleNamespace(compile=lambda *args, **kwargs: code)
+    owner = SimpleNamespace(enabled=True)
+    schema = {"enabled": {"kind": "static", "choices": [("bool", False), ("bool", True)]}} if declared else {}
+    with pytest.raises(ValueError, match="outside the declared package domain"):
+        compile_static_variants(environment, SimpleNamespace(_primal=object()), (), owner, schema,
+                                on_compiled=exported.append)
+    assert exported == []
+    assert owner.enabled is True
+
+
 @pytest.mark.parametrize("expression", ["self.gain", "self.size", "0 + ti.static(self.mode)"])
 @test_utils.test(arch=ti.cpu, offline_cache=False)
 def test_package_conditional_values_require_their_numerical_guard(tmp_path, monkeypatch, expression):
+    from taichi_forge.aot._package_compilation import PackageCompilation
+
+    exported = []
+    original = PackageCompilation.compile
+
+    def observed(compilation, code):
+        exported.append(code.kernel.func.__name__)
+        return original(compilation, code)
+
+    monkeypatch.setattr(PackageCompilation, "compile", observed)
     begin = CONDITIONAL_VALUES_SOURCE.index("    @ti.kernel\n    def step")
     end = CONDITIONAL_VALUES_SOURCE.index("    @ti.kernel\n    def common")
     source = (
@@ -20143,6 +20170,7 @@ def test_package_conditional_values_require_their_numerical_guard(tmp_path, monk
     with pytest.raises(ti.aot.PackageExportError, match="requires its declared static guard"):
         ti.aot.export_package(package, tmp_path / "sdk")
     assert sys.modules["definition_fixture.model"].constructors == 0
+    assert "step" not in exported
 
 
 CONDITIONAL_LAYOUT_SOURCE = """

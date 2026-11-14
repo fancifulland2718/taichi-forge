@@ -37,7 +37,7 @@ def _static_reference_aliases(schema, domains):
 
 
 def compile_static_variants(environment, entry, arguments, owner, schema, *, template_args=None, fixed=None,
-                            on_compiled=None, rejected=None):
+                            on_compiled=None, rejected=None, validate_capture=None):
     """Cover a kernel's finite declaration domain without multiplying owners.
 
     A compiled contract covers every assignment of unread configuration values.
@@ -70,10 +70,20 @@ def compile_static_variants(environment, entry, arguments, owner, schema, *, tem
         for name, item in schema.items()
         if item["kind"] == "record" and item.get("optional") and not item.get("dynamic_input_record")
     }
-    if not domains and not records:
-        code = environment.compile(entry, *arguments, owner=owner, template_args=template_args)
+
+    def export_capture(code):
+        # These facts are complete after capture; validate before the backend
+        # loads/compiles and seals a candidate that cannot be published.
+        if not code.static.keys() <= domains.keys():
+            raise ValueError("Kernel static dependencies are outside the declared package domain")
+        if validate_capture is not None:
+            validate_capture(code, owner, environment, schema)
         if on_compiled is not None:
             on_compiled(code)
+
+    if not domains and not records:
+        code = environment.compile(entry, *arguments, owner=owner, template_args=template_args)
+        export_capture(code)
         return [code]
     initial = {name: values[0] for name, values in domains.items()}
     initial.update((name, True) for name in records)
@@ -119,9 +129,8 @@ def compile_static_variants(environment, entry, arguments, owner, schema, *, tem
                     # Keep dependency facts only, never traceback/compiler state.
                     rejected.append(dict(missing.static))
             else:
+                export_capture(code)
                 codes.append(code)
-                if on_compiled is not None:
-                    on_compiled(code)
             if discarded and compilation is not None:
                 compilation.discard_capture(entry._primal)
             if not code.static.keys() <= domains.keys():
@@ -161,7 +170,8 @@ def compile_static_variants(environment, entry, arguments, owner, schema, *, tem
     return codes
 
 
-def compile_owner_variants(graph, identity, entry, arguments, *, template_args=None, on_compiled=None):
+def compile_owner_variants(graph, identity, entry, arguments, *, template_args=None, on_compiled=None,
+                           validate_capture=None):
     """Explore child implementations only after an entry actually uses them.
 
     The parent class/instance and Host constructor remain single definitions.
@@ -231,6 +241,7 @@ def compile_owner_variants(graph, identity, entry, arguments, *, template_args=N
             fixed=fixed,
             on_compiled=on_compiled,
             rejected=rejected,
+            validate_capture=validate_capture,
         )
         dependencies = []
         for code in codes:

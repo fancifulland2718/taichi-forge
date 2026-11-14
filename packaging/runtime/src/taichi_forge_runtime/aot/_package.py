@@ -1377,7 +1377,7 @@ def _entry_contract(manifest, symbol):
     binding = bindings[symbol]
     if (
         not isinstance(binding, dict)
-        or set(binding) != {"code", "admission"}
+        or set(binding) not in ({"code", "admission"}, {"code", "admission", "captures"})
         or type(binding["code"]) is not str
         or binding["code"] not in manifest["entries"]
         or binding["admission"] is not None
@@ -1385,6 +1385,29 @@ def _entry_contract(manifest, symbol):
     ):
         raise ValueError("Logical entry binding requires existing code and an admission contract")
     contract = {**manifest["entries"][binding["code"]]}
+    if "captures" in binding:
+        if manifest["version"] < 84:
+            raise ValueError("Logical capture bindings require definition package version 84")
+        captures = binding["captures"]
+        original = contract.get("captures", ())
+        layout_keys = {"layout_owner_path", "layout_member"}
+        if not isinstance(captures, list) or len(captures) != len(original):
+            raise ValueError("Logical capture binding differs from its numerical parameter contract")
+        for current, source in zip(captures, original):
+            if (
+                not isinstance(current, dict)
+                or {key: value for key, value in current.items() if key not in layout_keys}
+                != {key: value for key, value in source.items() if key not in layout_keys}
+                or ("layout_owner_path" in current) != ("layout_member" in current)
+                or "layout_member" in current and (
+                    current.get("kind") != "dense_field"
+                    or not isinstance(current["layout_owner_path"], list)
+                    or any(type(part) is not str or not part for part in current["layout_owner_path"])
+                    or type(current["layout_member"]) is not str or not current["layout_member"]
+                )
+            ):
+                raise ValueError("Logical capture binding differs from its numerical parameter contract")
+        contract["captures"] = captures
     contract.pop("admission", None)
     if binding["admission"] is not None:
         contract["admission"] = binding["admission"]
@@ -1806,6 +1829,7 @@ class LoadedPackage:
                 81,
                 82,
                 83,
+                84,
             )
             or self.manifest.get("kind") != "forge_definition_package_prototype"
         ):
