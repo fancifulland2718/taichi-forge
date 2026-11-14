@@ -951,6 +951,14 @@ lowering 后的 Plan 核对。仅提供 shape 的资源进入布局/资源闭包
 导出、11/37 元素实例、重复私有区域、交错调用及非法 shape 元数据；这些结果不代表
 应用条件求解器已取得资格。
 
+组件 Graph 也保留既有 Kernel lowering 生成的模型尺寸局部张量工作区。必需扩展
+`component_local_tensor_workspaces_v1` 在 `local_tensor_workspaces` 中记录有界
+shape 表达式及其已声明的维度/整数输入。prepare 根据消费者绑定快照求值，沿原
+ExecutionPlan 分配器接入私有 ndarray。同一实例的不同 prepared call 也各自拥有
+工作区及租约，replay 不重复分配。初始化、命名操作和 reset 只准备各自可达的工作区；
+非法 extent 或不一致合同在执行前拒绝。CPU/CUDA 检查覆盖新尺寸、变化的整数输入、
+局部值副本、交错 prepare、独立关闭和 reset。
+
 
 ### 正常 Host 所有者序列
 

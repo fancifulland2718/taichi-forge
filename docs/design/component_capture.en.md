@@ -1254,6 +1254,18 @@ under the existing allocation contract. CPU/CUDA gates cover 7-element productio
 11/37-element instances, repeated private regions, interleaved calls and malformed
 shape metadata. These gates do not qualify an application's conditional solver.
 
+Component Graphs also retain model-sized local tensor workspaces produced by the
+existing Kernel lowering. The required extension
+`component_local_tensor_workspaces_v1` records their bounded shape expressions and
+declared dimension/integer inputs in `local_tensor_workspaces`. Prepare evaluates
+these expressions from the consumer's binding snapshot and attaches private
+ndarrays through the existing ExecutionPlan allocator. Separate prepared calls,
+including calls on the same instance, own separate scratch and leases; replay
+does not allocate it again. Initialization, named operations and reset use their
+own reachable workspace closure. Invalid extents and inconsistent contracts
+reject before execution. CPU/CUDA checks cover new sizes, changed integer inputs,
+local value copies, interleaved prepares, independent closure and reset.
+
 
 ### Declared Host owner sequences
 

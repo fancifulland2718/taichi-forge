@@ -67,6 +67,7 @@ class _GraphCapture:
         self.host_resource_sets = {}
         self.bindings = {}
         self.values = {}
+        self.workspaces = {}
         self.explicit = {}
         self._native_array_arguments = set()
         self.entries = []
@@ -203,8 +204,6 @@ class _GraphCapture:
             if arg.name in managed_symbols:
                 continue
             self.explicit_argument(arg)
-        if code.workspaces:
-            raise TaichiCompilationError("Model local tensors in component Graphs require invocation workspace binding")
         if code.model_static_ranges:
             raise TaichiCompilationError("Model-sized static iteration in component Graphs requires snapshot guards; use a definition package")
         contract = code.contract
@@ -236,6 +235,25 @@ class _GraphCapture:
                 target[name] = schema
         hidden = []
         for name in code.dynamic:
+            if name in code.workspaces:
+                from taichi_forge.types import primitive_types
+                from taichi_forge.lang._resource_declaration import extent_dependencies
+
+                spec = code.workspaces[name]
+                # The Plan owns scratch per prepared invocation, not per owner
+                # or module. Sequential uses of the same code can share it.
+                symbol_name = "__component_workspace_" + _digest((code.semantic_key, name, spec))
+                symbol = Arg(ArgKind.NDARRAY, symbol_name, getattr(primitive_types, spec["dtype"]),
+                             ndim=len(spec["shape"]))
+                inputs = {}
+                for expression in spec["shape"]:
+                    for dependency in extent_dependencies(expression):
+                        kind = "dimension" if isinstance(self.component.declarations[dependency], Dimension) else "value"
+                        inputs[dependency] = "__component_" + kind + "_" + dependency
+                self.workspaces[symbol_name] = dict(**spec, inputs=inputs)
+                self.explicit[symbol_name] = describe_symbolic_arg(symbol).structural_key()
+                hidden.append(self.symbols.setdefault(symbol_name, symbol))
+                continue
             declaration = self.component.declarations[name]
             schema = declaration.schema
             if isinstance(declaration, DenseField):
@@ -602,13 +620,15 @@ class _GraphCapture:
             values=self.values,
             bindings=self.bindings,
             explicit={
-                name: schema for name, schema in self.explicit.items() if name not in builder._declared_private_bindings
+                name: schema for name, schema in self.explicit.items()
+                if name not in builder._declared_private_bindings and name not in self.workspaces
             },
             entries=self.entries,
             required_capabilities=["dense_snode_group_v1", "component_root_v1"],
         )
         internal = {
-            name: schema for name, schema in self.explicit.items() if name in builder._declared_private_bindings
+            name: schema for name, schema in self.explicit.items()
+            if name in builder._declared_private_bindings or name in self.workspaces
         }
         if internal:
             facts["internal_arguments"] = internal
@@ -850,6 +870,11 @@ def _complete_compiler_contract(graph, contract, capture, *, lifecycle=False):
         contract["required_capabilities"].append("component_private_array_extents_v1")
         used_symbols.update(value["array"] for shape in private_shapes.values()
                             for value in shape if isinstance(value, dict))
+    workspaces = {name: spec for name, spec in capture.workspaces.items() if name in used_symbols}
+    if workspaces:
+        contract["local_tensor_workspaces"] = workspaces
+        contract["required_capabilities"].append("component_local_tensor_workspaces_v1")
+        used_symbols.update(symbol for spec in workspaces.values() for symbol in spec["inputs"].values())
     for key in ("bindings", "explicit", "internal_arguments"):
         if key in contract:
             contract[key] = {name: value for name, value in contract[key].items() if name in used_symbols}

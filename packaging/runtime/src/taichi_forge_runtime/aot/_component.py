@@ -7,7 +7,7 @@ from copy import deepcopy
 from types import MappingProxyType
 import weakref
 
-from .._dimensions import check_constraints, evaluate_extent, extent_dependencies, validate_constraints, validate_extent
+from .._dimensions import check_constraints, evaluate_extent, extent_dependencies, validate_constraints, validate_extent, local_workspace_shape
 from ._component_info import _read_contract, _configuration, _check_configuration, _valid_source_path
 
 
@@ -127,6 +127,9 @@ class Component:
             private_scalar_capability = "component_private_scalar_values_v1" in contract["required_capabilities"]
             if private_scalar_capability:
                 capabilities.add("component_private_scalar_values_v1")
+            workspace_capability = "component_local_tensor_workspaces_v1" in contract["required_capabilities"]
+            if workspace_capability:
+                capabilities.add("component_local_tensor_workspaces_v1")
             optix_scenes = set()
             pending = [contract.get("control", {})]
             from ._component_native import operation_bindings
@@ -455,6 +458,30 @@ class Component:
                 if effect_groups != set(fixed_groups):
                     raise ValueError("Fixed SNode component effects do not cover its group closure")
             document = json.loads(plan.to_json())
+            if workspace_capability:
+                workspaces = contract["local_tensor_workspaces"]
+                if not isinstance(workspaces, dict) or not workspaces:
+                    raise ValueError("Invalid component local tensor workspaces")
+                for symbol, spec in workspaces.items():
+                    descriptor = contract.get("internal_arguments", {}).get(symbol)
+                    if (not isinstance(spec, dict) or set(spec) != {"dtype", "shape", "inputs"}
+                            or not isinstance(spec["shape"], list) or not spec["shape"]
+                            or not isinstance(spec["inputs"], dict)
+                            or not descriptor or descriptor[0] != "ndarray"
+                            or descriptor[1][1] != spec["dtype"] or descriptor[1][2]
+                            or descriptor[2] != len(spec["shape"])
+                            or symbol not in plan.argument_names
+                            or symbol in contract["explicit"] or symbol in contract["bindings"]):
+                        raise ValueError("Component local tensor workspace differs from its argument contract")
+                    dependencies = set().union(*(extent_dependencies(expr) for expr in spec["shape"]))
+                    if set(spec["inputs"]) != dependencies:
+                        raise ValueError("Component local tensor workspace inputs differ from its extents")
+                    for source in spec["inputs"].values():
+                        binding = contract["bindings"].get(source, {})
+                        schema = contract["values"].get(binding.get("name"))
+                        if (source not in plan.argument_names or binding.get("kind") not in ("dimension", "value")
+                                or binding["kind"] == "value" and schema != ["value", "i32", []]):
+                            raise ValueError("Component local tensor workspace requires bound integer inputs")
             if private_scalar_capability:
                 scalars = contract["private_scalars"]
                 scalar_symbols = {name: descriptor for name, descriptor in
@@ -527,8 +554,9 @@ class Component:
                 )
             ):
                 raise ValueError("Component contract differs from its actual execution plan")
-            if set(plan.argument_names) != set(contract["bindings"]) | set(contract["explicit"]):
+            if set(plan.argument_names) != set(contract["bindings"]) | set(contract["explicit"]) | set(contract.get("local_tensor_workspaces", {})):
                 raise ValueError("Component contract does not cover its execution plan bindings")
+            self._workspaces = contract.get("local_tensor_workspaces", {})
             used = {"resource": set(), "value": set(), "dimension": set()}
             for binding in contract["bindings"].values():
                 kind, key = binding["kind"], binding["name"]
@@ -970,6 +998,7 @@ class ComponentInstance:
             plan = self._component._operation_plan(operation)
             input_owners = self._input_owners(execution_domain)
             bindings = self._bindings(plan, values, dimensions, arguments)
+            plan = self._workspace_plan(plan, bindings)
             call = self._component._module.prepare_execution(
                 plan, bindings, execution_domain=execution_domain, snode_instance=self._fixed_state
             )
@@ -1029,6 +1058,21 @@ class ComponentInstance:
                 )
         return bindings
 
+    def _workspace_plan(self, plan, bindings):
+        from ._runtime import Scalar
+
+        resources = []
+        names = set(plan.argument_names)
+        for name, spec in self._component._workspaces.items():
+            if name not in names:
+                continue  # Initialization/operation splitting owns its closure.
+            def resolve(key):
+                value = bindings[spec["inputs"][key]]
+                return value.value if isinstance(value, Scalar) else value
+            resources.append(dict(kind="ndarray", name=name, dtype=spec["dtype"],
+                                  shape=list(local_workspace_shape(spec["shape"], resolve))))
+        return plan.with_argument_resources(resources) if resources else plan
+
     def initialize_state(self, *, values=None, dimensions=None, arguments=None, reset=False):
         """Run the original model initializer at a cold instance boundary.
 
@@ -1071,6 +1115,7 @@ class ComponentInstance:
                 if not required <= self._initialized:
                     raise ValueError("Component resources require explicit consumer initialization before state initialization")
                 bindings = self._bindings(plan, values, dimensions, arguments)
+                plan = self._workspace_plan(plan, bindings)
                 self._transfer_active = True
             try:
                 with ExitStack() as owners:

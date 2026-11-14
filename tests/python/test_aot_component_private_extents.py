@@ -111,3 +111,104 @@ def test_private_extent_rejects_undeclared_and_invalid_sources():
     model.source = ti.field(ti.f32, shape=3)
     with pytest.raises(ti.TaichiCompilationError, match="declared|declaration|layout"):
         Component.from_owner(model).compile_graph(model.record_field)
+
+
+@ti.data_oriented
+class _LocalWorkspace:
+    def __init__(self, count, width):
+        self.count, self.width, self.bias, self.tail = count, width, 1, 1
+        scope = ti.experimental.ResourceScope(self)
+        scope.dim("width")
+        scope.value("bias", ti.i32)
+        scope.value("tail", ti.i32)
+        scope.result = scope.field(ti.i32, shape=scope.dim("count"))
+
+    @ti.kernel
+    def clear(self):
+        for i in range(self.count):
+            scratch = ti.Vector.zero(ti.i32, self.width + self.tail)
+            self.result[i] = scratch[0]
+
+    @ti.kernel
+    def step(self):
+        for i in range(1, self.count):
+            scratch = ti.Vector.zero(ti.i32, self.width + self.tail)
+            for j in range(self.width + self.tail):
+                scratch[j] = i + j + self.bias
+            copied = scratch
+            copied[0] += 100
+            self.result[i] += scratch[0] + copied[self.width + self.tail - 1]
+
+    def initialize(self, builder):
+        builder.dispatch(self.clear, template_args={"self": self})
+
+    def record(self, builder):
+        builder.dispatch(self.step, template_args={"self": self})
+        builder.dispatch(self.step, template_args={"self": self})
+
+
+@test_utils.test(arch=[ti.cpu, ti.cuda], offline_cache=False)
+def test_component_local_tensors_are_private_to_prepared_invocations(tmp_path):
+    producer = _LocalWorkspace(7, 3)
+    root = Component.from_owner(producer).compile_graph(
+        producer.record, initializer=producer.initialize, operations={"twice": producer.record})
+    assert "component_local_tensor_workspaces_v1" in root.contract["required_capabilities"]
+    assert not root.contract["explicit"]
+    different = _LocalWorkspace(11, 5)
+    other = Component.from_owner(different).compile_graph(
+        different.record, initializer=different.initialize, operations={"twice": different.record})
+    assert other.contract["semantic_key"] == root.contract["semantic_key"]
+    module = ti.aot.Module()
+    root.export(module, "locals")
+    artifact = tmp_path / "locals.tcm"
+    module.archive(str(artifact))
+    backend = "cuda" if ti.cfg.arch == ti.cuda else "cpu"
+    ti.reset()
+    with Runtime(backend) as runtime, runtime.load_module(artifact) as loaded:
+        component = loaded.component("locals")
+        with component.instantiate(dict(count=11, width=5)) as first, component.instantiate(dict(count=3, width=17)) as second:
+            for instance in (first, second):
+                instance.initialize(zero=component.contract["resources"])
+                instance.initialize_state(values=dict(tail=1))
+            # Separate prepares, even on one instance, own their scratch and
+            # scalar snapshots. Closing one binding must not retire the others.
+            with first.prepare(values=dict(bias=2, tail=1)) as one, first.prepare(values=dict(bias=7, tail=3)) as newer, \
+                    second.prepare(values=dict(bias=4, tail=2), operation="twice") as two:
+                one.run()
+                two.run()
+                newer.run()
+                one.close()
+                with pytest.raises(ValueError, match="extent|[Dd]imension"):
+                    first.prepare(values=dict(bias=0, tail=-100))
+                newer.run()
+                runtime.wait()
+                expected = 2 * (2 * np.arange(11) + 4 + 5) + 4 * (2 * np.arange(11) + 14 + 7)
+                expected[0] = 0
+                np.testing.assert_array_equal(np.frombuffer(first.resource("result").read(), np.int32), expected)
+                expected = 2 * (2 * np.arange(3) + 8 + 18)
+                expected[0] = 0
+                np.testing.assert_array_equal(np.frombuffer(second.resource("result").read(), np.int32), expected)
+            first.initialize_state(values=dict(tail=1), reset=True)
+            assert not np.frombuffer(first.resource("result").read(), np.int32).any()
+    if backend == "cpu":
+        from taichi_forge_runtime.aot._component import _control_identity
+        with ZipFile(artifact) as archive:
+            payloads = {name: archive.read(name) for name in archive.namelist()}
+        for fault, error in (("source", "bound integer inputs"), ("rank", "argument contract"),
+                             ("capability", "Unsupported component contract")):
+            contract = json.loads(payloads["components/locals.json"])
+            spec = next(iter(contract["local_tensor_workspaces"].values()))
+            if fault == "source":
+                spec["inputs"][next(iter(spec["inputs"]))] = "missing_input"
+            elif fault == "rank":
+                spec["shape"].append(["const", 1])
+            else:
+                contract["required_capabilities"].remove("component_local_tensor_workspaces_v1")
+            contract["semantic_key"] = _control_identity(contract)
+            bad = tmp_path / (fault + ".tcm")
+            with ZipFile(bad, "w") as archive:
+                for name, payload in payloads.items():
+                    archive.writestr(name, json.dumps(contract) if name == "components/locals.json" else payload)
+            with Runtime(backend) as runtime, runtime.load_module(bad) as loaded:
+                with pytest.raises(ValueError, match=error):
+                    loaded.component("locals")
