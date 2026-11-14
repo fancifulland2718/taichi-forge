@@ -721,8 +721,9 @@ void TaichiLLVMContext::add_struct_module(std::unique_ptr<Module> module,
     if (id == std::this_thread::get_id()) {
       continue;
     }
-    data->struct_modules[tree_id] =
-        clone_module_to_context(module.get(), data->llvm_context);
+    // Tree publication/replacement runs under the existing lifecycle exclusion.
+    // Invalidate a worker's old copy, but only clone a tree if codegen uses it.
+    data->struct_modules.erase(tree_id);
   }
 
   this_thread_data->struct_modules[tree_id] = std::move(module);
@@ -1004,6 +1005,10 @@ std::size_t TaichiLLVMContext::debug_thread_local_data_count() const {
   return registry->data.size();
 }
 
+std::size_t TaichiLLVMContext::debug_this_thread_struct_module_count() {
+  return get_this_thread_data()->struct_modules.size();
+}
+
 template llvm::Value *TaichiLLVMContext::get_constant(float32 t);
 template llvm::Value *TaichiLLVMContext::get_constant(float64 t);
 
@@ -1081,16 +1086,6 @@ void TaichiLLVMContext::delete_snode_tree(int id) {
   }
 }
 
-void TaichiLLVMContext::fetch_this_thread_struct_module() {
-  TI_COMPILE_PROFILER("cpp.compile.llvm.fetch_struct_modules");
-  ThreadLocalData *data = get_this_thread_data();
-  if (data->struct_modules.empty()) {
-    for (auto &[id, mod] : main_thread_data_->struct_modules) {
-      data->struct_modules[id] = clone_module_to_this_thread_context(mod.get());
-    }
-  }
-}
-
 llvm::Function *TaichiLLVMContext::get_runtime_function(
     const std::string &name) {
   return get_this_thread_runtime_module()->getFunction(name);
@@ -1105,10 +1100,25 @@ llvm::Module *TaichiLLVMContext::get_this_thread_runtime_module() {
   return data->runtime_module.get();
 }
 
+llvm::Module *TaichiLLVMContext::get_this_thread_struct_module(int tree_id) {
+  auto *data = get_this_thread_data();
+  auto found = data->struct_modules.find(tree_id);
+  if (found == data->struct_modules.end()) {
+    TI_COMPILE_PROFILER("cpp.compile.llvm.fetch_struct_module");
+    // Keep types and functions in this worker's LLVMContext. AOT declaration
+    // witnesses can number in the thousands; unrelated trees must not be
+    // copied into every worker merely because it starts compiling a task.
+    auto *source = main_thread_data_->struct_modules.at(tree_id).get();
+    found = data->struct_modules
+                .emplace(tree_id, clone_module_to_this_thread_context(source))
+                .first;
+  }
+  return found->second.get();
+}
+
 llvm::Function *TaichiLLVMContext::get_struct_function(const std::string &name,
                                                        int tree_id) {
-  auto *data = get_this_thread_data();
-  return data->struct_modules[tree_id]->getFunction(name);
+  return get_this_thread_struct_module(tree_id)->getFunction(name);
 }
 
 llvm::Type *TaichiLLVMContext::get_runtime_type(const std::string &name) {
@@ -1222,7 +1232,6 @@ LLVMCompiledKernel TaichiLLVMContext::link_compiled_tasks(
   //     context contention. The link stage is fast (microseconds for
   //     typical kernels); the heavy optimization stage runs fully in
   //     parallel.
-  fetch_this_thread_struct_module();
   std::unique_lock<std::mutex> lock(linking_mut_, std::defer_lock);
   {
     TI_COMPILE_PROFILER("cpp.compile.llvm.link_tasks.lock_wait");

@@ -110,7 +110,6 @@ LLVMCompiledKernel KernelCodeGen::compile_kernel_to_module(
   if (serial_offloads) {
     TI_COMPILE_PROFILER("cpp.compile.llvm.tasks.serial");
     for (int i = 0; i < (int)offloads.size(); i++) {
-      tlctx_.fetch_this_thread_struct_module();
       auto offload = irpass::analysis::clone(offloads[i].get());
       irpass::re_id(offload.get());
 
@@ -123,7 +122,6 @@ LLVMCompiledKernel KernelCodeGen::compile_kernel_to_module(
     TI_COMPILE_PROFILER("cpp.compile.llvm.tasks.parallel");
     for (int i = 0; i < (int)offloads.size(); i++) {
       auto compile_func = [&, i] {
-        tlctx_.fetch_this_thread_struct_module();
         auto offload = irpass::analysis::clone(offloads[i].get());
         irpass::re_id(offload.get());
 

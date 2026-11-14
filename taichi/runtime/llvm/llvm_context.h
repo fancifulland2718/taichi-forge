@@ -95,6 +95,7 @@ class TaichiLLVMContext {
   llvm::orc::ThreadSafeContext *get_this_thread_thread_safe_context();
 
   std::size_t debug_thread_local_data_count() const;
+  std::size_t debug_this_thread_struct_module_count();
 
   /**
    * Updates the LLVM module of the JIT compiled SNode structs.
@@ -158,8 +159,8 @@ class TaichiLLVMContext {
 
   void mark_function_as_amdgpu_kernel(llvm::Function *func);
 
-  void fetch_this_thread_struct_module();
   llvm::Module *get_this_thread_runtime_module();
+  llvm::Module *get_this_thread_struct_module(int tree_id);
   llvm::Function *get_runtime_function(const std::string &name);
   llvm::Function *get_struct_function(const std::string &name, int tree_id);
   llvm::Type *get_runtime_type(const std::string &name);

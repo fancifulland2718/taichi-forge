@@ -459,6 +459,100 @@ TEST(LLVMContextThreadData, LazyLinkInputsPreserveClosureAndTreeReplacement) {
     context.delete_snode_tree(tree_id);
   }
 }
+
+TEST(LLVMContextThreadData, WorkersCloneOnlyReferencedStructTrees) {
+  lang::CompileConfig config;
+  lang::TaichiLLVMContext context(config, host_arch());
+  auto publish = [&](int tree_id, int value) {
+    auto module = context.new_module("tree");
+    auto &ctx = module->getContext();
+    auto *signature =
+        llvm::FunctionType::get(llvm::Type::getInt32Ty(ctx), {}, false);
+    auto *root = llvm::Function::Create(
+        signature, llvm::GlobalValue::ExternalLinkage, "tree_root", *module);
+    llvm::IRBuilder<> builder(llvm::BasicBlock::Create(ctx, "body", root));
+    builder.CreateRet(builder.getInt32(value));
+    context.add_struct_module(std::move(module), tree_id);
+  };
+  for (int tree_id = 0; tree_id < 12; ++tree_id) {
+    publish(tree_id, 17);
+  }
+
+  // Workers remain alive across publication, replacement and retirement.
+  // Main-thread mutations only occur while both workers are parked, matching
+  // the Program's existing lifecycle exclusion from active compilation.
+  std::atomic<int> phase{0};
+  std::atomic<int> completed{0};
+  std::array<std::thread, 2> workers;
+  for (auto &worker : workers) {
+    worker = std::thread([&] {
+      auto check_value = [&](int tree_id, int value) {
+        auto *function = context.get_struct_function("tree_root", tree_id);
+        ASSERT_NE(function, nullptr);
+        EXPECT_EQ(&function->getContext(), context.get_this_thread_context());
+        EXPECT_EQ(llvm::cast<llvm::ConstantInt>(
+                      llvm::cast<llvm::ReturnInst>(
+                          function->getEntryBlock().getTerminator())
+                          ->getReturnValue())
+                      ->getSExtValue(),
+                  value);
+      };
+      auto await_phase = [&](int expected) {
+        while (phase.load(std::memory_order_acquire) < expected) {
+          std::this_thread::yield();
+        }
+      };
+      EXPECT_EQ(context.debug_this_thread_struct_module_count(), 0u);
+      // Linking without a tree dependency must not prefetch all declarations.
+      auto empty = context.link_compiled_tasks({});
+      EXPECT_FALSE(llvm::verifyModule(*empty.module));
+      EXPECT_EQ(context.debug_this_thread_struct_module_count(), 0u);
+      check_value(7, 17);
+      auto *first = context.get_struct_function("tree_root", 7);
+      EXPECT_EQ(first, context.get_struct_function("tree_root", 7));
+      EXPECT_EQ(context.debug_this_thread_struct_module_count(), 1u);
+      completed.fetch_add(1, std::memory_order_release);
+
+      await_phase(1);
+      EXPECT_EQ(context.debug_this_thread_struct_module_count(), 0u);
+      check_value(7, 29);
+      EXPECT_EQ(context.debug_this_thread_struct_module_count(), 1u);
+      check_value(12, 42);
+      EXPECT_EQ(context.debug_this_thread_struct_module_count(), 2u);
+      completed.fetch_add(1, std::memory_order_release);
+
+      await_phase(2);
+      EXPECT_EQ(context.debug_this_thread_struct_module_count(), 1u);
+      EXPECT_THROW(context.get_struct_function("tree_root", 7),
+                   std::out_of_range);
+      check_value(12, 42);
+      completed.fetch_add(1, std::memory_order_release);
+
+      await_phase(3);
+      check_value(7, 53);
+      EXPECT_EQ(context.debug_this_thread_struct_module_count(), 2u);
+    });
+  }
+  auto await_completed = [&](int count) {
+    while (completed.load(std::memory_order_acquire) < count) {
+      std::this_thread::yield();
+    }
+  };
+  await_completed(2);
+  publish(7, 29);
+  publish(12, 42);
+  phase.store(1, std::memory_order_release);
+  await_completed(4);
+  context.delete_snode_tree(7);
+  phase.store(2, std::memory_order_release);
+  await_completed(6);
+  publish(7, 53);
+  phase.store(3, std::memory_order_release);
+  for (auto &worker : workers) {
+    worker.join();
+  }
+  EXPECT_EQ(context.debug_thread_local_data_count(), 1u);
+}
 #endif
 
 }  // namespace

@@ -367,11 +367,14 @@ std::unique_ptr<RuntimeObject> TaskCodeGenLLVM::emit_struct_meta_object(
     auto capacity = get_hash_snode_capacity(*snode);
     meta->set("table_capacity", tlctx->get_constant(capacity));
 
+    auto *struct_module =
+        tlctx->get_this_thread_struct_module(snode->get_snode_tree_id());
     auto *node_type = llvm::cast<llvm::StructType>(
-        StructCompilerLLVM::get_llvm_node_type(module.get(), snode));
+        StructCompilerLLVM::get_llvm_node_type(struct_module, snode));
     auto *aux_type = llvm::cast<llvm::StructType>(
-        StructCompilerLLVM::get_llvm_aux_type(module.get(), snode));
-    auto *body_type = StructCompilerLLVM::get_llvm_body_type(module.get(), snode);
+        StructCompilerLLVM::get_llvm_aux_type(struct_module, snode));
+    auto *body_type =
+        StructCompilerLLVM::get_llvm_body_type(struct_module, snode);
     auto aux_offset = tlctx->get_struct_element_offset(node_type, 0);
     auto body_offset = tlctx->get_struct_element_offset(node_type, 1);
     auto payload_offset = body_offset;
@@ -517,10 +520,14 @@ void TaskCodeGenLLVM::emit_struct_meta_base(const std::string &name,
                                             llvm::Value *node_meta,
                                             SNode *snode) {
   RuntimeObject common("StructMeta", this, builder.get(), node_meta);
+  // Type queries can precede accessor calls (e.g. list generation). Resolve
+  // their tree explicitly instead of relying on an eager worker-wide prefetch.
+  auto *struct_module =
+      tlctx->get_this_thread_struct_module(snode->get_snode_tree_id());
   std::size_t element_size;
   if (snode->type == SNodeType::dense) {
     auto body_type =
-        StructCompilerLLVM::get_llvm_body_type(module.get(), snode);
+        StructCompilerLLVM::get_llvm_body_type(struct_module, snode);
     auto element_ty = body_type->getArrayElementType();
     element_size = tlctx->get_type_size(element_ty);
   } else if (snode->type == SNodeType::pointer) {
@@ -528,15 +535,15 @@ void TaskCodeGenLLVM::emit_struct_meta_base(const std::string &name,
     // Using only the first child makes deterministic CUDA slots overlap and
     // clears only part of a cell when it is activated again.
     auto element_ty =
-        StructCompilerLLVM::get_llvm_element_type(module.get(), snode);
+        StructCompilerLLVM::get_llvm_element_type(struct_module, snode);
     element_size = tlctx->get_type_size(element_ty);
   } else if (snode->type == SNodeType::hash) {
     auto element_ty =
-        StructCompilerLLVM::get_llvm_element_type(module.get(), snode);
+        StructCompilerLLVM::get_llvm_element_type(struct_module, snode);
     element_size = tlctx->get_type_size(element_ty);
   } else {
     auto element_ty =
-        StructCompilerLLVM::get_llvm_element_type(module.get(), snode);
+        StructCompilerLLVM::get_llvm_element_type(struct_module, snode);
     element_size = tlctx->get_type_size(element_ty);
   }
   common.set("snode_tree_id", get_runtime_tree_id(snode->get_snode_tree_id()));
@@ -2053,13 +2060,17 @@ void TaskCodeGenLLVM::visit(GetRootStmt *stmt) {
         get_root(SNodeTree::kFirstID),
         llvm::PointerType::get(
             StructCompilerLLVM::get_llvm_node_type(
-                module.get(), prog->get_snode_root(SNodeTree::kFirstID)),
+                tlctx->get_this_thread_struct_module(SNodeTree::kFirstID),
+                prog->get_snode_root(SNodeTree::kFirstID)),
             0));
   else
     llvm_val[stmt] = builder->CreateBitCast(
         get_root(stmt->root()->get_snode_tree_id()),
         llvm::PointerType::get(
-            StructCompilerLLVM::get_llvm_node_type(module.get(), stmt->root()),
+            StructCompilerLLVM::get_llvm_node_type(
+                tlctx->get_this_thread_struct_module(
+                    stmt->root()->get_snode_tree_id()),
+                stmt->root()),
             0));
 }
 
@@ -2132,8 +2143,8 @@ void TaskCodeGenLLVM::visit(SNodeLookupStmt *stmt) {
     // mandatory opaque pointers. `get_llvm_node_type` is the authoritative
     // SNode→LLVM type mapping used across the struct compiler, so it
     // produces the correct GEP element type unconditionally.
-    llvm::Type *parent_ty =
-        StructCompilerLLVM::get_llvm_node_type(module.get(), snode);
+    llvm::Type *parent_ty = StructCompilerLLVM::get_llvm_node_type(
+        tlctx->get_this_thread_struct_module(snode->get_snode_tree_id()), snode);
     llvm_val[stmt] =
         builder->CreateGEP(parent_ty, parent, llvm_val[stmt->input_index]);
   } else if (snode->type == SNodeType::dense ||
@@ -2183,9 +2194,12 @@ void TaskCodeGenLLVM::visit(GetChStmt *stmt) {
         builder->CreateBitCast(llvm_val[stmt->input_ptr],
                                llvm::PointerType::get(*llvm_context, 0)));
     llvm_val[stmt] = builder->CreateBitCast(
-        ch, llvm::PointerType::get(StructCompilerLLVM::get_llvm_node_type(
-                                       module.get(), stmt->output_snode),
-                                   0));
+        ch, llvm::PointerType::get(
+                StructCompilerLLVM::get_llvm_node_type(
+                    tlctx->get_this_thread_struct_module(
+                        stmt->output_snode->get_snode_tree_id()),
+                    stmt->output_snode),
+                0));
   }
 }
 
