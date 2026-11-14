@@ -31,10 +31,11 @@ def layout_owner(environment, schema, name):
 
 
 class OwnerGraph:
-    def __init__(self, sources, imported, module):
+    def __init__(self, sources, imported, module, *, field_trees):
         from ._package_input_families import source_class
 
         self.imported, self.module = imported, module
+        self.field_trees = field_trees
         self._contexts = {}
         self._resource_contexts = {}
         self._allocation_schemas = {}
@@ -302,7 +303,8 @@ class OwnerGraph:
             return value
 
         declarations = construct_fields(owner, schema, vars(imported), self.module,
-                                        imported_modules=self.imported, source_dimension=source_dimension)
+                                        imported_modules=self.imported, source_dimension=source_dimension,
+                                        field_trees=self.field_trees)
         for attribute, item in schema.items():
             if item["kind"] in ("dense_field", "dimension", "borrowed_field", "host_owner_sequence"):
                 continue

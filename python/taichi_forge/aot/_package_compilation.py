@@ -4,6 +4,7 @@ import copy
 import gc
 import hashlib
 import json
+from collections import deque
 from types import SimpleNamespace
 
 from taichi_forge.lang._function_library import FunctionLibrary
@@ -34,6 +35,7 @@ class PackageCompilation(FunctionLibrary):
         self.schedule_guard = None
         self.static_preparation = None
         self.static_policies = {}
+        self.field_trees = []
         self._automatic_gc = None
 
     def __enter__(self):
@@ -167,3 +169,20 @@ class PackageCompilation(FunctionLibrary):
             self.module = None
         gc.collect()
         impl.get_runtime().collect_unused_kernel_definitions(force=True)
+        # Only construct_fields registers these private layout witnesses.
+        # Ordinary Module exports and caller-owned Fields retain their trees.
+        # Retire after the builder and definition leases have been released.
+        runtime = impl.get_runtime()
+        try:
+            while self.field_trees:
+                tree = self.field_trees[-1]
+                if not tree.destroyed:
+                    tree.destroy()
+                self.field_trees.pop()
+        finally:
+            # A partial failure retains the remaining ownership for a retry.
+            # Remove retired queued wrappers without materializing live trees.
+            with runtime._kernel_compilation_lock:
+                runtime._pending_aot_snode_trees = deque(
+                    tree for tree in runtime._pending_aot_snode_trees if not tree.destroyed
+                )

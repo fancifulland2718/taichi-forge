@@ -1651,7 +1651,7 @@ def _export_package(package, output, *, arch, caps, source_root, compilation, ar
         compilation.static_preparation = StaticPreparation(sources)
     from ._package_owner_graph import OwnerGraph, owner_bindings, layout_owner
 
-    owner_graph = OwnerGraph(sources, imported_modules, module)
+    owner_graph = OwnerGraph(sources, imported_modules, module, field_trees=compilation.field_trees)
     manifest = dict(
         version=(
             3

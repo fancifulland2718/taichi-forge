@@ -147,7 +147,7 @@ def field_declarations(module, constructor, kind, fail):
     return fields
 
 
-def construct_fields(owner, schema, namespace, module, *, imported_modules=None, source_dimension=None):
+def construct_fields(owner, schema, namespace, module, *, field_trees, imported_modules=None, source_dimension=None):
     """Use original FieldsBuilder and DenseField capture, not a layout emulator."""
     import taichi_forge as ti
     from ._component import (
@@ -457,7 +457,13 @@ def construct_fields(owner, schema, namespace, module, *, imported_modules=None,
             if item.get("struct_field")
             else field_declaration(dtype, item["element"])
         )
-    owner._forge_package_field_trees = [builder._finalize_for_aot() for builder in builders.values()]
+    owner._forge_package_field_trees = []
+    for builder in builders.values():
+        tree = builder._finalize_for_aot()
+        # Record each successful allocation immediately, including a prefix
+        # whose later group or owner construction fails.
+        field_trees.append(tree)
+        owner._forge_package_field_trees.append(tree)
     return declarations
 
 

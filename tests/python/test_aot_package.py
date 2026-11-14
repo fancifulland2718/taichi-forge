@@ -1741,6 +1741,7 @@ class Model:
     runtime = ti.lang.impl.get_runtime()
     runtime.collect_unused_kernel_definitions(force=True)
     baseline = runtime.prog._debug_kernel_definition_count()
+    baseline_trees = runtime.prog._debug_snode_metadata_stats()['active_tree_count']
     compile_one = PackageCompilation.compile
     automatic_gc = gc.isenabled()
     observed = []
@@ -1770,6 +1771,8 @@ class Model:
         output = tmp_path / f'sdk{attempt}'
         manifest = ti.aot.export_package(package, output)
         assert gc.isenabled() == automatic_gc
+        assert runtime.prog._debug_snode_metadata_stats()['active_tree_count'] == baseline_trees
+        assert not runtime._pending_aot_snode_trees
         assert len(manifest['entries']) == 5  # four step variants plus the fixture's unused kernel
         assert sum(item['definition'].endswith('.Model.step') for item in manifest['entries'].values()) == 4
         # Write facts must come from those AOT assets, without another compile
@@ -1803,6 +1806,8 @@ class Model:
     assert not (tmp_path / 'failed').exists()
     assert original_kernel.compiled_kernels == original_cache
     assert runtime.prog._debug_kernel_definition_count() == baseline
+    assert runtime.prog._debug_snode_metadata_stats()['active_tree_count'] == baseline_trees
+    assert not runtime._pending_aot_snode_trees
     captured.run(component, normal, 8)
     np.testing.assert_array_equal(normal.out.to_numpy(), 8*np.arange(5)+3)
 
@@ -1836,6 +1841,60 @@ def value() -> ti.i32:
     finally:
         if automatic_gc:
             gc.enable()
+
+
+@test_utils.test(arch=[ti.cpu, ti.cuda], offline_cache=False)
+def test_package_retires_witnesses_when_owner_construction_fails(tmp_path, monkeypatch):
+    from taichi_forge.aot import _package_fields
+
+    package = _source_package(tmp_path, monkeypatch, '''
+import taichi_forge as ti
+@ti.data_oriented
+class Model:
+    def __init__(self, n: int):
+        self.n = n
+        s = ti.experimental.ResourceScope(self)
+        s.values = s.field(ti.i32, shape=s.dim('n'))
+    @ti.kernel
+    def fill(self):
+        for i in self.values:
+            self.values[i] = i + 5
+''')
+    caller = ti.field(ti.i32)
+    builder = ti.FieldsBuilder()
+    builder.dense(ti.i, 3).place(caller)
+    caller_tree = builder._finalize_for_aot()
+    runtime = ti.lang.impl.get_runtime()
+    runtime.materialize(for_aot=True)
+    baseline = runtime.prog._debug_snode_metadata_stats()['active_tree_count']
+    pending = tuple(runtime._pending_aot_snode_trees)
+    created = []
+    construct = _package_fields.construct_fields
+
+    def fail_after_fields(owner, *args, **kwargs):
+        result = construct(owner, *args, **kwargs)
+        created.extend(getattr(owner, '_forge_package_field_trees', ()))
+        if created:
+            raise RuntimeError('injected owner construction failure')
+        return result
+
+    with monkeypatch.context() as patch:
+        patch.setattr(_package_fields, 'construct_fields', fail_after_fields)
+        with pytest.raises(RuntimeError, match='injected owner construction failure'):
+            ti.aot.export_package(package, tmp_path / 'failed')
+    assert created and all(tree.destroyed for tree in created)
+    assert runtime.prog._debug_snode_metadata_stats()['active_tree_count'] == baseline
+    assert tuple(runtime._pending_aot_snode_trees) == pending
+    assert not caller_tree.destroyed
+
+    # Retry in the same Program, then resume the caller's compile-only layout.
+    ti.aot.export_package(package, tmp_path / 'retry')
+    assert runtime.prog._debug_snode_metadata_stats()['active_tree_count'] == baseline
+    assert tuple(runtime._pending_aot_snode_trees) == pending
+    caller[0] = 19
+    assert caller[0] == 19
+    caller_tree.destroy()
+
 
 @pytest.mark.parametrize('failure', ('transient', 'persistent', 'archive'))
 @test_utils.test(arch=ti.cpu, offline_cache=False)
