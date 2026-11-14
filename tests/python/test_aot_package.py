@@ -4462,6 +4462,45 @@ def append_step(solver, builder):
     assert 'CHECKPOINT_INVENTORY_SOURCE_FREE_OK' in result.stdout
 
 
+@pytest.mark.parametrize("failure", [False, True])
+@test_utils.test(arch=ti.cpu, offline_cache=False)
+def test_package_input_analysis_releases_namespaces_without_gc(tmp_path, monkeypatch, failure):
+    import gc
+    import weakref
+    from taichi_forge.aot import _package_function_inputs as inputs
+
+    class Namespace(dict):
+        pass
+
+    references = []
+    original = inputs.source_function_namespace
+
+    def namespace(*args, **kwargs):
+        result = Namespace(original(*args, **kwargs))
+        references.append(weakref.ref(result))
+        return result
+
+    monkeypatch.setattr(inputs, "source_function_namespace", namespace)
+    source = CYCLIC_WRITE_INVENTORY_SOURCE
+    if failure:
+        source = source.replace("builder.dispatch(solver.step)", "builder.dispatch(solver.missing)")
+    package = _source_package(tmp_path, monkeypatch, source)
+    automatic = gc.isenabled()
+    gc.disable()
+    try:
+        if failure:
+            with pytest.raises(ValueError, match="write inventory dispatch has no proven Kernel"):
+                ti.aot.check_package(package)
+        else:
+            assert ti.aot.check_package(package)["declaration_check"] == "passed"
+        assert references and all(reference() is None for reference in references)
+        assert package.model.constructors == 0
+        assert ti.lang.impl.get_runtime().get_num_compiled_functions() == 0
+    finally:
+        if automatic:
+            gc.enable()
+
+
 @test_utils.test(arch=ti.cpu, offline_cache=False)
 def test_package_input_analysis_reuses_repeated_dispatch_contexts(tmp_path, monkeypatch):
     import cProfile
@@ -5770,6 +5809,85 @@ def test_package_allocation_slice_releases_temporary_schema_without_gc():
         assert list(selected) == ["n", "value"]
         del schema, selected
         assert reference() is None
+    finally:
+        if automatic:
+            gc.enable()
+
+
+@pytest.mark.parametrize("failure", [False, True])
+def test_package_field_witness_releases_construction_references_without_gc(failure):
+    import gc
+    import weakref
+    from taichi_forge.aot._package_fields import construct_fields
+
+    class Owner:
+        pass
+
+    class Mapping(dict):
+        pass
+
+    def construct():
+        owner, namespace = Owner(), Mapping(ti=ti)
+        schema = Mapping(n={"kind": "dimension"}, m={
+            "kind": "dimension", "expression": ("add", ("dim", "m" if failure else "n"), ("const", 2)),
+        })
+        references = [weakref.ref(value) for value in (owner, schema, namespace)]
+        try:
+            declarations = construct_fields(owner, schema, namespace, "fixture", field_trees=[])
+        except ValueError as error:
+            assert failure and "Cyclic derived dimension" in str(error)
+        else:
+            assert not failure and owner.m == 3
+            assert set(declarations) == {"n", "m"}
+        assert owner.n == 1 and set(schema) == {"n", "m"} and namespace == {"ti": ti}
+        return references
+
+    automatic = gc.isenabled()
+    gc.disable()
+    try:
+        assert all(reference() is None for reference in construct())
+    finally:
+        if automatic:
+            gc.enable()
+
+
+@pytest.mark.parametrize("failure", [False, True])
+def test_package_type_resolution_releases_build_references_without_gc(failure):
+    import gc
+    import weakref
+    from taichi_forge.aot._package_types import resolve_type
+
+    class Mapping(dict):
+        pass
+
+    def resolve():
+        node = ast.parse(
+            "ti.types.vector(n, self.source.dtype" + (", invalid=1)" if failure else ")"), mode="eval"
+        ).body
+        node.args[0]._package_model_extent = "n"
+        namespace, dimensions = Mapping(ti=ti), Mapping()
+        witness = lambda name: 3
+        resource_dtype = lambda expression: ti.f32
+        owner_dtype = lambda expression: None
+        references = [weakref.ref(value) for value in (namespace, dimensions, witness, resource_dtype, owner_dtype)]
+        try:
+            result = resolve_type(
+                node, namespace, model_tensors=dimensions, witness=witness,
+                resource_dtype=resource_dtype, owner_dtype=owner_dtype,
+            )
+        except TypeError:
+            assert failure
+        else:
+            assert not failure
+            assert tuple(result.get_shape()) == (3,)
+            assert dimensions[id(result)] == ("n",)
+        assert namespace == {"ti": ti}
+        return references
+
+    automatic = gc.isenabled()
+    gc.disable()
+    try:
+        assert all(reference() is None for reference in resolve())
     finally:
         if automatic:
             gc.enable()

@@ -2,8 +2,45 @@ import numpy as np
 import pytest
 
 import taichi_forge as ti
-from taichi_forge_runtime._dimensions import evaluate_extent, extent_dependencies, freeze_extent
+from taichi_forge_runtime._dimensions import evaluate_extent, extent_dependencies, freeze_extent, validate_extent
 from tests import test_utils
+
+
+@pytest.mark.parametrize("failure", [False, True])
+def test_dimension_visitors_release_resolvers_without_gc(failure):
+    import gc
+    import types
+    import weakref
+
+    def visitors():
+        return sum(isinstance(item, types.FunctionType) and item.__module__ == evaluate_extent.__module__
+                   and "<locals>" in item.__qualname__ for item in gc.get_objects())
+
+    automatic = gc.isenabled()
+    gc.disable()
+    try:
+        before = visitors()
+        for _ in range(32):
+            expression = ["add", ["dim", "n"], ["const", 1]]
+            resolver = lambda name: -1 if failure else 3
+            reference = weakref.ref(resolver)
+            if failure:
+                with pytest.raises(ValueError, match="intermediate range"):
+                    evaluate_extent(expression, resolver)
+                expression[2] = ["invalid"]
+                for operation in (validate_extent, freeze_extent):
+                    with pytest.raises(ValueError, match="Invalid dimension"):
+                        operation(expression)
+            else:
+                validate_extent(expression)
+                assert freeze_extent(expression) == ("add", ("dim", "n"), ("const", 1))
+                assert evaluate_extent(expression, resolver) == 4
+            del resolver
+            assert reference() is None
+        assert visitors() == before
+    finally:
+        if automatic:
+            gc.enable()
 
 
 def test_power_of_two_relation_validates_arity_and_integer_range():

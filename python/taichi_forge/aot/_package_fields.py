@@ -175,324 +175,330 @@ def construct_fields(
     # constructor sample. Resolve aliases before allocating any witness Field.
     type_nodes = {key: item["type_node"] for key, item in schema.items() if "type_node" in item}
 
-    def owner_dtype(expression):
-        from taichi_forge_runtime._static_values import read_static_key
-        from ._package_types import producer_static
+    try:
+        def owner_dtype(expression):
+            from taichi_forge_runtime._static_values import read_static_key
+            from ._package_types import producer_static
 
-        path = []
-        while isinstance(expression, ast.Attribute):
-            path.insert(0, expression.attr)
-            expression = expression.value
-        spec = next((item for key, item in schema.items() if item.get("path", [key]) == path), {})
-        if not spec.get("static_dtype"):
-            return None
-        if len(spec["choices"]) != 1:
-            raise ValueError("Field layout requires one fixed dtype; numerical dtype choices cannot change its ABI")
-        return producer_static(read_static_key(spec["choices"][0]))
+            path = []
+            while isinstance(expression, ast.Attribute):
+                path.insert(0, expression.attr)
+                expression = expression.value
+            spec = next((item for key, item in schema.items() if item.get("path", [key]) == path), {})
+            if not spec.get("static_dtype"):
+                return None
+            if len(spec["choices"]) != 1:
+                raise ValueError("Field layout requires one fixed dtype; numerical dtype choices cannot change its ABI")
+            return producer_static(read_static_key(spec["choices"][0]))
 
-    def resolved_dtype_policy(policy, type_namespace):
-        from ._package_types import resolve_scalar_dtype_policy
+        def resolved_dtype_policy(policy, type_namespace):
+            from ._package_types import resolve_scalar_dtype_policy
 
-        return resolve_scalar_dtype_policy(
-            policy, {**type_namespace, "_forge_package_scalar": ti}, module, owner_dtype=owner_dtype
-        )
+            return resolve_scalar_dtype_policy(
+                policy, {**type_namespace, "_forge_package_scalar": ti}, module, owner_dtype=owner_dtype
+            )
 
-    dtype_sources = []
+        dtype_sources = []
 
-    def resource_dtype(expression, visiting=()):
-        from taichi_forge.types._argument_descriptor import describe_element_type
+        def resource_dtype(expression, visiting=()):
+            from taichi_forge.types._argument_descriptor import describe_element_type
 
-        path = []
-        while isinstance(expression, ast.Attribute):
-            path.insert(0, expression.attr)
-            expression = expression.value
-        if not isinstance(expression, ast.Name) or expression.id != "self":
-            raise ValueError("Field dtype metadata requires a declared owner resource")
-        while True:
-            key = next((key for key, spec in schema.items() if spec.get("path", [key]) == path), None)
-            if key is None or key in visiting:
-                raise ValueError("Field dtype metadata has an unknown or cyclic resource source")
-            visiting = (*visiting, key)
-            spec = schema[key]
-            if spec["kind"] != "borrowed_field":
-                break
-            if any(name in spec for name in ("input_parameter", "input_expression", "source_type")):
-                raise ValueError("Field dtype metadata requires a resolved resource type contract")
-            path = spec["source_path"]
-        if spec["kind"] not in ("dense_field", "ndarray") or key not in type_nodes:
-            raise ValueError("Field dtype metadata requires an explicit scalar or tensor resource type")
-        node = type_nodes[key]
-        source_namespace = (
-            vars(imported_modules[spec.get("type_declaration_module", spec["declaration_module"])])
-            if imported_modules is not None and "declaration_module" in spec
-            else namespace
-        )
-        source_namespace = {
-            **source_namespace,
-            "_forge_package_scalar": ti,
-            "_forge_package_vector": ti.types.vector,
-            "_forge_package_matrix": ti.types.matrix,
-        }
-        if "dtype_policy" in spec:
-            policy = resolved_dtype_policy(spec["dtype_policy"], source_namespace)
-            dtype_sources.append((policy, spec.get("dtype_guards", {})))
-        # .dtype means the scalar component type, also for model-sized tensors.
-        if isinstance(node, ast.Call):
-            from ._package_factories import _source_value
-
-            factory = _source_value(node.func, source_namespace)
-            axes = 1 if factory is ti.types.vector else 2 if factory is ti.types.matrix else 0
-            if axes:
-                node = next((k.value for k in node.keywords if k.arg == "dtype"), None) or node.args[axes]
-        dtype = resolve_type(
-            node, source_namespace, resource_dtype=lambda value: resource_dtype(value, visiting), owner_dtype=owner_dtype
-        )
-        return describe_element_type(dtype).scalar_type
-
-    declarations = {}
-    from types import SimpleNamespace
-
-    # Direct fields retain the Host expression used at allocation. When a
-    # model axis comes from an owner scalar, connect that scalar to the same
-    # authoritative Dimension relation instead of treating it as an unrelated
-    # runtime value (or specializing its construction witness).
-    for item in fields.values():
-        for node in ast.walk(item["type_node"]):
-            axis = getattr(node, "_package_model_extent", None)
-            source = item.get("dimension_sources", {}).get(axis)
-            if source is None or axis in item.get("dimension_expressions", {}):
-                continue
-            expression = ast.parse(source, mode="eval").body
-            if (isinstance(expression, ast.Attribute) and isinstance(expression.value, ast.Name)
-                    and expression.value.id == "self"):
-                name = expression.attr
-                scalar = schema.get(name, {})
-                if scalar.get("kind") == "value" and scalar.get("dtype") == "i32":
-                    schema[name] = {**scalar, "kind": "dimension"}
-                if schema.get(name, {}).get("kind") == "dimension":
-                    item.setdefault("dimension_expressions", {})[axis] = ("dim", name)
-
-    for name, item in schema.items():
-        if item["kind"] == "record":
-            write_member(owner, name, SimpleNamespace(), schema)
-
-    def witness(name, visiting=()):
-        if name in visiting:
-            raise ValueError(f"Cyclic derived dimension {name!r}")
-        if "owner_dimension" in schema[name]:
-            value = read_member(owner, name, schema)
-            if type(value) is not int or not 0 <= value <= 2**31 - 1:
-                raise ValueError("Referenced dimension needs a legal symbolic construction witness")
-            return value
-        expression = schema[name].get("expression")
-        value = evaluate_extent(expression, lambda key: witness(key, (*visiting, name))) if expression else 1
-        if not 0 <= value <= 2**31 - 1:
-            raise ValueError("Declared dimension needs a legal symbolic construction witness")
-        write_member(owner, name, value, schema)
-        return value
-
-    for name, item in schema.items():
-        if item["kind"] == "dimension":
-            declarations[name] = Dimension(kind="active", expression=item.get("expression", ()))
-            witness(name)
-    if not fields:
-        return declarations
-    typed = []
-    for name, item in fields.items():
-
-        def field_extent(extent):
-            expression = item.get("dimension_expressions", {}).get(extent, ())
-            declarations[extent] = Dimension(expression=expression)
-            value = evaluate_extent(expression, lambda key: read_member(owner, key, schema)) if expression else 1
-            if "like_source_path" in item:
-                # field_like sources have already been proved against an
-                # allocation declaration. Preserve derived dimensions in the
-                # witness too; an independent default of 1 is not its layout.
-                node = ast.parse(item["dimension_sources"][extent], mode="eval").body
-                parts = []
-                while isinstance(node, ast.Attribute):
-                    parts.insert(0, node.attr)
-                    node = node.value
-                if not isinstance(node, ast.Name) or node.id != "self" or not parts or source_dimension is None:
-                    raise ValueError("field_like dimension requires its proved source owner")
-                value = source_dimension(parts)
-            if not 0 < value <= 2**31 - 1:
-                raise ValueError("Declared extent needs a legal symbolic construction witness")
-            setattr(owner, extent, value)
-            return value
-
-        model_tensors = {}
-        declaration_namespace = (
-            vars(imported_modules[item.get("type_declaration_module", item["declaration_module"])])
-            if imported_modules is not None and "declaration_module" in item
-            else namespace
-        )
-        if "dtype_policy" in item:
-            item["dtype_policy"] = resolved_dtype_policy(item["dtype_policy"], declaration_namespace)
-        dtype_sources.clear()
-        dtype = resolve_type(
-            item.pop("type_node"),
-            {
-                **declaration_namespace,
+            path = []
+            while isinstance(expression, ast.Attribute):
+                path.insert(0, expression.attr)
+                expression = expression.value
+            if not isinstance(expression, ast.Name) or expression.id != "self":
+                raise ValueError("Field dtype metadata requires a declared owner resource")
+            while True:
+                key = next((key for key, spec in schema.items() if spec.get("path", [key]) == path), None)
+                if key is None or key in visiting:
+                    raise ValueError("Field dtype metadata has an unknown or cyclic resource source")
+                visiting = (*visiting, key)
+                spec = schema[key]
+                if spec["kind"] != "borrowed_field":
+                    break
+                if any(name in spec for name in ("input_parameter", "input_expression", "source_type")):
+                    raise ValueError("Field dtype metadata requires a resolved resource type contract")
+                path = spec["source_path"]
+            if spec["kind"] not in ("dense_field", "ndarray") or key not in type_nodes:
+                raise ValueError("Field dtype metadata requires an explicit scalar or tensor resource type")
+            node = type_nodes[key]
+            source_namespace = (
+                vars(imported_modules[spec.get("type_declaration_module", spec["declaration_module"])])
+                if imported_modules is not None and "declaration_module" in spec
+                else namespace
+            )
+            source_namespace = {
+                **source_namespace,
                 "_forge_package_scalar": ti,
                 "_forge_package_vector": ti.types.vector,
                 "_forge_package_matrix": ti.types.matrix,
-            },
-            allow_members=item.get("struct_field", False),
-            model_tensors=model_tensors,
-            witness=field_extent,
-            resource_dtype=resource_dtype,
-            owner_dtype=owner_dtype,
-        )
-        item["element"] = type_spec(dtype, module, model_tensors=model_tensors)
-        if dtype_sources:
-            policy, guards = dtype_sources[0]
-            if item["element"]["kind"] != "scalar" or any(source != (policy, guards) for source in dtype_sources):
-                raise ValueError("Derived Field dtype choices require one scalar source policy")
-            item["dtype_policy"] = dict(policy)
-            item["dtype_guards"] = dict(guards)
-        if "local_type_source" in item and item["element"]["kind"] == "struct":
-            item["local_type_order"] = list(item["element"]["members"])
-        if "member_initialization_node" in item:
-            item["member_initialization"] = member_initialization(
-                item.pop("member_initialization_node"),
-                item["element"].get("members", {}),
-                item.pop("member_initialization_source"),
+            }
+            if "dtype_policy" in spec:
+                policy = resolved_dtype_policy(spec["dtype_policy"], source_namespace)
+                dtype_sources.append((policy, spec.get("dtype_guards", {})))
+            # .dtype means the scalar component type, also for model-sized tensors.
+            if isinstance(node, ast.Call):
+                from ._package_factories import _source_value
+
+                factory = _source_value(node.func, source_namespace)
+                axes = 1 if factory is ti.types.vector else 2 if factory is ti.types.matrix else 0
+                if axes:
+                    node = next((k.value for k in node.keywords if k.arg == "dtype"), None) or node.args[axes]
+            dtype = resolve_type(
+                node, source_namespace, resource_dtype=lambda value: resource_dtype(value, visiting), owner_dtype=owner_dtype
             )
-        if item.get("struct_field"):
-            if (
-                item["element"]["kind"] != "struct"
-                or not item["element"]["members"]
-                or any(part["kind"] not in ("scalar", "tensor") for part in item["element"]["members"].values())
-            ):
-                raise ValueError("Package Struct Field requires flat scalar/vector/matrix members")
-        elif item["element"]["kind"] not in ("scalar", "tensor"):
-            raise ValueError("Package Field declaration currently requires scalar/vector/matrix elements")
-        concrete = []
-        for extent in item["shape"]:
-            if isinstance(extent, str):
-                concrete.append(field_extent(extent))
-            else:
-                if not 0 < extent <= 2**31 - 1:
-                    raise ValueError("Field extents must fit the existing positive i32 dimension contract")
-                concrete.append(extent)
-        axes = ti.lang.impl.index_nd(len(concrete))
-        typed.append((name, item, dtype, concrete, axes))
-    # Expected type/rank/extent rejection must not leave an unfinalized
-    # FieldsBuilder behind and poison the caller's otherwise valid JIT.
-    builders, placements, events, recipes = {}, {}, {}, {}
-    from taichi_forge.types._argument_descriptor import describe_element_type
+            return describe_element_type(dtype).scalar_type
 
-    for ordinal, (name, item, dtype, concrete, axes) in enumerate(typed):
-        group = item.get("group", "fields")
-        element = (
-            tuple((member, describe_element_type(part).structural_key()) for member, part in dtype.members.items())
-            if item.get("struct_field") else describe_element_type(dtype).structural_key()
-        )
-        recipes.setdefault(group, []).append((
-            name, element, tuple(concrete), item.get("layout"), item.get("order"),
-            tuple(item["allocation"]), tuple(item.get("placement", {}).get("declaration", ())),
-        ))
-        # Several literal member declarations can originate at one source call.
-        # Preserve their declaration order instead of replacing earlier members.
-        events[(*item["allocation"], ordinal)] = ("field", name, item, dtype, concrete, axes)
-        if "placement" in item:
-            event = item["placement"]
-            events[(*event["declaration"], -1)] = ("placement", name, item, dtype, concrete, axes)
-    # A witness contains no model state to back up. Alternative constructor
-    # inputs/layout choices may reuse its physical fields while retaining their
-    # own declarations and symbolic dimensions below. The owner class, input
-    # path and allocation group keep independent slots from becoming aliases.
-    keys = {group: (witness_scope, group, tuple(recipe)) for group, recipe in recipes.items()}
-    reused, values = {}, {}
-    for group, key in keys.items():
-        if witnesses is not None and key in witnesses:
-            reused[group] = witnesses[key]
-        else:
-            builders[group] = ti.FieldsBuilder()
-            values[group] = {}
-    for position, (kind, name, item, dtype, concrete, axes) in sorted(events.items()):
-        group = item.get("group", "fields")
-        if kind == "placement":
-            if group not in reused:
-                placements[position[:2]] = builders[group].dense(axes, tuple(concrete))
-            continue
-        if group in reused:
-            value = reused[group][0][name]
-        else:
-            builder = builders[group]
-            value = ti.Struct.field(dtype.members) if item.get("struct_field") else ti.field(dtype)
-            axis_seq, shape_seq, same_level = ti.lang.impl._field_layout_axes(concrete, item.get("order"))
+        declarations = {}
+        from types import SimpleNamespace
 
-            def ordinary_placement():
-                return ti.lang.impl._create_snode(axis_seq, shape_seq, same_level, root_node=builder)
+        # Direct fields retain the Host expression used at allocation. When a
+        # model axis comes from an owner scalar, connect that scalar to the same
+        # authoritative Dimension relation instead of treating it as an unrelated
+        # runtime value (or specializing its construction witness).
+        for item in fields.values():
+            for node in ast.walk(item["type_node"]):
+                axis = getattr(node, "_package_model_extent", None)
+                source = item.get("dimension_sources", {}).get(axis)
+                if source is None or axis in item.get("dimension_expressions", {}):
+                    continue
+                expression = ast.parse(source, mode="eval").body
+                if (isinstance(expression, ast.Attribute) and isinstance(expression.value, ast.Name)
+                        and expression.value.id == "self"):
+                    name = expression.attr
+                    scalar = schema.get(name, {})
+                    if scalar.get("kind") == "value" and scalar.get("dtype") == "i32":
+                        schema[name] = {**scalar, "kind": "dimension"}
+                    if schema.get(name, {}).get("kind") == "dimension":
+                        item.setdefault("dimension_expressions", {})[axis] = ("dim", name)
 
-            # This is the documented default field(shape=...) placement through
-            # the ordinary builder. Even shape=() uses its empty-axis Dense
-            # node so tensor lanes remain packed rather than split at root.
-            parent = (
-                placements[tuple(item["placement"]["declaration"])]
-                if "placement" in item
-                else None if item.get("layout") == "SOA" else ordinary_placement()
+        for name, item in schema.items():
+            if item["kind"] == "record":
+                write_member(owner, name, SimpleNamespace(), schema)
+
+        def witness(name, visiting=()):
+            if name in visiting:
+                raise ValueError(f"Cyclic derived dimension {name!r}")
+            if "owner_dimension" in schema[name]:
+                value = read_member(owner, name, schema)
+                if type(value) is not int or not 0 <= value <= 2**31 - 1:
+                    raise ValueError("Referenced dimension needs a legal symbolic construction witness")
+                return value
+            expression = schema[name].get("expression")
+            value = evaluate_extent(expression, lambda key: witness(key, (*visiting, name))) if expression else 1
+            if not 0 <= value <= 2**31 - 1:
+                raise ValueError("Declared dimension needs a legal symbolic construction witness")
+            write_member(owner, name, value, schema)
+            return value
+
+        for name, item in schema.items():
+            if item["kind"] == "dimension":
+                declarations[name] = Dimension(kind="active", expression=item.get("expression", ()))
+                witness(name)
+        if not fields:
+            return declarations
+        typed = []
+        for name, item in fields.items():
+
+            def field_extent(extent):
+                expression = item.get("dimension_expressions", {}).get(extent, ())
+                declarations[extent] = Dimension(expression=expression)
+                value = evaluate_extent(expression, lambda key: read_member(owner, key, schema)) if expression else 1
+                if "like_source_path" in item:
+                    # field_like sources have already been proved against an
+                    # allocation declaration. Preserve derived dimensions in the
+                    # witness too; an independent default of 1 is not its layout.
+                    node = ast.parse(item["dimension_sources"][extent], mode="eval").body
+                    parts = []
+                    while isinstance(node, ast.Attribute):
+                        parts.insert(0, node.attr)
+                        node = node.value
+                    if not isinstance(node, ast.Name) or node.id != "self" or not parts or source_dimension is None:
+                        raise ValueError("field_like dimension requires its proved source owner")
+                    value = source_dimension(parts)
+                if not 0 < value <= 2**31 - 1:
+                    raise ValueError("Declared extent needs a legal symbolic construction witness")
+                setattr(owner, extent, value)
+                return value
+
+            model_tensors = {}
+            declaration_namespace = (
+                vars(imported_modules[item.get("type_declaration_module", item["declaration_module"])])
+                if imported_modules is not None and "declaration_module" in item
+                else namespace
             )
-            if item.get("layout") == "SOA":
-                if item.get("struct_field"):
-                    members = value.field_dict.values()
-                elif isinstance(value, ti.MatrixField):
-                    value._aot_tensor_soa = True
-                    members = (value.get_scalar_field(i, j) for i in range(value.n) for j in range(value.m))
+            if "dtype_policy" in item:
+                item["dtype_policy"] = resolved_dtype_policy(item["dtype_policy"], declaration_namespace)
+            dtype_sources.clear()
+            dtype = resolve_type(
+                item.pop("type_node"),
+                {
+                    **declaration_namespace,
+                    "_forge_package_scalar": ti,
+                    "_forge_package_vector": ti.types.vector,
+                    "_forge_package_matrix": ti.types.matrix,
+                },
+                allow_members=item.get("struct_field", False),
+                model_tensors=model_tensors,
+                witness=field_extent,
+                resource_dtype=resource_dtype,
+                owner_dtype=owner_dtype,
+            )
+            item["element"] = type_spec(dtype, module, model_tensors=model_tensors)
+            if dtype_sources:
+                policy, guards = dtype_sources[0]
+                if item["element"]["kind"] != "scalar" or any(source != (policy, guards) for source in dtype_sources):
+                    raise ValueError("Derived Field dtype choices require one scalar source policy")
+                item["dtype_policy"] = dict(policy)
+                item["dtype_guards"] = dict(guards)
+            if "local_type_source" in item and item["element"]["kind"] == "struct":
+                item["local_type_order"] = list(item["element"]["members"])
+            if "member_initialization_node" in item:
+                item["member_initialization"] = member_initialization(
+                    item.pop("member_initialization_node"),
+                    item["element"].get("members", {}),
+                    item.pop("member_initialization_source"),
+                )
+            if item.get("struct_field"):
+                if (
+                    item["element"]["kind"] != "struct"
+                    or not item["element"]["members"]
+                    or any(part["kind"] not in ("scalar", "tensor") for part in item["element"]["members"].values())
+                ):
+                    raise ValueError("Package Struct Field requires flat scalar/vector/matrix members")
+            elif item["element"]["kind"] not in ("scalar", "tensor"):
+                raise ValueError("Package Field declaration currently requires scalar/vector/matrix elements")
+            concrete = []
+            for extent in item["shape"]:
+                if isinstance(extent, str):
+                    concrete.append(field_extent(extent))
                 else:
-                    members = (value,)
-                for member in members:
-                    ordinary_placement().place(member)
+                    if not 0 < extent <= 2**31 - 1:
+                        raise ValueError("Field extents must fit the existing positive i32 dimension contract")
+                    concrete.append(extent)
+            axes = ti.lang.impl.index_nd(len(concrete))
+            typed.append((name, item, dtype, concrete, axes))
+        # Expected type/rank/extent rejection must not leave an unfinalized
+        # FieldsBuilder behind and poison the caller's otherwise valid JIT.
+        builders, placements, events, recipes = {}, {}, {}, {}
+        from taichi_forge.types._argument_descriptor import describe_element_type
+
+        for ordinal, (name, item, dtype, concrete, axes) in enumerate(typed):
+            group = item.get("group", "fields")
+            element = (
+                tuple((member, describe_element_type(part).structural_key()) for member, part in dtype.members.items())
+                if item.get("struct_field") else describe_element_type(dtype).structural_key()
+            )
+            recipes.setdefault(group, []).append((
+                name, element, tuple(concrete), item.get("layout"), item.get("order"),
+                tuple(item["allocation"]), tuple(item.get("placement", {}).get("declaration", ())),
+            ))
+            # Several literal member declarations can originate at one source call.
+            # Preserve their declaration order instead of replacing earlier members.
+            events[(*item["allocation"], ordinal)] = ("field", name, item, dtype, concrete, axes)
+            if "placement" in item:
+                event = item["placement"]
+                events[(*event["declaration"], -1)] = ("placement", name, item, dtype, concrete, axes)
+        # A witness contains no model state to back up. Alternative constructor
+        # inputs/layout choices may reuse its physical fields while retaining their
+        # own declarations and symbolic dimensions below. The owner class, input
+        # path and allocation group keep independent slots from becoming aliases.
+        keys = {group: (witness_scope, group, tuple(recipe)) for group, recipe in recipes.items()}
+        reused, values = {}, {}
+        for group, key in keys.items():
+            if witnesses is not None and key in witnesses:
+                reused[group] = witnesses[key]
             else:
-                parent.place(value)
-            values[group][name] = value
-        setattr(owner, name, value)
+                builders[group] = ti.FieldsBuilder()
+                values[group] = {}
+        for position, (kind, name, item, dtype, concrete, axes) in sorted(events.items()):
+            group = item.get("group", "fields")
+            if kind == "placement":
+                if group not in reused:
+                    placements[position[:2]] = builders[group].dense(axes, tuple(concrete))
+                continue
+            if group in reused:
+                value = reused[group][0][name]
+            else:
+                builder = builders[group]
+                value = ti.Struct.field(dtype.members) if item.get("struct_field") else ti.field(dtype)
+                axis_seq, shape_seq, same_level = ti.lang.impl._field_layout_axes(concrete, item.get("order"))
 
-        def field_declaration(element, spec):
-            guards = {**item.get("conditions", {}), **item.get("shape_guards", {}), **item.get("dtype_guards", {})}
-            if spec.get("model_tensor"):
+                def ordinary_placement():
+                    return ti.lang.impl._create_snode(axis_seq, shape_seq, same_level, root_node=builder)
+
+                # This is the documented default field(shape=...) placement through
+                # the ordinary builder. Even shape=() uses its empty-axis Dense
+                # node so tensor lanes remain packed rather than split at root.
+                parent = (
+                    placements[tuple(item["placement"]["declaration"])]
+                    if "placement" in item
+                    else None if item.get("layout") == "SOA" else ordinary_placement()
+                )
+                if item.get("layout") == "SOA":
+                    if item.get("struct_field"):
+                        members = value.field_dict.values()
+                    elif isinstance(value, ti.MatrixField):
+                        value._aot_tensor_soa = True
+                        members = (value.get_scalar_field(i, j) for i in range(value.n) for j in range(value.m))
+                    else:
+                        members = (value,)
+                    for member in members:
+                        ordinary_placement().place(member)
+                else:
+                    parent.place(value)
+                values[group][name] = value
+            setattr(owner, name, value)
+
+            def field_declaration(element, spec):
+                guards = {**item.get("conditions", {}), **item.get("shape_guards", {}), **item.get("dtype_guards", {})}
+                if spec.get("model_tensor"):
+                    if guards:
+                        return _ConditionalModelTensorField(
+                            element.dtype,
+                            tuple(item["shape"]),
+                            group,
+                            tuple(spec["element_shape"]),
+                            tuple(sorted(guards.items())),
+                        )
+                    return _ModelTensorField(element.dtype, tuple(item["shape"]), group, tuple(spec["element_shape"]))
                 if guards:
-                    return _ConditionalModelTensorField(
-                        element.dtype,
-                        tuple(item["shape"]),
-                        group,
-                        tuple(spec["element_shape"]),
-                        tuple(sorted(guards.items())),
-                    )
-                return _ModelTensorField(element.dtype, tuple(item["shape"]), group, tuple(spec["element_shape"]))
-            if guards:
-                return _ConditionalDenseField(element, tuple(item["shape"]), group, tuple(sorted(guards.items())))
-            return DenseField(element, tuple(item["shape"]), group)
+                    return _ConditionalDenseField(element, tuple(item["shape"]), group, tuple(sorted(guards.items())))
+                return DenseField(element, tuple(item["shape"]), group)
 
-        def record_declaration(**members):
-            return (
-                _ConditionalRecord(sorted(item["conditions"].items()), **members)
-                if item.get("conditions")
-                else Record(**members)
-            )
+            def record_declaration(**members):
+                return (
+                    _ConditionalRecord(sorted(item["conditions"].items()), **members)
+                    if item.get("conditions")
+                    else Record(**members)
+                )
 
-        declarations[name] = (
-            record_declaration(
-                **{
-                    member: field_declaration(element, item["element"]["members"][member])
-                    for member, element in dtype.members.items()
-                }
+            declarations[name] = (
+                record_declaration(
+                    **{
+                        member: field_declaration(element, item["element"]["members"][member])
+                        for member, element in dtype.members.items()
+                    }
+                )
+                if item.get("struct_field")
+                else field_declaration(dtype, item["element"])
             )
-            if item.get("struct_field")
-            else field_declaration(dtype, item["element"])
-        )
-    owner._forge_package_field_trees = [tree for _, tree in reused.values()]
-    for group, builder in builders.items():
-        tree = builder._finalize_for_aot()
-        # Record each successful allocation immediately, including a prefix
-        # whose later group or owner construction fails.
-        field_trees.append(tree)
-        owner._forge_package_field_trees.append(tree)
-        if witnesses is not None:
-            witnesses[keys[group]] = values[group], tree
-    return declarations
+        owner._forge_package_field_trees = [tree for _, tree in reused.values()]
+        for group, builder in builders.items():
+            tree = builder._finalize_for_aot()
+            # Record each successful allocation immediately, including a prefix
+            # whose later group or owner construction fails.
+            field_trees.append(tree)
+            owner._forge_package_field_trees.append(tree)
+            if witnesses is not None:
+                witnesses[keys[group]] = values[group], tree
+        return declarations
+    finally:
+        # Recursive dtype and dimension resolvers are construction-only. Their
+        # cells otherwise retain the owner, schema and source namespaces until
+        # cyclic GC, even for a dimension-only owner or a failed allocation.
+        resource_dtype = witness = None
 
 
 def field_environment(declarations, schema):

@@ -254,13 +254,19 @@ def resolve_type(
             return result
         raise ValueError("Type declarations require fixed names, constants or builtin factories")
 
-    result = value(node)
-    if allow_members and type(result) is dict:
-        result = ti.types.struct(**result)
-    if allow_ndarray and isinstance(result, ti.types.ndarray):
+    try:
+        result = value(node)
+        if allow_members and type(result) is dict:
+            result = ti.types.struct(**result)
+        if allow_ndarray and isinstance(result, ti.types.ndarray):
+            return result
+        describe_element_type(result)  # Reject arbitrary Host objects.
         return result
-    describe_element_type(result)  # Reject arbitrary Host objects.
-    return result
+    finally:
+        # The recursive closure otherwise retains its namespace and Field
+        # dimension callbacks until cyclic GC, including failed resolutions.
+        # Type factories consume these callbacks synchronously.
+        value = None
 
 
 def type_spec(dtype, module, *, model_tensors=None):

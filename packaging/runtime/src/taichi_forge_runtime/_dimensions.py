@@ -31,7 +31,10 @@ def validate_extent(expression):
         if not valid:
             raise ValueError(f"Invalid dimension expression {op!r}")
 
-    visit(expression, 0)
+    try:
+        visit(expression, 0)
+    finally:
+        visit = None  # Break the recursive closure without waiting for cyclic GC.
 
 
 def freeze_extent(expression):
@@ -41,7 +44,10 @@ def freeze_extent(expression):
         op, *args = node
         return (op, *args) if op in ("dim", "const") else (op, *(freeze(arg) for arg in args))
 
-    return freeze(expression)
+    try:
+        return freeze(expression)
+    finally:
+        freeze = None
 
 
 def evaluate_extent(expression, resolve, *, max_value=2**63 - 1, min_value=0):
@@ -94,7 +100,11 @@ def evaluate_extent(expression, resolve, *, max_value=2**63 - 1, min_value=0):
             raise ValueError("A dimension divisor must be positive")
         return result
 
-    return evaluate(expression)
+    try:
+        return evaluate(expression)
+    finally:
+        # The recursive evaluator also owns the caller's dimension resolver.
+        evaluate = None
 
 
 def check_model_static_ranges(expressions, resolve):
