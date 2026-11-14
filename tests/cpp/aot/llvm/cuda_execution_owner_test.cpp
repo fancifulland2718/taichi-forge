@@ -272,9 +272,17 @@ TEST(CudaExecutionOwner, ExternalStorageLoanPreservesCompleteAotEpoch) {
   driver.event_synchronize(default_pending);
   driver.event_destroy(default_pending);
   program.retire_external_dense_storage(owner);
-  EXPECT_TRUE(domain->snapshot().closed);
+  // Storage retirement invalidates its dependent executions, not the entire
+  // selected queue. This domain was already stopped explicitly above.
+  EXPECT_FALSE(domain->snapshot().closed);
+  EXPECT_FALSE(domain->snapshot().accepting);
   EXPECT_TRUE(adapter->closed());
   EXPECT_THROW(runtime->get_memory(memory, true), MemoryBindingError);
+  ticket = nullptr;
+  EXPECT_FALSE(ti_try_submit_prepared_ext(rt, prepared, 0, nullptr, &ticket));
+  EXPECT_EQ(ticket, nullptr);
+  EXPECT_NE(ti_get_last_error(nullptr, nullptr), TI_ERROR_SUCCESS);
+  ti_set_last_error(TI_ERROR_SUCCESS, nullptr);
   ti_destroy_prepared_ext(rt, prepared);
   ti_free_memory(rt, memory);
   ti_destroy_aot_module(module);

@@ -60,14 +60,14 @@ def check(runtime, folder):
     field.close()
     field = None
 
-    # Releasing every wrapper does not drop modules/array owners. Native
-    # capacity bounds residency until the domain's explicit cold close.
+    # Explicitly closing completed instances releases their owner wrappers.
+    # Keeping a domain open must not retain those retired bindings.
     module_ref, memory_ref = weakref.ref(module), weakref.ref(output._memory)
     left.close()
     right.close()
     del left, right, module, output, other, target
     gc.collect()
-    assert module_ref() is not None and memory_ref() is not None
+    assert module_ref() is None and memory_ref() is None
     first.close()
     second.close()
     gc.collect()

@@ -249,8 +249,10 @@ TEST(CudaExecutionContextAot,
       {operands->dispatch(second_args, 1), operands->read(1)}, owner, physics,
       operands);
   const auto a = first->instance_snapshot(), b = second->instance_snapshot();
-  EXPECT_GE(first->node_count(), 4);
-  EXPECT_GE(second->node_count(), 5);
+  // Parameter preparation can remove upload nodes. The second instance adds
+  // one pinned readback to the same kernel; its numerical work is checked below.
+  EXPECT_GT(first->node_count(), 0);
+  EXPECT_EQ(second->node_count(), first->node_count() + 1);
   EXPECT_NE(a.identity, b.identity);
   EXPECT_NE(a.temporary_storage, b.temporary_storage);
   EXPECT_EQ(a.temporary_bytes, taichi_global_tmp_buffer_size);

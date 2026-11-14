@@ -527,7 +527,14 @@ def check(folder):
                     ticket.wait()
                     ticket.close()
                 image.close()
-                assert domain.info["closed"]
+                # Retire the dependent instance while leaving its queue usable.
+                assert not domain.info["closed"]
+                try:
+                    call.submit()
+                except AotError:
+                    pass
+                else:
+                    raise AssertionError("Retired external storage remained callable")
                 producer.assert_handles_live()
                 call.close()
                 domain.close()
