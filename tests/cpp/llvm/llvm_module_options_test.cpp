@@ -263,6 +263,122 @@ TEST(LLVMAotFinalization, SnapshotReuseChecksFullInputAndCanonicalFallback) {
   EXPECT_EQ(finalizer.statistics().at("aot_cleaned_units"), 3);
 }
 
+TEST(LLVMAotFinalization, ConsumingExtractionMatchesImmutableRecording) {
+  llvm::LLVMContext context;
+  llvm::SMDiagnostic error;
+  auto original = llvm::parseAssemblyString(R"(
+    target datalayout = "e-p:64:64-i64:64-n16:32:64"
+    target triple = "nvptx64-nvidia-cuda"
+    @bias = internal constant i32 7
+    declare i32 @personality(...)
+    declare void @observable(i32)
+    define internal i32 @shared(i32 %x) {
+      %b = load i32, ptr @bias
+      %r = add i32 %x, %b
+      ret i32 %r
+    }
+    define internal fastcc i32 @leaf(ptr nonnull align 4 %out, i32 %n)
+        "taichi.aot.real_function" "target-features"="+ptx75"
+        prefix i32 3 prologue i32 11 personality ptr @personality
+        !forge.contract !0 {
+    start:
+      br label %loop
+    loop:
+      %i = phi i32 [ 0, %start ], [ %next, %body ]
+      %more = icmp slt i32 %i, %n
+      br i1 %more, label %body, label %end
+    body:
+      %v = call i32 @shared(i32 %i)
+      store volatile i32 %v, ptr %out, align 4, !forge.effect !0
+      %old = atomicrmw add ptr %out, i32 1 monotonic
+      %next = add i32 %i, 1
+      br label %loop
+    end:
+      call void @observable(i32 %i)
+      ret i32 %i
+    }
+    define i32 @entry(ptr %out, i32 %n) {
+      %r = call fastcc i32 @leaf(ptr nonnull align 4 %out, i32 %n)
+      %s = call i32 @shared(i32 %r)
+      ret i32 %s
+    }
+    !llvm.module.flags = !{!1}
+    !0 = !{!"effect", ptr @shared}
+    !1 = !{i32 1, !"forge.test.abi", i32 3}
+  )", error, context);
+  ASSERT_NE(original, nullptr);
+  ASSERT_FALSE(llvm::verifyModule(*original));
+  const auto serialize = [](const llvm::Module &module) {
+    std::string bytes;
+    llvm::raw_string_ostream stream(bytes);
+    encode_llvm_module(module, stream, LLVMModuleEncoding::bitcode);
+    return bytes;
+  };
+  const auto before = serialize(*original);
+  std::map<std::string, std::string> recorded, consumed;
+  std::string recorded_symbol, consumed_symbol;
+  LLVM::export_code_units(
+      *original,
+      [&](const auto &name, const auto &bytes) { recorded[name] = bytes; },
+      true, original->getFunction("leaf"), false, &recorded_symbol);
+  EXPECT_EQ(before, serialize(*original));
+  auto copy = llvm::CloneModule(*original);
+  LLVM::export_code_units(
+      *copy,
+      [&](const auto &name, const auto &bytes) { consumed[name] = bytes; },
+      true, copy->getFunction("leaf"), true, &consumed_symbol);
+  ASSERT_EQ(recorded.size(), 1);
+  EXPECT_EQ(recorded, consumed);
+  EXPECT_EQ(recorded_symbol, consumed_symbol);
+  EXPECT_FALSE(llvm::verifyModule(*copy));
+  EXPECT_TRUE(copy->getFunction(consumed_symbol)->isDeclaration());
+  // This helper is still used by the caller, so extracting the leaf must
+  // neither consume nor redirect its original body/constant dependencies.
+  EXPECT_FALSE(copy->getFunction("shared")->isDeclaration());
+  EXPECT_TRUE(copy->getNamedGlobal("bias")->hasInitializer());
+  for (const auto &[name, bytes] : consumed) {
+    llvm::LLVMContext unit_context;
+    auto decoded = decode_llvm_module(llvm::MemoryBufferRef(bytes, name),
+                                      unit_context, LLVMModuleEncoding::bitcode);
+    ASSERT_TRUE(bool(decoded));
+    EXPECT_FALSE(llvm::verifyModule(**decoded));
+    auto *leaf = (*decoded)->getFunction(consumed_symbol);
+    ASSERT_NE(leaf, nullptr);
+    EXPECT_EQ(leaf->getCallingConv(), llvm::CallingConv::Fast);
+    EXPECT_TRUE(leaf->hasPersonalityFn());
+    EXPECT_TRUE(leaf->hasPrefixData());
+    EXPECT_TRUE(leaf->hasPrologueData());
+    EXPECT_NE(leaf->getMetadata("forge.contract"), nullptr);
+  }
+}
+
+TEST(LLVMAotFinalization, RejectedEarlyRelocationsLeaveBodiesIntact) {
+  llvm::LLVMContext context;
+  llvm::SMDiagnostic error;
+  auto module = llvm::parseAssemblyString(R"(
+    @__ti_aot_tree_id_1 = external constant i32
+    define internal i32 @leaf() "taichi.aot.real_function" {
+      %r = load i32, ptr @__ti_aot_tree_id_1
+      ret i32 %r
+    }
+    define i32 @entry() {
+      %r = call i32 @leaf()
+      ret i32 %r
+    }
+  )", error, context);
+  ASSERT_NE(module, nullptr);
+  int emitted = 0;
+  LLVM::export_code_units(*module, [&](const auto &, const auto &) { ++emitted; },
+                         false);
+  EXPECT_EQ(emitted, 0);
+  EXPECT_FALSE(module->getFunction("leaf")->isDeclaration());
+  EXPECT_FALSE(llvm::verifyModule(*module));
+  LLVM::export_code_units(*module, [&](const auto &, const auto &) { ++emitted; });
+  EXPECT_EQ(emitted, 1);
+  EXPECT_EQ(module->getFunction("leaf"), nullptr);
+  EXPECT_FALSE(llvm::verifyModule(*module));
+}
+
 TEST(LLVMAotFinalization, PreservesEffectsNumericFlagsAndDisabledOptimization) {
   llvm::LLVMContext context;
   llvm::SMDiagnostic error;

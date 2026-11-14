@@ -12,6 +12,7 @@
 #include "llvm/Linker/Linker.h"
 #include "llvm/Transforms/IPO/GlobalDCE.h"
 #include "llvm/Transforms/Utils/Cloning.h"
+#include "llvm/Transforms/Utils/ValueMapper.h"
 #include "taichi/runtime/llvm/aot_artifact_integrity.h"
 #include "taichi/runtime/llvm/llvm_module_codec.h"
 
@@ -155,8 +156,42 @@ inline void export_code_units(
     llvm::ValueToValueMapTy values;
     auto unit =
         llvm::CloneModule(module, values, [&](const llvm::GlobalValue *value) {
-          return definitions.count(value) != 0;
+          return definitions.count(value) != 0 &&
+                 (!rewrite_caller || value != root);
         });
+    if (rewrite_caller) {
+      // This body is consumed by extraction. Move it into the private unit
+      // instead of copying every instruction and deleting the original below.
+      // Other closure definitions can still be used by subsequent roots and
+      // must remain cloned. Non-consuming FunctionCodeCache recording keeps
+      // the original CloneModule path.
+      auto *destination = llvm::cast<llvm::Function>(values[root]);
+      destination->copyAttributesFrom(root);
+      destination->setIsNewDbgInfoFormat(root->IsNewDbgInfoFormat);
+      if (const auto *comdat = root->getComdat()) {
+        auto *copy = unit->getOrInsertComdat(comdat->getName());
+        copy->setSelectionKind(comdat->getSelectionKind());
+        destination->setComdat(copy);
+      }
+      auto argument = destination->arg_begin();
+      for (auto &original : root->args()) {
+        argument->setName(original.getName());
+        values[&original] = &*argument++;
+      }
+      // Keep local SSA values, PHI predecessors and metadata operands intact;
+      // only arguments and module-owned values change their owner/identity.
+      for (auto &block : *root) {
+        values[&block] = &block;
+        for (auto &instruction : block)
+          values[&instruction] = &instruction;
+      }
+      llvm::SmallVector<std::pair<unsigned, llvm::MDNode *>, 8> metadata;
+      root->getAllMetadata(metadata);
+      for (const auto &[kind, node] : metadata)
+        destination->addMetadata(kind, *node);
+      destination->splice(destination->end(), root);
+      llvm::RemapFunction(*destination, values);
+    }
     unit->setModuleIdentifier("aot_code_unit");
     unit->setSourceFileName("");
     // Entry annotations refer to the caller, not the function library.
@@ -226,10 +261,9 @@ inline void export_code_units(
     const auto &filename = artifact.filename;
     const auto &digest = artifact.digest;
     emit(filename, artifact.bytes);
-    if (!rewrite_caller) {
-      unit.reset();
+    if (!rewrite_caller)
       continue;
-    }
+    // Also drop the source definition's metadata/personality after a move.
     root->deleteBody();
     root->setLinkage(llvm::GlobalValue::ExternalLinkage);
     if (auto *existing = module.getFunction(symbol)) {
