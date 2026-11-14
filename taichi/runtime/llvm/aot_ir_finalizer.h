@@ -25,24 +25,35 @@ class AotIRFinalizer {
     export_code_units(
         module, [](const auto &, const auto &) {}, allow_resource_relocations,
         nullptr, true, nullptr,
-        [&](llvm::Module &unit) {
-          const auto key = input_key(unit, optimize);
-          const auto found = units_.find(key);
-          if (found != units_.end()) {
+        [&](const std::string &snapshot) {
+          const auto snapshot_key = input_key(snapshot, optimize);
+          const auto previous = unit_snapshots_.find(snapshot_key);
+          if (previous != unit_snapshots_.end()) {
+            ++unit_snapshot_hits_;
             ++unit_cache_hits_;
-            return found->second.artifact;
+            return units_.at(previous->second).artifact;
           }
-          if (optimize) {
-            clean(unit);
-            ++cleaned_units_;
-          }
-          Unit entry;
-          entry.references = referenced_symbols(unit);
-          entry.artifact = encode_code_unit(unit);
-          symbols_.emplace(entry.artifact.symbol, key);
-          files_.emplace(entry.artifact.filename, key);
-          auto [item, inserted] = units_.emplace(key, std::move(entry));
-          return item->second.artifact;
+          return finalize_code_unit_snapshot(snapshot, [&](llvm::Module &unit) {
+            const auto key = input_key(unit, optimize);
+            const auto found = units_.find(key);
+            if (found != units_.end()) {
+              unit_snapshots_.emplace(snapshot_key, key);
+              ++unit_cache_hits_;
+              return found->second.artifact;
+            }
+            if (optimize) {
+              clean(unit);
+              ++cleaned_units_;
+            }
+            Unit entry;
+            entry.references = referenced_symbols(unit);
+            entry.artifact = encode_code_unit(unit);
+            symbols_.emplace(entry.artifact.symbol, key);
+            files_.emplace(entry.artifact.filename, key);
+            auto [item, inserted] = units_.emplace(key, std::move(entry));
+            unit_snapshots_.emplace(snapshot_key, key);
+            return item->second.artifact;
+          });
         });
   }
 
@@ -126,6 +137,7 @@ class AotIRFinalizer {
             {"aot_cleaned_units", cleaned_units_},
             {"aot_cleaned_roots", cleaned_roots_},
             {"aot_unit_finalization_hits", unit_cache_hits_},
+            {"aot_unit_snapshot_hits", unit_snapshot_hits_},
             {"aot_root_finalization_hits", root_cache_hits_}};
   }
 
@@ -141,9 +153,12 @@ class AotIRFinalizer {
     return bytes;
   }
   static std::string input_key(const llvm::Module &module, bool optimize) {
+    return input_key(serialize(module), optimize);
+  }
+  static std::string input_key(const std::string &bytes, bool optimize) {
     return aot_artifact_sha256(
         std::string(optimize ? "aot-local-v1:" : "aot-unchanged:") +
-        LLVM_VERSION_STRING + ":" + serialize(module));
+        LLVM_VERSION_STRING + ":" + bytes);
   }
   static std::set<std::string> referenced_symbols(const llvm::Module &module) {
     std::set<std::string> result;
@@ -184,9 +199,14 @@ class AotIRFinalizer {
          llvm::MDString::get(module.getContext(), LLVM_VERSION_STRING)}));
   }
   std::map<std::string, Unit> units_;
+  // Exact input aliases only: retain hashes, not another copy of every
+  // unoptimized bitcode body or its LLVMContext. Type-suffix differences still
+  // take the canonical path and converge in units_.
+  std::map<std::string, std::string> unit_snapshots_;
   std::map<std::string, std::string> symbols_, files_, roots_;
   std::uint64_t cleaned_units_{0}, cleaned_roots_{0};
   std::uint64_t unit_cache_hits_{0}, root_cache_hits_{0};
+  std::uint64_t unit_snapshot_hits_{0};
 };
 
 }  // namespace taichi::lang::LLVM

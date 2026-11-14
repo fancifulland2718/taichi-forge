@@ -5,6 +5,7 @@
 #include <unordered_set>
 
 #include "taichi/common/virtual_dir.h"
+#include "taichi/util/io.h"
 #include "llvm/IR/Constants.h"
 #include "llvm/Passes/PassBuilder.h"
 #include "llvm/IR/Metadata.h"
@@ -43,6 +44,25 @@ inline CodeUnitArtifact encode_code_unit(llvm::Module &unit) {
 }
 
 using CodeUnitFinalizer = std::function<CodeUnitArtifact(llvm::Module &)>;
+using CodeUnitSnapshotFinalizer =
+    std::function<CodeUnitArtifact(const std::string &)>;
+
+inline CodeUnitArtifact finalize_code_unit_snapshot(
+    const std::string &snapshot,
+    const CodeUnitFinalizer &finalize = {}) {
+  // Identified type names belong to the LLVMContext, not just this module.
+  // Normalize in a private context without mutating the producer/JIT types.
+  llvm::LLVMContext context;
+  auto decoded = decode_llvm_module(llvm::MemoryBufferRef(snapshot, "unit"),
+                                    context, LLVMModuleEncoding::bitcode);
+  TI_ERROR_IF(!decoded, "Cannot normalize AOT code unit");
+  auto unit = std::move(*decoded);
+  size_t type_index = 0;
+  for (auto *type : unit->getIdentifiedStructTypes())
+    if (!type->isOpaque())
+      type->setName("__ti_unit_type_" + std::to_string(type_index++));
+  return finalize ? finalize(*unit) : encode_code_unit(*unit);
+}
 
 // Prototype library representation: a typed real-function closure is stored
 // once, independently of its callers. Only local symbols are canonicalized;
@@ -54,7 +74,7 @@ inline void export_code_units(
     llvm::Function *selected_root = nullptr,
     bool rewrite_caller = true,
     std::string *selected_symbol = nullptr,
-    const CodeUnitFinalizer &finalize = {}) {
+    const CodeUnitSnapshotFinalizer &finalize = {}) {
   std::vector<llvm::Function *> roots;
   for (auto &function : module)
     if (!function.isDeclaration() && function.hasFnAttribute(kRealFunctionUnit) &&
@@ -133,7 +153,6 @@ inline void export_code_units(
     if (!supported)
       continue;
     llvm::ValueToValueMapTy values;
-    auto private_context = std::make_unique<llvm::LLVMContext>();
     auto unit =
         llvm::CloneModule(module, values, [&](const llvm::GlobalValue *value) {
           return definitions.count(value) != 0;
@@ -195,16 +214,12 @@ inline void export_code_units(
     std::string snapshot;
     llvm::raw_string_ostream snapshot_stream(snapshot);
     encode_llvm_module(*unit, snapshot_stream, LLVMModuleEncoding::bitcode);
-    auto private_unit =
-        decode_llvm_module(llvm::MemoryBufferRef(snapshot, "unit"),
-                           *private_context, LLVMModuleEncoding::bitcode);
-    TI_ERROR_IF(!private_unit, "Cannot normalize AOT code unit");
-    unit = std::move(*private_unit);
-    size_t type_index = 0;
-    for (auto *type : unit->getIdentifiedStructTypes())
-      if (!type->isOpaque())
-        type->setName("__ti_unit_type_" + std::to_string(type_index++));
-    const auto artifact = finalize ? finalize(*unit) : encode_code_unit(*unit);
+    unit.reset();
+    // The complete snapshot is available before the private-context parse.
+    // A build-owned finalizer may reuse that exact immutable input; a name or
+    // an upstream function-cache key alone is not an extraction identity.
+    const auto artifact = finalize ? finalize(snapshot)
+                                   : finalize_code_unit_snapshot(snapshot);
     const auto &symbol = artifact.symbol;
     if (selected_symbol)
       *selected_symbol = symbol;
@@ -230,7 +245,6 @@ inline void export_code_units(
             module.getContext(),
             {llvm::MDString::get(module.getContext(), filename),
              llvm::MDString::get(module.getContext(), digest)}));
-    unit.reset();  // The private LLVMContext must outlive its module.
   }
   if (rewrite_caller) {
     llvm::ModuleAnalysisManager analysis;

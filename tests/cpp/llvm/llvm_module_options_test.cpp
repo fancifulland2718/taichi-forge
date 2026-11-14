@@ -186,6 +186,7 @@ TEST(LLVMAotFinalization, SharesUnitsAndPrunesDeadTransitiveDependencies) {
   finalizer.export_units(*second, true, true);  // ordinary dump
   EXPECT_EQ(finalizer.statistics().at("aot_cleaned_units"), 2);
   EXPECT_EQ(finalizer.statistics().at("aot_unit_finalization_hits"), 2);
+  EXPECT_EQ(finalizer.statistics().at("aot_unit_snapshot_hits"), 2);
   finalizer.finalize_root(first, true);
   finalizer.finalize_root(second, true);
   EXPECT_EQ(finalizer.statistics().at("aot_cleaned_roots"), 1);
@@ -212,6 +213,54 @@ TEST(LLVMAotFinalization, SharesUnitsAndPrunesDeadTransitiveDependencies) {
   EXPECT_TRUE(llvm::isa<llvm::AllocaInst>(
       original->getFunction("leaf")->front().front()));
   EXPECT_EQ(original->getNamedMetadata("taichi.aot.cleanup.v1"), nullptr);
+}
+
+TEST(LLVMAotFinalization, SnapshotReuseChecksFullInputAndCanonicalFallback) {
+  LLVM::AotIRFinalizer finalizer;
+  const auto build = [&](const std::string &type_name, int bias, int abi,
+                         bool optimize) {
+    llvm::LLVMContext context;
+    llvm::SMDiagnostic error;
+    auto module = llvm::parseAssemblyString(
+        "target datalayout = \"e-p:64:64-i64:64-n16:32:64\"\n%" +
+            type_name + " = type { i32 }\n"
+            "define internal i32 @leaf(ptr %data) \"taichi.aot.real_function\" {\n"
+            "  %p = getelementptr %" + type_name + ", ptr %data, i32 0, i32 0\n"
+            "  %v = load volatile i32, ptr %p\n"
+            "  %r = add i32 %v, " + std::to_string(bias) + "\n"
+            "  ret i32 %r\n}\n"
+            "define i32 @entry(ptr %data) {\n"
+            "  %r = call i32 @leaf(ptr %data)\n  ret i32 %r\n}\n",
+        error, context);
+    EXPECT_NE(module, nullptr);
+    if (!module)
+      return std::string{};
+    module->addModuleFlag(llvm::Module::Error, "forge.test.abi", abi);
+    finalizer.export_units(*module, optimize, false);
+    finalizer.finalize_root(module, optimize);
+    EXPECT_FALSE(llvm::verifyModule(*module));
+    std::string result;
+    finalizer.emit_dependencies(*module, [&](const auto &, const auto &bytes) {
+      result += bytes;
+    });
+    EXPECT_FALSE(result.empty());
+    return result;
+  };
+  const auto first = build("Capture", 3, 1, true);
+  EXPECT_EQ(first, build("Capture", 3, 1, true));
+  EXPECT_EQ(finalizer.statistics().at("aot_unit_snapshot_hits"), 1);
+  // Different context-local type names miss the exact snapshot, but still
+  // converge through the original canonical normalization and policy key.
+  EXPECT_EQ(first, build("Capture.123", 3, 1, true));
+  EXPECT_EQ(finalizer.statistics().at("aot_unit_snapshot_hits"), 1);
+  EXPECT_EQ(finalizer.statistics().at("aot_unit_finalization_hits"), 2);
+  EXPECT_EQ(first, build("Capture.123", 3, 1, true));
+  EXPECT_EQ(finalizer.statistics().at("aot_unit_snapshot_hits"), 2);
+  EXPECT_NE(first, build("Capture", 7, 1, true));
+  EXPECT_NE(first, build("Capture", 3, 2, true));
+  EXPECT_NE(first, build("Capture", 3, 1, false));
+  EXPECT_EQ(finalizer.statistics().at("aot_unit_snapshot_hits"), 2);
+  EXPECT_EQ(finalizer.statistics().at("aot_cleaned_units"), 3);
 }
 
 TEST(LLVMAotFinalization, PreservesEffectsNumericFlagsAndDisabledOptimization) {
