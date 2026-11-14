@@ -16907,6 +16907,80 @@ class Model:
         np.testing.assert_array_equal(models[1].a.to_numpy(), 11 + np.arange(7))
 
 
+@test_utils.test(arch=[ti.cpu, ti.cuda], offline_cache=False)
+def test_package_full_borrowed_owner_witness_reuse(tmp_path, monkeypatch):
+    from taichi_forge.aot._package_owner_graph import OwnerGraph
+
+    source = '''
+import taichi_forge as ti
+@ti.data_oriented
+class Storage:
+    def __init__(self, n):
+        self.n = n
+        scope = ti.experimental.ResourceScope(self)
+        scope.dim('n')
+        scope.a = scope.field(ti.i32, shape=self.n, initialization='zero')
+        scope.b = scope.field(ti.i32, shape=self.n, initialization='zero')
+@ti.data_oriented
+class Reader:
+    def __init__(self, source, peer):
+        scope = ti.experimental.ResourceScope(self)
+        scope.owner_reference('source', source)
+        scope.owner_reference('peer', peer)
+    @ti.kernel
+    def step(self):
+        for i in self.source.a:
+            self.source.a[i] += 1
+            self.peer.a[i] += 10
+            self.peer.b[i] = self.source.a[i] + self.peer.a[i]
+@ti.data_oriented
+class OtherReader(Reader):
+    pass
+@ti.data_oriented
+class Model:
+    def __init__(self, n):
+        self.n = n
+        scope = ti.experimental.ResourceScope(self)
+        scope.dim('n')
+        scope.left = Storage(n)
+        scope.right = Storage(n)
+        scope.first = Reader(self.left, self.right)
+        scope.second = OtherReader(self.right, self.left)
+'''
+    package = _source_package(tmp_path, monkeypatch, source)
+    borrowed = {}
+    construct = OwnerGraph.construct
+
+    def observed(self, identity, **kwargs):
+        result = construct(self, identity, **kwargs)
+        if (identity == 'definition_fixture.model.Storage' and kwargs.get('resource_only')
+                and kwargs.get('resource_paths') is None):
+            borrowed.setdefault(kwargs['path'], []).append(result[0])
+        return result
+
+    monkeypatch.setattr(OwnerGraph, 'construct', observed)
+    manifest = ti.aot.export_package(package, tmp_path / 'sdk')
+    # Both standalone reader definitions borrow the same complete storage view.
+    # Different slots retain distinct allocations, including inside each reader.
+    for slot in (('source',), ('peer',)):
+        assert len(borrowed[slot]) >= 2
+        assert len({id(owner) for owner in borrowed[slot]}) == 1
+    assert len({id(values[0]) for values in borrowed.values()}) == len(borrowed)
+    with Runtime(manifest['target']) as runtime, load_package(runtime, tmp_path / 'sdk') as code:
+        a, b = code.host.Model(3), code.host.Model(7)
+        a.first.step()
+        a.second.step()
+        np.testing.assert_array_equal(a.left.a.to_numpy(), 11)
+        np.testing.assert_array_equal(a.right.a.to_numpy(), 11)
+        np.testing.assert_array_equal(a.right.b.to_numpy(), 11)
+        np.testing.assert_array_equal(a.left.b.to_numpy(), 22)
+        np.testing.assert_array_equal(b.left.a.to_numpy(), 0)
+        b.second.step()
+        np.testing.assert_array_equal(b.left.a.to_numpy(), 10)
+        np.testing.assert_array_equal(b.right.a.to_numpy(), 1)
+        np.testing.assert_array_equal(a.left.a.to_numpy(), 11)
+
+
 @pytest.mark.parametrize('policy', ['dtype', 'shape', 'derived_dtype'])
 @test_utils.test(arch=[ti.cpu, ti.cuda], offline_cache=False)
 def test_package_field_like_borrowed_layout_policy(tmp_path, monkeypatch, policy):

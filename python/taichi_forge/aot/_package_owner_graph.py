@@ -104,10 +104,14 @@ class OwnerGraph:
                     + ".".join(path)
                 )
             references = (*references, token)
-            if resource_paths is not None and len(references) == 1:
-                # Many input families borrow different members of one native
-                # allocation group. Reuse that complete build-only witness,
-                # not a new copy of every sibling Field for each member.
+            if resource_paths is None:
+                # A complete input view borrows this allocation scope, not its
+                # owned solver graph. Filter before copying or cache lookup so
+                # complete views can reuse the same build-only witness too.
+                schema = {key: item for key, item in schema.items() if item["kind"] != "owner"}
+            if len(references) == 1:
+                # Reuse complete input views and complete allocation groups
+                # selected by field inputs across compatible owner contexts.
                 # Keep input slots distinct: two unrelated inputs in a single
                 # owner must never acquire a false allocation alias. Relative
                 # choices retain every layout/child selection of this source.
@@ -209,11 +213,6 @@ class OwnerGraph:
                     for key, value in selected.get("conditions", {}).items()
                     if key not in item.get("conditions", {})
                 }
-        if resource_only:
-            # An input borrows its existing allocation scope. It does not create
-            # or recursively compile that scope's owned solver/workspace objects.
-            if resource_paths is None:
-                schema = {key: item for key, item in schema.items() if item["kind"] != "owner"}
         imported = self.imported[name]
         owner = object.__new__(getattr(imported, class_name))
         # Dimensions and field_like may read child allocation metadata before
