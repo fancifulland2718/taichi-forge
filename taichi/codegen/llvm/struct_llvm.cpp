@@ -55,8 +55,10 @@ void StructCompilerLLVM::generate_types(SNode &snode) {
     }
   }
 
-  auto ch_type =
-      llvm::StructType::create(*ctx, ch_types, snode.node_type_name + "_ch");
+  // Layouts have structural identity; resource identity stays in the tree and
+  // its accessor symbols. Identified types survive module retirement in the
+  // LLVMContext, so creating one per SNode retains every historical layout.
+  auto ch_type = llvm::StructType::get(*ctx, ch_types);
 
   snode.cell_size_bytes = tlctx_->get_type_size(ch_type);
 
@@ -147,7 +149,7 @@ void StructCompilerLLVM::generate_types(SNode &snode) {
     TI_NOT_IMPLEMENTED;
   }
   if (aux_type != nullptr) {
-    node_type = llvm::StructType::create(*ctx, {aux_type, body_type}, "");
+    node_type = llvm::StructType::get(*ctx, {aux_type, body_type});
   } else {
     node_type = body_type;
   }
@@ -155,17 +157,14 @@ void StructCompilerLLVM::generate_types(SNode &snode) {
   TI_ASSERT(node_type != nullptr);
   TI_ASSERT(body_type != nullptr);
 
-  // Here we create a stub holding 4 LLVM types as struct members.
-  // The aim is to give a **unique** name to the stub, so that we can look up
-  // these types using this name. This decouples them from the LLVM context.
-  // Note that body_type might not have a unique name, since literal structs
-  // (such as {i32, i32}) cannot be aliased in LLVM.
-  auto stub = llvm::StructType::create(
+  // The uniquely named declaration carries the SNode-to-layout mapping.
+  // Its return type is structural as well, allowing repeated layouts to reuse
+  // types after the declarations and their modules have been retired.
+  auto stub = llvm::StructType::get(
       *ctx,
       {node_type, body_type, aux_type ? aux_type : llvm::Type::getInt8Ty(*ctx),
        // aux_type might be null
-       ch_type},
-      type_stub_name(&snode));
+       ch_type});
 
   // Create a dummy function in the module with the type stub as return type
   // so that the type is referenced in the module
@@ -324,8 +323,10 @@ llvm::Type *StructCompilerLLVM::get_stub(llvm::Module *module,
                                          uint32 index) {
   TI_ASSERT(module);
   TI_ASSERT(snode);
-  auto stub = llvm::StructType::getTypeByName(module->getContext(),
-                                              type_stub_name(snode));
+  auto *declaration =
+      module->getFunction(type_stub_name(snode) + "_func");
+  TI_ASSERT(declaration);
+  auto *stub = llvm::dyn_cast<llvm::StructType>(declaration->getReturnType());
   TI_ASSERT(stub);
   TI_ASSERT(stub->getStructNumElements() == 4);
   TI_ASSERT(0 <= index && index < 4);

@@ -174,6 +174,51 @@ TEST_F(RefineCoordinatesTest, Basic) {
   }
 }
 
+TEST_F(RefineCoordinatesTest, RepeatedLayoutsReuseTypesAfterTreeRetirement) {
+  llvm::Type *first_body = nullptr;
+  llvm::Type *first_element = nullptr;
+  std::string previous_symbol;
+  for (int extent : {8, 8, 16, 8}) {
+    auto root = std::make_unique<SNode>(0, SNodeType::root);
+    auto &dense = root->dense({Axis{0}}, extent);
+    auto &narrow = dense.insert_children(SNodeType::place);
+    narrow.dt = PrimitiveType::i8;
+    auto &wide = dense.insert_children(SNodeType::place);
+    wide.dt = PrimitiveType::i64;
+    SNodeTree tree(1, 1, std::move(root));
+    tree.root()->set_snode_tree_id(1);
+    StructCompilerLLVM compiler(arch_, config_, tlctx_,
+                                tlctx_->new_module("struct"), 1);
+    compiler.run(*tree.root());
+    auto *module = tlctx_->get_this_thread_struct_module(1);
+    auto *body = StructCompilerLLVM::get_llvm_body_type(module, &dense);
+    auto *element = StructCompilerLLVM::get_llvm_element_type(module, &dense);
+    EXPECT_EQ(narrow.offset_bytes_in_parent_cell, 0u);
+    EXPECT_EQ(wide.offset_bytes_in_parent_cell, 8u);
+    EXPECT_EQ(dense.cell_size_bytes, 16u);
+    EXPECT_EQ(compiler.root_size, extent * 16u);
+    if (first_body == nullptr) {
+      first_body = body;
+      first_element = element;
+    }
+    EXPECT_EQ(element, first_element);
+    if (extent == 8) {
+      EXPECT_EQ(body, first_body);
+    } else {
+      EXPECT_NE(body, first_body);
+    }
+    // Sharing layout types must not alias per-tree function/resource names.
+    const auto symbol = StructCompilerLLVM::type_stub_name(&dense) + "_func";
+    ASSERT_NE(module->getFunction(symbol), nullptr);
+    EXPECT_NE(symbol, previous_symbol);
+    if (!previous_symbol.empty())
+      EXPECT_EQ(module->getFunction(previous_symbol), nullptr);
+    previous_symbol = symbol;
+    EXPECT_FALSE(llvm::verifyModule(*module));
+    tlctx_->delete_snode_tree(1);
+  }
+}
+
 }  // namespace
 }  // namespace taichi::lang
 #endif  // #ifdef TI_WITH_LLVM
