@@ -39,6 +39,7 @@ class OwnerGraph:
         self._contexts = {}
         self._resource_contexts = {}
         self._allocation_schemas = {}
+        self._field_witnesses = {}
         self.definitions = {
             name + "." + owner: (name, source_class(tree, owner), copy.deepcopy(schema))
             for name, _, _, _, tree, _, schemas, _ in sources
@@ -303,7 +304,8 @@ class OwnerGraph:
 
         declarations = construct_fields(owner, schema, vars(imported), self.module,
                                         imported_modules=self.imported, source_dimension=source_dimension,
-                                        field_trees=self.field_trees)
+                                        field_trees=self.field_trees, witnesses=self._field_witnesses,
+                                        witness_scope=(name, class_name, path))
         for attribute, item in schema.items():
             if item["kind"] in ("dense_field", "dimension", "borrowed_field", "host_owner_sequence"):
                 continue

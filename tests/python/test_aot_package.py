@@ -16850,12 +16850,13 @@ class Copy:
                 self.source[i] = self.backup[i]
 @ti.data_oriented
 class Model:
-    def __init__(self, n):
-        self.n = n
+    def __init__(self, n, m):
+        self.n, self.m = n, m
         scope = ti.experimental.ResourceScope(self)
         scope.dim('n')
+        scope.dim('m')
         scope.a = scope.field(ti.i32, shape=self.n, initialization='zero')
-        scope.b = scope.field(ti.i32, shape=self.n, initialization='zero')
+        scope.b = scope.field(ti.i32, shape=self.m, initialization='zero')
         scope.demand = scope.field(ti.i32, shape=1, initialization='zero')
         self.copies = tuple(Copy(field, self.demand) for field in (self.a, self.b))
         scope.owner_sequence('copies', self.copies)
@@ -16863,17 +16864,21 @@ class Model:
     def fill(self, value: ti.i32, enabled: ti.i32):
         for i in self.a:
             self.a[i] = value + i
+        for i in self.b:
             self.b[i] = value - i
         self.demand[0] = enabled
 '''
     package = _source_package(tmp_path, monkeypatch, source)
-    borrowed = []
+    borrowed, backups = [], []
     construct = OwnerGraph.construct
 
     def observed(self, identity, **kwargs):
         result = construct(self, identity, **kwargs)
         if identity == 'definition_fixture.model.Model' and kwargs.get('resource_paths'):
             borrowed.append((kwargs['path'], tuple(sorted(kwargs['resource_paths'])), result))
+        if identity.startswith('definition_fixture.model.Copy__input_') and not kwargs.get('path'):
+            backups.append(result[0].backup)
+            assert result[0].backup is not result[0].source
         return result
 
     monkeypatch.setattr(OwnerGraph, 'construct', observed)
@@ -16888,8 +16893,12 @@ class Model:
     for values in shared:
         assert len({id(result[0]) for _, result in values}) == 1
     assert len({id(values[0][1][0]) for values in by_slot.values()}) == len(by_slot)
+    # Alternative source contracts reuse the same physical construction witness.
+    # n and m happen to have equal producer extents, but stay distinct at use.
+    assert len(backups) >= 2
+    assert len({id(field) for field in backups}) == 1
     with Runtime(manifest['target']) as runtime, load_package(runtime, tmp_path / 'sdk') as code:
-        models = [code.host.Model(n) for n in (3, 7)]
+        models = [code.host.Model(n, m) for n, m in ((3, 5), (7, 11))]
         for index, model in enumerate(models):
             model.fill(10 + index, 1)
             for checkpoint in model.copies:
@@ -16902,7 +16911,7 @@ class Model:
             for checkpoint in model.copies:
                 checkpoint.restore()
             np.testing.assert_array_equal(model.a.to_numpy(), 10 + index + np.arange(model.n))
-            np.testing.assert_array_equal(model.b.to_numpy(), 10 + index - np.arange(model.n))
+            np.testing.assert_array_equal(model.b.to_numpy(), 10 + index - np.arange(model.m))
         models[0].fill(100, 1)
         np.testing.assert_array_equal(models[1].a.to_numpy(), 11 + np.arange(7))
 

@@ -147,7 +147,10 @@ def field_declarations(module, constructor, kind, fail):
     return fields
 
 
-def construct_fields(owner, schema, namespace, module, *, field_trees, imported_modules=None, source_dimension=None):
+def construct_fields(
+    owner, schema, namespace, module, *, field_trees, imported_modules=None, source_dimension=None,
+    witnesses=None, witness_scope=None,
+):
     """Use original FieldsBuilder and DenseField capture, not a layout emulator."""
     import taichi_forge as ti
     from ._component import (
@@ -377,51 +380,74 @@ def construct_fields(owner, schema, namespace, module, *, field_trees, imported_
         typed.append((name, item, dtype, concrete, axes))
     # Expected type/rank/extent rejection must not leave an unfinalized
     # FieldsBuilder behind and poison the caller's otherwise valid JIT.
-    builders, placements, events = {}, {}, {}
+    builders, placements, events, recipes = {}, {}, {}, {}
+    from taichi_forge.types._argument_descriptor import describe_element_type
+
     for ordinal, (name, item, dtype, concrete, axes) in enumerate(typed):
         group = item.get("group", "fields")
-        if group not in builders:
-            builders[group] = ti.FieldsBuilder()
+        element = (
+            tuple((member, describe_element_type(part).structural_key()) for member, part in dtype.members.items())
+            if item.get("struct_field") else describe_element_type(dtype).structural_key()
+        )
+        recipes.setdefault(group, []).append((
+            name, element, tuple(concrete), item.get("layout"), item.get("order"),
+            tuple(item["allocation"]), tuple(item.get("placement", {}).get("declaration", ())),
+        ))
         # Several literal member declarations can originate at one source call.
         # Preserve their declaration order instead of replacing earlier members.
         events[(*item["allocation"], ordinal)] = ("field", name, item, dtype, concrete, axes)
         if "placement" in item:
             event = item["placement"]
             events[(*event["declaration"], -1)] = ("placement", name, item, dtype, concrete, axes)
+    # A witness contains no model state to back up. Alternative constructor
+    # inputs/layout choices may reuse its physical fields while retaining their
+    # own declarations and symbolic dimensions below. The owner class, input
+    # path and allocation group keep independent slots from becoming aliases.
+    keys = {group: (witness_scope, group, tuple(recipe)) for group, recipe in recipes.items()}
+    reused, values = {}, {}
+    for group, key in keys.items():
+        if witnesses is not None and key in witnesses:
+            reused[group] = witnesses[key]
+        else:
+            builders[group] = ti.FieldsBuilder()
+            values[group] = {}
     for position, (kind, name, item, dtype, concrete, axes) in sorted(events.items()):
         group = item.get("group", "fields")
-        builder = builders[group]
         if kind == "placement":
-            placements[position[:2]] = builder.dense(axes, tuple(concrete))
+            if group not in reused:
+                placements[position[:2]] = builders[group].dense(axes, tuple(concrete))
             continue
-        value = ti.Struct.field(dtype.members) if item.get("struct_field") else ti.field(dtype)
-        axis_seq, shape_seq, same_level = ti.lang.impl._field_layout_axes(concrete, item.get("order"))
-
-        def ordinary_placement():
-            return ti.lang.impl._create_snode(axis_seq, shape_seq, same_level, root_node=builder)
-
-        # This is the documented default field(shape=...) placement through the
-        # ordinary builder. Native capture verifies the complete group below.
-        # Even shape=() uses the ordinary factory's empty-axis Dense node.
-        # Placing a tensor directly at root would split its lanes into separate
-        # implicit nodes, unlike Matrix.field(shape=())'s one packed element.
-        parent = (
-            placements[tuple(item["placement"]["declaration"])]
-            if "placement" in item
-            else None if item.get("layout") == "SOA" else ordinary_placement()
-        )
-        if item.get("layout") == "SOA":
-            if item.get("struct_field"):
-                members = value.field_dict.values()
-            elif isinstance(value, ti.MatrixField):
-                value._aot_tensor_soa = True
-                members = (value.get_scalar_field(i, j) for i in range(value.n) for j in range(value.m))
-            else:
-                members = (value,)
-            for member in members:
-                ordinary_placement().place(member)
+        if group in reused:
+            value = reused[group][0][name]
         else:
-            parent.place(value)
+            builder = builders[group]
+            value = ti.Struct.field(dtype.members) if item.get("struct_field") else ti.field(dtype)
+            axis_seq, shape_seq, same_level = ti.lang.impl._field_layout_axes(concrete, item.get("order"))
+
+            def ordinary_placement():
+                return ti.lang.impl._create_snode(axis_seq, shape_seq, same_level, root_node=builder)
+
+            # This is the documented default field(shape=...) placement through
+            # the ordinary builder. Even shape=() uses its empty-axis Dense
+            # node so tensor lanes remain packed rather than split at root.
+            parent = (
+                placements[tuple(item["placement"]["declaration"])]
+                if "placement" in item
+                else None if item.get("layout") == "SOA" else ordinary_placement()
+            )
+            if item.get("layout") == "SOA":
+                if item.get("struct_field"):
+                    members = value.field_dict.values()
+                elif isinstance(value, ti.MatrixField):
+                    value._aot_tensor_soa = True
+                    members = (value.get_scalar_field(i, j) for i in range(value.n) for j in range(value.m))
+                else:
+                    members = (value,)
+                for member in members:
+                    ordinary_placement().place(member)
+            else:
+                parent.place(value)
+            values[group][name] = value
         setattr(owner, name, value)
 
         def field_declaration(element, spec):
@@ -457,13 +483,15 @@ def construct_fields(owner, schema, namespace, module, *, field_trees, imported_
             if item.get("struct_field")
             else field_declaration(dtype, item["element"])
         )
-    owner._forge_package_field_trees = []
-    for builder in builders.values():
+    owner._forge_package_field_trees = [tree for _, tree in reused.values()]
+    for group, builder in builders.items():
         tree = builder._finalize_for_aot()
         # Record each successful allocation immediately, including a prefix
         # whose later group or owner construction fails.
         field_trees.append(tree)
         owner._forge_package_field_trees.append(tree)
+        if witnesses is not None:
+            witnesses[keys[group]] = values[group], tree
     return declarations
 
 
