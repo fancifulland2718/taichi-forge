@@ -2009,8 +2009,12 @@ class ASTTransformer(Builder):
             if iterator.keywords or not all(safe_bound(arg) for arg in iterator.args):
                 return False
         elif isinstance(iterator, (ast.Name, ast.Attribute)):
-            operand = build_stmt(ctx, iterator)
-            operand = ctx.deployment.field_operand(ctx, operand, for_loop=True)
+            # Inspect the iterator under its original branch too. Resolving a
+            # conditional Field records a presence requirement, even before
+            # the actual loop is lowered below.
+            with ctx.deployment.input_condition(node.test.ptr, True):
+                operand = build_stmt(ctx, iterator)
+                operand = ctx.deployment.field_operand(ctx, operand, for_loop=True)
             if not isinstance(operand, (any_array.AnyArray, any_array.ModelTensorArray)):
                 return False
         else:

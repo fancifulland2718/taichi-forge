@@ -22970,6 +22970,8 @@ class Model:
         "early_return",
         "early_return_free_domain",
         "early_return_free_allocator",
+        "field_loop",
+        "grouped_field_loop",
     ],
 )
 @test_utils.test(arch=[ti.cpu, ti.cuda], offline_cache=False)
@@ -23009,6 +23011,23 @@ class Model:
         b.dispatch(self.step)
         return b.compile()
 """
+    if mixed in ("field_loop", "grouped_field_loop"):
+        iterator = "ti.grouped(self.workspace)" if mixed == "grouped_field_loop" else "self.workspace"
+        index = "j[0]" if mixed == "grouped_field_loop" else "j"
+        source = source.replace(
+            "    @ti.kernel\n    def step(self):\n        for i in range(self.n):\n"
+            "            self.out[i] += 1\n            if ti.static(self.enabled):\n"
+            "                self.store(i)\n                self.out[i] += self.workspace[i]",
+            "    @ti.func\n    def optional_step(self):\n"
+            "        if ti.static(self.enabled):\n"
+            f"            for j in {iterator}:\n"
+            f"                self.store({index})\n"
+            f"                self.out[{index}] += self.workspace[{index}]\n"
+            "    @ti.kernel\n    def step(self):\n"
+            "        for i in range(self.n):\n            self.out[i] += 1\n"
+            "        self.optional_step()",
+        )
+        mixed = False
     returns_early = mixed in (
         "early_return", "early_return_free_domain", "early_return_free_allocator"
     )
