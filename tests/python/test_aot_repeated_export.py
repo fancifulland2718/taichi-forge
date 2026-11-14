@@ -47,7 +47,10 @@ def test_repeated_export_preserves_source_and_dense_relocations(tmp_path, artifa
     exported.add_kernel(read)
     first = tmp_path / "first"
     exported.save(first)
-    baseline = {path.name: path.read_bytes() for path in first.iterdir() if path.is_file()}
+    # Deployment archives intentionally omit LLVM's diagnostic cache dump and
+    # lock. Every runtime contract and code payload must still match save().
+    baseline = {path.name: path.read_bytes() for path in first.iterdir()
+                if path.is_file() and path.name not in {"metadata.json", "metadata.lock"}}
     packed = tmp_path / "second.tcm"
     exported.archive(str(packed))
     with ZipFile(packed) as archive:
