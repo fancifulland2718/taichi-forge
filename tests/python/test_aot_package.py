@@ -13839,7 +13839,10 @@ def test_package_model_static_control_uses_one_implementation(tmp_path, monkeypa
             # The final triangular count fits i32 at 50000, but its multiply
             # does not. Check the exact submission snapshot before any work.
             from taichi_forge_runtime.aot import _package, _package_graph
-            for bindings, action in ((_package, models[1].step),
+            # A stable call already owns a validated snapshot and need not
+            # recapture it. Inject at a fresh binding to exercise admission.
+            fresh = code.host.Model(2, 17)
+            for bindings, action in ((_package, fresh.step),
                                      (_package_graph, lambda: graphs[1].bind({}))):
                 original = bindings.capture_value
                 def changed(owner, spec):
