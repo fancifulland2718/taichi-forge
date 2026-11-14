@@ -320,7 +320,7 @@ KernelCompilationManager::find_cached_execution_handle(
     ensure_metadata_loaded_locked(arch);
   }
   if (auto found = caching_kernels_.find(kernel_key);
-      found != caching_kernels_.end()) {
+      found != caching_kernels_.end() && found->second.compiled_kernel_data) {
     record_if_enabled(executable_lifecycle_telemetry_.enabled,
                       executable_lifecycle_telemetry_.memory_cache_hits);
     return ensure_execution_handle_locked(found->second);
@@ -390,11 +390,20 @@ void KernelCompilationManager::dump() {
   // Update the cached data
   for (const auto *e : updated_data_) {
     auto iter = kernels.find(e->kernel_key);
-    if (iter != kernels.end()) {
-      iter->second.last_used_at = e->last_used_at;
+    if (e->cache_mode == CacheData::MemCache) {
+      // Deserialized index records only refresh existing timestamps, as in
+      // ordinary JIT. A private build's newly released records retain their
+      // MemAndDiskCache mode and must also publish missing index entries.
+      if (iter != kernels.end())
+        iter->second.last_used_at = e->last_used_at;
+      continue;
     }
+    if (iter != kernels.end())
+      data.size -= std::min(data.size, iter->second.size);
+    data.size += e->size;
+    kernels[e->kernel_key] = *e;
   }
-  // Add new data
+  // Add new data (a reloaded key supersedes its earlier released metadata).
   for (auto &[kernel_key, kernel] : caching_kernels_) {
     if (kernel.cache_mode == CacheData::MemAndDiskCache) {
       if (kernel.size == 0) {
@@ -424,20 +433,24 @@ void KernelCompilationManager::dump() {
 void KernelCompilationManager::release_build_cache() {
   std::lock_guard<std::mutex> guard(cache_mutex_);
   TI_ASSERT(in_progress_keys_.empty());
-  for (auto it = caching_kernels_.begin(); it != caching_kernels_.end();) {
-    auto &kernel = it->second;
+  for (auto &[key, kernel] : caching_kernels_) {
     if (kernel.cache_mode == CacheData::MemAndDiskCache && kernel.size != 0) {
       kernel.execution_handle.reset();
       kernel.compiled_kernel_data.reset();
-      ++it;
-    } else {
-      it = caching_kernels_.erase(it);
+      // Move only inert metadata to the existing index. References/pointers to
+      // unordered_map elements survive rehash and insert_or_assign; pending
+      // updated_data_ entries therefore remain valid, including a reloaded key.
+      auto previous = cached_data_.kernels.find(key);
+      if (previous != cached_data_.kernels.end())
+        cached_data_.size -= std::min(cached_data_.size, previous->second.size);
+      cached_data_.size += kernel.size;
+      auto item = cached_data_.kernels.insert_or_assign(key, std::move(kernel));
+      updated_data_.push_back(&item.first->second);
     }
   }
-  for (auto &[_, kernel] : cached_data_.kernels) {
-    kernel.execution_handle.reset();
-    kernel.compiled_kernel_data.reset();
-  }
+  caching_kernels_.clear();
+  // cached_data_ is the disk metadata index; loads install their parsed IR in
+  // caching_kernels_, never in that index. Do not rescan the entire index.
   execution_handles_.prune();
 }
 

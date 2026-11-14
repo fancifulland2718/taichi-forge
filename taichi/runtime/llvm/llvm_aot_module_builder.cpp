@@ -262,6 +262,20 @@ void LlvmAotModuleBuilder::dump(const std::string &output_dir,
   auto prepare_module = [&](LlvmOfflineCache::KernelCacheData &kernel) {
     auto module = load_kernel_module(kernel.kernel_key,
                                      kernel.compiled_data.module_context_owner);
+    // Preserve the original conservative runtime contract before relocation or
+    // cleanup. Reading it here avoids decoding every sealed root again, and
+    // remains local to this dump so repeated saves and later add() stay valid.
+    const auto state = LLVM::runtime_state_use(*module);
+    auto arrays = LLVM::runtime_affine_arrays(*module);
+    if (!arrays.empty())
+      metadata.kernel_runtime_affine_arrays.emplace(kernel.kernel_key,
+                                                    std::move(arrays));
+    if (state)
+      metadata.kernel_runtime_state.emplace(kernel.kernel_key, state);
+    const auto view_abi = LLVM::sparse_runtime_view_abi(*module);
+    if (view_abi)
+      metadata.kernel_sparse_runtime_view_abis.emplace(kernel.kernel_key,
+                                                      view_abi);
     if (relocatable) {
       LLVM::remap_aot_kernel_tree_ids(*module, kernel, tree_mapping);
     } else {
@@ -382,26 +396,6 @@ void LlvmAotModuleBuilder::dump(const std::string &output_dir,
     }
     metadata.launch_abi_sha256 = LLVM::aot_launch_abi_sha256(metadata);
   }
-  for (const auto &[name, kernel] : cache_.kernels) {
-    // A sealed export retains compact bitcode; inspect one module at a time.
-    std::shared_ptr<llvm::LLVMContext> context_owner;
-    std::unique_ptr<llvm::Module> restored;
-    auto *module = kernel.compiled_data.module.get();
-    if (module == nullptr) {
-      restored = load_kernel_module(name, context_owner);
-      module = restored.get();
-    }
-    const auto state = LLVM::runtime_state_use(*module);
-    auto arrays = LLVM::runtime_affine_arrays(*module);
-    if (!arrays.empty())
-      metadata.kernel_runtime_affine_arrays.emplace(name, std::move(arrays));
-    if (state)
-      metadata.kernel_runtime_state.emplace(name, state);
-    const auto view_abi =
-        LLVM::sparse_runtime_view_abi(*module);
-    if (view_abi)
-      metadata.kernel_sparse_runtime_view_abis.emplace(name, view_abi);
-  }
   if (!metadata.kernel_runtime_state.empty() || !metadata.kernel_runtime_affine_arrays.empty()) {
     if (metadata.abi_sha256.empty())
       metadata.abi_sha256 = LLVM::aot_artifact_sha256(LLVM::read_aot_artifact(
@@ -486,12 +480,30 @@ void LlvmAotModuleBuilder::add_with_launch_abi_per_backend(
 void LlvmAotModuleBuilder::add_kernel_impl(const std::string &identifier,
                                          Kernel *kernel,
                                          const std::string &launch_abi) {
-  const auto &artifact = compile_kernel(kernel);
-  const auto &source = artifact.get_internal_data();
-  record_kernel_resource_effects(identifier, artifact.graph_metadata());
+  auto config = compile_config_;
+  config.llvm_aot_relocatable_roots =
+      arch_is_cpu(config.arch) || config.arch == Arch::cuda;
+  const auto request = resolve_kernel_compile_request(
+      config, caps_, kernel->get_compile_tier_override(), CompilePurpose::aot,
+      compile_options_);
+  const auto request_key = kernel->get_or_create_kernel_key_for_cache(
+      request.config(), request.device_caps());
+  const LLVM::CompiledKernelData *artifact = nullptr;
+  auto facts = kernel_export_facts_.find(request_key);
+  if (facts == kernel_export_facts_.end()) {
+    artifact = &compile_kernel(kernel, request);
+    TI_ASSERT(artifact->kernel_identity() == request_key);
+    const auto &compiled = artifact->get_internal_data().compiled_data;
+    facts = kernel_export_facts_.emplace(
+        request_key,
+        KernelExportFacts{compiled.tasks, compiled.cuda_max_registers,
+                          LLVM::runtime_context_abi(*compiled.module),
+                          artifact->graph_metadata()}).first;
+  }
+  record_kernel_resource_effects(identifier, facts->second.resource_effects);
   LLVMCompiledKernel projected;
-  projected.tasks = source.compiled_data.tasks;
-  projected.cuda_max_registers = source.compiled_data.cuda_max_registers;
+  projected.tasks = facts->second.tasks;
+  projected.cuda_max_registers = facts->second.cuda_max_registers;
   std::vector<std::uint32_t> range_tasks;
   if (const auto &plan = kernel->get_offload_execution_plan(); plan) {
     LLVM::project_aot_task_launch_policy(projected, *plan, compile_config_.arch);
@@ -499,7 +511,7 @@ void LlvmAotModuleBuilder::add_kernel_impl(const std::string &identifier,
   }
   if (!range_tasks.empty()) {
     TI_ERROR_IF(compile_config_.arch != Arch::cuda || launch_abi != "ordinary" ||
-                    LLVM::runtime_context_abi(*source.compiled_data.module) !=
+                    facts->second.runtime_context_abi !=
                         LLVM::kRuntimeContextABI,
                 "AOT device range requires an ordinary CUDA context kernel");
     LLVM::validate_device_range_selection(projected.tasks, range_tasks,
@@ -507,8 +519,7 @@ void LlvmAotModuleBuilder::add_kernel_impl(const std::string &identifier,
   }
   // Compiled identity includes target/options/relocation. The projection adds
   // entry launch facts; range selection intentionally remains outside code.
-  TI_ASSERT(!artifact.kernel_identity().empty());
-  const auto identity = artifact.kernel_identity() + "\n" + launch_abi + "\n" +
+  const auto identity = request_key + "\n" + launch_abi + "\n" +
       liong::json::print(liong::json::serialize(projected));
   const auto existing = kernel_identities_.find(identity);
   const auto named = kernel_names_.find(identifier);
@@ -529,7 +540,9 @@ void LlvmAotModuleBuilder::add_kernel_impl(const std::string &identifier,
   }
   // Clone IR only for a new physical payload; aliases never retain another
   // module. dump() retains its separate relocation/mangling transaction.
-  auto compiled = source;
+  if (!artifact)
+    artifact = &compile_kernel(kernel, request);
+  auto compiled = artifact->get_internal_data();
   compiled.compiled_data.tasks = std::move(projected.tasks);
   if (launch_abi == cuda::kGraphGateLaunchABI) {
     TI_ERROR_IF(!compiled.rets.empty() ||
@@ -603,13 +616,7 @@ void LlvmAotModuleBuilder::add_field_per_backend(const std::string &identifier,
 }
 
 const LLVM::CompiledKernelData &LlvmAotModuleBuilder::compile_kernel(
-    Kernel *kernel) {
-  auto config = compile_config_;
-  config.llvm_aot_relocatable_roots =
-      arch_is_cpu(config.arch) || config.arch == Arch::cuda;
-  const auto request = resolve_kernel_compile_request(
-      config, caps_, kernel->get_compile_tier_override(), CompilePurpose::aot,
-      compile_options_);
+    Kernel *kernel, const KernelCompileRequest &request) {
   auto &manager = streaming_compilation_manager_ ? *streaming_compilation_manager_
                                                 : compilation_manager_;
   LLVM::FunctionCodeScope functions(kernel, function_code_cache_,

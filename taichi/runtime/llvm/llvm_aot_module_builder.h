@@ -56,7 +56,8 @@ class LlvmAotModuleBuilder : public AotModuleBuilder {
   std::unique_ptr<llvm::Module> load_kernel_module(
       const std::string &name,
       std::shared_ptr<llvm::LLVMContext> &context_owner) const;
-  const LLVM::CompiledKernelData &compile_kernel(Kernel *kernel);
+  const LLVM::CompiledKernelData &compile_kernel(
+      Kernel *kernel, const KernelCompileRequest &request);
   void add_kernel_impl(const std::string &identifier,
                         Kernel *kernel,
                         const std::string &launch_abi);
@@ -66,6 +67,15 @@ class LlvmAotModuleBuilder : public AotModuleBuilder {
   std::map<std::string, std::string> kernel_launch_abis_;
   std::map<std::string, std::string> kernel_names_;
   std::map<std::string, std::string> kernel_identities_;
+  // Immutable compiler facts, keyed by the same resolved request identity as
+  // KernelCompilationManager. Keep no LLVM objects alive after streaming seal.
+  struct KernelExportFacts {
+    std::vector<OffloadedTask> tasks;
+    int cuda_max_registers{-1};
+    unsigned runtime_context_abi{0};
+    GraphKernelMetadata resource_effects;
+  };
+  std::map<std::string, KernelExportFacts> kernel_export_facts_;
   std::map<std::string, std::vector<std::uint32_t>> range_selections_;
   KernelCompilationManager &compilation_manager_;
   // Reuse the same compiler/cache implementation, with build-local ownership.
