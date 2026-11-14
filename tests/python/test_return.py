@@ -97,6 +97,28 @@ def test_func_multiple_return():
         kern(-233)
 
 
+@test_utils.test(arch=[ti.cpu, ti.cuda], jit_function_library=False)
+@pytest.mark.parametrize('container', [tuple, list])
+def test_func_typed_multiple_return(container):
+    vec3 = ti.types.vector(3, ti.f32)
+
+    @ti.func
+    def values(value: ti.f32) -> Tuple[ti.i32, vec3, ti.f32]:
+        if ti.static(container is tuple):
+            return value, ti.Vector([value, value + 1, value + 2]), 3
+        else:
+            return [value, ti.Vector([value, value + 1, value + 2]), 3]
+
+    @ti.kernel
+    def run(value: ti.f32) -> Tuple[ti.f32, ti.i32]:
+        integer, vector, scalar = values(value)
+        return integer + vector.sum() + scalar, ti.bit_cast(scalar, ti.i32)
+
+    # The bit pattern proves the integer literal was cast to f32 as declared.
+    assert run(2.5) == [15.5, 1077936128]
+    assert run(-2.5) == [-3.5, 1077936128]
+
+
 @test_utils.test()
 def test_return_inside_static_for():
     @ti.kernel

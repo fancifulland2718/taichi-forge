@@ -1062,13 +1062,17 @@ class ASTTransformer(Builder):
         else:
             ctx.return_data = node.value.ptr
             if ctx.func.return_type is not None:
-                if len(ctx.func.return_type) == 1:
-                    ctx.return_data = [ctx.return_data]
+                # Multiple return expressions produce an immutable tuple.
+                # Cast a private list, preserving the original container for
+                # inline callers (including static tuple/list operations).
+                values = [ctx.return_data] if len(ctx.func.return_type) == 1 else list(ctx.return_data)
                 for i, return_type in enumerate(ctx.func.return_type):
                     if id(return_type) in primitive_types.type_ids:
-                        ctx.return_data[i] = ti_ops.cast(ctx.return_data[i], return_type)
+                        values[i] = ti_ops.cast(values[i], return_type)
                 if len(ctx.func.return_type) == 1:
-                    ctx.return_data = ctx.return_data[0]
+                    ctx.return_data = values[0]
+                else:
+                    ctx.return_data = tuple(values) if isinstance(ctx.return_data, tuple) else values
         if not ctx.is_real_function:
             ctx.returned = ReturnStatus.ReturnedValue
         return None
