@@ -403,16 +403,29 @@ class Model:
 @test_utils.test(arch=ti.cuda, offline_cache=False)
 @pytest.mark.parametrize("helper", ["func", "real_func"])
 def test_package_library_reuses_llvm_functions_before_emission(tmp_path, monkeypatch, helper):
+    from collections import Counter
     from taichi_forge.aot._package_compilation import PackageCompilation
+    from taichi_forge.lang.kernel_impl import Func
 
     snapshots = []
+    frontend = Counter()
+    retained = []
     original = PackageCompilation.compile
+    original_function = Func.do_compile
+
+    def observe_function(function, *args, **kwargs):
+        frontend[function.func.__name__] += 1
+        return original_function(function, *args, **kwargs)
 
     def observe(transaction, code):
         original(transaction, code)
         snapshots.append(transaction.module._aot_builder._streaming_export_statistics())
+        private = [f for f in transaction.functions.values() if f is not None]
+        assert all(not f.compiled for f in private)  # No retained Python lowering callbacks.
+        retained.append(sum(len(f.taichi_functions) for f in private))
 
     monkeypatch.setattr(PackageCompilation, 'compile', observe)
+    monkeypatch.setattr(Func, 'do_compile', observe_function)
     source = '''import taichi_forge as ti
 @ti.data_oriented
 class Model:
@@ -455,6 +468,10 @@ class Model:
     assert snapshots[-1]['llvm_function_body_reuses'] == 3
     assert snapshots[-1]['cached_llvm_functions'] == 2
     assert snapshots[-1]['shared_code_units'] == 2
+    # Auto-promoted definitions belong to the build. Explicit caller-owned
+    # real_func definitions retain their existing separate capture lifetime.
+    assert frontend['leaf'] == (2 if helper == 'func' else 4)
+    assert max(retained) == (1 if helper == 'func' else 0)
     with Runtime('cuda') as runtime, load_package(runtime, tmp_path / 'sdk') as code:
         for n in (3, 13):
             aot, jit = code.host.Model(n), package.model.Model(n)
@@ -463,6 +480,98 @@ class Model:
                     getattr(aot, entry)(value)
                     getattr(jit, entry)(value)
                     np.testing.assert_array_equal(aot.out.to_numpy(), jit.out.to_numpy())
+
+
+@test_utils.test(arch=ti.cuda, offline_cache=False, compile_tier='full')
+def test_package_library_reuses_guarded_function_closures(tmp_path, monkeypatch):
+    from collections import Counter
+    from taichi_forge.aot._package_compilation import PackageCompilation
+    from taichi_forge.lang.kernel_impl import Func
+
+    source = '''import taichi_forge as ti
+@ti.data_oriented
+class Model:
+    def __init__(self):
+        self.bias = 3
+        scope = ti.experimental.ResourceScope(self)
+        scope.static('bias', choices=(3, 9))
+        scope.data = scope.field(ti.i32, shape=3)
+        scope.out = scope.field(ti.i32, shape=3)
+    @ti.func
+    def leaf(self, i: ti.i32) -> ti.i32:
+        return self.data[i] + ti.static(self.bias)
+    @ti.func
+    def parent(self, i: ti.i32) -> ti.i32:
+        return self.leaf(i) * 2
+    @ti.kernel
+    def first(self):
+        for i in range(3):
+            # Capture leaf first, then reuse it while capturing the parent.
+            self.out[i] = self.leaf(i) + self.parent(i)
+    @ti.kernel
+    def second(self):
+        for i in range(3):
+            self.out[i] = self.parent(i)
+    @ti.kernel
+    def clear(self):
+        for i in range(3):
+            self.out[i] = 0
+    @ti.kernel
+    def after_clear(self):
+        for i in range(3):
+            self.out[i] = self.parent(i)
+    @ti.kernel(opt_level='fast')
+    def fast(self):
+        for i in range(3):
+            self.out[i] = self.parent(i)
+'''
+    package = _source_package(tmp_path, monkeypatch, source)
+    owner = package.model.Model()
+    component = ti.aot.Component.from_owner(owner)
+    frontend = Counter()
+    original = Func.do_compile
+
+    def observe(function, *args):
+        frontend[function.func.__name__] += 1
+        return original(function, *args)
+
+    monkeypatch.setattr(Func, 'do_compile', observe)
+    cases, native_definitions = [], []
+    with PackageCompilation() as compilation:
+        module = ti.aot.Module(artifact_format='bc-library')
+        compilation.attach(module, function_library=True)
+        for entry, bias, multiplier, count in (
+            ('first', 3, 3, 1), ('second', 3, 2, 1),
+            ('first', 9, 3, 2), ('second', 9, 2, 2),
+            ('clear', 9, 0, 2), ('after_clear', 9, 2, 3),
+            ('fast', 9, 2, 4),
+        ):
+            owner.bias = bias
+            code = component.compile(compilation.entry(getattr(owner, entry)), owner=owner)
+            assert frontend == {'leaf': count, 'parent': count}
+            compilation.compile(code)
+            if entry == 'clear':
+                assert not compilation._retained_functions
+                assert all(native._definition_retired() for native in native_definitions)
+            for function in compilation.functions.values():
+                assert not function.compiled
+                native_definitions.extend(function.taichi_functions.values())
+            cases.append((compilation.symbol(code), code.dynamic, bias, multiplier))
+        module.archive(str(tmp_path / 'closures.tcm'))
+    assert native_definitions and all(native._definition_retired() for native in native_definitions)
+    # Changing static facts and compile tier must select a new implementation;
+    # changing input data must remain live through the reused helper's ABI.
+    with Runtime('cuda') as runtime:
+        loaded = runtime.load_module(str(tmp_path / 'closures.tcm'))
+        arrays = {name: runtime.ndarray('i32', (3,)) for name in ('data', 'out')}
+        for symbol, captures, bias, multiplier in cases:
+            with loaded.kernel(symbol).bind(*(arrays[name] for name in captures)).prepare(specialize=True) as ready:
+                for offset in (0, 17):
+                    values = np.arange(3, dtype=np.int32) + offset
+                    arrays['data'].write(values.tobytes())
+                    ready.submit().wait()
+                    np.testing.assert_array_equal(np.frombuffer(arrays['out'].read(), np.int32),
+                                                  (values + bias) * multiplier)
 
 
 @test_utils.test(arch=ti.cuda, offline_cache=False)
@@ -1577,12 +1686,12 @@ def test_package_bitcode_library_preserves_jit_functions(tmp_path, monkeypatch, 
             module._aot_builder._set_ir_cleanup_for_testing(cleanup)
         return original_attach(transaction, module, **kwargs)
 
-    def release(transaction):
-        definitions = [native for function in transaction.functions.values() if function is not None
-                       for native in function.taichi_functions.values()]
-        original_release(transaction)
-        assert all(native._definition_retired() for native in definitions)
-        retired.extend(definitions)
+    def release(transaction, keep=()):
+        definitions = {(function, key): native for function in transaction.functions.values() if function is not None
+                       for key, native in function.taichi_functions.items()}
+        original_release(transaction, keep)
+        assert all(native._definition_retired() == (key not in keep) for key, native in definitions.items())
+        retired.extend(definitions.values())
 
     def observe(transaction, code):
         if fail_export and code.entry_definition[1].endswith('.second'):
@@ -11051,9 +11160,11 @@ class Model:
         imported.close()
 
 
-@pytest.mark.parametrize("function", ["func", "real_func"])
+@pytest.mark.parametrize("function", ["func", "real_func", "library"])
 @test_utils.test(arch=[ti.cpu, ti.cuda], offline_cache=False)
 def test_package_optional_arrays_share_code_and_check_branch_requirements(tmp_path, monkeypatch, function):
+    if function == "library" and ti.cfg.arch != ti.cuda:
+        pytest.skip("bc-library requires CUDA")
     source = """
 import taichi_forge as ti
 @ti.data_oriented
@@ -11107,9 +11218,10 @@ class Model:
         builder = ti.graph.GraphBuilder()
         builder.dispatch(self.step)
         return builder.compile()
-""".replace("@ti.real_func", "@ti." + function)
+""".replace("@ti.real_func", "@ti." + ("func" if function == "library" else function))
     package = _source_package(tmp_path, monkeypatch, source)
-    manifest = ti.aot.export_package(package, tmp_path / "sdk", arch=ti.cfg.arch)
+    manifest = ti.aot.export_package(package, tmp_path / "sdk", arch=ti.cfg.arch,
+                                     artifact_format='bc-library' if function == 'library' else None)
     assert manifest["version"] == 63 and not manifest["entry_families"]
     for name in ("step", "dependency", "both", "required", "query"):
         assert (
@@ -14388,15 +14500,18 @@ def test_package_model_tensor_copy_rejects_incompatible_values(tmp_path, monkeyp
 
 
 @pytest.mark.parametrize("ndrange", [False, True])
-@pytest.mark.parametrize("helper_kind", ["func", "real_func", "nested_real_func"])
+@pytest.mark.parametrize("helper_kind", ["func", "real_func", "nested_real_func", "library"])
 @test_utils.test(arch=[ti.cpu, ti.cuda, ti.vulkan], offline_cache=False)
 def test_package_model_local_tensors_use_invocation_workspace(tmp_path, monkeypatch, ndrange, helper_kind):
     source = MODEL_LOCAL_TENSOR_SOURCE
+    if helper_kind == "library" and ti.cfg.arch != ti.cuda:
+        pytest.skip("bc-library requires CUDA")
     if helper_kind != "func":
         if ti.cfg.arch == ti.vulkan:
             pytest.skip("Vulkan does not support real functions")
+        decorator = "func" if helper_kind == "library" else "real_func"
         source = source.replace("@ti.func\n    def solve(self, i, gain):",
-                                "@ti.real_func\n    def solve(self, i: ti.i32, gain: ti.f32) -> ti.f32:")
+                                f"@ti.{decorator}\n    def solve(self, i: ti.i32, gain: ti.f32) -> ti.f32:")
         if helper_kind == "nested_real_func":
             source = source.replace("def solve(self,", "def inner(self,")
             source += """
@@ -14407,7 +14522,8 @@ def test_package_model_local_tensors_use_invocation_workspace(tmp_path, monkeypa
     if ndrange:
         source = source.replace("for i in range(1, self.n):", "for i, unused in ti.ndrange((1, self.n), 1):")
     package = _source_package(tmp_path, monkeypatch, source)
-    manifest = ti.aot.export_package(package, tmp_path / "sdk", arch=ti.cfg.arch)
+    manifest = ti.aot.export_package(package, tmp_path / "sdk", arch=ti.cfg.arch,
+                                     artifact_format='bc-library' if helper_kind == 'library' else None)
     assert manifest["version"] == 27
     assert sys.modules["definition_fixture.model"].constructors == 0
     entries = [entry for entry in manifest["entries"].values() if entry["definition"].endswith("Model.step")]

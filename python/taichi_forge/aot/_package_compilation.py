@@ -37,6 +37,7 @@ class PackageCompilation(FunctionLibrary):
         self.static_policies = {}
         self.field_trees = []
         self._automatic_gc = None
+        self._retained_functions = {}
 
     def __enter__(self):
         return self
@@ -79,17 +80,50 @@ class PackageCompilation(FunctionLibrary):
             return None
         return super().library_function(source, args, dependencies=dependencies)
 
-    def _release_functions(self):
+    def reuse_function(self, identity, context):
+        state = self._retained_functions.get(identity)
+        if state is not None and state["dependencies"].matches(context):
+            return state
+        return None
+
+    def _retain_functions(self, code):
+        # Retain only the last sealed entry's reusable function closure. This
+        # skips Python lowering and Taichi IR optimization for neighboring
+        # callers without retaining every frontend definition in a large build.
+        states, code._function_states = code._function_states, {}
+        owned = {function for function in self.functions.values() if function is not None}
+        available = {**self._retained_functions, **states}
+        eligible = {
+            (identity[0], state["key"].instance_id)
+            for identity, state in available.items()
+            if identity[0] in owned and not state["recursive"] and state["local_index"] is None
+            and "dependencies" in state and state["dependencies"].reusable()
+        }
+        keep = set()
+        for state in states.values():
+            if state["definitions"] <= eligible:
+                keep.update(state["definitions"])
+        self._retained_functions = {
+            identity: state for identity, state in available.items()
+            if (identity[0], state["key"].instance_id) in keep
+        }
+        return keep
+
+    def _release_functions(self, keep=()):
         for function in self.functions.values():
             if function is not None:
                 # These are build-owned copies, never the ordinary JIT Func's
                 # definitions. Program retains native shells; dropping Python
                 # handles alone would keep every callee's frontend IR alive.
-                for definition in function.taichi_functions.values():
+                for key, definition in list(function.taichi_functions.items()):
+                    if (function, key) in keep:
+                        continue
                     definition._retire_definition()
                     self.retired_function_definitions += 1
+                    del function.taichi_functions[key]
+                # Callbacks own Python AST/Expr cycles. The retained native
+                # Function already owns its body and needs no callback lease.
                 function.compiled = {}
-                function.taichi_functions.clear()
 
     def compile(self, code):
         """Export each discovered implementation before exploring its neighbors."""
@@ -110,7 +144,7 @@ class PackageCompilation(FunctionLibrary):
         self.module._exported_kernels[symbol] = identity
         code.kernel.compiled_kernels.pop(code.key)
         code.kernel.kernel_cpp = None
-        self._release_functions()
+        self._release_functions(self._retain_functions(code))
         # Lowering contexts can form Python cycles through AST/Expr objects.
         # Release their reference-internal builder leases before native GC.
         gc.collect(1)
@@ -129,6 +163,7 @@ class PackageCompilation(FunctionLibrary):
         if kernel not in self.kernels.values():
             raise RuntimeError("Package compilation cannot retire a caller-owned kernel")
         kernel.kernel_cpp = None
+        self._retained_functions.clear()
         self._release_functions()
         gc.collect(1)
         kernel.runtime.collect_unused_kernel_definitions(force=True)
@@ -154,6 +189,7 @@ class PackageCompilation(FunctionLibrary):
             kernel._component_candidates.clear()
         self.exported.clear()
         self.resource_effects.clear()
+        self._retained_functions.clear()
         self._release_functions()
         self.functions.clear()
         self._function_variants.clear()

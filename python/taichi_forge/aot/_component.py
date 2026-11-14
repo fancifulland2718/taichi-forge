@@ -2043,13 +2043,30 @@ class _Capture:
                 args[index] = _UniformTemplate(freeze_extent(expression), args[index].ptr.get_rvalue_type())
         function._ensure_real_function_cache_current_program()
         instance_id, features = function.mapper.lookup(args)
+        compilation = getattr(self.kernel, "_package_compilation", None)
+        track_dependencies = compilation is not None and compilation.function_library
+        # A receiver can be the root in one entry and a child in another. Its
+        # Python identity alone does not establish the captured declaration ABI.
         identity = (function, instance_id)
+        if track_dependencies:
+            receivers = tuple(
+                (index, () if args[index] is self.owner else next(
+                    (path for child, path in self._method_owners if args[index] is child), None))
+                for index in function.template_slot_locations
+            )
+            identity = (*identity, function._real_function_compile_variant(), receivers)
         state = self._real_functions.get(identity)
+        if state is None and track_dependencies:
+            state = compilation.reuse_function(identity, self)
+            if state is not None:
+                self._real_functions[identity] = state
+        captured_here = state is None
         if state is None:
             variant = function._next_real_function_variant_id
             function._next_real_function_variant_id += 1
             key = core.FunctionKey(function.func.__name__, function.func_id, variant)
-            state = dict(key=key, compiling=True, recursive=False, captures=(), local_index=None)
+            state = dict(key=key, compiling=True, recursive=False, captures=(), local_index=None,
+                         definitions={(function, key.instance_id)})
             self._real_functions[identity] = state
             previous = (
                 self.expressions,
@@ -2063,6 +2080,7 @@ class _Capture:
             self.expressions, self.dynamic, self.resource_aliases = {}, [], {}
             self.input_guards, self.input_requirements = [], {}
             self.local_tensor_scope, self._current_real_function = (None, ("const", 0)), state
+            previous_facts = _FunctionDependencies.isolate(self) if track_dependencies else None
             try:
                 function.do_compile(key, args, features)
                 state["captures"] = tuple(self.dynamic)
@@ -2076,6 +2094,9 @@ class _Capture:
                 self._real_functions.pop(identity, None)
                 raise
             finally:
+                if previous_facts is not None:
+                    state["dependencies"] = _FunctionDependencies(function, self)
+                    state["dependencies"].restore(self, previous_facts)
                 (
                     self.expressions,
                     self.dynamic,
@@ -2088,6 +2109,12 @@ class _Capture:
                 state["compiling"] = False
         elif state["compiling"]:
             state["recursive"] = True
+        if not captured_here and not state["compiling"] and "dependencies" in state:
+            # Include a callee's transitive facts even when it was first
+            # lowered outside this parent or in the preceding entry.
+            state["dependencies"].merge(self)
+        if self._current_real_function is not None:
+            self._current_real_function["definitions"].update(state["definitions"])
         values, arguments = [], []
         for name in state["captures"]:
             if name is _LOCAL_TENSOR_INDEX:
@@ -2920,12 +2947,90 @@ class _Capture:
         return None
 
 
+class _FunctionDependencies:
+    """Plain capture facts for a build-owned function, with the existing guards.
+
+    Each callee records its own transitive dependencies instead of inheriting
+    unrelated facts from its first caller. No owner, AST or caller Expr is kept.
+    """
+
+    _maps = (
+        "used", "static", "objects", "resource_conditions", "record_field_keys",
+        "field_metadata", "owner_sequence_lengths", "methods", "method_paths",
+        "functions", "lexical", "constants", "struct_types", "groups",
+        "member_paths", "dense_access", "fixed_groups", "fixed_members",
+        "fixed_dependencies", "resource_templates",
+    )
+    _sets = ("record_equalities", "static_templates", "model_static_ranges", "model_blocks")
+
+    @classmethod
+    def isolate(cls, context):
+        previous = {name: getattr(context, name) for name in (*cls._maps, *cls._sets)}
+        for name in cls._maps:
+            setattr(context, name, {})
+        for name in cls._sets:
+            setattr(context, name, set())
+        previous["static_objects"], context.static_objects = context.static_objects, {}
+        return previous
+
+    def __init__(self, function, context):
+        self.kernel = function
+        self.entry_definition = _definition(function.func)
+        for name in self._maps:
+            setattr(self, name, dict(getattr(context, name)))
+        for name in self._sets:
+            setattr(self, name, frozenset(getattr(context, name)))
+        self.capture_paths = {name: context.component._paths.get(name) for name in self.used}
+        self.symbolic_dimensions = context.component._symbolic_dimensions
+
+    def restore(self, context, previous):
+        static_objects = context.static_objects
+        for name, value in previous.items():
+            setattr(context, name, value)
+        context.static_objects.update(static_objects)
+        self.merge(context)
+
+    def merge(self, context):
+        for name in self._maps:
+            target = getattr(context, name)
+            for key, value in getattr(self, name).items():
+                if key in target and target[key] != value:
+                    raise TaichiCompilationError("Function capture dependency changed during compilation; retry")
+                target[key] = value
+        for name in self._sets:
+            getattr(context, name).update(getattr(self, name))
+
+    def reusable(self):
+        # These contracts carry task-local allocations or producer IR bindings.
+        # Keep their established per-entry lowering until they can be rebound.
+        return not (self.fixed_groups or self.resource_templates or self.static_templates
+                    or self.model_static_ranges or self.model_blocks)
+
+    def matches(self, context):
+        if self.symbolic_dimensions != context.component._symbolic_dimensions:
+            return False
+        if any(context.component._paths.get(name) != path for name, path in self.capture_paths.items()):
+            return False
+        if _Capture.dependency_mismatch(self, context.component, context.owner, layouts=context._layouts) is not None:
+            return False
+        for name, access in self.dense_access.items():
+            declaration = context.declarations[name]
+            value = context.component.read(context.owner, name)
+            description = declaration.validate(value)
+            schema = context._layouts.dense(declaration.group)[0]
+            compact = json.loads(schema)["version"] == 1 and _extent_invariant_compact_member(value, description)
+            if access != ("compact" if compact else "affine"):
+                return False
+        return True
+
+
 class _ComponentCode:
     def __init__(self, kernel, key, context):
         self.kernel = kernel
         self.key = key
         self.call_signature = context.call_signature
         self.runtime = kernel.runtime
+        self._function_states = dict(context._real_functions) if getattr(kernel, "_package_compilation", None) else {}
         self.semantic_key = _digest(
             {key: value for key, value in context.contract.items() if key != "declaration_sources"}
         )
