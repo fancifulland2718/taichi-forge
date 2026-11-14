@@ -22,8 +22,8 @@ class LlvmAotModuleBuilder : public AotModuleBuilder {
             const std::string &filename) const override;
 
   void set_artifact_format(const std::string &format) override;
-  // Internal qualification switch; production remains unchanged until the
-  // cleaned artifacts have passed prepare and runtime qualification.
+  // Internal comparison override. CUDA bc-library enables cleanup by default;
+  // other artifact formats retain their existing production policy.
   void set_ir_cleanup_for_testing(bool enabled);
   void enable_streaming_exports() override;
   std::map<std::string, std::uint64_t> streaming_export_statistics() override;

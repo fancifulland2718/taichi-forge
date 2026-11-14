@@ -59,6 +59,13 @@ Shared units are extracted when sealing entries; units requiring final resource
 numbering wait for archive remapping. Host arrays still transfer on each invocation;
 reusing specialized code does not cache their contents.
 
+CUDA `bc-library` export removes function-local redundant IR on private build
+copies before finalizing dependencies and content hashes. It preserves the
+effective optimization and floating-point options, including `opt_level=0`,
+and leaves model specialization and final device optimization to consumption.
+Ordinary export does not enable compiler lifecycle telemetry or per-entry
+diagnostics. This policy does not change other artifact formats or ordinary JIT.
+
 Build-time analysis follows immutable `ti.static` local aliases and resolvable
 helper parameters to their condition uses. Helpers made of range schedules
 can remain independently guarded loops in one entry, preserving each loop's

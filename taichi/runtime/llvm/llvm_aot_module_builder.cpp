@@ -58,8 +58,6 @@ LlvmAotModuleBuilder::LlvmAotModuleBuilder(
 void LlvmAotModuleBuilder::set_artifact_format(const std::string &format) {
   TI_ERROR_IF(compile_options_frozen_,
               "AOT artifact format must be selected before exporting kernels.");
-  TI_ERROR_IF(ir_finalizer_ && format != "bc" && format != "bc-library",
-              "AOT IR cleanup requires bitcode");
   TI_ERROR_IF(format != "bc" && format != "bc-library" && !LLVM::is_cuda_aot_artifact_format(format),
               "Unsupported LLVM AOT artifact format '{}'", format);
   TI_ERROR_IF(LLVM::is_cuda_aot_artifact_format(format) &&
@@ -72,6 +70,10 @@ void LlvmAotModuleBuilder::set_artifact_format(const std::string &format) {
               "Experimental AOT code libraries currently require CUDA");
   function_code_cache_ = format == "bc-library"
       ? std::make_shared<LLVM::FunctionCodeCache>() : nullptr;
+  // Finalize CUDA library artifacts on private copies before publication.
+  // Per-module effective options still preserve explicit opt_level=0.
+  ir_finalizer_ = format == "bc-library"
+      ? std::make_shared<LLVM::AotIRFinalizer>() : nullptr;
 }
 
 void LlvmAotModuleBuilder::set_ir_cleanup_for_testing(bool enabled) {
@@ -88,7 +90,6 @@ void LlvmAotModuleBuilder::enable_streaming_exports() {
   if (streaming_compilation_manager_)
     return;
   streaming_compilation_manager_ = prog_->make_kernel_compilation_manager();
-  streaming_compilation_manager_->set_executable_lifecycle_telemetry_enabled(true);
 }
 
 void LlvmAotModuleBuilder::seal_kernel_export_per_backend(

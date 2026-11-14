@@ -14,7 +14,7 @@ from tests import test_utils
 
 
 @test_utils.test(arch=ti.cuda, offline_cache=False)
-@pytest.mark.parametrize("cleanup", [False, True])
+@pytest.mark.parametrize("cleanup", [None, False, True])
 def test_bitcode_library_shares_real_function_and_validates_dependencies(tmp_path, cleanup):
     import numpy as np
     from zipfile import ZipFile, ZIP_DEFLATED
@@ -38,13 +38,13 @@ def test_bitcode_library_shares_real_function_and_validates_dependencies(tmp_pat
             data[i] = shared(data[i], bias) + 1
 
     module = ti.aot.Module(artifact_format="bc-library")
-    if cleanup:
-        module._aot_builder._set_ir_cleanup_for_testing(True)
+    if cleanup is not None:
+        module._aot_builder._set_ir_cleanup_for_testing(cleanup)
     module.add_kernel(first)
     module.add_kernel(second)
     artifact = tmp_path / "library.tcm"
     module.archive(str(artifact))
-    if cleanup:
+    if cleanup is not False:
         stats = module._aot_builder._streaming_export_statistics()
         assert stats['aot_cleaned_units'] == 1
         assert stats['aot_cleaned_roots'] == 2

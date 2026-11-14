@@ -14,7 +14,7 @@
 
 namespace taichi::lang::LLVM {
 
-// Build-owned, opt-in finalization. Neither the Program's FunctionCodeCache nor
+// Build-owned artifact finalization. Neither the Program's FunctionCodeCache nor
 // its original modules enter this object. Keys cover the complete normalized
 // input and policy; output hashes continue to describe the actual final bytes.
 class AotIRFinalizer {

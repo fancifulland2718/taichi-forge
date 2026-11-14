@@ -1562,7 +1562,7 @@ class Model:
 
 @test_utils.test(arch=ti.cuda, offline_cache=False)
 @pytest.mark.parametrize("fail_export", [False, True])
-@pytest.mark.parametrize("cleanup", [False, True])
+@pytest.mark.parametrize("cleanup", [None, False, True])
 def test_package_bitcode_library_preserves_jit_functions(tmp_path, monkeypatch, fail_export, cleanup):
     from taichi_forge.aot._package_compilation import PackageCompilation
 
@@ -1573,8 +1573,8 @@ def test_package_bitcode_library_preserves_jit_functions(tmp_path, monkeypatch, 
     retired = []
 
     def attach(transaction, module, **kwargs):
-        if cleanup:
-            module._aot_builder._set_ir_cleanup_for_testing(True)
+        if cleanup is not None:
+            module._aot_builder._set_ir_cleanup_for_testing(cleanup)
         return original_attach(transaction, module, **kwargs)
 
     def release(transaction):
@@ -1588,7 +1588,11 @@ def test_package_bitcode_library_preserves_jit_functions(tmp_path, monkeypatch, 
         if fail_export and code.entry_definition[1].endswith('.second'):
             raise RuntimeError('injected package export failure')
         original_compile(transaction, code)
-        sealed_units.append(transaction.module._aot_builder._streaming_export_statistics()['shared_code_units'])
+        stats = transaction.module._aot_builder._streaming_export_statistics()
+        sealed_units.append(stats['shared_code_units'])
+        # Ordinary production does not enable compiler lifecycle telemetry.
+        assert stats['compiler_invocations'] == stats['disk_loads'] == stats['memory_cache_hits'] == 0
+        assert ('aot_cleaned_units' in stats) == (cleanup is not False)
 
     monkeypatch.setattr(PackageCompilation, 'compile', observe)
     monkeypatch.setattr(PackageCompilation, '_release_functions', release)
