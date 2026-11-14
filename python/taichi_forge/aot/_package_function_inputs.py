@@ -21,6 +21,48 @@ from ._package_factories import _source_value
 from ._package_input_families import source_class
 
 
+class _InventoryLocalAliases(ast.NodeTransformer):
+    """Keep one traversal's bindings on an instance, not a cyclic local type."""
+
+    def __init__(self, aliases, stores, tainted):
+        self.aliases, self.stores, self.tainted = aliases, stores, tainted
+        self.active = set()
+        self.used = []
+
+    def visit_Name(self, part):
+        if isinstance(part.ctx, ast.Load) and part.id in self.aliases and self.stores.get(part.id) == 1:
+            from ._package_source_sequences import UnprovenSourceSequence
+
+            if part.id in self.tainted:
+                raise UnprovenSourceSequence('Inventory local sequence escaped or was mutated')
+            if part.id in self.active:
+                raise UnprovenSourceSequence('Recursive local inventory alias')
+            self.active.add(part.id)
+            self.used.append(self.aliases[part.id])
+            replacement = self.visit(copy.deepcopy(self.aliases[part.id]))
+            self.active.remove(part.id)
+            return replacement
+        return part
+
+    def visit_Lambda(self, part):
+        return part
+
+
+class _InventoryIteration(ast.NodeTransformer):
+    def __init__(self, projector, bindings):
+        self.projector, self.bindings = projector, bindings
+
+    def visit_Name(self, part):
+        if isinstance(part.ctx, ast.Load) and part.id in self.bindings:
+            return ast.copy_location(self.projector.syntax(self.bindings[part.id]), part)
+        return part
+
+    def visit_FunctionDef(self, part):
+        return part
+
+    visit_AsyncFunctionDef = visit_ClassDef = visit_FunctionDef
+
+
 def source_function_namespace(function, node, imported):
     """Resolve local imports only from the already admitted source closure."""
     bindings, shadowed = {}, set(inspect.signature(function).parameters)
@@ -598,29 +640,7 @@ def discover(sources, imported, *, preparation_receivers=None, resource_inventor
                         try:
                             iteration = statement.iter
                             environment = sequence_environment()
-                            class LocalAliases(ast.NodeTransformer):
-                                def __init__(self):
-                                    self.active = set()
-                                    self.used = []
-
-                                def visit_Name(self, part):
-                                    if (isinstance(part.ctx, ast.Load) and part.id in aliases
-                                            and stores.get(part.id) == 1):
-                                        if part.id in tainted:
-                                            raise UnprovenSourceSequence('Inventory local sequence escaped or was mutated')
-                                        if part.id in self.active:
-                                            raise UnprovenSourceSequence('Recursive local inventory alias')
-                                        self.active.add(part.id)
-                                        self.used.append(aliases[part.id])
-                                        replacement = self.visit(copy.deepcopy(aliases[part.id]))
-                                        self.active.remove(part.id)
-                                        return replacement
-                                    return part
-
-                                def visit_Lambda(self, part):
-                                    return part
-
-                            substitution = LocalAliases()
+                            substitution = _InventoryLocalAliases(aliases, stores, tainted)
                             iteration = substitution.visit(copy.deepcopy(statement.iter))
                             from taichi_forge.lang.impl import static
                             static_iteration = (isinstance(iteration, ast.Call) and source_callable(iteration.func, namespace) is static
@@ -653,19 +673,8 @@ def discover(sources, imported, *, preparation_receivers=None, resource_inventor
                                 bindings = {}
                                 sequence_projector.bind(statement.target, item, bindings)
 
-                                class BindIteration(ast.NodeTransformer):
-                                    def visit_Name(self, part):
-                                        if isinstance(part.ctx, ast.Load) and part.id in bindings:
-                                            return ast.copy_location(sequence_projector.syntax(bindings[part.id]), part)
-                                        return part
-
-                                    def visit_FunctionDef(self, part):
-                                        return part
-
-                                    visit_AsyncFunctionDef = visit_ClassDef = visit_FunctionDef
-
                                 for body in statement.body:
-                                    walk(BindIteration().visit(copy.deepcopy(body)))
+                                    walk(_InventoryIteration(sequence_projector, bindings).visit(copy.deepcopy(body)))
                             for body in statement.orelse:
                                 walk(body)
                             return

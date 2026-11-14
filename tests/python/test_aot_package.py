@@ -4463,17 +4463,25 @@ def append_step(solver, builder):
 
 
 @pytest.mark.parametrize("failure", [False, True])
+@pytest.mark.parametrize("iteration", [False, True])
 @test_utils.test(arch=ti.cpu, offline_cache=False)
-def test_package_input_analysis_releases_namespaces_without_gc(tmp_path, monkeypatch, failure):
+def test_package_input_analysis_releases_namespaces_without_gc(tmp_path, monkeypatch, failure, iteration):
     import gc
     import weakref
     from taichi_forge.aot import _package_function_inputs as inputs
+    from taichi_forge.aot._package_source_sequences import SourceSequences
 
     class Namespace(dict):
         pass
 
     references = []
+    projectors = []
     original = inputs.source_function_namespace
+    original_projector = SourceSequences.__init__
+
+    def projector(self, *args, **kwargs):
+        original_projector(self, *args, **kwargs)
+        projectors.append(weakref.ref(self))
 
     def namespace(*args, **kwargs):
         result = Namespace(original(*args, **kwargs))
@@ -4481,8 +4489,19 @@ def test_package_input_analysis_releases_namespaces_without_gc(tmp_path, monkeyp
         return result
 
     monkeypatch.setattr(inputs, "source_function_namespace", namespace)
+    monkeypatch.setattr(SourceSequences, "__init__", projector)
     source = CYCLIC_WRITE_INVENTORY_SOURCE
-    if failure:
+    if iteration:
+        recipe = '''def append_step(solver, builder):
+    operations = (solver.step,)
+    aliases = operations
+    for operation in aliases:
+        builder.dispatch(operation)
+'''
+        if failure:
+            recipe += '        builder.dispatch(solver.missing)\n'
+        source = source.replace('def append_step(solver, builder):\n    builder.dispatch(solver.step)', recipe)
+    elif failure:
         source = source.replace("builder.dispatch(solver.step)", "builder.dispatch(solver.missing)")
     package = _source_package(tmp_path, monkeypatch, source)
     automatic = gc.isenabled()
@@ -4494,6 +4513,8 @@ def test_package_input_analysis_releases_namespaces_without_gc(tmp_path, monkeyp
         else:
             assert ti.aot.check_package(package)["declaration_check"] == "passed"
         assert references and all(reference() is None for reference in references)
+        if iteration:
+            assert projectors and all(reference() is None for reference in projectors)
         assert package.model.constructors == 0
         assert ti.lang.impl.get_runtime().get_num_compiled_functions() == 0
     finally:
