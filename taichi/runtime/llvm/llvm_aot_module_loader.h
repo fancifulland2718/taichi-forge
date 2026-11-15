@@ -94,7 +94,8 @@ class LlvmAotModule final : public aot::Module {
   }
 
   LlvmOfflineCache::KernelCacheData load_kernel_from_cache(
-      const std::string &name, LlvmOfflineCacheFileReader *reader = nullptr);
+      const std::string &name);
+  void verify_metadata_unchanged() const;
 
   std::unique_ptr<aot::Kernel> make_new_kernel(
       const std::string &name) override;

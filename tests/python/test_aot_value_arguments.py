@@ -143,6 +143,60 @@ def test_prepared_bitcode_specialization_keeps_shapes_and_instances_independent(
 
 
 @test_utils.test(arch=[ti.cpu, ti.cuda], offline_cache=False)
+@pytest.mark.parametrize("archive", [False, True])
+def test_prepared_metadata_reuse_preserves_artifact_snapshot(tmp_path, archive):
+    from zipfile import ZipFile, ZIP_DEFLATED
+    from taichi_forge_runtime.aot import Scalar
+
+    @ti.kernel
+    def update(data: ti.types.ndarray(ti.i32, 1), increment: ti.i32):
+        for i in data:
+            data[i] += increment
+
+    module = ti.aot.Module(artifact_format="bc-library" if ti.cfg.arch == ti.cuda else "bc")
+    module.add_kernel(update)
+    artifact = tmp_path / "snapshot.tcm"
+    module.archive(str(artifact))
+    with ZipFile(artifact) as source:
+        entries = {name: source.read(name) for name in source.namelist()}
+        source.extractall(tmp_path / "directory")
+    path = artifact if archive else tmp_path / "directory"
+    with ti.aot.borrow_runtime() as runtime, ExitStack() as stack:
+        loaded = stack.enter_context(runtime.load_module(path))
+        kernel = loaded.kernel("update")
+        data = stack.enter_context(closing(runtime.ndarray("i32", (7,))))
+        data.write(np.zeros(7, np.int32))
+        entries["metadata.tcb"] += b"changed after loading"
+        if archive:
+            with ZipFile(artifact, "w", ZIP_DEFLATED) as target:
+                for name, contents in entries.items():
+                    target.writestr(name, contents)
+        else:
+            (path / "metadata.tcb").write_bytes(entries["metadata.tcb"])
+
+        def prepare(value):
+            return kernel.bind(data, Scalar("i32", value)).prepare(specialize=True, constant_args=(1,))
+
+        if archive:
+            # The loaded TCM owns a snapshot. A new specialization and deferred
+            # generic registration both use that original contract and code.
+            for increment in (2, 3):
+                with prepare(increment) as ready:
+                    ready.run()
+            kernel.run(data, Scalar("i32", 4))
+            np.testing.assert_array_equal(np.frombuffer(data.read(), np.int32), np.full(7, 9))
+        else:
+            with pytest.raises(RuntimeError, match="metadata changed"):
+                prepare(2)
+            if ti.cfg.arch == ti.cuda:
+                with pytest.raises(RuntimeError, match="metadata changed"):
+                    kernel.run(data, Scalar("i32", 4))
+        # A newly loaded module must not accept the corrupted metadata.
+        with pytest.raises(RuntimeError, match="checksum mismatch"):
+            runtime.load_module(path)
+
+
+@test_utils.test(arch=[ti.cpu, ti.cuda], offline_cache=False)
 def test_prepared_real_function_arguments_have_their_own_layout(tmp_path):
     from taichi_forge_runtime.aot import Scalar
 

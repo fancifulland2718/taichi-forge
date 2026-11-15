@@ -29,6 +29,7 @@ TEST(VirtualDir, ZipOwnsCompressedSourceAndSupportsPrefixReads) {
     ASSERT_FALSE(bytes.empty());
     auto dir = VirtualDir::from_zip(bytes.data(), bytes.size());
     ASSERT_NE(dir, nullptr);
+    EXPECT_TRUE(dir->is_immutable());
     std::vector<uint8_t>().swap(bytes);
     size_t size = 0;
     ASSERT_TRUE(dir->get_file_size("large", size));
@@ -42,6 +43,10 @@ TEST(VirtualDir, ZipOwnsCompressedSourceAndSupportsPrefixReads) {
     ASSERT_TRUE(dir->load_file("large", full));
     EXPECT_EQ(std::string(full.begin(), full.end()), std::string(8192, 'x'));
   }
+}
+
+TEST(VirtualDir, FilesystemDoesNotPromiseImmutableContents) {
+  EXPECT_FALSE(VirtualDir::from_fs_dir(".")->is_immutable());
 }
 
 TEST(VirtualDir, ZipValidatesOnlyRequestedPayloads) {

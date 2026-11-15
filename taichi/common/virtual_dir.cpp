@@ -58,6 +58,9 @@ struct ZipArchiveVirtualDir : public VirtualDir {
   explicit ZipArchiveVirtualDir(std::vector<uint8_t> bytes)
       : bytes_(std::move(bytes)) {
   }
+  bool is_immutable() const override {
+    return true;
+  }
   ~ZipArchiveVirtualDir() override {
     if (archive_.m_pState)
       mz_zip_reader_end(&archive_);

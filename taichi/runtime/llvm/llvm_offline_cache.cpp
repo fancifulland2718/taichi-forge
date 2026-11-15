@@ -16,6 +16,7 @@
 #include "taichi/runtime/llvm/aot_snode_resources.h"
 #include "taichi/runtime/llvm/llvm_module_codec.h"
 #include "taichi/runtime/llvm/aot_code_units.h"
+#include "taichi/runtime/llvm/aot_artifact_integrity.h"
 #include "taichi/util/io.h"
 #include "taichi/util/lock.h"
 #include "taichi/util/offline_cache.h"
@@ -54,11 +55,23 @@ std::unique_ptr<LlvmOfflineCacheFileReader> LlvmOfflineCacheFileReader::make(
 std::unique_ptr<LlvmOfflineCacheFileReader> LlvmOfflineCacheFileReader::make(
     std::shared_ptr<const io::VirtualDir> directory,
     LlvmOfflineCache::Format format) {
+  return make(std::move(directory), format, {});
+}
+
+std::unique_ptr<LlvmOfflineCacheFileReader> LlvmOfflineCacheFileReader::make(
+    std::shared_ptr<const io::VirtualDir> directory,
+    LlvmOfflineCache::Format format,
+    const std::string &metadata_sha256) {
   std::vector<uint8_t> bytes;
   LlvmOfflineCache data;
   LlvmOfflineCache::Version version{};
-  if (!directory || !directory->load_file("metadata.tcb", bytes) ||
-      bytes.size() < sizeof(size_t) + sizeof(version) ||
+  if (!directory || !directory->load_file("metadata.tcb", bytes))
+    return nullptr;
+  TI_ERROR_IF(!metadata_sha256.empty() &&
+                  LLVM::aot_artifact_sha256(llvm::StringRef(
+                      reinterpret_cast<const char *>(bytes.data()), bytes.size())) != metadata_sha256,
+              "LLVM AOT launch ABI checksum mismatch");
+  if (bytes.size() < sizeof(size_t) + sizeof(version) ||
       !read_from_binary(version, bytes.data(), bytes.size(), false) ||
       version[0] != TI_VERSION_MAJOR || version[1] != TI_VERSION_MINOR ||
       version[2] != TI_VERSION_PATCH ||
@@ -154,6 +167,14 @@ bool LlvmOfflineCacheFileReader::take_kernel_cache(
     LlvmOfflineCache::KernelCacheData &res,
     const std::string &key,
     llvm::LLVMContext &llvm_ctx) {
+  return take_kernel_cache(res, key, llvm_ctx, false);
+}
+
+bool LlvmOfflineCacheFileReader::take_kernel_cache(
+    LlvmOfflineCache::KernelCacheData &res,
+    const std::string &key,
+    llvm::LLVMContext &llvm_ctx,
+    bool retain_metadata) {
   auto it = data_.kernels.find(key);
   if (it == data_.kernels.end() || failed_kernels_.count(key)) return false;
   auto &cache = it->second;
@@ -190,8 +211,15 @@ bool LlvmOfflineCacheFileReader::take_kernel_cache(
       return false;
     }
   }
+  // Clone the contract before moving so allocation failure cannot leave a
+  // consumed entry. The retained copy has no context-bound LLVM module.
+  auto metadata = retain_metadata ? cache.clone_metadata()
+                                  : LlvmOfflineCache::KernelCacheData{};
   res = std::move(cache);
-  data_.kernels.erase(it);
+  if (retain_metadata)
+    cache = std::move(metadata);
+  else
+    data_.kernels.erase(it);
   return true;
 }
 

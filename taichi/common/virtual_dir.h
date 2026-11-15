@@ -27,6 +27,12 @@ struct TI_DLL_EXPORT VirtualDir {
                            void *data,
                            size_t size) const = 0;
 
+  // An owned archive is a snapshot; a filesystem directory may change after
+  // opening. Consumers may reuse verified metadata only within this lifetime.
+  virtual bool is_immutable() const {
+    return false;
+  }
+
   template <typename T>
   bool load_file(const std::string &path, std::vector<T> &data) const {
     size_t size = 0;

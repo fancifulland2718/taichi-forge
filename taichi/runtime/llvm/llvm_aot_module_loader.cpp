@@ -118,16 +118,14 @@ LlvmAotModule::LlvmAotModule(
   if (is_cuda_aot_artifact_format(metadata.kernel_format)) {
     TI_ERROR_IF(arch() != Arch::cuda, "CUDA device artifacts require a CUDA runtime");
   }
-  if (is_cuda_aot_artifact_format(metadata.kernel_format) ||
+  const bool verify_metadata = is_cuda_aot_artifact_format(metadata.kernel_format) ||
       !metadata.resource_binding.empty() ||
       !metadata.kernel_launch_abis.empty() ||
       !metadata.kernel_runtime_state.empty() ||
       !metadata.kernel_runtime_affine_arrays.empty() ||
-      metadata.schema_version == kDynamicSharedAotSchemaVersion) {
-    TI_ERROR_IF(aot_artifact_sha256(read_artifact(
-                    *directory_, "metadata.tcb")) != metadata.abi_sha256,
-                "LLVM AOT launch ABI checksum mismatch");
-  }
+      metadata.schema_version == kDynamicSharedAotSchemaVersion;
+  TI_ERROR_IF(verify_metadata && metadata.abi_sha256.size() != 64,
+              "LLVM AOT launch ABI checksum mismatch");
 
   // Select exactly the declared representation. Missing/corrupt payloads must
   // not silently fall back to a different generation left in this directory.
@@ -136,7 +134,8 @@ LlvmAotModule::LlvmAotModule(
                           : (is_cuda_aot_artifact_format(metadata.kernel_format)
                                  ? LlvmOfflineCache::Format::CUDAArtifact
                                  : LlvmOfflineCache::Format::LL);
-  cache_reader_ = LlvmOfflineCacheFileReader::make(directory_, format);
+  cache_reader_ = LlvmOfflineCacheFileReader::make(
+      directory_, format, verify_metadata ? metadata.abi_sha256 : std::string{});
   TI_ERROR_IF(cache_reader_ == nullptr,
               "LLVM AOT artifact metadata at {} is corrupt or incompatible. "
               "Rebuild the artifact with the current Forge AOT compiler.",
@@ -157,8 +156,8 @@ LlvmAotModule::LlvmAotModule(
                   "AOT ndarray layout qualification has an invalid argument path");
   }
 
-  // Validate the entire entry inventory while the reader still owns all task
-  // metadata. take_kernel_* later transfers each physical payload exactly once.
+  // Validate the entire entry inventory before loading code. Bitcode readers
+  // retain these contracts, but transfer each private IR payload to its caller.
   for (const auto &[name, code] : metadata.kernel_aliases) {
     TI_ERROR_IF(name.empty() || name.find('\0') != std::string::npos ||
                     cache_reader_->has_kernel(name) ||
@@ -311,16 +310,16 @@ LlvmAotModule::~LlvmAotModule() {
 }
 
 LlvmOfflineCache::KernelCacheData LlvmAotModule::load_kernel_from_cache(
-    const std::string &name, LlvmOfflineCacheFileReader *reader) {
-  if (!reader)
-    reader = cache_reader_.get();
+    const std::string &name) {
+  auto *reader = cache_reader_.get();
   TI_ASSERT(reader != nullptr);
   LlvmOfflineCache::KernelCacheData loaded;
   auto ok = is_cuda_aot_artifact_format(metadata_.kernel_format)
                 ? reader->take_kernel_metadata(loaded, name)
                 : reader->take_kernel_cache(
                       loaded, name,
-                      *executor_->get_llvm_context()->get_this_thread_context());
+                      *executor_->get_llvm_context()->get_this_thread_context(),
+                      is_llvm_aot_bitcode_format(metadata_.kernel_format));
   if (!ok) {
     throw aot::ArtifactLoadError("Failed to read LLVM AOT kernel: " + name);
   }
@@ -376,6 +375,14 @@ LlvmOfflineCache::KernelCacheData LlvmAotModule::load_kernel_from_cache(
       id = tree_bindings_.at(id);
   }
   return loaded;
+}
+
+void LlvmAotModule::verify_metadata_unchanged() const {
+  // TCM owns immutable compressed bytes verified at module load. Directory
+  // artifacts remain mutable: check their bytes before reusing the catalog.
+  if (!directory_->is_immutable())
+    TI_ERROR_IF(aot_artifact_sha256(read_artifact(*directory_, "metadata.tcb")) != metadata_.abi_sha256,
+                "AOT metadata changed after loading");
 }
 
 aot::Kernel *LlvmAotModule::specialize_kernel(
@@ -456,14 +463,10 @@ aot::Kernel *LlvmAotModule::specialize_kernel(
   if (cached != specialized_kernels_.end())
     return cached->second.get();
 
-  // Ordinary loading consumes its reader's IR. Reopen only on a specialization
-  // miss instead of retaining every generic module in compiler memory. Reuse
-  // the same artifact decoder, task contracts and SNode relocation path.
-  TI_ERROR_IF(aot_artifact_sha256(read_artifact(*directory_, "metadata.tcb")) != metadata_.abi_sha256,
-              "AOT metadata changed after loading");
-  auto reader = LlvmOfflineCacheFileReader::make(directory_, LlvmOfflineCache::Format::BC);
-  TI_ERROR_IF(!reader, "Cannot reopen specialization bitcode metadata");
-  auto data = load_kernel_from_cache(code, reader.get());
+  // Reuse the verified catalog, but load private IR on each specialization
+  // miss. No generic LLVM modules remain resident in the reader.
+  verify_metadata_unchanged();
+  auto data = load_kernel_from_cache(code);
   auto &module = *data.compiled_data.module;
   TI_ERROR_IF(cuda::is_graph_gate_launch_abi(compiled_kernel_launch_abi(module)),
               "Prepared specialization does not accept gated graph kernels");
@@ -777,21 +780,10 @@ std::unique_ptr<aot::Kernel> LlvmAotModule::make_new_kernel_impl(
 
 std::unique_ptr<llvm_aot::KernelImpl> LlvmAotModule::load_kernel_payload(
     const std::string &name, bool defer_registration) {
-  std::unique_ptr<LlvmOfflineCacheFileReader> reopened;
-  auto *reader = cache_reader_.get();
-  if (!defer_registration) {
-    // take_kernel_cache consumes its metadata as well as its IR. A deferred
-    // ordinary registration must reopen the frozen artifact, just as prepared
-    // specialization does, rather than reusing that consumed reader.
-    TI_ERROR_IF(aot_artifact_sha256(read_artifact(*directory_, "metadata.tcb")) != metadata_.abi_sha256,
-                "AOT metadata changed after loading");
-    reopened = LlvmOfflineCacheFileReader::make(directory_, LlvmOfflineCache::Format::BC);
-    TI_ERROR_IF(!reopened || !reopened->has_kernel(name),
-                "Cannot reopen deferred AOT kernel: {}", name);
-    reader = reopened.get();
-  }
-  if (!reader->has_kernel(name)) return nullptr;
-  auto kernel_cache = load_kernel_from_cache(name, reader);
+  if (!defer_registration)
+    verify_metadata_unchanged();
+  if (!cache_reader_->has_kernel(name)) return nullptr;
+  auto kernel_cache = load_kernel_from_cache(name);
   const auto array_declaration = metadata_.kernel_runtime_affine_arrays.find(name);
   const auto affine_arrays = array_declaration == metadata_.kernel_runtime_affine_arrays.end()
       ? std::vector<std::vector<int>>{} : array_declaration->second;
@@ -923,8 +915,8 @@ std::unique_ptr<llvm_aot::KernelImpl> LlvmAotModule::load_kernel_payload(
     // Contract/dependency validation above still happens at lookup. A prepared
     // consumer can now compile only its specialization; an ordinary consumer
     // registers the generic implementation when it first needs its handle.
-    // Reopen through the same validated reader rather than retaining a large
-    // LLVM module for a generic implementation that may never be used.
+    // Reload private IR through the verified catalog rather than retaining a
+    // large module for a generic implementation that may never be used.
     return std::make_unique<llvm_aot::KernelImpl>(
         kernel_launcher_.get(), KernelLaunchHandle{}, arch(), kernel_name,
         compiled.get_internal_data(), affine_arrays,

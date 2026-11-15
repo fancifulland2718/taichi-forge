@@ -103,8 +103,14 @@ class LlvmOfflineCacheFileReader {
   bool take_kernel_cache(LlvmOfflineCache::KernelCacheData &res,
                          const std::string &key,
                          llvm::LLVMContext &llvm_ctx);
+  // Keep only the decoded contract for subsequent private IR loads. Never
+  // retain the transferred module or a clone of it in the reader.
+  bool take_kernel_cache(LlvmOfflineCache::KernelCacheData &res,
+                         const std::string &key,
+                         llvm::LLVMContext &llvm_ctx,
+                         bool retain_metadata);
   bool has_kernel(const std::string &key) const;
-  // Cold entry validation before take_kernel_* consumes the physical payload.
+  // Cold entry validation without loading executable payloads.
   const LlvmOfflineCache::KernelCacheData *kernel_metadata(
       const std::string &key) const;
 
@@ -128,6 +134,11 @@ class LlvmOfflineCacheFileReader {
   static std::unique_ptr<LlvmOfflineCacheFileReader> make(
       std::shared_ptr<const io::VirtualDir> directory,
       LlvmOfflineCache::Format format);
+  // Verify and decode the same bytes, without a second archive extraction.
+  static std::unique_ptr<LlvmOfflineCacheFileReader> make(
+      std::shared_ptr<const io::VirtualDir> directory,
+      LlvmOfflineCache::Format format,
+      const std::string &metadata_sha256);
 
   static bool load_meta_data(LlvmOfflineCache &data,
                              const std::string &cache_file_path,

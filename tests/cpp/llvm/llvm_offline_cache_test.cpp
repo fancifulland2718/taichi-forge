@@ -23,6 +23,7 @@ namespace fs = std::filesystem;
 #include "taichi/rhi/arch.h"
 #include "taichi/runtime/llvm/llvm_context.h"
 #include "taichi/runtime/llvm/llvm_offline_cache.h"
+#include "taichi/runtime/llvm/aot_artifact_integrity.h"
 #include "taichi/runtime/program_impls/llvm/llvm_program.h"
 #include "taichi/program/compile_config.h"
 #include "taichi/program/program.h"
@@ -227,7 +228,11 @@ TEST_P(LlvmOfflineCacheTest, ReadWrite) {
   // Archive readers share this interface. Opening retains the source and reads
   // only metadata; executable payloads stay lazy and are consumed once.
   auto directory = std::make_shared<ObservedDirectory>(tmp_dir_str);
-  reader = LlvmOfflineCacheFileReader::make(directory, llvm_fmt);
+  std::vector<char> metadata;
+  ASSERT_TRUE(directory->files->load_file("metadata.tcb", metadata));
+  const auto checksum = LLVM::aot_artifact_sha256(
+      llvm::StringRef(metadata.data(), metadata.size()));
+  reader = LlvmOfflineCacheFileReader::make(directory, llvm_fmt, checksum);
   ASSERT_NE(reader, nullptr);
   EXPECT_EQ(directory->reads.size(), 1);
   EXPECT_EQ(directory->reads["metadata.tcb"], 1);
@@ -244,6 +249,27 @@ TEST_P(LlvmOfflineCacheTest, ReadWrite) {
             1);
   reader.reset();
   EXPECT_TRUE(lifetime.expired());
+
+  // Specializations reload private IR while sharing one verified catalog.
+  // Mutating one returned module/contract cannot contaminate the next load.
+  directory = std::make_shared<ObservedDirectory>(tmp_dir_str);
+  reader = LlvmOfflineCacheFileReader::make(directory, llvm_fmt, checksum);
+  LlvmOfflineCache::KernelCacheData first, second;
+  ASSERT_TRUE(reader->take_kernel_cache(first, kKernelName, *llvm_ctx, true));
+  ASSERT_NE(reader->kernel_metadata(kKernelName), nullptr);
+  EXPECT_EQ(reader->kernel_metadata(kKernelName)->compiled_data.module, nullptr);
+  first.compiled_data.module->getFunction(kTaskName)->setName("private_copy");
+  first.compiled_data.tasks.front().name = "private_copy";
+  ASSERT_TRUE(reader->take_kernel_cache(second, kKernelName, *llvm_ctx, true));
+  EXPECT_NE(second.compiled_data.module->getFunction(kTaskName), nullptr);
+  EXPECT_EQ(second.compiled_data.module->getFunction("private_copy"), nullptr);
+  EXPECT_EQ(second.compiled_data.tasks.front().name, kTaskName);
+  EXPECT_EQ(reader->kernel_metadata(kKernelName)->compiled_data.module, nullptr);
+  EXPECT_EQ(directory->reads["metadata.tcb"], 1);
+  EXPECT_EQ(directory->reads[std::string(kKernelName) +
+                                (llvm_fmt == Format::LL ? ".ll" : ".bc")], 2);
+  EXPECT_ANY_THROW(LlvmOfflineCacheFileReader::make(directory, llvm_fmt,
+                                                   std::string(64, '0')));
 }
 
 TEST_P(LlvmOfflineCacheTest, ConsumeFailureLeavesArtifactFilesUntouched) {
