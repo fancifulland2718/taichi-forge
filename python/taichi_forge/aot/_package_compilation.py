@@ -87,27 +87,37 @@ class PackageCompilation(FunctionLibrary):
         return None
 
     def _retain_functions(self, code):
-        # Retain only the last sealed entry's reusable function closure. This
-        # skips Python lowering and Taichi IR optimization for neighboring
-        # callers without retaining every frontend definition in a large build.
+        # Each typed function family owns the variants needed by its latest
+        # successful entry. Unrelated entries do not evict that working set;
+        # revisiting a family replaces its historical owner/static/tier variants
+        # rather than accumulating every definition explored by the build.
+        # A single entry may legitimately need several variants of one family.
         states, code._function_states = code._function_states, {}
         owned = {function for function in self.functions.values() if function is not None}
         available = {**self._retained_functions, **states}
+        current = {definition for state in states.values() for definition in state["definitions"]}
+        touched = {function for function, _ in current}
         eligible = {
             (identity[0], state["key"].instance_id)
             for identity, state in available.items()
             if identity[0] in owned and not state["recursive"] and state["local_index"] is None
             and "dependencies" in state and state["dependencies"].reusable()
+            and (identity[0] not in touched or (identity[0], state["key"].instance_id) in current)
         }
-        keep = set()
-        for state in states.values():
-            if state["definitions"] <= eligible:
-                keep.update(state["definitions"])
+        # Definitions are transitive. Replacing a leaf also removes every old
+        # parent that still calls it, including parents absent from this entry.
+        # Reused parents carry their descendants even when those callees were
+        # not visited separately by this capture.
         self._retained_functions = {
             identity: state for identity, state in available.items()
-            if (identity[0], state["key"].instance_id) in keep
+            if (identity[0], state["key"].instance_id) in eligible and state["definitions"] <= eligible
         }
-        return keep
+        return self._retained_definitions()
+
+    def _retained_definitions(self):
+        return {
+            definition for state in self._retained_functions.values() for definition in state["definitions"]
+        }
 
     def _release_functions(self, keep=()):
         for function in self.functions.values():
@@ -163,8 +173,9 @@ class PackageCompilation(FunctionLibrary):
         if kernel not in self.kernels.values():
             raise RuntimeError("Package compilation cannot retire a caller-owned kernel")
         kernel.kernel_cpp = None
-        self._retained_functions.clear()
-        self._release_functions()
+        # Failed captures never publish their states. Keep the last successful
+        # closure intact, retiring only definitions created by the failed try.
+        self._release_functions(self._retained_definitions())
         gc.collect(1)
         kernel.runtime.collect_unused_kernel_definitions(force=True)
 

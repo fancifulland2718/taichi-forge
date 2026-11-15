@@ -482,7 +482,7 @@ class Model:
                     np.testing.assert_array_equal(aot.out.to_numpy(), jit.out.to_numpy())
 
 
-@test_utils.test(arch=ti.cuda, offline_cache=False, compile_tier='full')
+@test_utils.test(arch=[ti.cpu, ti.cuda], offline_cache=False, compile_tier='full')
 def test_package_library_reuses_guarded_function_closures(tmp_path, monkeypatch):
     from collections import Counter
     from taichi_forge.aot._package_compilation import PackageCompilation
@@ -537,22 +537,23 @@ class Model:
 
     monkeypatch.setattr(Func, 'do_compile', observe)
     cases, native_definitions = [], []
+    cuda = ti.lang.impl.current_cfg().arch == ti.cuda
     with PackageCompilation() as compilation:
-        module = ti.aot.Module(artifact_format='bc-library')
+        module = ti.aot.Module(artifact_format='bc-library' if cuda else 'bc')
         compilation.attach(module, function_library=True)
         for entry, bias, multiplier, count in (
             ('first', 3, 3, 1), ('second', 3, 2, 1),
             ('first', 9, 3, 2), ('second', 9, 2, 2),
-            ('clear', 9, 0, 2), ('after_clear', 9, 2, 3),
-            ('fast', 9, 2, 4),
+            ('clear', 9, 0, 2), ('after_clear', 9, 2, 2),
+            ('fast', 9, 2, 3),
         ):
             owner.bias = bias
             code = component.compile(compilation.entry(getattr(owner, entry)), owner=owner)
             assert frontend == {'leaf': count, 'parent': count}
             compilation.compile(code)
             if entry == 'clear':
-                assert not compilation._retained_functions
-                assert all(native._definition_retired() for native in native_definitions)
+                assert len(compilation._retained_functions) == 2
+                assert any(not native._definition_retired() for native in native_definitions)
             for function in compilation.functions.values():
                 assert not function.compiled
                 native_definitions.extend(function.taichi_functions.values())
@@ -561,7 +562,7 @@ class Model:
     assert native_definitions and all(native._definition_retired() for native in native_definitions)
     # Changing static facts and compile tier must select a new implementation;
     # changing input data must remain live through the reused helper's ABI.
-    with Runtime('cuda') as runtime:
+    with Runtime('cuda' if cuda else 'cpu') as runtime:
         loaded = runtime.load_module(str(tmp_path / 'closures.tcm'))
         arrays = {name: runtime.ndarray('i32', (3,)) for name in ('data', 'out')}
         for symbol, captures, bias, multiplier in cases:
@@ -572,6 +573,174 @@ class Model:
                     ready.submit().wait()
                     np.testing.assert_array_equal(np.frombuffer(arrays['out'].read(), np.int32),
                                                   (values + bias) * multiplier)
+
+
+@test_utils.test(arch=ti.cpu, offline_cache=False, compile_tier='full')
+def test_package_library_function_family_retirement(tmp_path, monkeypatch):
+    from collections import Counter
+    import gc
+    import weakref
+    from taichi_forge.aot._package_compilation import PackageCompilation
+    from taichi_forge.lang.kernel_impl import Func
+
+    source = '''import taichi_forge as ti
+@ti.func
+def shift(i: ti.i32, amount: ti.template()) -> ti.i32:
+    return i + amount
+@ti.func
+def shifted(i: ti.i32) -> ti.i32:
+    return shift(i, 2)
+@ti.data_oriented
+class Model:
+    def __init__(self, bias):
+        self.bias = bias
+        scope = ti.experimental.ResourceScope(self)
+        scope.static('bias', choices=tuple(range(32)))
+        scope.out = scope.field(ti.i32, shape=1)
+    @ti.func
+    def leaf(self, i: ti.i32) -> ti.i32:
+        return i + ti.static(self.bias)
+    @ti.func
+    def parent(self, i: ti.i32) -> ti.i32:
+        return self.leaf(i) * 2
+    @ti.func
+    def alternate(self, i: ti.i32) -> ti.i32:
+        return self.leaf(i) * 3
+    @ti.kernel
+    def first(self):
+        for i in range(1):
+            self.out[i] = self.parent(i)
+    @ti.kernel
+    def side(self):
+        for i in range(1):
+            self.out[i] = self.alternate(i)
+    @ti.kernel
+    def leaf_only(self):
+        for i in range(1):
+            self.out[i] = self.leaf(i)
+    @ti.kernel
+    def after(self):
+        for i in range(1):
+            self.out[i] = self.parent(i)
+    @ti.kernel
+    def retry(self):
+        for i in range(1):
+            self.out[i] = self.parent(i)
+    @ti.kernel(opt_level='fast')
+    def fast(self):
+        for i in range(1):
+            self.out[i] = self.parent(i)
+    @ti.kernel
+    def fail(self):
+        for i in range(1):
+            self.out[i] = self.leaf(i) + self.undeclared
+    @ti.kernel
+    def clear(self):
+        for i in range(1):
+            self.out[i] = 0
+    @ti.kernel
+    def multiple(self):
+        for i in range(1):
+            self.out[i] = shift(i, 1) + shift(i, 2) + shifted(i) + self.parent(i)
+    @ti.kernel
+    def after_multiple(self):
+        for i in range(1):
+            self.out[i] = shift(i, 1) + shift(i, 2) + shifted(i) + self.parent(i)
+    @ti.kernel
+    def single(self):
+        for i in range(1):
+            self.out[i] = shift(i, 1)
+'''
+    package = _source_package(tmp_path, monkeypatch, source)
+    frontend, native_definitions, owner_refs = Counter(), [], []
+    original = Func.do_compile
+
+    def observe(function, *args):
+        frontend[function.func.__name__] += 1
+        result = original(function, *args)
+        native_definitions.extend(function.taichi_functions.values())
+        return result
+
+    monkeypatch.setattr(Func, 'do_compile', observe)
+    with PackageCompilation() as compilation:
+        # CPU bc exercises the same private frontend lease and native
+        # retirement. Shared-library serialization is covered on CUDA above.
+        compilation.attach(ti.aot.Module(artifact_format='bc'), function_library=True)
+
+        def compile_entry(owner, entry):
+            component = ti.aot.Component.from_owner(owner)
+            code = component.compile(compilation.entry(getattr(owner, entry)), owner=owner)
+            compilation.compile(code)
+            assert all(not function.compiled for function in compilation.functions.values())
+
+        def live_definitions():
+            return {native for function in compilation.functions.values()
+                    for native in function.taichi_functions.values()}
+
+        owner = package.model.Model(0)
+        compile_entry(owner, 'first')
+        compile_entry(owner, 'side')
+        compile_entry(owner, 'clear')
+        assert frontend == {'leaf': 1, 'parent': 1, 'alternate': 1}
+        assert len(live_definitions()) == 3
+        old = live_definitions()
+
+        # Replacing only the shared leaf invalidates both absent parents.
+        owner.bias = 1
+        compile_entry(owner, 'leaf_only')
+        assert len(live_definitions()) == 1
+        assert all(native._definition_retired() for native in old)
+        compile_entry(owner, 'after')
+        assert frontend == {'leaf': 2, 'parent': 2, 'alternate': 1}
+
+        previous_states = dict(compilation._retained_functions)
+        previous_native = live_definitions()
+        owner.bias = 2
+        entry = compilation.entry(owner.fail)
+        with pytest.raises(ti.TaichiCompilationError, match='undeclared'):
+            ti.aot.Component.from_owner(owner).compile(entry, owner=owner)
+        del entry
+        compilation.discard_capture(compilation.kernels[owner.fail._primal])
+        assert compilation._retained_functions == previous_states
+        assert live_definitions() == previous_native
+        assert frontend['leaf'] == 3
+        owner.bias = 1
+        compile_entry(owner, 'retry')
+        assert frontend == {'leaf': 3, 'parent': 2, 'alternate': 1}
+
+        # Distinct owners, static choices and alternating tiers replace the
+        # same typed Func families. Native IR stays at two live definitions,
+        # independent of the number of previously explored configurations.
+        for bias in range(3, 15):
+            owner = package.model.Model(bias)
+            owner_refs.append(weakref.ref(owner))
+            compile_entry(owner, 'fast' if bias % 2 else 'first')
+            assert len(live_definitions()) == 2
+            assert len(compilation._retained_functions) == 2
+            assert all(native in live_definitions() or native._definition_retired()
+                       for native in native_definitions)
+
+        compile_entry(owner, 'multiple')
+        counts = frontend.copy()
+        assert frontend['shift'] == 2
+        assert len(live_definitions()) == 5
+        compile_entry(owner, 'clear')
+        compile_entry(owner, 'after_multiple')
+        assert frontend == counts
+        assert len(live_definitions()) == 5
+        # Selecting one template instance retires the other instance and its
+        # absent caller, while preserving unrelated leaf/parent families.
+        old = live_definitions()
+        compile_entry(owner, 'single')
+        assert frontend == counts
+        assert len(live_definitions()) == 3
+        assert all(native._definition_retired() for native in old - live_definitions())
+        del owner
+        gc.collect()
+        assert all(reference() is None for reference in owner_refs)
+    assert not compilation._retained_functions
+    assert not compilation.functions
+    assert all(native._definition_retired() for native in native_definitions)
 
 
 @test_utils.test(arch=ti.cuda, offline_cache=False)
