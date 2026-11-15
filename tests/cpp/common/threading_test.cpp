@@ -429,6 +429,9 @@ TEST(LLVMContextThreadData, LazyLinkInputsPreserveClosureAndTreeReplacement) {
     builder.SetInsertPoint(llvm::BasicBlock::Create(ctx, "body", unused));
     builder.CreateRet(builder.getInt32(-1));
     context.add_struct_module(std::move(library), tree_id);
+    EXPECT_TRUE(context.linking_context_data->struct_modules.empty());
+    ASSERT_FALSE(context.linking_context_data->struct_link_bitcode.at(tree_id)
+                     .empty());
 
     // A fresh kernel must see the complete closure on both the initial and
     // repeated link; consuming the first lazy input cannot drain the snapshot.
@@ -457,6 +460,8 @@ TEST(LLVMContextThreadData, LazyLinkInputsPreserveClosureAndTreeReplacement) {
                        ->isDeclaration());
     }
     context.delete_snode_tree(tree_id);
+    EXPECT_EQ(context.linking_context_data->struct_link_bitcode.count(tree_id),
+              0u);
   }
 }
 
@@ -477,6 +482,8 @@ TEST(LLVMContextThreadData, WorkersCloneOnlyReferencedStructTrees) {
   for (int tree_id = 0; tree_id < 12; ++tree_id) {
     publish(tree_id, 17);
   }
+  EXPECT_TRUE(context.linking_context_data->struct_modules.empty());
+  EXPECT_EQ(context.linking_context_data->struct_link_bitcode.size(), 12u);
 
   // Workers remain alive across publication, replacement and retirement.
   // Main-thread mutations only occur while both workers are parked, matching

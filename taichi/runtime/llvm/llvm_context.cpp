@@ -711,9 +711,17 @@ void TaichiLLVMContext::add_struct_module(std::unique_ptr<Module> module,
     TI_ERROR("module broken");
   }
 
-  linking_context_data->struct_link_bitcode.erase(tree_id);
-  linking_context_data->struct_modules[tree_id] =
-      clone_module_to_context(module.get(), linking_context_data->llvm_context);
+  // Linking consumes immutable bitcode, never the published layout IR. Keep
+  // that snapshot directly instead of an extra full module in the linking
+  // context (and, after the first link, both the module and its bitcode).
+  // Large AOT builds otherwise destroy a second forest of unused LLVM objects
+  // for every layout witness. Codegen still owns its original typed module.
+  std::string link_bitcode;
+  {
+    llvm::raw_string_ostream stream(link_bitcode);
+    llvm::WriteBitcodeToFile(*module, stream);
+  }
+  linking_context_data->struct_link_bitcode[tree_id] = std::move(link_bitcode);
 
   auto registry = thread_data_registry_;
   std::lock_guard<std::mutex> registry_lock(registry->mutex);
@@ -1074,8 +1082,7 @@ void TaichiLLVMContext::init_runtime_module(llvm::Module *runtime_module) {
 }
 
 void TaichiLLVMContext::delete_snode_tree(int id) {
-  TI_ASSERT(linking_context_data->struct_modules.erase(id));
-  linking_context_data->struct_link_bitcode.erase(id);
+  TI_ASSERT(linking_context_data->struct_link_bitcode.erase(id));
   auto registry = thread_data_registry_;
   std::lock_guard<std::mutex> registry_lock(registry->mutex);
   for (auto &entry : registry->data) {
@@ -1171,6 +1178,20 @@ TaichiLLVMContext::ThreadLocalData::~ThreadLocalData() {
 
 namespace {
 
+std::unique_ptr<llvm::Module> lazy_link_bitcode(const std::string &bitcode,
+                                              llvm::LLVMContext &context,
+                                              const std::string &name) {
+  // Each consumed module owns its buffer; replacement/retirement of the
+  // published snapshot cannot invalidate an in-flight link input.
+  auto module = llvm::getOwningLazyBitcodeModule(
+      llvm::MemoryBuffer::getMemBufferCopy(bitcode, name), context);
+  if (!module) {
+    TI_ERROR("Failed to load LLVM link input: {}",
+              llvm::toString(module.takeError()));
+  }
+  return std::move(*module);
+}
+
 std::unique_ptr<llvm::Module> lazy_link_input(llvm::Module &source,
                                             std::string &bitcode) {
   if (bitcode.empty()) {
@@ -1188,14 +1209,8 @@ std::unique_ptr<llvm::Module> lazy_link_input(llvm::Module &source,
   // globals and address-taken functions. Do not clone all function bodies only
   // to discard most of them in the linker. The consumed module owns its buffer
   // so failed links and later snapshot invalidation cannot leave dangling data.
-  auto module = llvm::getOwningLazyBitcodeModule(
-      llvm::MemoryBuffer::getMemBufferCopy(bitcode, source.getModuleIdentifier()),
-      source.getContext());
-  if (!module) {
-    TI_ERROR("Failed to load LLVM link input: {}",
-              llvm::toString(module.takeError()));
-  }
-  return std::move(*module);
+  return lazy_link_bitcode(bitcode, source.getContext(),
+                           source.getModuleIdentifier());
 }
 
 }  // namespace
@@ -1262,8 +1277,8 @@ LLVMCompiledKernel TaichiLLVMContext::link_compiled_tasks(
   for (auto tree_id : used_tree_ids) {
     TI_COMPILE_PROFILER("cpp.compile.llvm.link_tasks.struct_modules");
     linker.linkInModule(
-        lazy_link_input(*linking_context_data->struct_modules.at(tree_id),
-                        linking_context_data->struct_link_bitcode[tree_id]),
+        lazy_link_bitcode(linking_context_data->struct_link_bitcode.at(tree_id),
+                           *linking_context_data->llvm_context, "struct"),
         llvm::Linker::LinkOnlyNeeded | llvm::Linker::OverrideFromSrc);
   }
   auto runtime_module = [&] {

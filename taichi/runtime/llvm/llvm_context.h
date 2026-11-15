@@ -36,8 +36,9 @@ class TaichiLLVMContext {
     std::unique_ptr<llvm::Module> runtime_module{nullptr};
     std::unordered_map<int, std::unique_ptr<llvm::Module>> struct_modules;
     // Only populated on linking_context_data, under the existing link/lifecycle
-    // exclusion. Each link consumes a fresh lazy module from immutable bytes;
-    // neither source IR nor a previous link's materializer is shared.
+    // exclusion. Struct publication stores bytes without retaining a second
+    // full IR module there. Each link consumes a fresh lazy module; neither
+    // source IR nor a previous link's materializer is shared.
     std::string runtime_link_bitcode;
     std::unordered_map<int, std::string> struct_link_bitcode;
     explicit ThreadLocalData(std::unique_ptr<llvm::orc::ThreadSafeContext> ctx);
