@@ -226,7 +226,12 @@ class OwnerGraph:
             if "shape_policy" in item:
                 policy = item["shape_policy"]
                 selected = layout_static(policy)
-                item["shape"] = policy["if_true" if selected else "if_false"]
+                shape = policy["if_true" if selected else "if_false"]
+                if item.get("external"):
+                    item["shape_expressions"] = shape
+                    item["ndim"] = len(shape)
+                else:
+                    item["shape"] = shape
                 item["shape_guards"] = {policy["condition"]: selected}
             alternatives = item.get("owner_alternatives")
             if alternatives:
@@ -581,6 +586,9 @@ def _compose(environment, schema, children):
                     ),
                 }
                 transformed["shape_guards"] = {names[n]: expected for n, expected in item["shape_guards"].items()}
+                if item.get("external"):
+                    for branch in ("if_true", "if_false"):
+                        transformed["shape_policy"][branch] = [expression(axis) for axis in item["shape_policy"][branch]]
             if "dtype_policy" in item:
                 transformed["dtype_policy"] = {
                     **item["dtype_policy"],

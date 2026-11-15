@@ -1971,6 +1971,8 @@ def _export_package(package, output, *, arch, caps, source_root, compilation, ar
                 manifest["version"] = max(78, manifest["version"])
             if any(item.get("input_conditions") for item in schema.values()):
                 manifest["version"] = max(79, manifest["version"])
+            if any(item.get("external") and item.get("shape_policy") for item in schema.values()):
+                manifest["version"] = max(88, manifest["version"])
             if any(item.get("input_presence_attribute") for item in schema.values()):
                 manifest["version"] = max(57, manifest["version"])
             if any(item["kind"] == "dimension" and item.get("expression") for item in schema.values()):

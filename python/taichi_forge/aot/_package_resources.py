@@ -1335,6 +1335,48 @@ def scope_declarations(
         optional_records.update(id(call) for call in calls)
         return name
 
+    def declared_shape(scope, shape_node):
+        """Resolve one existing static layout choice before materialization."""
+        shape = dimension(shape_node)
+        policy = None
+        choice = shape_node
+        visited_shapes = set()
+        while isinstance(choice, ast.Name) and choice.id in shape_aliases and choice.id not in visited_shapes:
+            visited_shapes.add(choice.id)
+            choice = shape_aliases[choice.id]
+        if shape is None and isinstance(choice, ast.IfExp):
+            test, invert = choice.test, False
+            if isinstance(test, ast.UnaryOp) and isinstance(test.op, ast.Not):
+                test, invert = test.operand, True
+            identity = None
+            if isinstance(test, ast.Attribute) and isinstance(test.value, ast.Name):
+                binding = scope_binding(test.value)
+                if binding in scopes:
+                    identity = member(binding, test.attr)
+                    allowed.add(id(test.value))
+                elif test.value.id == "self":
+                    identity = test.attr
+            declaration = declarations.get(identity, (earlier or {}).get(identity, {}))
+            if not (
+                declaration.get("kind") == "static"
+                and {tuple(value) for value in declaration["choices"]} == {("bool", False), ("bool", True)}
+                and not declaration.get("kernel_only")
+                and not declaration.get("conditions")
+            ):
+                fail(module, choice, "Field shape selection requires an unconditional declared boolean static")
+            branches = [dimension(branch) for branch in (choice.body, choice.orelse)]
+            branches = [(branch,) if isinstance(branch, Extent) else branch for branch in branches]
+            if any(not isinstance(branch, tuple) for branch in branches):
+                fail(module, choice, "Field shape alternatives require declared dimensions and their algebra")
+            if invert:
+                branches.reverse()
+            policy = dict(condition=identity, if_true=branches[0], if_false=branches[1])
+            shape = branches[1]
+            for branch in branches:
+                namespace_check(scope, branch, shape_node)
+        namespace_check(scope, shape, shape_node)
+        return (shape,) if isinstance(shape, Extent) else shape, policy
+
     def declare_static(scope, call, statement, conditions=None):
         from ._component import StaticValue, _static_value
 
@@ -1880,10 +1922,10 @@ def scope_declarations(
                         dict(kind="value", dtype="i32", input_presence=True),
                         call,
                     )
-                shape = dimension(keywords["shape"])
-                namespace_check(scope, shape, call)
-                shape = (shape,) if isinstance(shape, Extent) else shape
-                if not isinstance(shape, tuple) or any(not isinstance(axis, Extent) for axis in shape):
+                shape, shape_policy = declared_shape(scope, keywords["shape"])
+                shapes = (shape,) if shape_policy is None else (shape_policy["if_true"], shape_policy["if_false"])
+                if any(not isinstance(branch, tuple) or any(not isinstance(axis, Extent) for axis in branch)
+                       for branch in shapes):
                     fail(module, call, "Typed external shape requires declared dimensions or integer constants")
                 add(
                     member(scope, call.args[0].value),
@@ -1895,6 +1937,11 @@ def scope_declarations(
                         type_node=keywords["dtype"],
                         ndim=len(shape),
                         shape_expressions=[axis.expression for axis in shape],
+                        **({"shape_policy": {
+                            **shape_policy,
+                            **{key: [axis.expression for axis in shape_policy[key]]
+                               for key in ("if_true", "if_false")},
+                        }} if shape_policy else {}),
                         borrow_declaration=[call.lineno, call.col_offset],
                         scope_allocation=origin(scope),
                         **(
@@ -2313,46 +2360,7 @@ def scope_declarations(
             )
             original_args.update((k.arg, k.value) for k in call.keywords)
             shape_node = original_args["shape"]
-            shape = dimension(shape_node)
-            shape_policy = None
-            choice = shape_node
-            visited_shapes = set()
-            while isinstance(choice, ast.Name) and choice.id in shape_aliases and choice.id not in visited_shapes:
-                visited_shapes.add(choice.id)
-                choice = shape_aliases[choice.id]
-            if shape is None and isinstance(choice, ast.IfExp):
-                test, invert = choice.test, False
-                if isinstance(test, ast.UnaryOp) and isinstance(test.op, ast.Not):
-                    test, invert = test.operand, True
-                identity = None
-                if isinstance(test, ast.Attribute) and isinstance(test.value, ast.Name):
-                    binding = scope_binding(test.value)
-                    if binding in scopes:
-                        identity = member(binding, test.attr)
-                        allowed.add(id(test.value))
-                    elif test.value.id == "self":
-                        identity = test.attr
-                declaration = declarations.get(identity, (earlier or {}).get(identity, {}))
-                if not (
-                    declaration.get("kind") == "static"
-                    and {tuple(value) for value in declaration["choices"]} == {("bool", False), ("bool", True)}
-                    and not declaration.get("kernel_only")
-                    and not declaration.get("conditions")
-                ):
-                    fail(module, choice, "Field shape selection requires an unconditional declared boolean static")
-                branches = [dimension(branch) for branch in (choice.body, choice.orelse)]
-                branches = [(branch,) if isinstance(branch, Extent) else branch for branch in branches]
-                if any(not isinstance(branch, tuple) for branch in branches):
-                    fail(module, choice, "Field shape alternatives require declared dimensions and their algebra")
-                if invert:
-                    branches.reverse()
-                shape_policy = dict(condition=identity, if_true=branches[0], if_false=branches[1])
-                shape = branches[1]
-                for branch in branches:
-                    namespace_check(scope, branch, shape_node)
-            namespace_check(scope, shape, shape_node)
-            if isinstance(shape, Extent):
-                shape = (shape,)
+            shape, shape_policy = declared_shape(scope, shape_node)
             if not isinstance(shape, tuple):
                 fail(module, shape_node, "ResourceScope Field shape requires declared dimensions and their algebra")
             if method == "ndarray":

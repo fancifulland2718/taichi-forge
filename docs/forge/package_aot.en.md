@@ -19,6 +19,16 @@ rejects a faulted runtime. A package declaring this requirement rejects a native
 runtime without the query before loading its Host modules. This does not project
 full `ti.runtime.stats()` or enable telemetry during export or execution.
 
+Format 88 lets a typed external borrow select its shape and rank using one
+declared boolean layout choice, as for an owned Field. For example,
+`shape=(rows, columns) if self.batched else (columns,)` is resolved before
+materialization. The flag must be an unconditional static declaration with both
+boolean choices; it cannot be `kernel_only`. Actual dimensions remain consumer
+facts, and array contents remain live. Binding checks the selected shape/type,
+while prepared calls retain their original resources after a later rebind.
+This does not infer an ABI from a sample Field or support arbitrary Host shape
+functions or nested shape choices.
+
 Definition-package AOT materialization retains required build definitions independently
 of the JIT `kernel_specialization_limit`. It keeps normal executable ownership and
 memory accounting; this does not promise a memory bound or remove duplicate code.

@@ -12439,6 +12439,127 @@ class Other(Ports):
             view.close()
 
 
+@test_utils.test(arch=[ti.cpu, ti.cuda], offline_cache=False)
+def test_package_external_shape_choice_preserves_rank_and_live_data(tmp_path, monkeypatch):
+    source = '''
+import taichi_forge as ti
+@ti.data_oriented
+class Reader:
+    def __init__(self, n: int, rows: int, batched: bool):
+        self.n, self.rows, self.batched = n, rows, batched
+        scope = ti.experimental.ResourceScope(self)
+        scope.static('batched', choices=(False, True))
+        scope.dim('rows')
+        scope.out = scope.vector_field(3, ti.f32, shape=scope.dim('n'))
+    def prepare(self, values):
+        scope = ti.experimental.ResourceScope(self)
+        shape = (scope.dim('rows'), scope.dim('n')) if self.batched else (scope.dim('n'),)
+        scope.borrow('values', values, external=True, dtype=ti.types.vector(3, ti.f32), shape=shape)
+    @ti.kernel
+    def update(self, gain: ti.f32):
+        for i in range(self.n):
+            if ti.static(self.batched):
+                self.out[i] = gain * self.values[self.rows - 1, i]
+            else:
+                self.out[i] = gain * self.values[i]
+    def graph(self):
+        b = ti.graph.GraphBuilder()
+        b.dispatch(self.update, ti.graph.Arg(ti.graph.ArgKind.SCALAR, 'gain', ti.f32))
+        return b.compile()
+@ti.data_oriented
+class Model:
+    def __init__(self, n: int, rows: int, batched: bool):
+        scope = ti.experimental.ResourceScope(self)
+        scope.reader = Reader(n, rows, batched)
+    @ti.kernel
+    def update(self, gain: ti.f32):
+        for i in range(self.reader.n):
+            if ti.static(self.reader.batched):
+                self.reader.out[i] = gain * self.reader.values[self.reader.rows - 1, i]
+            else:
+                self.reader.out[i] = gain * self.reader.values[i]
+'''
+    package = _source_package(tmp_path, monkeypatch, source)
+    options = {'artifact_format': 'bc-library'} if ti.cfg.arch == ti.cuda else {}
+    manifest = ti.aot.export_package(package, tmp_path / 'sdk', **options)
+    assert manifest['version'] == 88
+    original = package.model
+    with Runtime(manifest['target']) as runtime, load_package(runtime, tmp_path / 'sdk') as code:
+        owners = []
+        for n, rows, batched in ((5, 2, False), (7, 3, True)):
+            shape = (rows, n) if batched else (n,)
+            initial = np.arange(np.prod(shape) * 3, dtype=np.float32).reshape(*shape, 3)
+            jit_values = ti.Vector.field(3, ti.f32, shape=shape)
+            jit_values.from_numpy(initial)
+            normal = original.Model(n, rows, batched)
+            normal.reader.prepare(jit_values)
+            normal.update(2)
+            expected = normal.reader.out.to_numpy()
+            owner = code.host.Model(n, rows, batched)
+            values = runtime.ndarray('f32', shape, element_shape=(3,))
+            values.from_numpy(initial)
+            owner.reader.prepare(values)
+            owner.update(2)
+            np.testing.assert_array_equal(owner.reader.out.to_numpy(), expected)
+            old = owner.reader.graph().bind({'gain': 2})
+            replacement = runtime.ndarray('f32', shape, element_shape=(3,))
+            replacement.from_numpy(initial + 10)
+            owner.reader.prepare(replacement)
+            wrong = runtime.ndarray('f32', (n + 1,), element_shape=(3,))
+            try:
+                with pytest.raises(ValueError, match='shape'):
+                    owner.reader.prepare(wrong)
+            finally:
+                wrong.close()
+            assert owner.reader.values is replacement
+            values.from_numpy(initial + 3)
+            old.run()
+            np.testing.assert_array_equal(owner.reader.out.to_numpy(), expected + 6)
+            owner.update(-1)
+            final = -(initial[-1] if batched else initial) - 10
+            np.testing.assert_array_equal(owner.reader.out.to_numpy(), final)
+            owners.append((owner, final))
+        for owner, expected in owners:
+            np.testing.assert_array_equal(owner.reader.out.to_numpy(), expected)
+    probe = tmp_path / 'consume_external_shapes.py'
+    probe.write_text(textwrap.dedent('''
+        import importlib.abc, sys
+        import numpy as np
+        class Block(importlib.abc.MetaPathFinder):
+            def find_spec(self, fullname, path=None, target=None):
+                if fullname.split('.')[0] in ('taichi', 'taichi_forge', 'definition_fixture'):
+                    raise AssertionError(fullname)
+        sys.meta_path.insert(0, Block())
+        from taichi_forge_runtime.aot import Runtime, load_package
+        with Runtime(sys.argv[2]) as runtime, load_package(runtime, sys.argv[1]) as code:
+            for n, batched in ((13, True), (9, False)):
+                owner = code.host.Model(n, 2, batched)
+                shape = (2, n) if batched else (n,)
+                data = np.arange(np.prod(shape)*3, dtype=np.float32).reshape(*shape, 3)
+                values = runtime.ndarray('f32', shape, element_shape=(3,))
+                values.from_numpy(data)
+                owner.reader.prepare(values)
+                owner.update(3)
+                np.testing.assert_array_equal(owner.reader.out.to_numpy(), 3*(data[-1] if batched else data))
+        print('EXTERNAL_SHAPES_SOURCE_FREE_OK')
+    '''), encoding='utf8')
+    env = dict(os.environ, PYTHONDONTWRITEBYTECODE='1',
+        PYTHONPATH=str(Path(__file__).resolve().parents[2]/'packaging/runtime/src'),
+        TAICHI_NATIVE_RUNTIME_DIR=str(Path(utils._loaded_native_runtime_path).parent),
+        TAICHI_RUNTIME_DIR=utils._runtime_bitcode_dir())
+    result = subprocess.run([sys.executable, '-B', str(probe), str(tmp_path/'sdk'), ti.cfg.arch.name],
+                            cwd=tmp_path, env=env, capture_output=True, text=True, timeout=90)
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert 'EXTERNAL_SHAPES_SOURCE_FREE_OK' in result.stdout
+    manifest_path = tmp_path / 'sdk' / 'package.json'
+    stored = json.loads(manifest_path.read_text())
+    stored['version'] = 87
+    manifest_path.write_text(json.dumps(stored))
+    with Runtime(manifest['target']) as runtime:
+        with pytest.raises(ValueError, match='version 88'):
+            load_package(runtime, tmp_path / 'sdk')
+
+
 @pytest.mark.parametrize("tensor", [False, True])
 @test_utils.test(arch=[ti.cpu, ti.cuda], offline_cache=False)
 def test_package_typed_external_borrow_uses_caller_storage_contract(tmp_path, monkeypatch, tensor):

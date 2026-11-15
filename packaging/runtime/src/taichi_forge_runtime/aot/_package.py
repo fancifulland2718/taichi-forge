@@ -636,6 +636,13 @@ class _ModuleBinding:
                 raise ValueError("Typed external resource requires its managed package scope")
             owner_key = self.owner_contract(scope._root, owner_key)
             contract = self.package.manifest["owners"][owner_key].get(scope._identity(name), {})
+            if contract.get("shape_policy"):
+                policy = contract["shape_policy"]
+                guard = self.package.manifest["owners"][owner_key][policy["condition"]]
+                selected = path_value(scope._root, guard.get("path", (policy["condition"],)))
+                if type(selected) is not bool:
+                    raise ValueError("External shape selection requires a boolean configuration")
+                contract = {**contract, "shape_expressions": policy["if_true" if selected else "if_false"]}
             if not (construction is not None and construction[0] is self.package and construction[2] is scope._root):
                 if contract.get("binding_phase") != "preparation":
                     raise ValueError("External resource binding requires its declared preparation phase")
@@ -1873,6 +1880,7 @@ class LoadedPackage:
                 85,
                 86,
                 87,
+                88,
             )
             or self.manifest.get("kind") != "forge_definition_package_prototype"
         ):
@@ -1882,6 +1890,11 @@ class LoadedPackage:
             raise ValueError("Application source package is missing its import boundary")
         if self.manifest["target"] != runtime.arch:
             raise ValueError("Package target differs from Runtime")
+        if self.manifest["version"] < 88 and any(
+            member.get("external") and member.get("shape_policy")
+            for schema in self.manifest.get("owners", {}).values() for member in schema.values()
+        ):
+            raise ValueError("External shape selection requires definition package version 88")
         requirements = self.manifest.get("runtime_requirements", [])
         if not isinstance(requirements, list) or any(item != "fault_snapshot" for item in requirements):
             raise ValueError("Unsupported package runtime requirement")
