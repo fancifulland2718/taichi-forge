@@ -33,6 +33,7 @@ from taichi_forge.lang.util import cook_dtype
 from taichi_forge.types import primitive_types
 from taichi_forge.types.ndarray_type import NdarrayType
 from taichi_forge.types.ray_type import AccelerationStructureType
+from taichi_forge.types.texture_type import TextureType
 from taichi_forge.types._argument_descriptor import describe_element_type
 from taichi_forge_runtime._static_values import StaticDType, static_key
 
@@ -1686,6 +1687,14 @@ class Component:
             elif isinstance(argument.annotation, (MatrixType, StructType)):
                 features.append(None)
                 abi.append(("value", describe_element_type(argument.annotation).structural_key()))
+            elif isinstance(argument.annotation, TextureType):
+                if impl.current_cfg().arch.name not in ("cuda", "vulkan"):
+                    raise TaichiCompilationError("Component sampled textures require CUDA or Vulkan")
+                feature = TaichiCallableTemplateMapper.extract_arg(value, argument.annotation, argument.name)
+                features.append(feature)
+                # Sampling ABI depends on rank, not image size, pixels, sampler
+                # identity or the producer's temporary texture allocation.
+                abi.append(("texture", feature[0]))
             elif id(argument.annotation) in primitive_types.type_ids:
                 features.append(None)
                 abi.append(("value", str(argument.annotation)))
@@ -1698,7 +1707,7 @@ class Component:
                 abi.append(("acceleration_structure",))
             else:
                 raise TaichiCompilationError(
-                    "Component explicit arguments require scalar/vector/matrix/struct values, ndarrays, or Vulkan acceleration structures"
+                    "Component explicit arguments require scalar/vector/matrix/struct values, ndarrays, sampled textures, or Vulkan acceleration structures"
                 )
         signature = (tuple(template_facts), tuple(abi))
         runtime = impl.get_runtime()

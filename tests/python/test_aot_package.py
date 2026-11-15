@@ -18,6 +18,176 @@ from tests import test_utils
 from taichi_forge_runtime.aot import Runtime, load_package
 
 
+SAMPLED_TEXTURE_SOURCE = """
+import taichi_forge as ti
+@ti.data_oriented
+class Model:
+    def __init__(self, n: int, m: int):
+        self.n, self.m = n, m
+        scope = ti.experimental.ResourceScope(self)
+        scope.output = scope.field(ti.f32, shape=(scope.dim('n'), scope.dim('m')))
+    @ti.kernel
+    def publish(self, image: ti.types.texture(2), gain: ti.f32):
+        for i, j in self.output:
+            self.output[i, j] = image.fetch(ti.Vector([i, j]), 0).x * gain
+    def graph(self):
+        builder = ti.graph.GraphBuilder()
+        builder.dispatch(self.publish,
+            ti.graph.Arg(ti.graph.ArgKind.TEXTURE, 'image', ndim=2),
+            ti.graph.Arg(ti.graph.ArgKind.SCALAR, 'gain', ti.f32),
+            template_args={'self': self})
+        return builder.compile()
+"""
+
+
+@test_utils.test(arch=ti.cuda, offline_cache=False)
+def test_package_sampled_texture_inputs_preserve_live_data_and_bindings(tmp_path, monkeypatch):
+    source_root = tmp_path / 'src'
+    source_root.mkdir()
+    package = _source_package(source_root, monkeypatch, SAMPLED_TEXTURE_SOURCE)
+    output = tmp_path / 'forge_aot/texture'
+    manifest = ti.aot.export_package(package.model, output, source_root=source_root, artifact_format='bc-library')
+    assert manifest['version'] == 86
+    entry = next(item for item in manifest['entries'].values() if item['arguments'][0]['name'] == 'image')
+    assert entry['arguments'][0] == dict(name='image', kind='texture', ndim=2)
+    shapes = [(3, 5), (4, 7)]
+    expected = []
+    for shape in shapes:
+        model = package.Model(*shape)
+        pixels = ti.ndarray(ti.f32, shape)
+        pixels.from_numpy(np.arange(np.prod(shape), dtype=np.float32).reshape(shape) + 1)
+        image = ti.Texture(ti.Format.r32f, shape)
+        image.from_ndarray(pixels)
+        model.publish(image, 2.0)
+        expected.append(model.output.to_numpy())
+    np.savez(tmp_path / 'expected.npz', *expected)
+    probe = tmp_path / 'consume.py'
+    probe.write_text(textwrap.dedent('''
+        import importlib.abc
+        import json
+        from pathlib import Path
+        import sys
+        import numpy as np
+        class NoSource(importlib.abc.MetaPathFinder):
+            def find_spec(self, fullname, path=None, target=None):
+                if fullname.split('.')[0] in ('taichi', 'taichi_forge', 'definition_fixture'):
+                    raise AssertionError(fullname)
+        sys.meta_path.insert(0, NoSource())
+        from taichi_forge_runtime.aot import Runtime, load_package, ExecutionPlan
+        from taichi_forge_runtime.aot._package_graph import Arg, ArgKind
+        artifact = Path(sys.argv[1])
+        expected = np.load(sys.argv[2])
+        with Runtime('cuda') as runtime, load_package(runtime, artifact) as code:
+            frames = []
+            for index, shape in enumerate(((3, 5), (4, 7))):
+                pixels = runtime.ndarray('f32', shape)
+                pixels.write(np.arange(np.prod(shape), dtype=np.float32).reshape(shape) + 1)
+                image = runtime.native_resource('image', 'sampled',
+                    parameters=dict(shape=shape, format='r32f', filter='nearest'), bindings=dict(pixels=pixels))
+                model = code.host.Model(*shape)
+                model.publish(image, 2.0)
+                model.publish(image, 2.0)
+                np.testing.assert_array_equal(model.output.to_numpy(), expected['arr_' + str(index)])
+                graph = model.graph()
+                call = graph.bind(dict(image=image, gain=2.0))
+                call()
+                np.testing.assert_array_equal(model.output.to_numpy(), expected['arr_' + str(index)])
+                frames.append((model, pixels, image, graph, call))
+            first, second = frames
+            model, pixels, image, graph, old = first
+            pixels.write(np.full(pixels.shape, 9, np.float32))
+            upload = ExecutionPlan([dict(kind='native', provider='image', operation='upload', version=1,
+                parameters={}, bindings=dict(image='image', pixels='pixels'))]).prepare(
+                    code._module, dict(image=image, pixels=pixels))
+            upload()
+            old()
+            np.testing.assert_array_equal(model.output.to_numpy(), np.full(pixels.shape, 18, np.float32))
+            # Rebinding another image must not rewrite the retained invocation.
+            rebound = graph.bind(dict(image=second[2], gain=3.0))
+            rebound()
+            old()
+            np.testing.assert_array_equal(model.output.to_numpy(), np.full(pixels.shape, 18, np.float32))
+            second[4]()
+            np.testing.assert_array_equal(second[0].output.to_numpy(), expected['arr_1'])
+            image.close()
+            try:
+                old()
+            except (ValueError, RuntimeError):
+                pass
+            else:
+                raise AssertionError('Closed image was accepted')
+            for rank in (0, 4, True):
+                try:
+                    Arg(ArgKind.TEXTURE, 'image', ndim=rank).schema()
+                except ValueError:
+                    pass
+                else:
+                    raise AssertionError('Invalid sampled texture rank accepted')
+        path = artifact / 'package.json'
+        original = path.read_text(encoding='utf8')
+        manifest = json.loads(original)
+        manifest['version'] = 85
+        try:
+            path.write_text(json.dumps(manifest), encoding='utf8')
+            with Runtime('cuda') as runtime:
+                try:
+                    load_package(runtime, artifact)
+                except ValueError as error:
+                    assert 'version 86' in str(error)
+                else:
+                    raise AssertionError('Old format accepted texture arguments')
+        finally:
+            path.write_text(original, encoding='utf8')
+        print('TEXTURE_SOURCE_FREE_OK')
+    '''), encoding='utf8')
+    env = dict(os.environ, PYTHONDONTWRITEBYTECODE='1',
+        PYTHONPATH=str(Path(__file__).resolve().parents[2] / 'packaging/runtime/src'),
+        TAICHI_NATIVE_RUNTIME_DIR=str(Path(utils._loaded_native_runtime_path).parent),
+        TAICHI_RUNTIME_DIR=utils._runtime_bitcode_dir())
+    result = subprocess.run([sys.executable, '-B', str(probe), str(output), str(tmp_path/'expected.npz')],
+                            cwd=tmp_path, env=env, capture_output=True, text=True, timeout=90)
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert 'TEXTURE_SOURCE_FREE_OK' in result.stdout
+    ti.reset()
+    del model, pixels, image, package
+    for name in tuple(sys.modules):
+        if name == 'definition_fixture' or name.startswith('definition_fixture.'):
+            monkeypatch.delitem(sys.modules, name)
+    (source_root / 'definition_fixture/model.py').rename(tmp_path / 'model.producer')
+    monkeypatch.syspath_prepend(str(tmp_path))
+    monkeypatch.delenv('FORGE_AOT_PACKAGE_PATH', raising=False)
+    ti.init(arch=ti.cuda, execution_mode='hybrid', offline_cache=False)
+    from definition_fixture.model import Model
+    session = ti.lang.impl.get_runtime()._package_execution_session
+    model = Model(3, 5)
+    pixels = ti.ndarray(ti.f32, (3, 5))
+    image = ti.Texture(ti.Format.r32f, (3, 5))
+    pixels.fill(3)
+    image.from_ndarray(pixels)
+    model.publish(image, 2.0)
+    graph = model.graph()
+    graph.run(dict(image=image, gain=2.0))
+    adapter = session.runtime._package_array_adapter
+    borrowed = adapter(image)
+    imports = len(adapter._cache)
+    pixels.fill(7)
+    image.from_ndarray(pixels)
+    model.publish(image, 2.0)
+    graph.run(dict(image=image, gain=2.0))
+    np.testing.assert_array_equal(model.output.to_numpy(), np.full((3, 5), 14, np.float32))
+    assert adapter(image) is borrowed and len(adapter._cache) == imports
+    ti.reset()
+
+
+@test_utils.test(arch=ti.cpu, offline_cache=False)
+def test_package_sampled_texture_rejects_cpu_before_compilation(tmp_path, monkeypatch):
+    package = _source_package(tmp_path, monkeypatch, SAMPLED_TEXTURE_SOURCE)
+    before = ti.lang.impl.get_runtime().get_num_compiled_functions()
+    with pytest.raises(ti.aot.PackageExportError, match='sampled texture arguments require CUDA or Vulkan'):
+        ti.aot.export_package(package.model, tmp_path/'sdk')
+    assert ti.lang.impl.get_runtime().get_num_compiled_functions() == before
+
+
 @test_utils.test(arch=ti.cpu, offline_cache=False)
 def test_package_type_only_import_does_not_enter_runtime_closure(tmp_path, monkeypatch):
     source_root = tmp_path / 'src'

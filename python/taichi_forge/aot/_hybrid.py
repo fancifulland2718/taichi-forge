@@ -8,6 +8,7 @@ import threading
 import weakref
 
 from taichi_forge.lang._ndarray import Ndarray, StructNdarray
+from taichi_forge.lang._texture import Texture
 from taichi_forge.lang._storage_view import DenseNdarrayView, ndarray_view
 from taichi_forge.lang.field import ScalarField
 from taichi_forge.lang.matrix import MatrixField
@@ -20,7 +21,7 @@ class PackageArrays:
         self._lock = threading.RLock()
 
     def __call__(self, value):
-        if not isinstance(value, (Ndarray, DenseNdarrayView, ScalarField, MatrixField)):
+        if not isinstance(value, (Ndarray, DenseNdarrayView, ScalarField, MatrixField, Texture)):
             return value
         if isinstance(value, StructNdarray):
             raise TypeError("Hybrid package inputs require scalar or tensor storage")
@@ -28,9 +29,14 @@ class PackageArrays:
             key = id(value)
             previous = self._cache.get(key)
             if previous is not None and previous[0]() is value:
-                previous[1]._descriptor(self.runtime)
+                if isinstance(value, Texture):
+                    previous[1]._check()
+                else:
+                    previous[1]._descriptor(self.runtime)
                 return previous[1]
-            if isinstance(value, Ndarray):
+            if isinstance(value, Texture):
+                imported = self.runtime.import_texture(value)
+            elif isinstance(value, Ndarray):
                 imported = self.runtime.import_ndarray(value)
             else:
                 view = value if isinstance(value, DenseNdarrayView) else ndarray_view(value)

@@ -1867,6 +1867,7 @@ class LoadedPackage:
                 83,
                 84,
                 85,
+                86,
             )
             or self.manifest.get("kind") != "forge_definition_package_prototype"
         ):
@@ -1876,6 +1877,16 @@ class LoadedPackage:
             raise ValueError("Application source package is missing its import boundary")
         if self.manifest["target"] != runtime.arch:
             raise ValueError("Package target differs from Runtime")
+        texture_arguments = [argument for entry in self.manifest["entries"].values()
+                             for argument in entry["arguments"] if argument.get("kind") == "texture"]
+        if texture_arguments:
+            if self.manifest["version"] < 86:
+                raise ValueError("Sampled texture inputs require definition package version 86")
+            if runtime.arch not in ("cuda", "vulkan") or any(
+                    set(argument) != {"name", "kind", "ndim"}
+                    or type(argument["ndim"]) is not int or argument["ndim"] not in (1, 2, 3)
+                    for argument in texture_arguments):
+                raise ValueError("Invalid sampled texture input contract")
         if self.manifest["version"] < 85 and any(
                 member.get("kind") == "owner_input" and member.get("binding_phase") == "preparation"
                 for owner in self.manifest["owners"].values() for member in owner.values()):

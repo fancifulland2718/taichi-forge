@@ -59,6 +59,7 @@ def _describe_entry_argument(argument):
     from taichi_forge.types._argument_descriptor import describe_annotation
     from taichi_forge.types.annotations import Template
     from taichi_forge.types.ndarray_type import NdarrayType
+    from taichi_forge.types.texture_type import TextureType
     from taichi_forge.lang.matrix import MatrixType
     from taichi_forge.lang.struct import StructType
 
@@ -69,6 +70,16 @@ def _describe_entry_argument(argument):
             "the exporter cannot infer it from a model/test invocation"
         )
     descriptor = describe_annotation(annotation)
+    if isinstance(annotation, TextureType):
+        from taichi_forge.lang import impl
+
+        if type(descriptor.ndim) is not int or descriptor.ndim not in (1, 2, 3):
+            raise ValueError("sampled texture arguments require rank 1, 2 or 3")
+        if impl.current_cfg().arch.name not in ("cuda", "vulkan"):
+            raise ValueError("sampled texture arguments require CUDA or Vulkan")
+        if argument.default is not inspect.Parameter.empty:
+            raise ValueError("kernel default arguments are not yet supported")
+        return descriptor
     if descriptor.element is None:
         raise ValueError("requires an explicit value or ndarray type")
     if isinstance(annotation, NdarrayType):
@@ -2210,8 +2221,12 @@ def _export_package(package, output, *, arch, caps, source_root, compilation, ar
                     descriptor = _describe_entry_argument(argument)
                 except (TypeError, ValueError) as error:
                     _fail(name, node, f"argument {argument.name!r}: {error}")
-                dtype = str(descriptor.element.scalar_type)
-                if isinstance(annotation, NdarrayType):
+                dtype = str(descriptor.element.scalar_type) if descriptor.element is not None else None
+                if descriptor.kind == "texture":
+                    values.append(ti.Texture(ti.Format.rgba8, (2,) * descriptor.ndim))
+                    argument_schema.append(dict(name=argument.name, kind="texture", ndim=descriptor.ndim))
+                    manifest["version"] = max(86, manifest["version"])
+                elif isinstance(annotation, NdarrayType):
                     value = ti.ndarray(annotation.dtype, (1,) * annotation.ndim)
                     # A definition export has no caller allocation to specialize
                     # against. Reuse the Graph/runtime affine ABI so compact

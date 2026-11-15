@@ -40,13 +40,14 @@ class ArgKind(Enum):
     NDARRAY = "ndarray"
     MATRIX = "compound"
     STRUCT = "compound_struct"
+    TEXTURE = "texture"
 
 
 @dataclass(frozen=True)
 class Arg:
     tag: ArgKind
     name: str
-    dtype: object
+    dtype: object = None
     ndim: int = 0
 
     def schema(self):
@@ -56,6 +57,10 @@ class Arg:
             raise ValueError("Graph arguments require a name and supported ArgKind")
         if self.tag == ArgKind.SCALAR:
             return dict(kind="value", dtype=self.dtype)
+        if self.tag == ArgKind.TEXTURE:
+            if self.dtype is not None or type(self.ndim) is not int or self.ndim not in (1, 2, 3):
+                raise ValueError("Sampled texture Graph arguments require rank 1, 2 or 3 and no dtype")
+            return dict(kind="texture", ndim=self.ndim)
         element = (
             self.dtype.spec
             if isinstance(self.dtype, _ElementType)

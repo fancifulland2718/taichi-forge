@@ -36,7 +36,10 @@ def specialization_entries(path, target, entries):
         return frozenset()
     excluded = {item["name"] for item in metadata["device_range_dispatch"] if item["tasks"]}
     aliases = {item["key"]: item["value"] for item in metadata.get("kernel_aliases", ())}
-    return frozenset(name for name in entries if name not in excluded and aliases.get(name, name) not in excluded)
+    # Sampled images retain the existing managed-resource kernel route. Package
+    # automatic specialization currently admits ordinary value/array bindings.
+    return frozenset(name for name in entries if name not in excluded and aliases.get(name, name) not in excluded
+                     and not any(item["kind"] == "texture" for item in entries[name]["arguments"]))
 
 
 def specialization_constant_args(contract, owner_schema):

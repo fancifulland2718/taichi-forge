@@ -328,6 +328,7 @@ Field 合同也未因此扩大为任意可写输入。
 
 - 顶层 Kernel 和普通 `data_oriented` 类的实例 Kernel、它们调用的 `func` helper；支持普通导入别名。
 - 显式标量、向量、矩阵和结构体值，以及固定元素类型/rank 的标量、张量和结构体 Ndarray；不支持梯度参数。
+- 格式 86 允许 CUDA/Vulkan 的 `ti.types.texture(rank)` 采样输入，复用既有 image ABI 和租约。rank 固定，实际尺寸、采样器及像素属于调用方资源；包内 Graph 使用 `Arg(ArgKind.TEXTURE, name, ndim=rank)`，hybrid 借用现有 JIT 纹理，不复制像素。CUDA `bc-library` 局部检查覆盖无源码调用、活数据上传、两尺寸/实例、Graph 重绑及退休；该检查尚不构成 Vulkan 包消费资格。纹理入口保留通用托管资源路径，本次不扩展自动包特化、Host 自有纹理构造、RWTexture 或纹理集合。
 - 普通入口可接收类型/rank 匹配、可写且 C 连续的 Host 数组缓冲区（例如 NumPy 标量/张量数组）。复用原生上传与回读，调用返回时结果已写回；临时资源随后释放。设备 Ndarray 保持原调用路径，不额外复制。此 Host 便利路径有传输和同步成本，不用于替代稳态设备绑定；重叠/别名、只读、非连续和结构体 Host 缓冲区明确拒绝。Graph prepared binding 仍使用设备资源。
 - 构造函数中直接分配的带类型 Ndarray，以及由标量常量或带 `int/float/bool`、Forge 标量类型注解的构造参数赋值的 `self` 属性。
 - `types.vector/matrix/struct`、math 向量/矩阵别名及 `dataclass` 保留原逻辑类型。结构体存储复用 `Module.add_ndarray_layout` 和消费者原生布局查询，不建立另一套 packing 规则。Host 类型投影目前提供参数构造，不等于完整 Python Matrix/Struct 操作接口。
