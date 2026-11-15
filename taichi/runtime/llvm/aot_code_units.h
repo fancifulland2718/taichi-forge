@@ -2,6 +2,8 @@
 
 #include <fstream>
 #include <functional>
+#include <map>
+#include <optional>
 #include <unordered_set>
 
 #include "taichi/common/virtual_dir.h"
@@ -75,7 +77,11 @@ inline void export_code_units(
     llvm::Function *selected_root = nullptr,
     bool rewrite_caller = true,
     std::string *selected_symbol = nullptr,
-    const CodeUnitSnapshotFinalizer &finalize = {}) {
+    const CodeUnitSnapshotFinalizer &finalize = {},
+    bool split_selected_closure = false,
+    const std::function<void(const llvm::Function *, const CodeUnitArtifact &)> &observe = {},
+    const std::function<std::optional<CodeUnitArtifact>(const llvm::Function *)> &reuse_source = {}) {
+  std::map<const llvm::Function *, CodeUnitArtifact> extracted;
   std::vector<llvm::Function *> roots;
   for (auto &function : module)
     if (!function.isDeclaration() && function.hasFnAttribute(kRealFunctionUnit) &&
@@ -99,12 +105,26 @@ inline void export_code_units(
               order(callee);
     ordered.push_back(function);
   };
-  if (!selected_root) {
+  if (!selected_root || split_selected_closure) {
     for (auto *root : roots)
       order(root);
     roots = std::move(ordered);
   }
   for (auto *root : roots) {
+    // Only the codegen recorder supplies this proof, before any transform can
+    // mutate the registered definition. Disk-cache/AOT sealing never uses it.
+    if (reuse_source) {
+      TI_ASSERT(!rewrite_caller && split_selected_closure);
+      if (const auto previous = reuse_source(root)) {
+        extracted.emplace(root, *previous);
+        if (selected_symbol)
+          *selected_symbol = previous->symbol;
+        emit(previous->filename, previous->bytes);
+        if (observe)
+          observe(root, *previous);
+        continue;
+      }
+    }
     std::unordered_set<const llvm::Value *> seen;
     std::unordered_set<const llvm::GlobalValue *> definitions;
     std::vector<const llvm::GlobalValue *> order;
@@ -126,6 +146,9 @@ inline void export_code_units(
               supported = false;
               return;
             }
+            if (auto *function = llvm::dyn_cast<llvm::Function>(global))
+              if (global != root && extracted.count(function))
+                return;
             if (global->isDeclaration())
               return;
             if (global != root && !global->hasLocalLinkage()) {
@@ -192,6 +215,22 @@ inline void export_code_units(
       destination->splice(destination->end(), root);
       llvm::RemapFunction(*destination, values);
     }
+    // A non-consuming record projects previously extracted callees to typed
+    // declarations. The producer keeps every original definition and use.
+    for (const auto &[function, dependency] : extracted) {
+      auto *projected = llvm::cast<llvm::Function>(values[function]);
+      TI_ASSERT(projected->isDeclaration());
+      projected->setLinkage(llvm::GlobalValue::ExternalLinkage);
+      if (auto *existing = unit->getFunction(dependency.symbol);
+          existing && existing != projected) {
+        TI_ERROR_IF(existing->getFunctionType() != projected->getFunctionType(),
+                    "Producer function dependency ABI mismatch");
+        projected->replaceAllUsesWith(existing);
+        projected->eraseFromParent();
+      } else {
+        projected->setName(dependency.symbol);
+      }
+    }
     unit->setModuleIdentifier("aot_code_unit");
     unit->setSourceFileName("");
     // Entry annotations refer to the caller, not the function library.
@@ -255,6 +294,10 @@ inline void export_code_units(
     // an upstream function-cache key alone is not an extraction identity.
     const auto artifact = finalize ? finalize(snapshot)
                                    : finalize_code_unit_snapshot(snapshot);
+    if (split_selected_closure)
+      extracted.emplace(root, artifact);
+    if (observe)
+      observe(root, artifact);
     const auto &symbol = artifact.symbol;
     if (selected_symbol)
       *selected_symbol = symbol;
@@ -266,7 +309,7 @@ inline void export_code_units(
     // Also drop the source definition's metadata/personality after a move.
     root->deleteBody();
     root->setLinkage(llvm::GlobalValue::ExternalLinkage);
-    if (auto *existing = module.getFunction(symbol)) {
+    if (auto *existing = module.getFunction(symbol); existing && existing != root) {
       TI_ERROR_IF(existing->getFunctionType() != root->getFunctionType(),
                   "AOT code unit function type mismatch");
       root->replaceAllUsesWith(existing);

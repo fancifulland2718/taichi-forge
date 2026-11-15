@@ -3517,6 +3517,10 @@ LLVMCompiledTask TaskCodeGenLLVM::run_compilation() {
   offload_to_executable(ir, compile_config, kernel);
 
   emit_to_module();
+  // Registration proves immutable bodies only while this task is assembled.
+  // Never persist that proof through optimization, cloning or offline caches.
+  if (auto *units = module->getNamedMetadata(LLVM::kImportedFunctionUnits))
+    module->eraseNamedMetadata(units);
   eliminate_unused_functions();
 
   if (compile_config.arch == Arch::cuda) {
@@ -3632,8 +3636,11 @@ void TaskCodeGenLLVM::visit(FuncCallStmt *stmt) {
         stmt->func->ir->accept(this);
         current_callable = old_callable;
       }  // Complete the function before freezing its independent LLVM unit.
-      if (!key.empty())
-        context.cache->record(key, *module, func_map.at(stmt->func));
+      if (!key.empty()) {
+        auto *function = func_map.at(stmt->func);
+        if (const auto recorded = context.cache->record(key, *module, function))
+          LLVM::register_function_code(*module, *recorded, function);
+      }
     }
   }
   llvm::Function *llvm_func = func_map[stmt->func];

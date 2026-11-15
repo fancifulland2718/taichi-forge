@@ -9,6 +9,7 @@
 #include "taichi/codegen/llvm/compiled_kernel_data.h"
 #include "taichi/runtime/llvm/llvm_module_options.h"
 #include "taichi/runtime/llvm/aot_ir_finalizer.h"
+#include "taichi/runtime/llvm/function_code_cache.h"
 
 namespace taichi::lang {
 
@@ -377,6 +378,143 @@ TEST(LLVMAotFinalization, RejectedEarlyRelocationsLeaveBodiesIntact) {
   EXPECT_EQ(emitted, 1);
   EXPECT_EQ(module->getFunction("leaf"), nullptr);
   EXPECT_FALSE(llvm::verifyModule(*module));
+}
+
+TEST(LLVMFunctionCodeCache, SharesIndependentDependenciesWithoutChangingProducer) {
+  llvm::LLVMContext context;
+  llvm::SMDiagnostic error;
+  auto source = llvm::parseAssemblyString(R"(
+    target datalayout = "e-p:64:64-i64:64-n16:32:64"
+    define internal i32 @leaf(i32 %x) "taichi.aot.real_function" {
+      %r = add i32 %x, 1
+      ret i32 %r
+    }
+    define internal i32 @a(i32 %x) "taichi.aot.real_function" {
+      %r = call i32 @leaf(i32 %x)
+      %v = add i32 %r, 2
+      ret i32 %v
+    }
+    define internal i32 @b(i32 %x) "taichi.aot.real_function" {
+      %r = call i32 @leaf(i32 %x)
+      %v = add i32 %r, 3
+      ret i32 %v
+    }
+  )", error, context);
+  ASSERT_NE(source, nullptr);
+  const auto serialize = [](const llvm::Module &module) {
+    std::string bytes;
+    llvm::raw_string_ostream stream(bytes);
+    encode_llvm_module(module, stream, LLVMModuleEncoding::bitcode);
+    return bytes;
+  };
+  const auto original = serialize(*source);
+  LLVM::FunctionCodeCache cache;
+  auto a = cache.record("a", *source, source->getFunction("a"));
+  auto b = cache.record("b", *source, source->getFunction("b"));
+  ASSERT_NE(a, nullptr);
+  ASSERT_NE(b, nullptr);
+  ASSERT_EQ(a->units.size(), 2);
+  ASSERT_EQ(b->units.size(), 2);
+  EXPECT_EQ(a->units.front(), b->units.front());
+  EXPECT_EQ(original, serialize(*source));
+  auto leaf_record = cache.record("leaf", *source, source->getFunction("leaf"));
+  LLVM::register_function_code(*source, *leaf_record, source->getFunction("leaf"));
+  const auto registered = serialize(*source);
+  cache.record("a_registered", *source, source->getFunction("a"));
+  cache.record("b_registered", *source, source->getFunction("b"));
+  EXPECT_EQ(registered, serialize(*source));
+  EXPECT_EQ(cache.statistics().at("llvm_function_unit_record_reuses"), 2);
+  EXPECT_EQ(cache.statistics().at("cached_llvm_function_units"), 3);
+  for (bool optimize : {false, true}) {
+    auto consumer = std::make_unique<llvm::Module>("consumer", context);
+    consumer->setDataLayout(source->getDataLayout());
+    auto *first = LLVM::import_function_code(*consumer, *a);
+    auto *second = LLVM::import_function_code(*consumer, *b);
+    EXPECT_NE(first, second);
+    EXPECT_EQ(consumer->size(), 3);
+    EXPECT_EQ(second, LLVM::import_function_code(*consumer, *b));
+    EXPECT_EQ(consumer->size(), 3);
+    EXPECT_FALSE(llvm::verifyModule(*consumer));
+    LLVM::AotIRFinalizer finalizer;
+    finalizer.export_units(*consumer, optimize, false);
+    EXPECT_EQ(finalizer.statistics().at("shared_code_units"), 3);
+    EXPECT_FALSE(llvm::verifyModule(*consumer));
+  }
+  // A just-emitted leaf can be registered without mutating its body. Importing
+  // a cached parent then uses that same definition rather than a second leaf.
+  auto local = llvm::CloneModule(*source);
+  local->getFunction("a")->eraseFromParent();
+  local->getFunction("b")->eraseFromParent();
+  auto leaf = cache.record("leaf", *local, local->getFunction("leaf"));
+  LLVM::register_function_code(*local, *leaf, local->getFunction("leaf"));
+  LLVM::import_function_code(*local, *b);
+  EXPECT_EQ(local->size(), 2);
+  EXPECT_FALSE(llvm::verifyModule(*local));
+  local->setDataLayout("e-p:32:32");
+  EXPECT_ANY_THROW(LLVM::import_function_code(*local, *b));
+  auto conflicting = llvm::CloneModule(*source);
+  conflicting->getFunction("a")->setName(a->units.front()->symbol);
+  EXPECT_ANY_THROW(LLVM::import_function_code(*conflicting, *a));
+}
+
+TEST(LLVMFunctionCodeCache, SeparatesChangedBodiesAndRejectsUnsupportedRoots) {
+  llvm::LLVMContext context;
+  llvm::SMDiagnostic error;
+  auto source = llvm::parseAssemblyString(R"(
+    target datalayout = "e-p:64:64-i64:64-n16:32:64"
+    @state = internal global i32 1
+    define internal i32 @leaf(i32 %x) "taichi.aot.real_function" {
+      %r = add i32 %x, 1
+      ret i32 %r
+    }
+    define internal i32 @parent(i32 %x) "taichi.aot.real_function" {
+      %r = call i32 @leaf(i32 %x)
+      ret i32 %r
+    }
+    define internal i32 @unsupported(i32 %x) "taichi.aot.real_function" {
+      %r = call i32 @leaf(i32 %x)
+      %s = load i32, ptr @state
+      %v = add i32 %r, %s
+      ret i32 %v
+    }
+  )", error, context);
+  ASSERT_NE(source, nullptr);
+  LLVM::FunctionCodeCache cache;
+  EXPECT_EQ(cache.record("unsupported", *source,
+                         source->getFunction("unsupported")), nullptr);
+  EXPECT_EQ(cache.find("unsupported"), nullptr);
+  const auto first = cache.record("first", *source, source->getFunction("parent"));
+  auto changed = llvm::CloneModule(*source);
+  changed->getFunction("leaf")->front().front().setOperand(
+      1, llvm::ConstantInt::get(llvm::Type::getInt32Ty(context), 9));
+  const auto second = cache.record("second", *changed,
+                                   changed->getFunction("parent"));
+  ASSERT_NE(first, nullptr);
+  ASSERT_NE(second, nullptr);
+  EXPECT_NE(first->units.front()->digest, second->units.front()->digest);
+  EXPECT_NE(first->symbol, second->symbol);
+  llvm::Module consumer("consumer", context);
+  consumer.setDataLayout(source->getDataLayout());
+  LLVM::import_function_code(consumer, *first);
+  LLVM::import_function_code(consumer, *second);
+  EXPECT_EQ(consumer.size(), 4);
+  EXPECT_FALSE(llvm::verifyModule(consumer));
+
+  // A proof for the existing leaf does not make an incompatible declaration
+  // (or calls already using that declaration's calling convention) compatible.
+  const auto leaf = cache.record("leaf", *source, source->getFunction("leaf"));
+  LLVM::register_function_code(*source, *leaf, source->getFunction("leaf"));
+  auto *wrong = llvm::Function::Create(source->getFunction("leaf")->getFunctionType(),
+                                       llvm::GlobalValue::ExternalLinkage,
+                                       leaf->symbol, *source);
+  wrong->setCallingConv(llvm::CallingConv::Fast);
+  EXPECT_ANY_THROW(LLVM::import_function_code(*source, *first));
+  wrong->eraseFromParent();
+  auto *bad_declaration = llvm::Function::Create(
+      llvm::FunctionType::get(llvm::Type::getVoidTy(context), false),
+      llvm::GlobalValue::ExternalLinkage, first->symbol, *source);
+  EXPECT_ANY_THROW(LLVM::import_function_code(*source, *first));
+  bad_declaration->eraseFromParent();
 }
 
 TEST(LLVMAotFinalization, PreservesEffectsNumericFlagsAndDisabledOptimization) {
