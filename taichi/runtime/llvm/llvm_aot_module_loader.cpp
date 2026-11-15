@@ -19,6 +19,7 @@
 #include "taichi/rhi/cuda/cuda_context.h"
 #include "taichi/runtime/llvm/aot_artifact_integrity.h"
 #include "taichi/runtime/llvm/aot_kernel_contract.h"
+#include "taichi/runtime/llvm/aot_prepared_range.h"
 #include "taichi/runtime/llvm/aot_snode_relocation.h"
 #include "taichi/runtime/llvm/aot_snode_resources.h"
 #include "taichi/codegen/llvm/cuda_graph_gate.h"
@@ -468,11 +469,12 @@ aot::Kernel *LlvmAotModule::specialize_kernel(
               "Prepared specialization does not accept gated graph kernels");
   // Select tasks from immutable prepared facts before lowering LLVM to device
   // code. A current argument value alone is not a constant: live scalar ranges
-  // must remain callable with later values. Exclude TLS/collective/prologue
-  // cases; the existing independent-iteration proof establishes that an empty
-  // range has no effects outside its iterations.
+  // must remain callable with later values. Auxiliary/TLS callbacks retain
+  // their policy. A linked canonical range with no outside effects can also
+  // discard an empty body, even when that body contains collective calls.
   auto &tasks = data.compiled_data.tasks;
   const auto original_task_count = tasks.size();
+  AotPreparedRangeAnalysis range_analysis;
   auto fixed_bound = [&](const HostRangeBound &bound) {
     auto fixed_input = [&](uint64_t offset) {
       if (offset > INT_MAX)
@@ -489,9 +491,19 @@ aot::Kernel *LlvmAotModule::specialize_kernel(
     return true;
   };
   for (auto it = tasks.begin(); it != tasks.end();) {
-    const auto &range = it->range_bounds;
+    auto &range = it->range_bounds;
+    bool empty_has_no_effects = false;
+    if (arch() == Arch::cuda && it->task_type == OffloadedTaskType::range_for &&
+        range && range->host_launch &&
+        range->empty_group_elision == EmptyRangeGroupProof::unproven_call) {
+      const auto proof = range_analysis.inspect(module.getFunction(it->name));
+      empty_has_no_effects = proof.empty_has_no_effects;
+      if (proof.independent_iterations)
+        range->empty_group_elision = EmptyRangeGroupProof::independent_iterations;
+    }
     if (tasks.size() == 1 || it->task_type != OffloadedTaskType::range_for || !range ||
-        range->empty_group_elision != EmptyRangeGroupProof::independent_iterations ||
+        (range->empty_group_elision != EmptyRangeGroupProof::independent_iterations &&
+         !empty_has_no_effects) ||
         !range->host_launch || !fixed_bound(range->host_launch->begin) ||
         !fixed_bound(range->host_launch->end)) {
       ++it;

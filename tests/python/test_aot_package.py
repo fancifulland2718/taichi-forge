@@ -876,6 +876,56 @@ class Model:
 
 
 @test_utils.test(arch=ti.cuda, offline_cache=False)
+def test_package_prepared_library_range_refines_linked_helpers(tmp_path, monkeypatch):
+    from taichi_forge._lib import core
+
+    source = '''import taichi_forge as ti
+@ti.real_func
+def helper(value: ti.i32) -> ti.i32:
+    return value * 3 + 1
+@ti.data_oriented
+class Model:
+    def __init__(self, n: int, enabled: bool):
+        self.n, self.enabled = n, enabled
+        scope = ti.experimental.ResourceScope(self)
+        scope.static('enabled', choices=(False, True))
+        scope.out = scope.field(ti.i32, shape=scope.dim('n'))
+    @ti.kernel
+    def step(self, live_count: ti.i32):
+        if ti.static(self.enabled):
+            for i in range(self.n):
+                self.out[i] = helper(i)
+        else:
+            for i in range(self.n):
+                self.out[i] = helper(i) + 10
+        for i in range(live_count):
+            self.out[i] += 11
+'''
+    package = _source_package(tmp_path, monkeypatch, source)
+    ti.aot.export_package(package, tmp_path / 'sdk', artifact_format='bc-library')
+    with Runtime('cuda') as runtime, load_package(runtime, tmp_path / 'sdk') as code:
+        owners = []
+        for n, enabled in ((7, False), (257, True), (7, True)):
+            owner = code.host.Model(n, enabled)
+            before = core.query_int64('cuda_artifact_entry_points_loaded')
+            owner.step(0)  # Library first use automatically prepares its fixed facts.
+            assert core.query_int64('cuda_artifact_entry_points_loaded') - before == 2
+            before = core.query_int64('cuda_artifact_entry_points_loaded')
+            owner.step(0)
+            assert core.query_int64('cuda_artifact_entry_points_loaded') == before
+            ready = next(iter(owner._forge_package_calls.values()))
+            assert ready.prepared is not None and ready.specialize
+            for count in (n, n, 2, 2):
+                owner.step(count)
+                expected = np.arange(n, dtype=np.int32) * 3 + 1 + (0 if enabled else 10)
+                expected[:count] += 11
+                np.testing.assert_array_equal(owner.out.to_numpy(), expected)
+            owners.append((owner, expected))
+        for owner, expected in owners:
+            np.testing.assert_array_equal(owner.out.to_numpy(), expected)
+
+
+@test_utils.test(arch=ti.cuda, offline_cache=False)
 def test_package_library_guards_live_device_range_bounds(tmp_path, monkeypatch):
     from itertools import product
     from taichi_forge.aot._component import _ComponentCode

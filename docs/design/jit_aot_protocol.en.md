@@ -192,7 +192,16 @@ This is a dependency order, not a requirement for identical APIs or repeated pre
 | Execution | Mutable model contents, ordinary runtime arguments, valid bindings and ordering | Content changes do not implicitly trigger recompilation. Prepared descriptors/leases remain valid; binding changes follow existing update/reprepare APIs |
 
 Shared specialization caches hold code, not one instance's current pointers for another to
-switch. Generations, close and in-flight retirement retain existing ownership/lease rules.
+switch. CUDA bitcode prepare can refine a producer's `unproven_call` range after linking its
+helpers. It checks the canonical range ABI and complete reachable call graph. Nonempty ranges
+with unknown calls, physical-thread queries or shared memory, and ranges with auxiliary
+callbacks, retain their launch policy. A proved consumer copy uses the existing Host range
+contract to remove empty blocks. A task with no effects outside its iterations can be removed
+before device-code generation only when every bound input is a permitted fixed fact and the
+range is empty. A currently zero live range cannot be deleted; Graph mutable-bound restrictions
+remain in force. This does not change persisted IR, public ABI, producer inlining or per-step
+execution paths.
+Generations, close and in-flight retirement retain existing ownership/lease rules.
 Runtime/provider dependencies need not be embedded in TCM, but must resolve under their contracts.
 
 For matching inputs, effective configuration and supported capabilities, preserve language,
