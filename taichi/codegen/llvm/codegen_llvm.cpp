@@ -3517,11 +3517,12 @@ LLVMCompiledTask TaskCodeGenLLVM::run_compilation() {
   offload_to_executable(ir, compile_config, kernel);
 
   emit_to_module();
-  // Registration proves immutable bodies only while this task is assembled.
-  // Never persist that proof through optimization, cloning or offline caches.
-  if (auto *units = module->getNamedMetadata(LLVM::kImportedFunctionUnits))
-    module->eraseNamedMetadata(units);
+  // Carry immutable bodies only across the known Internalize/GlobalDCE pair.
+  // The sidecar owns bytes, never cross-context LLVM values or persistent proof.
+  const auto function_units = LLVM::capture_task_function_units(
+      *module, LLVM::function_code_context(kernel).cache);
   eliminate_unused_functions();
+  auto shared_units = LLVM::detach_task_function_units(*module, function_units);
 
   if (compile_config.arch == Arch::cuda) {
     // CUDA specific metadata
@@ -3556,7 +3557,8 @@ LLVMCompiledTask TaskCodeGenLLVM::run_compilation() {
   }
 
   return {std::move(offloaded_tasks), std::move(module),
-          std::move(used_tree_ids), std::move(struct_for_tls_sizes)};
+          std::move(used_tree_ids), std::move(struct_for_tls_sizes),
+          std::move(shared_units)};
 }
 
 llvm::Value *TaskCodeGenLLVM::create_xlogue(std::unique_ptr<Block> &block) {
@@ -3874,7 +3876,7 @@ void TaskCodeGenLLVM::set_args_ptr(Callable *callable,
 
 LLVMCompiledTask LLVMCompiledTask::clone() const {
   return {tasks, llvm::CloneModule(*module), used_tree_ids,
-          struct_for_tls_sizes};
+          struct_for_tls_sizes, function_units};
 }
 
 LLVMCompiledKernel LLVMCompiledKernel::clone() const {

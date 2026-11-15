@@ -12,6 +12,10 @@
 
 namespace taichi::lang {
 
+namespace LLVM {
+struct FunctionCodeUnit;
+}
+
 class OffloadedTask {
  public:
   static constexpr int kSparseListOpNone = 0;
@@ -205,17 +209,23 @@ struct LLVMCompiledTask {
   std::unique_ptr<llvm::Module> module{nullptr};
   std::unordered_set<int> used_tree_ids;
   std::unordered_set<int> struct_for_tls_sizes;
+  // Build-owned immutable bodies removed before transferring this task to the
+  // linking context. Never serialized into the persistent kernel cache.
+  std::vector<std::shared_ptr<const LLVM::FunctionCodeUnit>> function_units;
   LLVMCompiledTask() = default;
   LLVMCompiledTask(LLVMCompiledTask &&) = default;
   LLVMCompiledTask &operator=(LLVMCompiledTask &&) = default;
   LLVMCompiledTask(std::vector<OffloadedTask> tasks,
                    std::unique_ptr<llvm::Module> module,
                    std::unordered_set<int> used_tree_ids,
-                   std::unordered_set<int> struct_for_tls_sizes)
+                   std::unordered_set<int> struct_for_tls_sizes,
+                   std::vector<std::shared_ptr<const LLVM::FunctionCodeUnit>>
+                       function_units = {})
       : tasks(std::move(tasks)),
         module(std::move(module)),
         used_tree_ids(std::move(used_tree_ids)),
-        struct_for_tls_sizes(std::move(struct_for_tls_sizes)) {
+        struct_for_tls_sizes(std::move(struct_for_tls_sizes)),
+        function_units(std::move(function_units)) {
   }
   LLVMCompiledTask clone() const;
   TI_IO_DEF(tasks);

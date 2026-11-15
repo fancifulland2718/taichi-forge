@@ -52,6 +52,7 @@
 
 #include "taichi/runtime/llvm/llvm_context_pass.h"
 #include "taichi/runtime/llvm/llvm_module_codec.h"
+#include "taichi/runtime/llvm/function_code_cache.h"
 
 #ifdef _WIN32
 // Travis CI seems doesn't support <filesystem>...
@@ -1259,6 +1260,7 @@ LLVMCompiledKernel TaichiLLVMContext::link_compiled_tasks(
   std::unordered_set<std::string> offloaded_names;
   auto mod = new_module("kernel", linking_context_data->llvm_context);
   llvm::Linker linker(*mod);
+  std::map<std::string, std::shared_ptr<const LLVM::FunctionCodeUnit>> function_units;
   for (auto &datum : data_list) {
     TI_COMPILE_PROFILER("cpp.compile.llvm.link_tasks.task_modules");
     for (auto tree_id : datum->used_tree_ids) {
@@ -1271,9 +1273,13 @@ LLVMCompiledKernel TaichiLLVMContext::link_compiled_tasks(
       offloaded_names.insert(task.name);
       linked.tasks.push_back(std::move(task));
     }
-    linker.linkInModule(clone_module_to_context(
-        datum->module.get(), linking_context_data->llvm_context));
+    TI_ERROR_IF(linker.linkInModule(clone_module_to_context(
+                    datum->module.get(), linking_context_data->llvm_context)),
+                "Cannot link compiled task module");
+    for (const auto &unit : datum->function_units)
+      function_units.emplace(unit->digest, unit);
   }
+  LLVM::link_task_function_units(*mod, function_units);
   for (auto tree_id : used_tree_ids) {
     TI_COMPILE_PROFILER("cpp.compile.llvm.link_tasks.struct_modules");
     linker.linkInModule(

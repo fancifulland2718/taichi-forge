@@ -588,3 +588,410 @@ TEST(LLVMAotFinalization, PreservesEffectsNumericFlagsAndDisabledOptimization) {
 
 }  // namespace taichi::lang
 #endif
+
+#ifdef TI_WITH_LLVM
+#include "llvm/Transforms/IPO/Internalize.h"
+
+namespace taichi::lang {
+namespace {
+
+class LLVMTaskFunctionUnits : public testing::Test {
+ protected:
+  using UnitRef = std::shared_ptr<const LLVM::FunctionCodeUnit>;
+  using UnitMap = std::map<std::string, UnitRef>;
+
+  static std::unique_ptr<llvm::Module> parse(llvm::LLVMContext &context,
+                                           const std::string &body) {
+    llvm::SMDiagnostic error;
+    // LLVM 20 upgrades x86 bitcode layouts with i128 alignment. Specify it
+    // before recording units so a context transfer preserves the same layout.
+    auto module = llvm::parseAssemblyString(
+        "target triple = \"x86_64-pc-windows-msvc\"\n"
+        "target datalayout = \"e-p:64:64-i64:64-i128:128-n16:32:64\"\n" + body,
+        error, context);
+    EXPECT_NE(module, nullptr);
+    return module;
+  }
+
+  static std::unique_ptr<llvm::Module> task(llvm::LLVMContext &context,
+                                          const std::string &entry,
+                                          int bias,
+                                          int leaf_bias = 1) {
+    return parse(context,
+        "define internal i32 @leaf(i32 %x) \"taichi.aot.real_function\" {\n"
+        "  %r = add i32 %x, " + std::to_string(leaf_bias) + "\n"
+        "  ret i32 %r\n}\n"
+        "define internal i32 @parent(i32 %x) \"taichi.aot.real_function\" {\n"
+        "  %r = call i32 @leaf(i32 %x)\n"
+        "  %v = add i32 %r, " + std::to_string(bias) + "\n"
+        "  ret i32 %v\n}\n"
+        "define i32 @" + entry + "(i32 %x) {\n"
+        "  %r = call i32 @parent(i32 %x)\n"
+        "  ret i32 %r\n}\n");
+  }
+
+  static bool record(llvm::Module &module,
+                     const std::shared_ptr<LLVM::FunctionCodeCache> &cache,
+                     const std::string &key,
+                     const std::string &name) {
+    auto *function = module.getFunction(name);
+    EXPECT_NE(function, nullptr);
+    if (!function)
+      return false;
+    const auto entry = cache->record(key, module, function);
+    EXPECT_NE(entry, nullptr);
+    if (!entry)
+      return false;
+    LLVM::register_function_code(module, *entry, function);
+    return true;
+  }
+
+  static void prune(llvm::Module &module,
+                    const std::unordered_set<std::string> &entries) {
+    llvm::ModuleAnalysisManager analysis;
+    llvm::PassBuilder passes;
+    passes.registerModuleAnalyses(analysis);
+    llvm::ModulePassManager manager;
+    manager.addPass(llvm::InternalizePass([&](const llvm::GlobalValue &value) {
+      return entries.count(value.getName().str()) != 0;
+    }));
+    manager.addPass(llvm::GlobalDCEPass());
+    manager.run(module, analysis);
+  }
+
+  static std::vector<UnitRef> detach(
+      llvm::Module &module,
+      const std::shared_ptr<LLVM::FunctionCodeCache> &cache,
+      const std::unordered_set<std::string> &entries) {
+    const auto captured = LLVM::capture_task_function_units(module, cache);
+    EXPECT_EQ(module.getNamedMetadata(LLVM::kImportedFunctionUnits), nullptr);
+    prune(module, entries);
+    return LLVM::detach_task_function_units(module, captured);
+  }
+
+  static std::unique_ptr<llvm::Module> transfer(const llvm::Module &module,
+                                               llvm::LLVMContext &context) {
+    std::string bytes;
+    {
+      llvm::raw_string_ostream stream(bytes);
+      encode_llvm_module(module, stream, LLVMModuleEncoding::bitcode);
+    }
+    auto decoded = decode_llvm_module(llvm::MemoryBufferRef(bytes, "thin_task"),
+                                      context, LLVMModuleEncoding::bitcode);
+    if (!decoded) {
+      ADD_FAILURE() << llvm::toString(decoded.takeError());
+      return nullptr;
+    }
+    return std::move(*decoded);
+  }
+
+  static UnitMap collect(const std::vector<UnitRef> &units) {
+    UnitMap result;
+    for (const auto &unit : units)
+      result.emplace(unit->digest, unit);
+    return result;
+  }
+
+  static int definitions(const llvm::Module &module) {
+    int result = 0;
+    for (const auto &function : module)
+      result += !function.isDeclaration();
+    return result;
+  }
+};
+
+TEST_F(LLVMTaskFunctionUnits, SharesLeafAcrossContextsBeforeFinalOptimization) {
+  llvm::LLVMContext first_context, second_context, linked_context;
+  auto cache = std::make_shared<LLVM::FunctionCodeCache>();
+  auto first = task(first_context, "entry_a", 2);
+  auto second = task(second_context, "entry_b", 3);
+  ASSERT_NE(first, nullptr);
+  ASSERT_NE(second, nullptr);
+  ASSERT_TRUE(record(*first, cache, "a.leaf", "leaf"));
+  ASSERT_TRUE(record(*first, cache, "a.parent", "parent"));
+  ASSERT_TRUE(record(*second, cache, "b.leaf", "leaf"));
+  ASSERT_TRUE(record(*second, cache, "b.parent", "parent"));
+  const auto leaf = cache->find("a.leaf")->units.back();
+  EXPECT_EQ(leaf, cache->find("b.leaf")->units.back());
+  auto units = collect(detach(*first, cache, {"entry_a"}));
+  const auto second_units = collect(detach(*second, cache, {"entry_b"}));
+  EXPECT_EQ(units.size(), 2);
+  EXPECT_EQ(second_units.size(), 2);
+  units.insert(second_units.begin(), second_units.end());
+  ASSERT_EQ(units.size(), 3);
+  EXPECT_EQ(definitions(*first), 1);
+  EXPECT_EQ(definitions(*second), 1);
+  EXPECT_FALSE(llvm::verifyModule(*first));
+  EXPECT_FALSE(llvm::verifyModule(*second));
+
+  auto linked = transfer(*first, linked_context);
+  auto other = transfer(*second, linked_context);
+  ASSERT_NE(linked, nullptr);
+  ASSERT_NE(other, nullptr);
+  ASSERT_FALSE(llvm::Linker(*linked).linkInModule(std::move(other)));
+  LLVM::link_task_function_units(*linked, units);
+  prune(*linked, {"entry_a", "entry_b"});
+  EXPECT_EQ(definitions(*linked), 5);  // Two entries, two parents, one leaf.
+  auto *shared_leaf = linked->getFunction(leaf->symbol);
+  ASSERT_NE(shared_leaf, nullptr);
+  EXPECT_FALSE(shared_leaf->isDeclaration());
+  EXPECT_TRUE(shared_leaf->hasInternalLinkage());
+  EXPECT_EQ(shared_leaf->getNumUses(), 2);
+  EXPECT_EQ(linked->getNamedMetadata(LLVM::kImportedFunctionUnits), nullptr);
+  EXPECT_FALSE(llvm::verifyModule(*linked));
+}
+
+TEST_F(LLVMTaskFunctionUnits, DropsDceDeathsAndRetainsOwnershipThroughTaskClone) {
+  llvm::LLVMContext context;
+  LLVMCompiledTask cloned;
+  std::weak_ptr<const LLVM::FunctionCodeUnit> retained;
+  {
+    auto cache = std::make_shared<LLVM::FunctionCodeCache>();
+    auto module = task(context, "entry", 2);
+    ASSERT_NE(module, nullptr);
+    auto *dead = llvm::Function::Create(
+        module->getFunction("leaf")->getFunctionType(),
+        llvm::GlobalValue::InternalLinkage, "dead", *module);
+    dead->addFnAttr(LLVM::kRealFunctionUnit);
+    auto *block = llvm::BasicBlock::Create(context, "", dead);
+    llvm::ReturnInst::Create(context, dead->getArg(0), block);
+    ASSERT_TRUE(record(*module, cache, "leaf", "leaf"));
+    ASSERT_TRUE(record(*module, cache, "parent", "parent"));
+    ASSERT_TRUE(record(*module, cache, "dead", "dead"));
+    auto captured = LLVM::capture_task_function_units(*module, cache);
+    ASSERT_EQ(captured.size(), 3);
+    prune(*module, {"entry"});
+    EXPECT_EQ(module->getFunction("dead"), nullptr);
+    int deaths = 0;
+    for (const auto &item : captured)
+      deaths += item.function == nullptr;
+    EXPECT_EQ(deaths, 1);
+    auto units = LLVM::detach_task_function_units(*module, captured);
+    ASSERT_EQ(units.size(), 2);
+    retained = units.front();
+    LLVMCompiledTask original({}, std::move(module), {}, {}, std::move(units));
+    cloned = original.clone();
+    EXPECT_EQ(cloned.function_units, original.function_units);
+  }
+  ASSERT_FALSE(retained.expired());
+  EXPECT_EQ(definitions(*cloned.module), 1);
+  auto units = collect(cloned.function_units);
+  LLVM::link_task_function_units(*cloned.module, units);
+  prune(*cloned.module, {"entry"});
+  EXPECT_EQ(definitions(*cloned.module), 3);
+  EXPECT_EQ(cloned.module->getNamedMetadata(LLVM::kImportedFunctionUnits), nullptr);
+  EXPECT_FALSE(llvm::verifyModule(*cloned.module));
+  units.clear();
+  cloned.function_units.clear();
+  EXPECT_TRUE(retained.expired());
+}
+
+TEST_F(LLVMTaskFunctionUnits, RejectsObservableAddressesTransitively) {
+  const std::vector<std::string> bodies = {
+      R"(
+        define internal i32 @leaf(i32 %x) "taichi.aot.real_function" {
+          ret i32 %x
+        }
+        define internal i32 @parent(i32 %x) "taichi.aot.real_function" {
+          %r = call i32 @leaf(i32 %x)
+          ret i32 %r
+        }
+        define i32 @entry(i32 %x, ptr %out) {
+          store ptr @leaf, ptr %out
+          %r = call i32 @parent(i32 %x)
+          ret i32 %r
+        }
+      )",
+      R"(
+        @private_address = internal constant i32 7
+        define internal ptr @leaf() "taichi.aot.real_function" {
+          ret ptr @private_address
+        }
+        define internal ptr @parent() "taichi.aot.real_function" {
+          %r = call ptr @leaf()
+          ret ptr %r
+        }
+        define ptr @entry() {
+          %r = call ptr @parent()
+          ret ptr %r
+        }
+      )"};
+  for (size_t i = 0; i < bodies.size(); ++i) {
+    SCOPED_TRACE(i);
+    llvm::LLVMContext context;
+    auto module = parse(context, bodies[i]);
+    auto cache = std::make_shared<LLVM::FunctionCodeCache>();
+    ASSERT_NE(module, nullptr);
+    ASSERT_TRUE(record(*module, cache, "leaf", "leaf"));
+    ASSERT_TRUE(record(*module, cache, "parent", "parent"));
+    const auto units = detach(*module, cache, {"entry"});
+    EXPECT_TRUE(units.empty());
+    EXPECT_FALSE(module->getFunction("leaf")->isDeclaration());
+    EXPECT_FALSE(module->getFunction("parent")->isDeclaration());
+    EXPECT_FALSE(llvm::verifyModule(*module));
+  }
+}
+
+TEST_F(LLVMTaskFunctionUnits, RejectsLateExternalDefinitionsAndTypedABI) {
+  llvm::LLVMContext context;
+  auto cache = std::make_shared<LLVM::FunctionCodeCache>();
+  auto module = parse(context, R"(
+    declare i32 @external(i32)
+    define internal i32 @parent(i32 %x) "taichi.aot.real_function" {
+      %r = call i32 @external(i32 %x)
+      ret i32 %r
+    }
+    define i32 @entry(i32 %x) {
+      %r = call i32 @parent(i32 %x)
+      ret i32 %r
+    }
+  )");
+  ASSERT_NE(module, nullptr);
+  ASSERT_TRUE(record(*module, cache, "parent", "parent"));
+  // Codegen can finish this dependency after the parent was recorded, but
+  // before the capture/Internalize/GlobalDCE contract begins.
+  auto *external = module->getFunction("external");
+  auto *block = llvm::BasicBlock::Create(context, "", external);
+  llvm::ReturnInst::Create(context, external->getArg(0), block);
+  EXPECT_TRUE(detach(*module, cache, {"entry"}).empty());
+  EXPECT_FALSE(module->getFunction("parent")->isDeclaration());
+  EXPECT_TRUE(external->hasInternalLinkage());
+  EXPECT_FALSE(llvm::verifyModule(*module));
+
+  for (bool typed_external : {false, true}) {
+    SCOPED_TRACE(typed_external);
+    llvm::LLVMContext typed_context;
+    auto typed = parse(typed_context, typed_external ? R"(
+      declare i32 @external(ptr byval(i32))
+      define internal i32 @parent(ptr %p) "taichi.aot.real_function" {
+        %r = call i32 @external(ptr byval(i32) %p)
+        ret i32 %r
+      }
+      define i32 @entry(ptr %p) {
+        %r = call i32 @parent(ptr %p)
+        ret i32 %r
+      }
+    )" : R"(
+      define internal i32 @parent(ptr byval(i32) %p) "taichi.aot.real_function" {
+        %r = load i32, ptr %p
+        ret i32 %r
+      }
+      define i32 @entry(ptr %p) {
+        %r = call i32 @parent(ptr byval(i32) %p)
+        ret i32 %r
+      }
+    )");
+    ASSERT_NE(typed, nullptr);
+    auto typed_cache = std::make_shared<LLVM::FunctionCodeCache>();
+    ASSERT_TRUE(record(*typed, typed_cache, "typed", "parent"));
+    EXPECT_TRUE(detach(*typed, typed_cache, {"entry"}).empty());
+    EXPECT_FALSE(typed->getFunction("parent")->isDeclaration());
+    EXPECT_FALSE(llvm::verifyModule(*typed));
+  }
+}
+
+TEST_F(LLVMTaskFunctionUnits, RejectsTargetABIAndGlobalSymbolConflicts) {
+  llvm::LLVMContext context;
+  auto cache = std::make_shared<LLVM::FunctionCodeCache>();
+  auto module = task(context, "entry", 2);
+  ASSERT_NE(module, nullptr);
+  ASSERT_TRUE(record(*module, cache, "leaf", "leaf"));
+  ASSERT_TRUE(record(*module, cache, "parent", "parent"));
+  const auto units = collect(detach(*module, cache, {"entry"}));
+  ASSERT_EQ(units.size(), 2);
+  const auto symbol = units.begin()->second->symbol;
+  auto wrong_target = llvm::CloneModule(*module);
+  wrong_target->setTargetTriple("aarch64-unknown-linux-gnu");
+  EXPECT_ANY_THROW(LLVM::link_task_function_units(*wrong_target, units));
+  auto wrong_layout = llvm::CloneModule(*module);
+  wrong_layout->setDataLayout("e-p:32:32");
+  EXPECT_ANY_THROW(LLVM::link_task_function_units(*wrong_layout, units));
+  auto wrong_cc = llvm::CloneModule(*module);
+  wrong_cc->getFunction(symbol)->setCallingConv(llvm::CallingConv::Fast);
+  EXPECT_ANY_THROW(LLVM::link_task_function_units(*wrong_cc, units));
+  auto wrong_attrs = llvm::CloneModule(*module);
+  wrong_attrs->getFunction(symbol)->addFnAttr(llvm::Attribute::NoUnwind);
+  EXPECT_ANY_THROW(LLVM::link_task_function_units(*wrong_attrs, units));
+  auto wrong_type = parse(context, "declare void @" + symbol + "()\n");
+  ASSERT_NE(wrong_type, nullptr);
+  EXPECT_ANY_THROW(LLVM::link_task_function_units(*wrong_type, units));
+  auto global_collision = parse(context, "@" + symbol + " = global i32 0\n");
+  ASSERT_NE(global_collision, nullptr);
+  EXPECT_ANY_THROW(LLVM::link_task_function_units(*global_collision, units));
+  EXPECT_FALSE(llvm::verifyModule(*module));
+}
+
+TEST_F(LLVMTaskFunctionUnits, RejectsExternalDependencyABIConflicts) {
+  llvm::LLVMContext context;
+  auto cache = std::make_shared<LLVM::FunctionCodeCache>();
+  auto module = parse(context, R"(
+    declare i32 @external(i32)
+    define internal i32 @parent(i32 %x) "taichi.aot.real_function" {
+      %r = call i32 @external(i32 %x)
+      ret i32 %r
+    }
+    define i32 @entry(i32 %x) {
+      %r = call i32 @parent(i32 %x)
+      ret i32 %r
+    }
+  )");
+  ASSERT_NE(module, nullptr);
+  ASSERT_TRUE(record(*module, cache, "parent", "parent"));
+  const auto units = collect(detach(*module, cache, {"entry"}));
+  ASSERT_EQ(units.size(), 1);
+  auto compatible = llvm::CloneModule(*module);
+  LLVM::link_task_function_units(*compatible, units);
+  EXPECT_FALSE(llvm::verifyModule(*compatible));
+  auto incompatible = llvm::CloneModule(*module);
+  incompatible->getFunction("external")->setCallingConv(llvm::CallingConv::Fast);
+  EXPECT_ANY_THROW(LLVM::link_task_function_units(*incompatible, units));
+  auto private_definition = llvm::CloneModule(*module);
+  auto *external = private_definition->getFunction("external");
+  external->setLinkage(llvm::GlobalValue::InternalLinkage);
+  auto *block = llvm::BasicBlock::Create(context, "", external);
+  llvm::ReturnInst::Create(context, external->getArg(0), block);
+  EXPECT_ANY_THROW(LLVM::link_task_function_units(*private_definition, units));
+}
+
+TEST_F(LLVMTaskFunctionUnits, KeepsDifferentLeafBodiesAndParentsSeparate) {
+  llvm::LLVMContext first_context, second_context, linked_context;
+  auto cache = std::make_shared<LLVM::FunctionCodeCache>();
+  auto first = task(first_context, "entry_a", 2, 1);
+  auto second = task(second_context, "entry_b", 2, 9);
+  ASSERT_NE(first, nullptr);
+  ASSERT_NE(second, nullptr);
+  ASSERT_TRUE(record(*first, cache, "a.leaf", "leaf"));
+  ASSERT_TRUE(record(*first, cache, "a.parent", "parent"));
+  ASSERT_TRUE(record(*second, cache, "b.leaf", "leaf"));
+  ASSERT_TRUE(record(*second, cache, "b.parent", "parent"));
+  const auto first_leaf = cache->find("a.leaf")->units.back();
+  const auto second_leaf = cache->find("b.leaf")->units.back();
+  EXPECT_NE(first_leaf->digest, second_leaf->digest);
+  auto units = collect(detach(*first, cache, {"entry_a"}));
+  const auto other_units = collect(detach(*second, cache, {"entry_b"}));
+  units.insert(other_units.begin(), other_units.end());
+  ASSERT_EQ(units.size(), 4);
+  auto linked = transfer(*first, linked_context);
+  auto other = transfer(*second, linked_context);
+  ASSERT_NE(linked, nullptr);
+  ASSERT_NE(other, nullptr);
+  ASSERT_FALSE(llvm::Linker(*linked).linkInModule(std::move(other)));
+  LLVM::link_task_function_units(*linked, units);
+  prune(*linked, {"entry_a", "entry_b"});
+  EXPECT_EQ(definitions(*linked), 6);
+  for (const auto &[unit, bias] :
+       std::vector<std::pair<UnitRef, int>>{{first_leaf, 1}, {second_leaf, 9}}) {
+    auto *function = linked->getFunction(unit->symbol);
+    ASSERT_NE(function, nullptr);
+    ASSERT_FALSE(function->isDeclaration());
+    auto *constant = llvm::dyn_cast<llvm::ConstantInt>(
+        function->front().front().getOperand(1));
+    ASSERT_NE(constant, nullptr);
+    EXPECT_EQ(constant->getSExtValue(), bias);
+  }
+  EXPECT_FALSE(llvm::verifyModule(*linked));
+}
+
+}  // namespace
+}  // namespace taichi::lang
+#endif
