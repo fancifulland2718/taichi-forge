@@ -1173,6 +1173,7 @@ def scope_declarations(
     import inspect
 
     typed_owner_parameters = set()
+    typed_owner_types = {}
     for parameter in parameters:
         annotation = parameter.annotation
         while isinstance(annotation, ast.Constant) and isinstance(annotation.value, str):
@@ -1180,6 +1181,7 @@ def scope_declarations(
         declared = _source_value(annotation, namespace)
         if inspect.isclass(declared) and declared.__module__ != "builtins":
             typed_owner_parameters.add(parameter.arg)
+            typed_owner_types[parameter.arg] = declared.__module__ + "." + declared.__qualname__
     defaults = (
         dict(
             zip(
@@ -1211,7 +1213,7 @@ def scope_declarations(
 
     def absent_record(call):
         if not (
-            operation(call)[1] == "record"
+            operation(call)[1] in ("record", "owner_reference")
             and len(call.args) == 2
             and isinstance(call.args[0], ast.Constant)
             and type(call.args[0].value) is str
@@ -1255,7 +1257,7 @@ def scope_declarations(
                 ):
                     return None
                 fields.add(targets[0].attr)
-            elif method == "record":
+            elif method == "record" or method == "owner_reference" and absent_record(call) is not None:
                 name = absent_record(call)
                 if not isinstance(node, ast.Expr) or name is None or name in records:
                     return None
@@ -1265,6 +1267,13 @@ def scope_declarations(
                     return None
                 fields.add(call.args[0].value)
                 borrows.add(call.args[0].value)
+            elif method == "owner_reference" and isinstance(node, ast.Expr):
+                if (len(call.args) != 2 or call.keywords
+                        or not isinstance(call.args[0], ast.Constant)
+                        or not isinstance(call.args[1], ast.Name)
+                        or call.args[1].id not in typed_owner_parameters):
+                    return None
+                fields.add(call.args[0].value)
             elif isinstance(node, (ast.Assign, ast.AnnAssign)) and isinstance(call, ast.Name):
                 targets = node.targets if isinstance(node, ast.Assign) else [node.target]
                 if (len(targets) == 1 and isinstance(targets[0], ast.Attribute)
@@ -1704,9 +1713,17 @@ def scope_declarations(
             fail(module, statement, "Definition constants must remain unconditional")
         if method == "record" and id(call) in record_calls:
             continue
-        if method == "record" and isinstance(statement, ast.Expr) and id(call) in optional_records:
+        if method in ("record", "owner_reference") and isinstance(statement, ast.Expr) and id(call) in optional_records:
             allowed.add(id(call.func.value))
             optional_members.add(absent_record(call))
+        elif (method == "owner_reference" and isinstance(statement, ast.Expr)
+              and constructor.name == "__init__" and not scope_paths[scope]
+              and not conditions and (absent_name := absent_record(call)) is not None):
+            # A constructor can initialize a later declared owner port to None.
+            # Complete package admission must find its typed preparation binding.
+            add(absent_name, dict(kind="record", optional=True, initial_owner_absence=True,
+                                 scope_allocation=origin(scope)), statement)
+            allowed.add(id(call.func.value))
         elif method in ("static", "static_dtype") and isinstance(statement, ast.Expr):
             declare_static(scope, call, statement, conditions)
         elif method == "constant" and isinstance(statement, ast.Expr):
@@ -1821,7 +1838,11 @@ def scope_declarations(
                 call.args[0].value,
                 dict(
                     kind="owner_input",
-                    **({"reference_path": reference_path} if declared_path else {"input_parameter": parameter}),
+                    **({"reference_path": reference_path} if declared_path else (
+                        {"owner_type": typed_owner_types[parameter], "input_method": constructor.name}
+                        if getattr(constructor, "_package_preparation_method", False)
+                        and parameter in typed_owner_types else {"input_parameter": parameter}
+                    )),
                     **({"conditions": dict(conditions)} if conditions else {}),
                     reference_declaration=[call.lineno, call.col_offset],
                     scope_allocation=origin(scope),

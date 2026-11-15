@@ -1336,6 +1336,22 @@ one consistent source type; extra unscoped calls, unknown or conflicting sources
 reject instead of selecting one successful path. Host wrapping and different
 instances of that type reuse the same numerical entry.
 
+Version 85 permits preparation methods to bind `owner_reference` from an
+explicitly class-annotated, unreassigned parameter. An optional port starts with
+`scope.owner_reference('source', None, optional=True)` in the constructor, binds
+the object under a declared presence condition, and uses the same optional
+reference declaration in the absent branch. A plain record cannot change its
+resource role. Export rejects missing typed preparation bindings and unproven
+types. Consumption validates the package and source type before publishing the
+reference, without reallocating source resources.
+Local CPU/CUDA checks cover two capacities and instances, live data, rebinding
+and absence, existing Graph call snapshots, wrong-type and foreign-package
+rejection, and a separate process that blocks numerical source imports.
+An already bound Graph retains its old resource snapshot; bind it again to use
+new references. The ordinary JIT reference binds before first compilation.
+This does not qualify arbitrary rebinding of compiled JIT template owners or
+export of arbitrary cyclic object graphs.
+
 Version 42 supports the existing `scope.owner_dim('source', 'n')`. The reference
 must be an unconditional declared owner input and the target a declared dimension.
 Original size relations are checked before new allocations; numerical code keeps

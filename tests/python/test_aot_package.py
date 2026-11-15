@@ -5824,6 +5824,149 @@ def test_package_write_inventory_does_not_drop_opaque_or_recursive_sources(tmp_p
     assert ti.lang.impl.get_runtime().get_num_compiled_functions() == 0
 
 
+PREPARED_OWNER_INPUT_SOURCE = '''
+import taichi_forge as ti
+@ti.data_oriented
+class Storage:
+    def __init__(self, n: int):
+        self.n = n
+        scope = ti.experimental.ResourceScope(self)
+        scope.values = scope.field(ti.i32, shape=scope.dim('n'), initialization='zero')
+    @ti.func
+    def read(self, i):
+        return self.values[i]
+@ti.data_oriented
+class Model:
+    def __init__(self, n: int):
+        self.n = n
+        self.has_source = False
+        scope = ti.experimental.ResourceScope(self)
+        scope.static('has_source', choices=(False, True))
+        scope.owner_reference('source', None, optional=True)
+        scope.out = scope.field(ti.i32, shape=scope.dim('n'), initialization='zero')
+    def bind(self, source: Storage = None):
+        self.has_source = source is not None
+        scope = ti.experimental.ResourceScope(self)
+        if self.has_source:
+            scope.owner_reference('source', source)
+        else:
+            scope.owner_reference('source', None, optional=True)
+    @ti.kernel
+    def step(self):
+        for i in range(self.n):
+            if ti.static(self.source is not None):
+                self.out[i] = self.source.read(i)
+            else:
+                self.out[i] = -1
+    def graph(self):
+        builder = ti.graph.GraphBuilder()
+        builder.dispatch(self.step)
+        return builder.compile()
+'''
+
+
+@test_utils.test(arch=[ti.cpu, ti.cuda], offline_cache=False)
+def test_package_typed_owner_preparation_rebinds_optional_input(tmp_path, monkeypatch):
+    package = _source_package(tmp_path, monkeypatch, PREPARED_OWNER_INPUT_SOURCE)
+    manifest = ti.aot.export_package(package, tmp_path / 'sdk')
+    assert manifest['version'] == 85
+    with Runtime(manifest['target']) as runtime, load_package(runtime, tmp_path / 'sdk') as code:
+        model = code.host.Model(5)
+        first, second = code.host.model.Storage(5), code.host.model.Storage(5)
+        first.values.from_numpy(np.full(5, 7, dtype=np.int32))
+        second.values.from_numpy(np.full(5, 19, dtype=np.int32))
+        for selected, expected in ((None, -1), (first, 7), (second, 19), (None, -1), (first, 7)):
+            model.bind(selected)
+            model.step()
+            np.testing.assert_array_equal(model.out.to_numpy(), np.full(5, expected))
+            # Each reference binds before first compilation, as in renderer
+            # preparation; JIT template owners do not support live rebinding.
+            normal = package.Model(5)
+            normal_source = package.model.Storage(5) if selected is not None else None
+            if normal_source is not None:
+                normal_source.values.fill(expected)
+            normal.bind(normal_source)
+            normal.step()
+            np.testing.assert_array_equal(model.out.to_numpy(), normal.out.to_numpy())
+        other = code.host.Model(9)
+        other_source = code.host.model.Storage(9)
+        other_source.values.from_numpy(np.full(9, 31, dtype=np.int32))
+        other.bind(other_source)
+        other.step()
+        saved = model.graph().bind({})
+        model.bind(second)
+        first.values.from_numpy(np.full(5, 23, dtype=np.int32))
+        model.step()
+        np.testing.assert_array_equal(model.out.to_numpy(), 19)
+        saved.run()
+        np.testing.assert_array_equal(model.out.to_numpy(), 23)
+        np.testing.assert_array_equal(other.out.to_numpy(), 31)
+        saved.close()
+        with pytest.raises(ValueError, match='source type'):
+            model.bind(model)
+        assert model.source is second
+        with load_package(runtime, tmp_path / 'sdk') as foreign:
+            with pytest.raises(ValueError, match='source type'):
+                model.bind(foreign.host.model.Storage(5))
+        assert model.source is second
+    probe = tmp_path / 'consume_prepared_owner.py'
+    probe.write_text('''
+import importlib.abc, sys
+import numpy as np
+from taichi_forge_runtime.aot import Runtime, load_package
+class RejectSource(importlib.abc.MetaPathFinder):
+    def find_spec(self, fullname, path=None, target=None):
+        if fullname.split('.')[0] in ('taichi', 'taichi_forge', 'definition_fixture'):
+            raise ImportError(fullname)
+sys.meta_path.insert(0, RejectSource())
+with Runtime(sys.argv[2]) as runtime, load_package(runtime, sys.argv[1]) as code:
+    model, other = code.host.Model(3), code.host.Model(11)
+    source = code.host.model.Storage(3)
+    source.values.from_numpy(np.array([3, 5, 8], dtype=np.int32))
+    model.bind(source)
+    model.step()
+    np.testing.assert_array_equal(model.out.to_numpy(), [3, 5, 8])
+    other.step()
+    np.testing.assert_array_equal(other.out.to_numpy(), -1)
+    model.bind(None)
+    model.step()
+    np.testing.assert_array_equal(model.out.to_numpy(), -1)
+print('PREPARED_OWNER_SOURCE_FREE_OK')
+''', encoding='utf8')
+    result = subprocess.run(
+        [sys.executable, '-B', str(probe), str(tmp_path / 'sdk'), manifest['target']],
+        cwd=tmp_path,
+        env=dict(os.environ, PYTHONDONTWRITEBYTECODE='1',
+                 PYTHONPATH=str(Path(__file__).parents[2] / 'packaging/runtime/src'),
+                 TAICHI_NATIVE_RUNTIME_DIR=str(Path(utils._loaded_native_runtime_path).parent),
+                 TAICHI_RUNTIME_DIR=utils._runtime_bitcode_dir()),
+        capture_output=True, text=True, timeout=90)
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert 'PREPARED_OWNER_SOURCE_FREE_OK' in result.stdout
+    manifest['version'] = 84
+    (tmp_path / 'sdk/package.json').write_text(json.dumps(manifest), encoding='utf8')
+    with Runtime(manifest['target']) as runtime, pytest.raises(ValueError, match='version 85'):
+        load_package(runtime, tmp_path / 'sdk')
+
+
+@pytest.mark.parametrize('case', ['untyped', 'reassigned', 'missing_binding'])
+@test_utils.test(arch=ti.cpu, offline_cache=False)
+def test_package_prepared_owner_requires_proven_type_and_binding(tmp_path, monkeypatch, case):
+    source = PREPARED_OWNER_INPUT_SOURCE
+    if case == 'untyped':
+        source = source.replace('source: Storage = None', 'source=None')
+    elif case == 'reassigned':
+        source = source.replace('        self.has_source = source is not None',
+                                '        source = self\n        self.has_source = source is not None')
+    else:
+        start, end = source.index('    def bind('), source.index('    @ti.kernel')
+        source = source[:start] + source[end:]
+    package = _source_package(tmp_path, monkeypatch, source)
+    with pytest.raises(ValueError, match='[Oo]wner|[Pp]reparation|[Oo]ptional|ResourceScope use'):
+        ti.aot.check_package(package)
+    assert ti.lang.impl.get_runtime().get_num_compiled_functions() == 0
+
+
 @test_utils.test(arch=[ti.cpu, ti.cuda], offline_cache=False)
 def test_package_owner_sequence_uses_compiler_write_inventory(tmp_path, monkeypatch):
     package = _source_package(tmp_path, monkeypatch, WRITE_INVENTORY_SOURCE)

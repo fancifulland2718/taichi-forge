@@ -142,6 +142,9 @@ def _owner_schema(
                 declaration["binding_phase"] = "preparation"
                 children = getattr(function, "_package_preparation_children", ())
                 function._package_preparation_children = tuple(dict.fromkeys((*children, name)))
+            if (getattr(function, "_package_preparation_method", False)
+                    and declaration["kind"] == "owner_input" and "owner_type" in declaration):
+                declaration["binding_phase"] = "preparation"
             if getattr(function, "_package_preparation_method", False) and declaration["kind"] == "borrowed_field":
                 if "input_parameter" in declaration:
                     _fail(module, function, "Prepared Field inputs require a definition-proven allocation path")
@@ -153,7 +156,8 @@ def _owner_schema(
             ):
                 _fail(module, function, "Preparation resource allocations require explicit group contexts")
             if getattr(function, "_package_preparation_method", False) and (
-                "presence_parameter" in declaration or declaration["kind"] in ("owner_input", "host_owner_sequence")
+                "presence_parameter" in declaration or declaration["kind"] == "host_owner_sequence"
+                or declaration["kind"] == "owner_input" and "owner_type" not in declaration
             ):
                 _fail(
                     module,
@@ -162,6 +166,12 @@ def _owner_schema(
                 )
             if name in schema and schema[name]["kind"] != "value":
                 previous = schema[name]
+                if (previous.get("initial_owner_absence")
+                        and declaration["kind"] == "owner_input"
+                        and declaration.get("binding_phase") == "preparation"
+                        and declaration.get("optional_presence")):
+                    schema[name] = declaration
+                    continue
                 origins = (
                     "scope_allocation",
                     "scope_allocations",
@@ -1555,6 +1565,12 @@ def _preflight_package(package, *, arch=None, source_root=None):
     except ValueError as error:
         raise PackageExportError(str(error)) from error
     resolve_inputs(sources, imported_modules)
+    for name, _, _, _, tree, _, schemas, _ in sources:
+        for owner, schema in schemas.items():
+            for member, declaration in schema.items():
+                if declaration.get("initial_owner_absence"):
+                    _fail(name, tree, "Initial absent owner requires a typed optional preparation binding: "
+                          + owner + "." + member)
     from ._package_function_inputs import discover as discover_function_inputs
 
     try:
@@ -1924,6 +1940,9 @@ def _export_package(package, output, *, arch, caps, source_root, compilation, ar
                 manifest["version"] = max(55, manifest["version"])
             if any(item.get("input_method") for item in schema.values()):
                 manifest["version"] = max(56, manifest["version"])
+            if any(item["kind"] == "owner_input" and item.get("binding_phase") == "preparation"
+                   for item in schema.values()):
+                manifest["version"] = max(85, manifest["version"])
             if any(item.get("source_policy") for item in schema.values()):
                 manifest["version"] = max(73, manifest["version"])
             if any(item.get("source_policy", {}).get("presence") for item in schema.values()):

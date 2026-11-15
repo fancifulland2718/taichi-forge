@@ -561,16 +561,26 @@ class _ModuleBinding:
         if (
             not isinstance(scope, _ResourceScope)
             or scope._parent is not None
-            or construction is None
-            or construction[0] is not self.package
-            or construction[2] is not scope._root
+            or getattr(scope._root, "_forge_package_owner", None) is not self.package
         ):
-            raise ValueError("Owner input requires its managed constructor scope")
+            raise ValueError("Owner input requires its managed owner scope")
         owner_key = self.owner_contract(scope._root, owner_key)
         declaration = self.package.manifest["owners"][owner_key].get(name, {})
         if declaration.get("kind") != "owner_input":
             raise ValueError("Owner input differs from its declared reference")
-        from ._package_values import check_owner_bindings
+        if declaration.get("binding_phase") != "preparation" and (
+                construction is None or construction[0] is not self.package
+                or construction[2] is not scope._root):
+            raise ValueError("Owner input requires its managed constructor scope")
+        from ._package_values import check_owner_bindings, owner_type, path_value
+
+        # Validate before publication so a rejected rebind cannot replace a
+        # valid instance's reference. Pending calls retain their own leases.
+        if (getattr(value, "_forge_package_owner", None) is not self.package
+                or owner_type(value) != declaration["owner_type"]
+                or "reference_path" in declaration
+                and value is not path_value(scope._root, declaration["reference_path"])):
+            raise ValueError("Owner input differs from its declared source type or identity")
 
         setattr(scope._root, name, value)
         check_owner_bindings(
@@ -1179,6 +1189,19 @@ class _ResourceScope:
         if not isinstance(minimum, Extent):
             raise TypeError("A power-of-two dimension requires an Extent minimum")
         return self.derived_dim(name, Extent(("ceil_pow2", minimum.expression)))
+
+    def owner_reference(self, name, value, *, optional=False):
+        # Proven non-null references are projected through _ModuleBinding.
+        # The normal API also permits an explicit absent preparation binding.
+        from ._package_values import owner_type
+
+        package = getattr(self._root, "_forge_package_owner", None)
+        contract = package.manifest["owners"].get(owner_type(self._root), {}).get(name, {}) if package else {}
+        if (self._parent is not None or type(name) is not str or optional is not True or value is not None
+                or contract.get("kind") != "owner_input" or not contract.get("optional_presence")
+                or contract.get("binding_phase") != "preparation"):
+            raise ValueError("Absent owner reference requires a declared optional preparation input")
+        setattr(self._owner, name, None)
 
     def record(self, name, value, *, optional=False):
         if (
@@ -1843,6 +1866,7 @@ class LoadedPackage:
                 82,
                 83,
                 84,
+                85,
             )
             or self.manifest.get("kind") != "forge_definition_package_prototype"
         ):
@@ -1852,6 +1876,10 @@ class LoadedPackage:
             raise ValueError("Application source package is missing its import boundary")
         if self.manifest["target"] != runtime.arch:
             raise ValueError("Package target differs from Runtime")
+        if self.manifest["version"] < 85 and any(
+                member.get("kind") == "owner_input" and member.get("binding_phase") == "preparation"
+                for owner in self.manifest["owners"].values() for member in owner.values()):
+            raise ValueError("Prepared owner inputs require definition package version 85")
         if self.manifest["version"] < 81 and any(
             "prepare_static" in capture
             for entry in self.manifest["entries"].values() for capture in entry.get("captures", ())
