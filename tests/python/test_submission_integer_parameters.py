@@ -113,7 +113,7 @@ def test_submission_integer_schema():
             with pytest.raises((ValueError, TypeError)):
                 parameters.snapshot({"value": invalid})
     parameters = SubmissionParameters(("value",))
-    for dtype in ("f32", "i16", "u8"):
+    for dtype in ("f16", "i16", "u8"):
         with pytest.raises(ValueError):
             parameters.configure([abi.NamedArgument(b"value", Scalar(dtype, 0)._argument())])
     with pytest.raises(ValueError):
@@ -164,7 +164,7 @@ def test_aot_mixed_integer_submission(tmp_path):
                 args = dict(out=out, guard=GUARD, **{name: Scalar(TYPES[name], value)
                             for name, value in values(0, lane).items()})
                 # Reject unsupported/missing types before any native instance is published.
-                with pytest.raises(ValueError):
+                with pytest.raises((ValueError, RuntimeError)):
                     module.prepare_execution("publish", dict(args, left=Scalar("f32", 1)),
                                              execution_domain=domain, mutable_parameters=NAMES)
                 call = scope.enter_context(module.prepare_execution("publish", args,

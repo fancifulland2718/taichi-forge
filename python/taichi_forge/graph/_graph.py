@@ -19504,7 +19504,8 @@ class Graph:
         preparation owns independent arguments and private workspace. Shared
         application arrays and Fields require explicit dependencies.
 
-        Declare replay-only ``i32/u32/i64/u64`` names in ``mutable_parameters`` to
+        Declare replay-only ``i32/u32/i64/u64`` (also ``f32/f64`` on qualified
+        CUDA runtimes) names in ``mutable_parameters`` to
         supply them via ``submit(values={...})``. Every declared value is required
         on every submit. CUDA permits one in-flight use per parameterized
         instance; Vulkan stages each admitted queue slot separately. Prepare

@@ -85,12 +85,13 @@ def test_plan_specialization_preserves_control_aliases_and_independent_bindings(
 
 
 @test_utils.test(arch=ti.cuda, offline_cache=False)
-def test_plan_specialization_keeps_submission_parameters_live(tmp_path):
+@pytest.mark.parametrize("changing_dtype", [ti.i32, ti.f32, ti.f64])
+def test_plan_specialization_keeps_submission_parameters_live(tmp_path, changing_dtype):
     import numpy as np
     from taichi_forge_runtime.aot import ExecutionPlan, Runtime
 
     @ti.kernel
-    def publish(out: ti.types.ndarray(ti.i32, 1), fixed: ti.i32, changing: ti.i32):
+    def publish(out: ti.types.ndarray(changing_dtype, 1), fixed: ti.i32, changing: changing_dtype):
         for i in range(out.shape[0]):
             out[i] = fixed * 10 + changing
 
@@ -102,15 +103,18 @@ def test_plan_specialization_keeps_submission_parameters_live(tmp_path):
                                specialization=dict(constant_args=[1, 2]))])
     with Runtime("cuda") as runtime:
         module = runtime.load_module(path)
-        out = runtime.ndarray("i32", (3,))
+        dtype = str(changing_dtype)
+        numpy_dtype = {"i32": np.int32, "f32": np.float32, "f64": np.float64}[dtype]
+        out = runtime.ndarray(dtype, (3,))
         with runtime.execution_domain(capacity=2) as domain, plan.prepare(
-                module, dict(out=out, fixed=Scalar("i32", 3), changing=Scalar("i32", 1)),
+                module, dict(out=out, fixed=Scalar("i32", 3), changing=Scalar(dtype, 1)),
                 execution_domain=domain, mutable_parameters=("changing",)) as call:
             call.initialize()
-            for value in (9, -4, 13):
+            values = (9, -4, 13) if dtype == "i32" else (9.25, -4.5, 13.125)
+            for value in values:
                 with call.submit(values=dict(changing=value)) as ticket:
                     ticket.wait()
-                np.testing.assert_array_equal(np.frombuffer(out.read(), np.int32), [30 + value] * 3)
+                np.testing.assert_array_equal(np.frombuffer(out.read(), numpy_dtype), [30 + value] * 3)
 
 
 @test_utils.test(arch=ti.cuda, offline_cache=False)

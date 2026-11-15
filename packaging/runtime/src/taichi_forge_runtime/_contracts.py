@@ -58,6 +58,7 @@ _FEATURE_BITS = {
     "cuda_execution_domain_sparse_fields": 40,
     "cuda_submission_parameters_integer": 41,
     "vulkan_submission_parameters_integer": 42,
+    "cuda_submission_parameters_float": 43,
 }
 
 

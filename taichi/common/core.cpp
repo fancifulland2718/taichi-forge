@@ -133,7 +133,8 @@ std::uint64_t get_forge_native_feature_bitmap() {
             kForgeCudaExternalStorageExecutionDomains |
             kForgeCudaSubmissionParameters | kForgeCudaCompletionGpuTiming |
             kForgeCudaExecutionInstanceRetirement |
-            kForgeCudaSubmissionIntegerParameters;
+            kForgeCudaSubmissionIntegerParameters |
+            kForgeCudaSubmissionFloatParameters;
 #if defined(TI_WITH_LLVM)
   result |= kForgeCudaJitGraphExecutionDomains |
             kForgeCudaExecutionDomainSparseFields;

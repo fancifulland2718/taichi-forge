@@ -2647,7 +2647,8 @@ CUDA/Vulkan 共用依赖分析；选中该 recipe 后，`Graph.prepare(..., exec
 completion 覆盖全部分支及后段；采样时间仍为 `execution_envelope`，包含内部等待。
 工作区成本见 `prepared.info["workspace_bytes"]`，并行不保证小工作量更快。
 声明为 replay-only 的 `i32/u32/i64/u64` 参数可按编译 ABI 宽度逐提交更新。
-能力发现、取值检查和所有权见[整数参数更新](cuda_execution_domains.zh.md#逐提交参数)。
+具备对应能力项的 CUDA Runtime 还支持 `f32/f64`。
+能力发现、取值检查和所有权见[参数更新](cuda_execution_domains.zh.md#逐提交参数)。
 其他标量仍在准备时固定，不支持任意 dtype 的参数更新。
 
 host count 截断、producer-owned launch state

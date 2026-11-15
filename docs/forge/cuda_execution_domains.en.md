@@ -409,13 +409,20 @@ ticket = step.submit(values={"epoch": epoch, "simulation_step": step_id,
 ```
 
 `module.prepare_execution(..., mutable_parameters=names)` has the same AOT
-contract. Replay-only `i32/u32/i64/u64` kernel scalars are supported. Check
+contract. `component_instance.prepare(..., mutable_parameters=names)` forwards
+explicit operation arguments; component configuration and resource dimensions
+remain fixed. Replay-only `i32/u32/i64/u64` kernel scalars are supported. Check
 `cuda_submission_parameters_integer` / `vulkan_submission_parameters_integer`
 in the runtime contract manifest before selecting this route; the older `_u64`
-feature alone does not qualify the additional types. Scalars also used in
-initialization, arrays, floating point and smaller integer types are rejected
+feature alone does not qualify the additional types. CUDA additionally supports
+`f32/f64` when `cuda_submission_parameters_float` is present. Vulkan retains its
+integer-only contract. Scalars also used in initialization, arrays and smaller types are rejected
 during preparation. Names and count are caller-defined. Every submit requires all
-declared values, within their declared integer range; bool is rejected.
+declared values, within their declared integer range; bool is rejected. Floating
+values are encoded at their declared precision, including signed zero, infinity
+and NaN; algorithm-specific validity remains the caller's responsibility. Mutable
+values remain live when materializing specialized bitcode; layout facts and
+eligible fixed arguments can still be specialized.
 Mutating the original dictionary after acceptance
 cannot change accepted work. Each instance owns preallocated staging and device
 arguments. Uploads and the complete Graph use the selected queue, and
@@ -427,7 +434,8 @@ Vulkan uses prepared staging and buffer copies with explicit transfer/compute
 dependencies on its leased queue. No upload is redirected to the ordinary queue.
 Host staging keeps an eight-byte slot per parameter. The compiled ABI determines
 whether each destination receives four or eight bytes, preserving neighboring
-fixed arguments. C API consumers pass two's-complement low bits for signed values;
+fixed arguments. C API consumers pass two's-complement low bits for signed values
+and IEEE-754 bits for floating values;
 32-bit values must have zero upper 32 bits in the uint64 submission slot.
 
 CUDA's mutable argument frame permits one in-flight submission per instance;

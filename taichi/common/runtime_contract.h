@@ -70,6 +70,7 @@ inline constexpr std::uint64_t kForgeCudaSubmissionIntegerParameters = 1ull
                                                                        << 41;
 inline constexpr std::uint64_t kForgeVulkanSubmissionIntegerParameters = 1ull
                                                                          << 42;
+inline constexpr std::uint64_t kForgeCudaSubmissionFloatParameters = 1ull << 43;
 
 // Stable C bootstrap used before the pybind module touches any C++ object
 // crossing the split-runtime boundary.  Never extend this v1 struct in place;

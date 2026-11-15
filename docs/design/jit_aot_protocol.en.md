@@ -204,6 +204,17 @@ execution paths.
 Generations, close and in-flight retirement retain existing ownership/lease rules.
 Runtime/provider dependencies need not be embedded in TCM, but must resolve under their contracts.
 
+CUDA independent Graph domains share typed live-scalar submission between JIT
+Graph preparation and AOT Plan/Component preparation. Declared replay-only
+parameters are excluded from constant specialization and copied into each
+accepted submission's existing argument frame; fixed layout facts and resources
+retain their preparation-time contracts. Qualified runtimes support `f32/f64`
+as well as the existing integer types. Component forwarding is limited to
+explicit operation arguments, not configuration or resource dimensions.
+Ordinary JIT `Graph.run` and immutable AOT replay keep their own lifetimes;
+alignment does not require turning every invocation into an independent domain
+or uploading values that never change. See [submission parameters](../forge/cuda_execution_domains.en.md#per-submission-parameters).
+
 For matching inputs, effective configuration and supported capabilities, preserve language,
 value-copy, resource-effect and control semantics. Declared floating-point tolerance may reflect
 optimization/backend differences. Comparisons with different targets, fast-math settings or

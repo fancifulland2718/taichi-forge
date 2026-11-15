@@ -11,6 +11,68 @@ from tests import test_utils
 from tests.python.test_aot_component_setup import _Model
 
 
+@ti.data_oriented
+class _LiveStageModel:
+    def __init__(self, n):
+        self.n, self.bias = n, 1.25
+        scope = ti.experimental.ResourceScope(self)
+        scope.value("bias", ti.f32)
+        scope.out = scope.field(ti.f32, shape=scope.dim("n"), initialization="zero")
+
+    @ti.kernel
+    def stage(self, alpha: ti.f32):
+        for i in range(self.n):
+            self.out[i] += alpha + self.bias
+
+    def record(self, builder):
+        builder.dispatch(self.stage, ti.graph.Arg(ti.graph.ArgKind.SCALAR, "alpha", ti.f32))
+
+
+@test_utils.test(arch=ti.cuda, offline_cache=False)
+def test_component_operation_live_scalar_preserves_fixed_bindings(tmp_path):
+    from contextlib import ExitStack
+
+    owner = _LiveStageModel(3)
+    root = ti.aot.Component.from_owner(owner).compile_graph(owner.record, operations=dict(stage=owner.record))
+    artifact = ti.aot.Module()
+    root.export(artifact, "model")
+    path = tmp_path / "live-stage.tcm"
+    artifact.archive(str(path))
+    ti.reset()
+    with ExitStack() as scope:
+        runtime = scope.enter_context(Runtime("cuda"))
+        module = scope.enter_context(runtime.load_module(path))
+        code = module.component("model")
+        domain = scope.enter_context(runtime.execution_domain(capacity=2))
+        states = [scope.enter_context(code.instantiate(dict(n=n))) for n in (7,11)]
+        calls=[]
+        for state in states:
+            state.initialize(zero=("out",))
+            with pytest.raises(ValueError,match='explicit operation arguments'):
+                state.prepare(values=dict(bias=1.25),arguments=dict(alpha=0.),
+                    execution_domain=domain,operation='stage',mutable_parameters=('bias',))
+            calls.append(scope.enter_context(state.prepare(values=dict(bias=1.25),arguments=dict(alpha=0.),
+                execution_domain=domain,operation='stage',mutable_parameters=('alpha',))))
+        fixed=scope.enter_context(states[0].prepare(values=dict(bias=1.25),arguments=dict(alpha=.25),
+            execution_domain=domain,operation='stage'))
+        for call in (*calls,fixed):
+            call.initialize()
+        for alpha in (.5,-.25,.125):
+            for lane,call in enumerate(calls):
+                values=dict(alpha=alpha+lane)
+                ticket=call.submit(values=values)
+                assert ticket is not None
+                values['alpha']=999.
+                ticket.wait()
+                ticket.close()
+        ticket=fixed.submit()
+        assert ticket is not None
+        ticket.wait()
+        ticket.close()
+        np.testing.assert_array_equal(np.frombuffer(states[0].resource('out').read(),np.float32),np.full(7,5.625,np.float32))
+        np.testing.assert_array_equal(np.frombuffer(states[1].resource('out').read(),np.float32),np.full(11,7.125,np.float32))
+
+
 def test_operation_projection_preserves_constraints_and_private_ownership():
     from taichi_forge_runtime.aot._component_lifecycle import split_component_operations
 

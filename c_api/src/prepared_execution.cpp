@@ -1545,12 +1545,15 @@ static TiPreparedExecution prepare_execution_plan_impl(
         (argument->second->value.scalar.type != TI_DATA_TYPE_U64 &&
          argument->second->value.scalar.type != TI_DATA_TYPE_I64 &&
          argument->second->value.scalar.type != TI_DATA_TYPE_U32 &&
-         argument->second->value.scalar.type != TI_DATA_TYPE_I32) ||
+         argument->second->value.scalar.type != TI_DATA_TYPE_I32 &&
+         !(rt.arch == taichi::Arch::cuda &&
+           (argument->second->value.scalar.type == TI_DATA_TYPE_F32 ||
+            argument->second->value.scalar.type == TI_DATA_TYPE_F64))) ||
         !plan.replay_bindings.count(name) ||
         plan.initialization_bindings.count(name))
       throw MemoryBindingError(
           "Submission parameters require replay-only i32/u32/i64/u64 "
-          "scalars: " +
+          "scalars (also f32/f64 on CUDA): " +
           name);
   }
   std::unordered_set<std::string> patched_parameters;

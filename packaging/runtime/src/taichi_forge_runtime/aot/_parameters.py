@@ -2,6 +2,7 @@
 
 import ctypes
 import operator
+import struct
 from collections.abc import Mapping
 
 
@@ -31,8 +32,13 @@ class SubmissionParameters:
         for name in self.names:
             argument = provided.get(name)
             dtype = dtypes.get(argument.value.scalar.type) if argument is not None and argument.type == 4 else None
-            if dtype not in {"i32", "u32", "i64", "u64"}:
-                raise ValueError(f"Submission parameter {name!r} requires an i32/u32/i64/u64 scalar")
+            if dtype not in {"i32", "u32", "i64", "u64", "f32", "f64"}:
+                raise ValueError(f"Submission parameter {name!r} requires an i32/u32/i64/u64/f32/f64 scalar")
+            if dtype.startswith("f"):
+                # The native ABI still receives raw bits, never an integer
+                # conversion of the floating value. Admission is backend-owned.
+                schema.append((dtype, None, None, None))
+                continue
             bits = int(dtype[1:])
             signed = dtype.startswith("i")
             schema.append((dtype, -(1 << (bits - 1)) if signed else 0,
@@ -43,7 +49,7 @@ class SubmissionParameters:
         if values is None:
             values = {}
         if not isinstance(values, Mapping):
-            raise TypeError("values must be a mapping of declared integer parameters")
+            raise TypeError("values must be a mapping of declared scalar parameters")
         frozen = dict(values)
         if frozen.keys() != self._keys:
             raise ValueError("values must contain exactly the declared mutable_parameters")
@@ -52,6 +58,12 @@ class SubmissionParameters:
         result = []
         for name, (dtype, lower, upper, mask) in zip(self.names, self._schema):
             value = frozen[name]
+            if dtype.startswith("f"):
+                if isinstance(value, (bool, str, bytes)):
+                    raise TypeError("Floating submission parameters require numeric values, not bool or text")
+                encoded = struct.pack("<f" if dtype == "f32" else "<d", float(value))
+                result.append(int.from_bytes(encoded, "little"))
+                continue
             if isinstance(value, bool):
                 raise TypeError("Submission parameter values must be integers, not bool")
             value = operator.index(value)

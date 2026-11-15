@@ -983,7 +983,13 @@ class ComponentInstance:
             self in owners for bindings in runtime._domain_owners.values() for owners in bindings.values()
         )
 
-    def prepare(self, *, values=None, dimensions=None, arguments=None, execution_domain=None, operation=None):
+    def prepare(self, *, values=None, dimensions=None, arguments=None, execution_domain=None, operation=None,
+                mutable_parameters=()):
+        from ._parameters import SubmissionParameters
+
+        mutable_parameters = SubmissionParameters(mutable_parameters).names
+        if any(name not in (arguments or {}) for name in mutable_parameters):
+            raise ValueError("Component submission parameters must be explicit operation arguments")
         runtime = self._component._module._runtime
         with runtime._lock:
             self._check()
@@ -1000,7 +1006,8 @@ class ComponentInstance:
             bindings = self._bindings(plan, values, dimensions, arguments)
             plan = self._workspace_plan(plan, bindings)
             call = self._component._module.prepare_execution(
-                plan, bindings, execution_domain=execution_domain, snode_instance=self._fixed_state
+                plan, bindings, execution_domain=execution_domain, snode_instance=self._fixed_state,
+                mutable_parameters=mutable_parameters,
             )
             try:
                 self._retain_owners(call, (self, *input_owners), execution_domain)

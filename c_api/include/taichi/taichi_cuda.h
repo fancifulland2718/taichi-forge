@@ -255,7 +255,9 @@ ti_prepare_execution_plan_on_domain_ext(TiRuntime runtime,
                                         const TiNamedArgument *args,
                                         uint32_t binding_count,
                                         const TiNamedNdArrayBinding *bindings);
-// Cold declaration of replay-only i32/u32/i64/u64 scalars in positional order.
+// Cold declaration of replay-only i32/u32/i64/u64/f32/f64 scalars in positional
+// order. Floating values use IEEE-754 bits in the uint64 submission slots;
+// f32 uses the low 32 bits with zero upper bits. Query the float capability.
 // Each independent instance owns preallocated pinned/device argument storage.
 // A parameterized instance accepts one in-flight submission; prepare separate
 // instances for overlap. No new kernel compilation or artifact format is used.

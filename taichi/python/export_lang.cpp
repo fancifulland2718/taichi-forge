@@ -8476,6 +8476,8 @@ void export_lang(py::module &m) {
         bool(bitmap & kForgeCudaSubmissionParameters);
     features["cuda_submission_parameters_integer"] =
         bool(bitmap & kForgeCudaSubmissionIntegerParameters);
+    features["cuda_submission_parameters_float"] =
+        bool(bitmap & kForgeCudaSubmissionFloatParameters);
     features["cuda_completion_gpu_timing"] =
         bool(bitmap & kForgeCudaCompletionGpuTiming);
     features["cuda_execution_instance_retirement"] =
