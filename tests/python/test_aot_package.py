@@ -5967,6 +5967,38 @@ def test_package_prepared_owner_requires_proven_type_and_binding(tmp_path, monke
     assert ti.lang.impl.get_runtime().get_num_compiled_functions() == 0
 
 
+@pytest.mark.parametrize('full_owner', [False, True])
+@test_utils.test(arch=[ti.cpu, ti.cuda], offline_cache=False)
+def test_package_prepared_owner_back_reference_needs_finite_resource_contract(tmp_path, monkeypatch, full_owner):
+    source = PREPARED_OWNER_INPUT_SOURCE.replace(
+        'def __init__(self, n: int):', 'def __init__(self, n: int, consumer: "Model"):', 1)
+    declaration = ("scope.owner_reference('consumer', consumer)" if full_owner else
+                   "consumer_scope = scope.record('consumer', consumer)\n"
+                   "        consumer_scope.borrow('out', consumer.out, external=True, dtype=ti.i32, "
+                   "shape=(consumer_scope.dim('n'),))")
+    source = source.replace('        scope.values =', '        ' + declaration + '\n        scope.values =')
+    source = source.replace('return self.values[i]',
+                            'return self.values[i % self.consumer.n] + self.consumer.out[i]')
+    package = _source_package(tmp_path, monkeypatch, source)
+    if full_owner:
+        with pytest.raises(ValueError, match='Cyclic input resource definitions'):
+            ti.aot.export_package(package, tmp_path / 'sdk')
+        assert ti.lang.impl.get_runtime().get_num_compiled_functions() == 0
+        return
+    manifest = ti.aot.export_package(package, tmp_path / 'sdk')
+    with Runtime(manifest['target']) as runtime, load_package(runtime, tmp_path / 'sdk') as code:
+        for n in (3, 11):
+            model = code.host.Model(n)
+            storage = code.host.model.Storage(n, model)
+            storage.values.from_numpy(np.arange(n, dtype=np.int32))
+            model.bind(storage)
+            model.step()
+            assert storage.consumer is model
+            np.testing.assert_array_equal(model.out.to_numpy(), np.arange(n))
+            model.step()
+            np.testing.assert_array_equal(model.out.to_numpy(), 2 * np.arange(n))
+
+
 @test_utils.test(arch=[ti.cpu, ti.cuda], offline_cache=False)
 def test_package_owner_sequence_uses_compiler_write_inventory(tmp_path, monkeypatch):
     package = _source_package(tmp_path, monkeypatch, WRITE_INVENTORY_SOURCE)

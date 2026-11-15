@@ -1351,6 +1351,12 @@ An already bound Graph retains its old resource snapshot; bind it again to use
 new references. The ordinary JIT reference binds before first compilation.
 This does not qualify arbitrary rebinding of compiled JIT template owners or
 export of arbitrary cyclic object graphs.
+For bidirectional associations, an existing `record` with typed external Field
+borrows can declare the members actually read while retaining the original
+object and storage. CPU/CUDA positive and negative checks cover back-reference
+dimensions, reads and writes to the same storage, and live data. Full cycles
+without a finite resource path still reject; no recursive owner-graph service
+is introduced.
 
 Version 42 supports the existing `scope.owner_dim('source', 'n')`. The reference
 must be an unconditional declared owner input and the target a declared dimension.
