@@ -57,7 +57,7 @@ def collect_sources(package, source_root):
             if name == item.__name__ or (hasattr(item, "__path__") and name.startswith(item.__name__ + "."))
         }
     )
-    report = audit_source_imports(available, roots=roots)
+    report = audit_source_imports(available, roots=roots, include_type_checking=False)
     if report["unresolved_local_imports"]:
         raise ValueError("Unresolved local source imports: " + repr(report["unresolved_local_imports"]))
     result = {name: (Path(available[name]["source"]), Path(available[name]["relative"])) for name in report["visited"]}

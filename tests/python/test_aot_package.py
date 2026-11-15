@@ -19,6 +19,30 @@ from taichi_forge_runtime.aot import Runtime, load_package
 
 
 @test_utils.test(arch=ti.cpu, offline_cache=False)
+def test_package_type_only_import_does_not_enter_runtime_closure(tmp_path, monkeypatch):
+    source_root = tmp_path / 'src'
+    source_root.mkdir()
+    package = _source_package(source_root, monkeypatch, '''
+from typing import TYPE_CHECKING
+import taichi_forge as ti
+if TYPE_CHECKING:
+    from .type_only import Simulator
+def describe(value: 'Simulator | None' = None):
+    return value is None
+@ti.kernel
+def increment(value: ti.i32) -> ti.i32:
+    return value + 1
+''', initializer="from .model import increment\n",
+        extra_modules={"type_only": "raise RuntimeError('Type-only module must not be imported or compiled')\n"})
+    manifest = ti.aot.export_package(package.model, tmp_path/'sdk', source_root=source_root)
+    assert 'definition_fixture.type_only' not in manifest['sources']
+    assert 'definition_fixture.type_only' not in sys.modules
+    with Runtime('cpu') as runtime, load_package(runtime, tmp_path/'sdk') as code:
+        assert code.module('definition_fixture.model').describe()
+        assert code.module('definition_fixture.model').increment(7) == 8
+
+
+@test_utils.test(arch=ti.cpu, offline_cache=False)
 def test_package_selects_only_reachable_static_inputs(tmp_path, monkeypatch):
     source = '''import taichi_forge as ti
 @ti.data_oriented

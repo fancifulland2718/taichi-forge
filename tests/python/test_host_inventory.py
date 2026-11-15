@@ -109,3 +109,57 @@ def test_audit_rejects_ambiguous_module_and_package_candidates(tmp_path, audit):
     spec = fixture_spec(tmp_path, {"entry.py": "", "other.py": "", "other/__init__.py": ""}, {"entry": "entry.py"})
     with pytest.raises(ValueError, match="Ambiguous module/package candidate: other"):
         audit["audit_imports"](spec)
+
+
+@pytest.mark.parametrize('import_line,guard', [
+    ('from typing import TYPE_CHECKING', 'TYPE_CHECKING'),
+    ('from typing import TYPE_CHECKING as TC', 'TC'),
+    ('import typing as t', 't.TYPE_CHECKING'),
+])
+def test_runtime_imports_skip_only_proven_type_checking_arms(tmp_path, audit, import_line, guard):
+    fixture_spec(tmp_path, {'app.py': f'''{import_line}
+if {guard}:
+    import dead
+else:
+    import live
+if not {guard}:
+    def lazy():
+        import late
+if unknown:
+    import optional
+''', **{name + '.py': "raise RuntimeError('must not execute')" for name in ('dead', 'live', 'late', 'optional')}},
+                 {'app': 'app.py'})
+    sources = audit['source_inventory'](tmp_path/'src')
+    broad = audit['audit_source_imports'](sources, roots=['app'])
+    runtime = audit['audit_source_imports'](sources, roots=['app'], include_type_checking=False)
+    assert set(broad['visited']) == {'app', 'dead', 'live', 'late', 'optional'}
+    assert set(runtime['visited']) == {'app', 'live', 'late', 'optional'}
+
+
+@pytest.mark.parametrize('shadow', [
+    'TC = True', 'def caller(TC):\n    pass', 'from custom import value as TC',
+    'match {}:\n    case {**TC}:\n        pass',
+])
+def test_runtime_imports_keep_rebound_type_checking_names(tmp_path, audit, shadow):
+    fixture_spec(tmp_path, {'app.py': 'from typing import TYPE_CHECKING as TC\n' + shadow +
+                 '\nif TC:\n    import needed\n', 'needed.py': ''}, {'app': 'app.py'})
+    report = audit['audit_source_imports'](audit['source_inventory'](tmp_path/'src'),
+                                           roots=['app'], include_type_checking=False)
+    assert set(report['visited']) == {'app', 'needed'}
+
+
+def test_runtime_imports_keep_local_typing_module(tmp_path, audit):
+    fixture_spec(tmp_path, {'app.py': 'from typing import TYPE_CHECKING\nif TYPE_CHECKING:\n    import needed\n',
+                            'typing.py': 'TYPE_CHECKING = True', 'needed.py': ''}, {'app': 'app.py'})
+    report = audit['audit_source_imports'](audit['source_inventory'](tmp_path/'src'),
+                                           roots=['app'], include_type_checking=False)
+    assert set(report['visited']) == {'app', 'typing', 'needed'}
+
+
+def test_runtime_imports_keep_mutated_typing_attribute(tmp_path, audit):
+    fixture_spec(tmp_path, {'app.py': 'import typing\ntyping.TYPE_CHECKING = True\n'
+                            'from typing import TYPE_CHECKING\nif TYPE_CHECKING:\n    import needed\n',
+                            'needed.py': ''}, {'app': 'app.py'})
+    report = audit['audit_source_imports'](audit['source_inventory'](tmp_path/'src'),
+                                           roots=['app'], include_type_checking=False)
+    assert set(report['visited']) == {'app', 'needed'}

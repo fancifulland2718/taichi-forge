@@ -47,7 +47,76 @@ def audit_imports(filename, *, source_root=None, roots=()):
     return audit_source_imports(dict(candidates, **selected), roots=roots, selected=selected, aliases=aliases)
 
 
-def audit_source_imports(available, *, roots=(), selected=None, aliases=None):
+def _runtime_import_nodes(tree):
+    """Skip only proven stdlib TYPE_CHECKING arms, retaining ordinary branches.
+
+    Any rebinding (including a nested argument) makes the name conservative.
+    This is import selection, not a general Python constant evaluator.
+    """
+    if not any(
+        isinstance(s, ast.ImportFrom) and s.level == 0 and s.module == 'typing'
+        and any(a.name == 'TYPE_CHECKING' for a in s.names)
+        or isinstance(s, ast.Import) and any(a.name == 'typing' for a in s.names)
+        for s in tree.body
+    ):
+        yield from ast.walk(tree)
+        return
+    nodes = tuple(ast.walk(tree))
+    bindings = {}
+    for node in nodes:
+        names = []
+        if isinstance(node, (ast.Import, ast.ImportFrom)):
+            names = [(a.asname or (a.name.split('.')[0] if isinstance(node, ast.Import) else a.name), a)
+                     for a in node.names]
+        elif isinstance(node, ast.Name) and isinstance(node.ctx, (ast.Store, ast.Del)):
+            names = [(node.id, node)]
+        elif isinstance(node, ast.arg):
+            names = [(node.arg, node)]
+        elif isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+            names = [(node.name, node)]
+        elif isinstance(node, (ast.ExceptHandler, ast.MatchAs, ast.MatchStar)) and node.name:
+            names = [(node.name, node)]
+        elif isinstance(node, ast.MatchMapping) and node.rest:
+            names = [(node.rest, node)]
+        for name, site in names:
+            bindings.setdefault(name, []).append(site)
+    constants, modules = {}, {}
+    mutated_attribute = any(isinstance(n, ast.Attribute) and n.attr == 'TYPE_CHECKING'
+                            and isinstance(n.ctx, (ast.Store, ast.Del)) for n in nodes)
+    if '*' not in bindings and not mutated_attribute:
+        for statement in tree.body:
+            if not isinstance(statement, (ast.Import, ast.ImportFrom)):
+                continue
+            for alias in statement.names:
+                name = alias.asname or alias.name
+                if bindings.get(name) != [alias]:
+                    continue
+                if (isinstance(statement, ast.ImportFrom) and statement.level == 0
+                        and statement.module == 'typing' and alias.name == 'TYPE_CHECKING'):
+                    constants[name] = statement.lineno
+                elif isinstance(statement, ast.Import) and alias.name == 'typing':
+                    modules[name] = statement.lineno
+    pending = [tree]
+    while pending:
+        node = pending.pop()
+        yield node
+        if isinstance(node, ast.If):
+            test, negated = node.test, False
+            if isinstance(test, ast.UnaryOp) and isinstance(test.op, ast.Not):
+                test, negated = test.operand, True
+            line = None
+            if isinstance(test, ast.Name):
+                line = constants.get(test.id)
+            elif (isinstance(test, ast.Attribute) and test.attr == 'TYPE_CHECKING'
+                  and isinstance(test.value, ast.Name)):
+                line = modules.get(test.value.id)
+            if line is not None and line < node.lineno:
+                pending.extend(reversed([node.test, *(node.body if negated else node.orelse)]))
+                continue
+        pending.extend(reversed(list(ast.iter_child_nodes(node))))
+
+
+def audit_source_imports(available, *, roots=(), selected=None, aliases=None, include_type_checking=True):
     """Shared static dependency walk for audits and definition package exports."""
     selected, aliases = selected or {}, aliases or {}
     local_roots = {name.split(".")[0] for name in available} | {name.split(".")[0] for name in aliases}
@@ -102,8 +171,11 @@ def audit_source_imports(available, *, roots=(), selected=None, aliases=None):
             parent = parent.rpartition(".")[0]
         package = name if item["package"] else name.rpartition(".")[0]
         tree = ast.parse(data, filename=item["source"])
+        # A local module named typing is not the stdlib contract. Advisory
+        # audits retain their original broad walk unless explicitly requested.
+        nodes = tuple(ast.walk(tree)) if include_type_checking or 'typing' in local_roots else tuple(_runtime_import_nodes(tree))
         dynamic_names, importlib_names = {"__import__"}, set()
-        for node in ast.walk(tree):
+        for node in nodes:
             if isinstance(node, ast.ImportFrom) and node.module == "importlib":
                 dynamic_names.update(a.asname or a.name for a in node.names if a.name == "import_module")
             if isinstance(node, ast.Import):
@@ -112,7 +184,7 @@ def audit_source_imports(available, *, roots=(), selected=None, aliases=None):
                     for a in node.names
                     if a.name == "importlib" or (a.name.startswith("importlib.") and a.asname is None)
                 )
-        for node in ast.walk(tree):
+        for node in nodes:
             if isinstance(node, ast.Import):
                 pending.extend((entry.name, name, node.lineno, "import") for entry in node.names)
             elif isinstance(node, ast.ImportFrom):
@@ -160,7 +232,8 @@ def audit_source_imports(available, *, roots=(), selected=None, aliases=None):
                         pending.append((target, name, node.lineno, "literal_dynamic"))
     return dict(
         version=1,
-        coverage="Static syntax only; optional branches may over-report and dynamic imports may be missed.",
+        coverage=("Static syntax only; optional branches may over-report and dynamic imports may be missed."
+                  + (" Proven stdlib TYPE_CHECKING arms are excluded." if not include_type_checking else "")),
         roots=list(roots),
         local_roots=sorted(local_roots),
         visited=sorted(seen),
