@@ -4,6 +4,7 @@
 #include <exception>
 #include <limits>
 #include "taichi/program/program.h"
+#include "taichi/program/runtime_fault.h"
 #include "taichi/program/storage_view.h"
 #include "taichi/runtime/native_image.h"
 #include "taichi/runtime/native_vulkan_ray_access.h"
@@ -150,7 +151,8 @@ struct AotRuntimeClient::State {
       : program(&program),
         runtime(std::move(runtime)),
         arch(program.compile_config().arch),
-        device_id(reinterpret_cast<std::uintptr_t>(&this->runtime->get())) {
+        device_id(reinterpret_cast<std::uintptr_t>(&this->runtime->get())),
+        fault_domain(program.runtime_fault_domain()) {
     if (&this->runtime->get() != program.get_compute_device())
       throw std::logic_error("AOT borrower did not share its Program device");
     this->runtime->borrow_runtime_fault_domain(
@@ -170,6 +172,7 @@ struct AotRuntimeClient::State {
   std::unique_ptr<::Runtime> runtime;
   const Arch arch;
   const std::uintptr_t device_id;
+  const std::shared_ptr<RuntimeFaultDomain> fault_domain;
   std::atomic<bool> closed{false};
   std::vector<Program::RuntimeResourceSubmissionGuard> scopes;
 
@@ -269,6 +272,11 @@ void AotRuntimeClient::retire() {
 
 bool AotRuntimeClient::closed() const {
   return state_->closed.load(std::memory_order_acquire);
+}
+RuntimeFaultSnapshot AotRuntimeClient::fault_snapshot() const {
+  // The domain retains no Program/backend handles. It remains readable after
+  // submission rejection and retirement without reopening the borrowed owner.
+  return state_->fault_domain->snapshot();
 }
 std::uintptr_t AotRuntimeClient::handle() const {
   std::lock_guard<std::recursive_mutex> lock(state_->mutex);

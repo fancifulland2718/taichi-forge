@@ -176,6 +176,10 @@ class _ModuleBinding:
             **{dtype: dtype for dtype in _DTYPES},
         )
 
+    def runtime_fault(self):
+        self.package._check()
+        return self.package.runtime.fault_snapshot()
+
     def written_resources(self, owner, record):
         from ._package_graph import GraphBuilder
 
@@ -1868,6 +1872,7 @@ class LoadedPackage:
                 84,
                 85,
                 86,
+                87,
             )
             or self.manifest.get("kind") != "forge_definition_package_prototype"
         ):
@@ -1877,6 +1882,13 @@ class LoadedPackage:
             raise ValueError("Application source package is missing its import boundary")
         if self.manifest["target"] != runtime.arch:
             raise ValueError("Package target differs from Runtime")
+        requirements = self.manifest.get("runtime_requirements", [])
+        if not isinstance(requirements, list) or any(item != "fault_snapshot" for item in requirements):
+            raise ValueError("Unsupported package runtime requirement")
+        if requirements:
+            if self.manifest["version"] < 87:
+                raise ValueError("Runtime fault snapshots require definition package version 87")
+            runtime._require_fault_snapshot()
         texture_arguments = [argument for entry in self.manifest["entries"].values()
                              for argument in entry["arguments"] if argument.get("kind") == "texture"]
         if texture_arguments:

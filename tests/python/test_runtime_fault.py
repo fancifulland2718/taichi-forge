@@ -6,6 +6,63 @@ from taichi_forge.lang import impl
 from tests import test_utils
 
 
+@test_utils.test(arch=[ti.cpu, ti.cuda], offline_cache=False)
+def test_aot_fault_snapshot_shares_first_fault_without_waiting(monkeypatch):
+    import ctypes as C
+    from dataclasses import asdict, FrozenInstanceError
+
+    runtime = ti.aot.borrow_runtime()
+    healthy = runtime.fault_snapshot()
+    assert asdict(healthy) == asdict(ti.runtime.stats().fault)
+    before = ti.runtime.stats().synchronization
+    with monkeypatch.context() as patch:
+        patch.setattr(runtime, 'wait', lambda: pytest.fail('Fault query must not wait'))
+        assert runtime.fault_snapshot() == healthy
+    assert ti.runtime.stats().synchronization == before
+
+    # The C ABI reports the required capacity without partially overwriting a
+    # short buffer. Invalid pointers reject without changing fault state.
+    runtime._api.load_runtime_fault_snapshot()
+    query = runtime._api.ti_get_runtime_fault_snapshot_ext
+    size = C.c_uint64(1)
+    buffer = C.create_string_buffer(b'Z')
+    runtime._api.call(query, runtime._handle, C.byref(size), buffer)
+    assert size.value > 1 and buffer.value == b'Z'
+    with pytest.raises(RuntimeError, match='size'):
+        runtime._api.call(query, runtime._handle, None, None)
+    assert runtime.fault_snapshot() == healthy
+
+    program = impl.get_runtime().prog
+    code = 700 if ti.cfg.arch == ti.cuda else -1
+    message = 'quoted "message" and unicode 关闭\\newline\n' * 50
+    program._debug_inject_runtime_fault(code, 'snapshot_test', message)
+    first = runtime.fault_snapshot()
+    assert asdict(first) == asdict(ti.runtime.fault_snapshot())
+    assert first.state == 'faulted' and first.first_fatal_faults == 1
+    assert first.first_fault.message == message
+    # Check the same record through the independent C ABI, including its resize
+    # path and JSON escaping. The borrowed adapter still owns this handle here.
+    import json
+    size = C.c_uint64(0)
+    runtime._api.call(query, runtime._handle, C.byref(size), None)
+    assert size.value > 512
+    buffer = C.create_string_buffer(size.value)
+    runtime._api.call(query, runtime._handle, C.byref(size), buffer)
+    raw = json.loads(buffer.value)
+    assert raw.pop('schema_version') == 1 and raw == asdict(first)
+    assert healthy.state == 'healthy' and healthy.first_fault is None
+    with pytest.raises(FrozenInstanceError):
+        first.state = 'healthy'
+    program._debug_inject_runtime_fault(code, 'second_fault', 'must not replace the first record')
+    with monkeypatch.context() as patch:
+        patch.setattr(runtime, 'wait', lambda: pytest.fail('Fault query must not wait'))
+        assert runtime.fault_snapshot() == first
+    runtime.close()
+    ti.reset()
+    with pytest.raises(RuntimeError, match='closed'):
+        runtime.fault_snapshot()
+
+
 @test_utils.test(arch=[ti.cpu, ti.cuda, ti.vulkan])
 def test_faulted_runtime_rejects_work_and_reset_creates_healthy_program():
     arch = impl.current_cfg().arch

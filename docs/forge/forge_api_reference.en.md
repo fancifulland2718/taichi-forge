@@ -1411,6 +1411,17 @@ diagnostic, not a steady-state kernel/Graph tracer; enabling it after package
 import cannot reconstruct import or native-loader time. `startup_profile()`
 does not require a CUDA driver or active Program.
 
+### `ti.runtime.fault_snapshot()`
+
+Returns immutable first-fault state for the active Program: `state`,
+`first_fatal_faults`, `rejected_submissions`, and optional `first_fault`
+(`backend`, `backend_code`, `sequence`, `operation`, `message`). The records
+support `dataclasses.asdict`. The query reads only the existing host fault domain;
+it makes no device call or wait and does not require admission for new work.
+Use it when deciding whether teardown can synchronize after a fatal error.
+Full `stats()` may consult resources that reject access in a faulted Program.
+This query does not recover the backend or permit further submissions.
+
 ### `ti.runtime.stats()`
 
 Returns an immutable `RuntimeStatistics` snapshot:

@@ -6,6 +6,15 @@ or Host transfers by default. Development can opt in with
 This checks existing assertions; it does not insert assertions into release code.
 Driver errors and input/resource lifetime contracts retain their normal handling.
 
+`runtime.fault_snapshot()` reads immutable first-fault metadata without a device
+call, wait, or submission. It has the same fault fields as
+`ti.runtime.fault_snapshot()` in a JIT script. A borrower keeps only its host fault
+domain readable after work is rejected; it does not revive the Program or device.
+Explicitly closing the Python Runtime retires this query as well. The C extension
+is `ti_get_runtime_fault_snapshot_ext`; a missing native query raises explicitly.
+Use this narrow snapshot during faulted teardown instead of collecting full
+resource statistics. It does not detect faults that the backend has not reported.
+
 [中文](aot_sdk.zh.md)
 
 For the new experiment using existing decorators to separate numerical methods

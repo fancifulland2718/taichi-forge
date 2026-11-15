@@ -10,6 +10,15 @@ No export decorator, per-kernel registration or component root is required.
 This is a limited prototype, not a complete engine distribution interface.
 Its format and supported scope are experimental.
 
+Format 87 projects the Host query `ti.runtime.fault_snapshot()` onto the
+runtime's existing first-fault domain. It returns an immutable snapshot with
+the same fault fields, including an optional record accepted by `dataclasses.asdict`.
+This cold query makes no device call, wait or new-work admission. Borrowers read
+retained host-only fault state after submission rejection; ordinary work still
+rejects a faulted runtime. A package declaring this requirement rejects a native
+runtime without the query before loading its Host modules. This does not project
+full `ti.runtime.stats()` or enable telemetry during export or execution.
+
 Definition-package AOT materialization retains required build definitions independently
 of the JIT `kernel_specialization_limit`. It keeps normal executable ownership and
 memory accounting; this does not promise a memory bound or remove duplicate code.

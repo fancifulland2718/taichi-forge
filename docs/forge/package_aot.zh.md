@@ -7,6 +7,12 @@
 `@ti.func`、`@ti.real_func`、`@ti.pyfunc`、`@ti.dataclass` 和 `@ti.data_oriented`，无需增加导出装饰器、逐 Kernel 注册或组件根。
 这个接口目前是小范围原型，不是完整引擎的一键发行接口，格式和支持范围尚未稳定。
 
+格式 87 将 Host 查询 `ti.runtime.fault_snapshot()` 投影到现有 Runtime 首次故障域，
+返回同字段的不可变快照；可选故障记录支持 `dataclasses.asdict`。冷查询不调用设备、
+不等待，也不进入新工作准入；借用者被拒绝提交后仍可读取所持有的纯 Host 故障状态，
+普通工作继续拒绝故障 Runtime。声明该需求的包在加载 Host 模块前检查原生接口是否存在。
+这不投影完整 `ti.runtime.stats()`，不在正常导出或执行中开启统计诊断。
+
 定义包的显式 AOT 编译保留构建所需定义，不受 JIT 驻留 `kernel_specialization_limit` 截断。
 可执行代码所有权和内存计账仍保留；这不代表内存有界或重复代码已消除。
 原配置上限仍作用于之后普通 JIT 的新编译请求。

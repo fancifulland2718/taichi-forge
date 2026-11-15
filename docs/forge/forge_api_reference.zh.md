@@ -1146,6 +1146,15 @@ materialization 与 primitive-capability registration 的配对 phase duration�
 import 后才启用时无法重建 import 或 native-loader 时间。`startup_profile()` 不要求 CUDA driver
 或 active Program。
 
+### `ti.runtime.fault_snapshot()`
+
+返回当前 Program 的不可变首次故障状态：`state`、`first_fatal_faults`、
+`rejected_submissions` 和可选的 `first_fault`（`backend`、`backend_code`、
+`sequence`、`operation`、`message`）。记录支持 `dataclasses.asdict`。
+查询只读取已有的 Host 故障域，不调用设备、不等待，也不要求新工作准入。
+关闭阶段判断致命故障后是否可以同步时使用此查询；完整 `stats()` 可能访问已拒绝
+故障 Program 的资源。该查询不会恢复后端，也不会允许继续提交。
+
 ### `ti.runtime.stats()`
 
 返回不可变的 `RuntimeStatistics` snapshot：

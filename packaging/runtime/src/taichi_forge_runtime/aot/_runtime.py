@@ -30,6 +30,24 @@ from ._completion import SubmissionTicket
 from ._struct import StructLayout
 from ._value import ArgPackLayout, ArgumentLayout, ReturnLayout, _BoundValue
 
+
+@dataclass(frozen=True)
+class RuntimeFault:
+    backend: str
+    backend_code: int
+    sequence: int
+    operation: str
+    message: str
+
+
+@dataclass(frozen=True)
+class FaultStatistics:
+    state: str
+    first_fatal_faults: int
+    rejected_submissions: int
+    first_fault: RuntimeFault | None
+
+
 __all__ = [
     "AotError",
     "Runtime",
@@ -194,6 +212,45 @@ class Runtime:
     def _check(self):
         if self._handle is None or (self._borrower is not None and self._borrower.closed):
             raise RuntimeError("AOT runtime is closed")
+
+    def _require_fault_snapshot(self):
+        if self._borrower is not None:
+            if not hasattr(self._borrower, 'fault_snapshot'):
+                raise NotImplementedError("The selected Forge borrower has no fault snapshot query")
+        else:
+            self._api.load_runtime_fault_snapshot()
+
+    def fault_snapshot(self):
+        """Read this runtime's first-fault state without polling or waiting on a device."""
+        self._require_fault_snapshot()
+        if self._borrower is not None:
+            # Entering a borrower is submission admission, which rejects fatal
+            # state. Read its retained host-only domain directly instead.
+            if self._handle is None:
+                raise RuntimeError("AOT runtime is closed")
+            data = self._borrower.fault_snapshot()
+        else:
+            data = self._standalone_fault_snapshot()
+        if data["first_fault"] is not None:
+            data["first_fault"] = RuntimeFault(**data["first_fault"])
+        return FaultStatistics(**data)
+
+    def _standalone_fault_snapshot(self):
+        with self._lock:
+            self._check()
+            query = self._api.ti_get_runtime_fault_snapshot_ext
+            size = 512
+            while True:
+                buffer = C.create_string_buffer(size)
+                required = C.c_uint64(size)
+                self._api.call(query, self._handle, C.byref(required), buffer)
+                if required.value <= size:
+                    break
+                size = required.value
+            data = json.loads(buffer.value)
+            if data.pop("schema_version") != 1:
+                raise ValueError("Unsupported runtime fault snapshot schema")
+            return data
 
     def device_capabilities(self):
         """Return a snapshot of this runtime's enabled device capability levels.

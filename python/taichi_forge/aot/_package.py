@@ -536,6 +536,7 @@ def _host_projection(
         def __init__(self):
             self.producer_only = []
             self.host_functions = []
+            self.runtime_requirements = set()
 
         def producer_allocation(self, node, role):
             if not self.host_functions:
@@ -1068,6 +1069,11 @@ def _host_projection(
 
         def visit_Attribute(self, node):
             role = qualified_kind(node, kind)
+            if isinstance(node.ctx, ast.Load) and role == "runtime.fault_snapshot":
+                self.minimum_version = max(self.minimum_version, 87)
+                self.runtime_requirements.add("fault_snapshot")
+                return ast.copy_location(
+                    ast.Attribute(ast.Name(_PREFIX + "runtime", ast.Load()), "runtime_fault", ast.Load()), node)
             if isinstance(node.ctx, ast.Load) and role == "lang.util.to_numpy_type":
                 self.minimum_version = max(self.minimum_version, 83)
                 return ast.copy_location(
@@ -1461,7 +1467,8 @@ def _host_projection(
         ).body
         ast.fix_missing_locations(projected)
         compile(projected, f"<projected-host:{module}>", "exec")
-        return ast.unparse(projected) + "\n", projector.minimum_version, projector.producer_only
+        return (ast.unparse(projected) + "\n", projector.minimum_version,
+                projector.producer_only, sorted(projector.runtime_requirements))
     finally:
         # Local transformer classes form cycles (including their MRO). Their
         # method closures must not pin the complete declaration/owner graph or
@@ -2748,7 +2755,7 @@ def _export_package(package, output, *, arch, caps, source_root, compilation, ar
             contract = manifest["entry_families"].get(first) or manifest["entries"][code_symbol]
             manifest["entry_families"][symbol] = dict(arguments=contract["arguments"], owner_inputs=methods)
             entries[definition["name"]] = dict(symbol=symbol)
-        host_source, minimum_version, producer_only = _host_projection(
+        host_source, minimum_version, producer_only, runtime_requirements = _host_projection(
             name,
             tree,
             kind,
@@ -2768,6 +2775,9 @@ def _export_package(package, output, *, arch, caps, source_root, compilation, ar
         payloads["host/" + relative.as_posix()] = host_source.encode("utf8")
         manifest["version"] = max(manifest["version"], minimum_version)
         manifest["producer_only"].extend(producer_only)
+        if runtime_requirements:
+            manifest["runtime_requirements"] = sorted(
+                set(manifest.get("runtime_requirements", ())) | set(runtime_requirements))
         manifest["sources"][name] = hashlib.sha256(text.encode("utf8")).hexdigest()
         owner_graph.release_module(name)
         owners.clear()

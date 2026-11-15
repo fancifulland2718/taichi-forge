@@ -10,6 +10,11 @@ CPU/CUDA 独立 `Runtime` 默认不在同步或 Host 传输后回读设备断言
 开发时可显式使用 `Runtime("cuda", debug=True)`；借用 JIT Runtime 时继承
 `ti.init(debug=True)`。这只启用已有断言的检查，不会给发行代码补插断言。
 设备驱动错误和输入/资源生命周期合同仍由原执行路径处理。
+`runtime.fault_snapshot()` 只读首次故障元数据，不调用设备、不等待、不提交，字段与
+JIT 脚本的 `ti.runtime.fault_snapshot()` 相同。借用者被拒绝工作后只保留可读的 Host
+故障域，不恢复 Program 或设备；显式关闭 Python Runtime 后该查询也会拒绝。
+对应 C 扩展为 `ti_get_runtime_fault_snapshot_ext`，缺少原生接口时明确报错。
+故障关闭阶段应使用这个窄快照，避免收集完整资源统计；它不探测后端尚未报告的故障。
 有界独立 CUDA 队列、精确设备依赖和显式初始化见
 [CUDA 执行域](cuda_execution_domains.zh.md)。开发接口在运行时绑定已保存计划，
 不序列化 stream 身份，也不改变已选择的执行路线。

@@ -1164,6 +1164,14 @@ ti_get_runtime_capabilities(TiRuntime runtime,
                             // Returned capabilities.
                             TiCapabilityLevelInfo *capabilities);
 
+// Reads the shared runtime fault domain without backend calls or waits. The
+// schema-version-1 JSON contains state, first_fatal_faults, rejected_submissions
+// and the immutable first_fault record (or null). *size receives the required
+// byte count including the terminator. If json is null or its input capacity is
+// insufficient, no bytes are written; callers may retry with the reported size.
+TI_DLL_EXPORT void TI_API_CALL
+ti_get_runtime_fault_snapshot_ext(TiRuntime runtime, uint64_t *size, char *json);
+
 // Function `ti_allocate_memory` (1.4.0)
 //
 // Allocates a contiguous device memory with provided parameters.

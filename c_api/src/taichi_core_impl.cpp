@@ -17,6 +17,7 @@
 #include "taichi/program/runtime_fault.h"
 #include "taichi/common/virtual_dir.h"
 #include "taichi/common/utils.h"
+#include "taichi/common/json.h"
 #include "taichi/runtime/vulkan_execution_domain.h"
 #ifdef TI_WITH_LLVM
 #include "taichi/rhi/cpu/cpu_device.h"
@@ -647,6 +648,39 @@ void ti_get_runtime_capabilities(TiRuntime runtime,
 
   *capability_count = count;
 
+  TI_CAPI_TRY_CATCH_END();
+}
+
+void ti_get_runtime_fault_snapshot_ext(TiRuntime runtime,
+                                       uint64_t *size,
+                                       char *json) {
+  TI_CAPI_TRY_CATCH_BEGIN();
+  TI_CAPI_ARGUMENT_NULL(runtime);
+  TI_CAPI_ARGUMENT_NULL(size);
+  using namespace liong::json;
+  auto &owner = *reinterpret_cast<Runtime *>(runtime);
+  std::lock_guard<std::recursive_mutex> lock(owner.submission_mutex());
+  const auto snapshot = owner.runtime_fault_domain()->snapshot();
+  JsonValue first;
+  if (snapshot.first_fault) {
+    const auto &fault = *snapshot.first_fault;
+    first = JsonValue(JsonObject{
+        {"backend", JsonValue(taichi::arch_name(fault.backend))},
+        {"backend_code", JsonValue(fault.backend_code)},
+        {"sequence", JsonValue(fault.submission_sequence)},
+        {"operation", JsonValue(fault.operation)},
+        {"message", JsonValue(fault.message)}});
+  }
+  const auto text = print(JsonValue(JsonObject{
+      {"schema_version", JsonValue(1)},
+      {"state", JsonValue(taichi::lang::runtime_lifecycle_state_name(snapshot.state))},
+      {"first_fatal_faults", JsonValue(snapshot.first_fault ? 1 : 0)},
+      {"rejected_submissions", JsonValue(snapshot.rejected_submissions)},
+      {"first_fault", std::move(first)}}));
+  const auto capacity = *size;
+  *size = text.size() + 1;
+  if (json && capacity >= *size)
+    std::memcpy(json, text.c_str(), *size);
   TI_CAPI_TRY_CATCH_END();
 }
 

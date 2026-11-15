@@ -765,6 +765,25 @@ py::dict primitive_workspace_snapshot_to_dict(
   return result;
 }
 
+py::dict runtime_fault_snapshot_to_dict(const lang::RuntimeFaultSnapshot &snapshot) {
+  py::dict result;
+  result["state"] = lang::runtime_lifecycle_state_name(snapshot.state);
+  result["first_fatal_faults"] = snapshot.first_fault ? 1 : 0;
+  result["rejected_submissions"] = snapshot.rejected_submissions;
+  if (snapshot.first_fault) {
+    const auto &fault = *snapshot.first_fault;
+    py::dict first;
+    first["backend"] = arch_name(fault.backend);
+    first["backend_code"] = fault.backend_code;
+    first["sequence"] = fault.submission_sequence;
+    first["operation"] = fault.operation;
+    first["message"] = fault.message;
+    result["first_fault"] = std::move(first);
+  } else {
+    result["first_fault"] = py::none();
+  }
+  return result;
+}
 }  // namespace
 
 void export_lang(py::module &m) {
@@ -812,6 +831,9 @@ void export_lang(py::module &m) {
            py::call_guard<py::gil_scoped_release>())
 #endif
       .def_property_readonly("closed", &AotRuntimeClient::closed)
+      .def("fault_snapshot", [](const AotRuntimeClient &client) {
+        return runtime_fault_snapshot_to_dict(client.fault_snapshot());
+      })
       .def_property_readonly("handle", &AotRuntimeClient::handle)
       .def_property_readonly("device_identity",
                              &AotRuntimeClient::device_identity)
@@ -2329,6 +2351,9 @@ void export_lang(py::module &m) {
         return result;
       })
       .def("_runtime_has_fatal_fault", &Program::runtime_has_fatal_fault)
+      .def("_runtime_fault_snapshot", [](const Program &program) {
+        return runtime_fault_snapshot_to_dict(program.runtime_fault_snapshot());
+      })
       .def("_debug_inject_runtime_fault",
            &Program::debug_inject_runtime_fault)
       .def("_debug_runtime_fault_state", [](const Program &program) {

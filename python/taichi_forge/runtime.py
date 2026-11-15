@@ -281,6 +281,16 @@ def _trace_session_from_raw(raw) -> RuntimeTraceSession:
     return RuntimeTraceSession(**raw)
 
 
+def fault_snapshot() -> FaultStatistics:
+    """Read immutable first-fault state without device access or submission admission."""
+    prog = _require_program("fault_snapshot")
+    raw = _require_program_method(prog, "_runtime_fault_snapshot", "fault_snapshot")()
+    return FaultStatistics(
+        state=raw["state"], first_fatal_faults=raw["first_fatal_faults"],
+        rejected_submissions=raw["rejected_submissions"], first_fault=_runtime_fault(raw["first_fault"]),
+    )
+
+
 def stats() -> RuntimeStatistics:
     """Return an immutable snapshot for the active Program generation."""
     prog = _require_program("stats")
@@ -510,6 +520,7 @@ __all__ = [
     "TransferStatistics",
     "capabilities",
     "configure_startup_profile",
+    "fault_snapshot",
     "stats",
     "startup_profile",
     "trace",

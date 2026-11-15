@@ -40,6 +40,79 @@ class Model:
 """
 
 
+@test_utils.test(arch=[ti.cpu, ti.cuda], offline_cache=False)
+def test_package_fault_query_preserves_teardown_without_frontend(tmp_path, monkeypatch):
+    from dataclasses import asdict
+    source = '''
+import taichi_forge as ti
+from dataclasses import asdict
+def retire():
+    fault = ti.runtime.fault_snapshot()
+    if fault.first_fault is None:
+        ti.sync()
+    return asdict(fault)
+@ti.kernel
+def value(x: ti.i32) -> ti.i32:
+    return x + 3
+'''
+    package = _source_package(tmp_path, monkeypatch, source, initializer='from .model import retire, value\n')
+    output = tmp_path/'sdk'
+    manifest = ti.aot.export_package(package.model, output)
+    assert manifest['version'] == 87
+    assert manifest['runtime_requirements'] == ['fault_snapshot']
+    arch = ti.cfg.arch.name
+    probe = tmp_path/'consume_fault.py'
+    probe.write_text(textwrap.dedent('''
+        import importlib.abc, sys
+        class NoSource(importlib.abc.MetaPathFinder):
+            def find_spec(self, fullname, path=None, target=None):
+                if fullname.split('.')[0] in ('taichi', 'taichi_forge', 'definition_fixture'):
+                    raise AssertionError(fullname)
+        sys.meta_path.insert(0, NoSource())
+        from taichi_forge_runtime.aot import Runtime, load_package
+        with Runtime(sys.argv[2]) as runtime, load_package(runtime, sys.argv[1]) as code:
+            assert code.host.value(8) == 11
+            assert code.host.retire() == dict(state='healthy', first_fatal_faults=0,
+                                             rejected_submissions=0, first_fault=None)
+        print('FAULT_SOURCE_FREE_OK')
+    '''), encoding='utf8')
+    env = dict(os.environ, PYTHONDONTWRITEBYTECODE='1',
+        PYTHONPATH=str(Path(__file__).resolve().parents[2]/'packaging/runtime/src'),
+        TAICHI_NATIVE_RUNTIME_DIR=str(Path(utils._loaded_native_runtime_path).parent),
+        TAICHI_RUNTIME_DIR=utils._runtime_bitcode_dir())
+    result = subprocess.run([sys.executable, '-B', str(probe), str(output), arch], cwd=tmp_path,
+                            env=env, capture_output=True, text=True, timeout=90)
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert 'FAULT_SOURCE_FREE_OK' in result.stdout
+    with Runtime(arch) as runtime:
+        with monkeypatch.context() as patch:
+            def missing():
+                raise NotImplementedError('missing native fault query')
+            patch.setattr(runtime, '_require_fault_snapshot', missing)
+            with pytest.raises(NotImplementedError, match='missing native fault query'):
+                load_package(runtime, output)
+        path = output/'package.json'
+        manifest['version'] = 86
+        path.write_text(json.dumps(manifest), encoding='utf8')
+        try:
+            with pytest.raises(ValueError, match='version 87'):
+                load_package(runtime, output)
+        finally:
+            manifest['version'] = 87
+            path.write_text(json.dumps(manifest), encoding='utf8')
+    with ti.aot.borrow_runtime() as runtime, load_package(runtime, output) as code:
+        assert code.host.retire() == package.retire()
+        ti.lang.impl.get_runtime().prog._debug_inject_runtime_fault(-1, 'test_teardown', 'do not synchronize')
+        # The normal JIT and projected Host branches both avoid sync after a fault.
+        assert code.host.retire() == package.retire() == asdict(runtime.fault_snapshot())
+        # Submission rejection may close the borrower's call scope; cold diagnosis
+        # still reports its first fault instead of entering that scope again.
+        with pytest.raises(RuntimeError):
+            code.host.value(2)
+        assert code.host.retire()['first_fault']['operation'] == 'test_teardown'
+    ti.reset()
+
+
 @test_utils.test(arch=ti.cuda, offline_cache=False)
 def test_package_sampled_texture_inputs_preserve_live_data_and_bindings(tmp_path, monkeypatch):
     source_root = tmp_path / 'src'

@@ -438,6 +438,17 @@ class Api:
         function.argtypes, function.restype = [Handle], UInt
         setattr(self, name, function)
 
+    def load_runtime_fault_snapshot(self):
+        name = "ti_get_runtime_fault_snapshot_ext"
+        if getattr(self, name, None) is not None:
+            return
+        try:
+            function = getattr(self.library, name)
+        except AttributeError as error:
+            raise NotImplementedError("The selected Forge runtime has no fault snapshot query") from error
+        function.argtypes, function.restype = [Handle, C.POINTER(C.c_uint64), C.c_void_p], None
+        setattr(self, name, function)
+
     def load_debug_mode(self):
         name = "ti_set_runtime_debug_mode_ext"
         if getattr(self, name, None) is not None:

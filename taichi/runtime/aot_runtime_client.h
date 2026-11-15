@@ -15,6 +15,7 @@ class Program;
 class Ndarray;
 class Texture;
 class RuntimeCompletion;
+struct RuntimeFaultSnapshot;
 namespace cuda {
 class ExecutionDomain;
 }
@@ -39,6 +40,8 @@ class AotRuntimeClient final : public RuntimeClient {
   void close();
   void retire() override;
   bool closed() const;
+  // Read retained host-only fault state without entering a submission scope.
+  TI_DLL_EXPORT RuntimeFaultSnapshot fault_snapshot() const;
   std::uintptr_t handle() const;
   std::uintptr_t device_identity() const;
   Arch arch() const;
