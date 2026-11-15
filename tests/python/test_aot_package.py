@@ -3417,6 +3417,49 @@ def test_package_typed_owner_input_needs_no_constructor_call_sample(tmp_path, mo
         np.testing.assert_array_equal(storage.values.to_numpy(), 3 * np.arange(7) + 7)
 
 
+@test_utils.test(arch=ti.cpu, offline_cache=False)
+def test_package_scoped_owner_parameter_uses_proven_type_and_instance(tmp_path, monkeypatch):
+    source = OWNER_INPUT_SOURCE[: OWNER_INPUT_SOURCE.index("class Forward:")]
+    source = source.replace("        scope.reader = Reader(self)\n", "").replace(
+        "def __init__(self, source):", "def __init__(self, source: Storage):"
+    ).replace("scope.owner_reference('source', source)", "scope.source = source")
+    package = _source_package(tmp_path, monkeypatch, source,
+                              initializer="from .model import Reader as Model, Storage\n")
+    manifest = ti.aot.export_package(package, tmp_path / "sdk")
+    assert sys.modules["definition_fixture.model"].constructors == 0
+    with Runtime(manifest["target"]) as runtime, load_package(runtime, tmp_path / "sdk") as code:
+        a, b = code.host.Storage(5, True), code.host.Storage(9, False)
+        left, right = code.host.Model(a), code.host.Model(b)
+        left.step(3.0)
+        right.step(-2.0)
+        np.testing.assert_array_equal(a.values.to_numpy(), 3 * np.arange(5) + 7)
+        np.testing.assert_array_equal(b.values.to_numpy(), -2 * np.arange(9) + 2)
+        assert left.source is a and right.source is b
+        with pytest.raises(ValueError):
+            code.host.Model(left)
+
+
+@pytest.mark.parametrize("change", ["untyped", "reassigned", "duplicate"])
+@test_utils.test(arch=ti.cpu, offline_cache=False)
+def test_package_scoped_owner_parameter_rejects_unproven_source(tmp_path, monkeypatch, change):
+    source = OWNER_INPUT_SOURCE[: OWNER_INPUT_SOURCE.index("class Forward:")]
+    source = source.replace("        scope.reader = Reader(self)\n", "").replace(
+        "def __init__(self, source):", "def __init__(self, source: Storage):"
+    ).replace("scope.owner_reference('source', source)", "scope.source = source")
+    if change == "untyped":
+        source = source.replace("source: Storage", "source")
+    elif change == "reassigned":
+        source = source.replace("scope.source = source", "source = None\n        scope.source = source")
+    else:
+        source = source.replace("scope.source = source", "scope.source = source\n        self.source = None")
+    package = _source_package(tmp_path, monkeypatch, source,
+                              initializer="from .model import Reader as Model, Storage\n")
+    with pytest.raises(ValueError):
+        ti.aot.export_package(package, tmp_path / "sdk")
+    assert sys.modules["definition_fixture.model"].constructors == 0
+    assert not (tmp_path / "sdk").exists()
+
+
 def _default_owner_source(annotation=""):
     source = OWNER_INPUT_SOURCE[: OWNER_INPUT_SOURCE.index("class Forward:")]
     source = source.replace("        scope.reader = Reader(self)\n", "").replace(

@@ -1167,6 +1167,19 @@ def scope_declarations(
                 )
 
     parameters = (*constructor.args.posonlyargs, *constructor.args.args, *constructor.args.kwonlyargs)
+    # Scoped existing-owner assignments need an explicit source type. Scalar
+    # assignments still acquire their role from dim/value/static declarations.
+    from ._package_factories import _source_value
+    import inspect
+
+    typed_owner_parameters = set()
+    for parameter in parameters:
+        annotation = parameter.annotation
+        while isinstance(annotation, ast.Constant) and isinstance(annotation.value, str):
+            annotation = ast.parse(annotation.value, mode="eval").body
+        declared = _source_value(annotation, namespace)
+        if inspect.isclass(declared) and declared.__module__ != "builtins":
+            typed_owner_parameters.add(parameter.arg)
     defaults = (
         dict(
             zip(
@@ -1242,6 +1255,13 @@ def scope_declarations(
                     return None
                 fields.add(call.args[0].value)
                 borrows.add(call.args[0].value)
+            elif isinstance(node, (ast.Assign, ast.AnnAssign)) and isinstance(call, ast.Name):
+                targets = node.targets if isinstance(node, ast.Assign) else [node.target]
+                if (len(targets) == 1 and isinstance(targets[0], ast.Attribute)
+                        and scope_binding(targets[0].value) in scopes
+                        and call.id in typed_owner_parameters and stores[call.id] == 1
+                        and call.id not in deleted):
+                    fields.add(targets[0].attr)
             elif isinstance(node, ast.Assign) and len(node.targets) == 1 and isinstance(call, ast.Call):
                 target = node.targets[0]
                 if isinstance(target, ast.Attribute) and scope_binding(target.value) in scopes:
@@ -2488,6 +2508,28 @@ def scope_declarations(
                 receiver = scope_binding(target.value)
                 if receiver in scopes and not scope_paths[receiver]:
                     scope_writes.append(target)
+                    if (
+                        isinstance(statement.value, ast.Name)
+                        and statement.value.id in typed_owner_parameters
+                        and stores[statement.value.id] == 1
+                        and statement.value.id not in deleted
+                        and target.attr not in declarations
+                        and target.attr not in (earlier or {})
+                    ):
+                        if member_stores[target.attr] != 1:
+                            fail(module, statement, "Scoped owner input requires one unmodified constructor assignment")
+                        add(
+                            target.attr,
+                            dict(
+                                kind="owner_input",
+                                input_parameter=statement.value.id,
+                                reference_assignment=[statement.lineno, statement.col_offset],
+                                scope_allocation=origin(receiver),
+                                **({"conditions": dict(conditions)} if conditions else {}),
+                            ),
+                            statement,
+                        )
+                        allowed.add(id(target.value))
                     construction = statement.value
                     if isinstance(construction, ast.Name):
                         construction = child_constructor_aliases.get(construction.id)

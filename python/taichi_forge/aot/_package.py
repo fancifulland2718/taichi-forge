@@ -558,6 +558,20 @@ def _host_projection(
             schema = binding_schemas.get(self.owner, {})
             if (
                 isinstance(target, ast.Attribute)
+                and schema.get(target.attr, {}).get("reference_assignment") == [node.lineno, node.col_offset]
+            ):
+                self.minimum_version = max(self.minimum_version, 22)
+                return ast.copy_location(
+                    ast.Expr(ast.Call(
+                        ast.Attribute(ast.Name(_PREFIX + "runtime", ast.Load()), "owner_reference", ast.Load()),
+                        [ast.Constant(module + "." + self.owner), self.visit(target.value),
+                         ast.Constant(target.attr), self.visit(node.value)],
+                        [],
+                    )),
+                    node,
+                )
+            if (
+                isinstance(target, ast.Attribute)
                 and isinstance(target.value, ast.Name)
                 and "array_extents" in schema.get(target.attr, {})
                 and schema[target.attr]["allocation"] == [node.lineno, node.col_offset]
@@ -1952,6 +1966,7 @@ def _export_package(package, output, *, arch, caps, source_root, compilation, ar
                         "placement_alias",
                         "borrow_declaration",
                         "reference_declaration",
+                        "reference_assignment",
                         "constructor_call",
                         "input_references",
                         "default_constructor_call",
