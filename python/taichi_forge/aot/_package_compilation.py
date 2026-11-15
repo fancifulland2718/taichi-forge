@@ -38,6 +38,7 @@ class PackageCompilation(FunctionLibrary):
         self.field_trees = []
         self._automatic_gc = None
         self._retained_functions = {}
+        self._released = False
 
     def __enter__(self):
         return self
@@ -192,6 +193,8 @@ class PackageCompilation(FunctionLibrary):
     def _release(self):
         from taichi_forge.lang import impl
 
+        if self._released:
+            return
         # Also release incomplete definitions after a failed build. This never
         # clears user caches or touches submitted executable handles.
         for kernel in self.kernels.values():
@@ -243,3 +246,4 @@ class PackageCompilation(FunctionLibrary):
                 # Also release cache leases for the successful prefix if a
                 # later tree failed. Remaining trees stay owned for retry.
                 runtime.clear_compiled_functions()
+        self._released = True

@@ -1784,18 +1784,78 @@ def _export_package(package, output, *, arch, caps, source_root, compilation, ar
         if definition["kind"] in ("func", "real_func") and not definition.get("error_interface")
     }
     shared_entries, pyfunc_kernels, closure_kernels = {}, {}, {}
-    for name, path, relative, text, tree, kind, schemas, definitions in sources:
+    for source_index, (name, source_path, relative, text, tree, kind, schemas, definitions) in enumerate(sources):
         imported = imported_modules[name]
         if any(getattr(node, "_package_inherited_resource_dependencies", False) for node in tree.body):
             manifest["version"] = max(67, manifest["version"])
         owners = {}
         environments = {}
         compilation_schemas = {}
+
+        entries = {}
+        compiled_definitions = []
+        input_families = getattr(tree, "_package_input_families", {})
+        for definition in definitions:
+            if definition.get("free_template"):
+                continue
+            variants = input_families.get(definition["owner"])
+            if variants:
+                for variant in variants:
+                    context = variant["owner"].rpartition(".")[2]
+                    compiled_definitions.append(
+                        {
+                            **definition,
+                            "owner": context,
+                            "name": context + definition["name"][len(definition["owner"]) :],
+                        }
+                    )
+            else:
+                compiled_definitions.append(definition)
         for class_name in schemas:
-            owner, schema, environment, expanded = owner_graph.context(name + "." + class_name)
+            for call in function_inputs.get(name + "." + class_name, ()):
+                compiled_definitions.append(
+                    dict(
+                        owner=class_name,
+                        node=call["node"],
+                        kind="kernel",
+                        name=class_name
+                        + ".__function_"
+                        + hashlib.sha256(
+                            json.dumps(
+                                [call["definition"], call["templates"], call["resources"]], sort_keys=True
+                            ).encode()
+                        ).hexdigest(),
+                        function_kernel=call["kernel"],
+                        function_identity=call["definition"],
+                        function_receiver=call["receiver"],
+                        function_templates=call["templates"],
+                        function_resources=call["resources"],
+                    )
+                )
+        numerical_owners = {
+            definition["owner"] for definition in compiled_definitions
+            if definition["kind"] in ("kernel", "pyfunc")
+            and not definition.get("requires_owner") and not definition.get("error_interface")
+        }
+        numerical_owners.update(
+            class_name for class_name in schemas if factory_calls.get(name + "." + class_name)
+        )
+
+        def owner_context(class_name):
+            if class_name not in owners:
+                value, _, context, expanded = owner_graph.context(name + "." + class_name)
+                owners[class_name], environments[class_name] = value, context
+                compilation_schemas[class_name] = expanded
+            return owners[class_name]
+
+        for class_name in schemas:
+            # A selected numerical owner supplies this layout too. Do not
+            # construct a reduced copy immediately before its full compilation.
+            owner, schema, environment, expanded = (
+                owner_graph.context(name + "." + class_name) if class_name in numerical_owners
+                else owner_graph.contract(name + "." + class_name)
+            )
             schemas[class_name] = schema
-            owners[class_name], environments[class_name] = owner, environment
-            compilation_schemas[class_name] = expanded
             if (
                 len(
                     {
@@ -1924,15 +1984,15 @@ def _export_package(package, output, *, arch, caps, source_root, compilation, ar
                 for group in sorted(
                     {item.get("group", "fields") for item in schema.values() if item["kind"] == "dense_field"}
                 ):
-                    layout, members, dimensions, _ = _dense_group(environments[class_name], owner, group)
+                    layout, members, dimensions, _ = _dense_group(environment, owner, group)
                     if any(paths[0] == "schema_nodes" for paths in members.values()):
                         manifest["version"] = max(26, manifest["version"])
                     key = owner_key if group == "fields" else owner_key + ":" + group
                     manifest["field_groups"][key] = dict(schema=layout, members=members, dimensions=sorted(dimensions))
                     member_schemas = {
                         attribute: schema[
-                            environments[class_name]._source_scope_paths.get(
-                                attribute, environments[class_name]._paths[attribute]
+                            environment._source_scope_paths.get(
+                                attribute, environment._paths[attribute]
                             )[0]
                         ]
                         for attribute in members
@@ -1982,11 +2042,11 @@ def _export_package(package, output, *, arch, caps, source_root, compilation, ar
 
                         manifest["field_groups"][key]["conditions"] = conditions
                         presence = {
-                            flag: list(environments[class_name]._paths[flag])
+                            flag: list(environment._paths[flag])
                             for guards in conditions.values()
                             for flag in guards
-                            if compilation_schemas[class_name][flag]["kind"] == "record"
-                            and compilation_schemas[class_name][flag].get("optional")
+                            if expanded[flag]["kind"] == "record"
+                            and expanded[flag].get("optional")
                         }
                         if presence:
                             manifest["field_groups"][key]["record_presence"] = presence
@@ -2020,53 +2080,14 @@ def _export_package(package, output, *, arch, caps, source_root, compilation, ar
                             select_layout(contract, {**selection, flag: False})
                         manifest["version"] = max(40, manifest["version"])
                     for attribute in members:
-                        path = environments[class_name]._paths[attribute]
+                        path = environment._paths[attribute]
                         item = manifest["owners"][owner_key][path[0]]
                         item["field_group"] = key
                         if len(path) > 1:
                             item.setdefault("member_ids", {})[path[1]] = attribute
-        entries = {}
-        compiled_definitions = []
-        input_families = getattr(tree, "_package_input_families", {})
-        for definition in definitions:
-            if definition.get("free_template"):
-                continue
-            variants = input_families.get(definition["owner"])
-            if variants:
-                for variant in variants:
-                    context = variant["owner"].rpartition(".")[2]
-                    compiled_definitions.append(
-                        {
-                            **definition,
-                            "owner": context,
-                            "name": context + definition["name"][len(definition["owner"]) :],
-                        }
-                    )
-            else:
-                compiled_definitions.append(definition)
-        for class_name in schemas:
-            for call in function_inputs.get(name + "." + class_name, ()):
-                compiled_definitions.append(
-                    dict(
-                        owner=class_name,
-                        node=call["node"],
-                        kind="kernel",
-                        name=class_name
-                        + ".__function_"
-                        + hashlib.sha256(
-                            json.dumps(
-                                [call["definition"], call["templates"], call["resources"]], sort_keys=True
-                            ).encode()
-                        ).hexdigest(),
-                        function_kernel=call["kernel"],
-                        function_identity=call["definition"],
-                        function_receiver=call["receiver"],
-                        function_templates=call["templates"],
-                        function_resources=call["resources"],
-                    )
-                )
         for class_name in schemas:
             for attribute, call, recipe in factory_calls.get(name + "." + class_name, ()):
+                owner_context(class_name)
                 closure_environment = copy.copy(environments[class_name])
                 try:
                     kernel, bindings, selected = materialize_closure(
@@ -2097,7 +2118,7 @@ def _export_package(package, output, *, arch, caps, source_root, compilation, ar
                 continue
             owner_name, node = definition["owner"], definition["node"]
             definition_name = definition.get("function_identity", name + "." + definition["name"])
-            owner = owners.get(owner_name)
+            owner = owner_context(owner_name) if owner_name is not None else None
             entry = (
                 definition["function_kernel"]
                 if "function_kernel" in definition
@@ -2654,6 +2675,8 @@ def _export_package(package, output, *, arch, caps, source_root, compilation, ar
                         ),
                     )
                 )
+            if compilation.static_preparation is not None:
+                compilation.static_preparation.release_entry(kernel)
         for definition in definitions:
             variants = input_families.get(definition["owner"])
             if (
@@ -2691,12 +2714,20 @@ def _export_package(package, output, *, arch, caps, source_root, compilation, ar
             application_modules,
             frozenset(manifest["error_interfaces"]),
             host_contexts,
-            lambda identity: owner_graph.context(identity)[1],
+            owner_graph.schema,
         )
         payloads["host/" + relative.as_posix()] = host_source.encode("utf8")
         manifest["version"] = max(manifest["version"], minimum_version)
         manifest["producer_only"].extend(producer_only)
         manifest["sources"][name] = hashlib.sha256(text.encode("utf8")).hexdigest()
+        owner_graph.release_module(name)
+        owners.clear()
+        environments.clear()
+        compilation_schemas.clear()
+        # Coverage and source-integrity facts are already in the manifest. Do
+        # not retain every processed source tree until the final archive. The
+        # static/task helper analysis owns only the syntax it still needs.
+        sources[source_index] = (name, source_path, relative, None, None, kind, {}, ())
     context_payloads, manifest["host_contexts"] = host_contexts.render()
     payloads.update(context_payloads)
     if not manifest["entries"]:
@@ -2706,6 +2737,11 @@ def _export_package(package, output, *, arch, caps, source_root, compilation, ar
     complete = False
     try:
         module.archive(str(staging / "code.tcm"), shared_component_contracts=True)
+        # Archive owns complete bytes/contracts. No following file publication
+        # needs frontend definitions, native witnesses or builder cache leases.
+        owner_graph = owner = environment = expanded = compilation_schema = None
+        contexts = compiled_definitions = None
+        compilation._release()
         for relative, data in payloads.items():
             target = staging / relative
             target.parent.mkdir(parents=True, exist_ok=True)
@@ -2713,7 +2749,10 @@ def _export_package(package, output, *, arch, caps, source_root, compilation, ar
         for path in sorted(staging.rglob("*")):
             if path.is_file():
                 manifest["files"][path.relative_to(staging).as_posix()] = hashlib.sha256(path.read_bytes()).hexdigest()
-        if any(path.read_text(encoding="utf8") != text for _, path, _, text, *_ in sources):
+        if any(
+            hashlib.sha256(path.read_text(encoding="utf8").encode("utf8")).hexdigest() != manifest["sources"][name]
+            for name, path, *_ in sources
+        ):
             raise PackageExportError("Source changed during export")
         (staging / "package.json").write_text(json.dumps(manifest, separators=(",", ":")), encoding="utf8")
         complete = True

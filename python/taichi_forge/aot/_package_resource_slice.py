@@ -21,6 +21,12 @@ class AllocationSchema:
                 self.records.setdefault(path, []).append(key)
             if item["kind"] == "dense_field":
                 self.groups.setdefault(item.get("group", "fields"), []).append(key)
+        # A field can declare computed extents which construct_fields resolves
+        # into dimension attributes. Borrowing such an attribute requires its
+        # allocating field and expression dependencies, not an undeclared leaf.
+        for key, item in schema.items():
+            for dimension in item.get("dimension_sources", {}):
+                self.paths.setdefault((dimension,), [key])
 
     def select(self, source_paths):
         return _allocation_schema(self, source_paths)
@@ -34,9 +40,13 @@ def _allocation_schema(index, source_paths):
     schema = index.schema
     selected, pending, children = set(), [], {}
     expanded_groups = set()
+    reference_paths, visited_paths = [], set()
 
     def require_path(path):
         path = tuple(path)
+        if path in visited_paths:
+            return
+        visited_paths.add(path)
         matches = [
             (key, path[:length])
             for length in range(len(path) + 1)
@@ -52,6 +62,10 @@ def _allocation_schema(index, source_paths):
             if schema[parent]["kind"] in ("owner", "owner_input") and len(owner_path) < len(path):
                 require(parent)
                 children.setdefault(parent, set()).add(path[len(owner_path) :])
+                if "reference_path" in schema[parent]:
+                    # An owner alias carries the same selected members, not a
+                    # request to construct the complete referenced solver.
+                    reference_paths.append((*schema[parent]["reference_path"], *path[len(owner_path) :]))
         item = schema[key]
         if item["kind"] in ("owner", "owner_input"):
             if len(path) == len(prefix):
@@ -80,7 +94,10 @@ def _allocation_schema(index, source_paths):
 
     for path in source_paths:
         require_path(path)
-    while pending:
+    while pending or reference_paths:
+        if reference_paths:
+            require_path(reference_paths.pop())
+            continue
         key = pending.pop()
         item = schema[key]
         path = tuple(item.get("path", (key,)))
@@ -92,6 +109,8 @@ def _allocation_schema(index, source_paths):
         for part in ("shape", "expression", "dimension_expressions", "dimensions", "constraints"):
             expression_dependencies(item.get(part, ()))
         for part in ("source_path", "like_source_path", "reference_path", "owner_dimension"):
+            if part == "reference_path" and item["kind"] in ("owner", "owner_input"):
+                continue
             if item.get(part):
                 require_path(item[part])
         for part in ("shape_policy", "dtype_policy", "source_policy"):
@@ -119,8 +138,17 @@ def _allocation_schema(index, source_paths):
         nodes.extend(ast.parse(source, mode="eval").body for source in item.get("dimension_sources", {}).values())
         for node in nodes:
             intermediate = {id(part.value) for part in ast.walk(node) if isinstance(part, ast.Attribute)}
-            for part in ast.walk(node):
-                require(getattr(part, "_package_model_extent", None))
+            parts = [node]
+            while parts:
+                part = parts.pop()
+                extent = getattr(part, "_package_model_extent", None)
+                if extent is not None:
+                    # resolve_type substitutes the declared extent here. A
+                    # field_like copy keeps the source expression as syntax,
+                    # but its dependencies belong to the remapped dimension.
+                    require(extent)
+                    continue
+                parts.extend(ast.iter_child_nodes(part))
                 if isinstance(part, ast.Attribute) and id(part) not in intermediate:
                     suffix, base = [], part
                     while isinstance(base, ast.Attribute):

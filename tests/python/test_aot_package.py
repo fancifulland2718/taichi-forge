@@ -341,6 +341,37 @@ def wrapper(x, ENABLED: ti.template()):
     assert proof._function_task_context('model.wrapper', {'ENABLED': False}, set())
 
 
+def test_package_static_analysis_releases_finished_syntax_without_gc():
+    import gc
+    import weakref
+    from taichi_forge.aot._package_static import StaticPreparation
+    from taichi_forge.tools._compiled_host import decorator_resolver
+
+    source = '''import taichi_forge as ti
+@ti.func
+def ordinary(x):
+    return x + 1
+@ti.func
+def cooperative(enabled: ti.template()):
+    if ti.static(enabled):
+        ti.simt.block.sync()
+'''
+    automatic = gc.isenabled()
+    gc.disable()
+    try:
+        tree = ast.parse(source)
+        module, ordinary = weakref.ref(tree), weakref.ref(tree.body[1])
+        proof = StaticPreparation([('model', None, None, source, tree, decorator_resolver(tree), None, None)])
+        del tree
+        assert module() is None and ordinary() is None
+        # Task-dependent helper syntax still refines the original boolean call.
+        assert not proof._function_task_context('model.cooperative', {'enabled': False}, set())
+        assert proof._function_task_context('model.cooperative', {'enabled': True}, set())
+    finally:
+        if automatic:
+            gc.enable()
+
+
 @test_utils.test(arch=ti.cuda, offline_cache=False)
 def test_package_library_keeps_caller_array_templates_inline(tmp_path, monkeypatch):
     from taichi_forge.lang._function_library import FunctionLibrary
@@ -2226,6 +2257,8 @@ def test_package_witness_retirement_batches_cache_cleanup(monkeypatch, failure):
         monkeypatch.setattr(SNodeTree, "_destroy", destroy)
     compilation._release()
     assert flushes == ([1, 3] if failure else [3])
+    compilation._release()
+    assert flushes == ([1, 3] if failure else [3])
     assert not compilation.field_trees
     assert all(tree.destroyed for tree in trees)
     assert runtime.prog._debug_snode_metadata_stats()["active_tree_count"] == baseline
@@ -2295,6 +2328,94 @@ def value() -> ti.i32:
     manifest = json.loads((output / 'package.json').read_text())
     with Runtime(manifest['target']) as target, load_package(target, output) as code:
         assert code.host.value() == 7
+
+
+@pytest.mark.parametrize('change_source', [False, True])
+@test_utils.test(arch=[ti.cpu, ti.cuda], offline_cache=False)
+def test_package_layout_only_owners_retire_before_publication(tmp_path, monkeypatch, change_source):
+    import weakref
+    from taichi_forge.aot import _package
+    from taichi_forge.aot._package_owner_graph import OwnerGraph
+    from taichi_forge.aot.module import Module
+
+    package = _source_package(tmp_path, monkeypatch, '''
+import taichi_forge as ti
+@ti.data_oriented
+class Storage:
+    def __init__(self, n: int):
+        self.n = n
+        s = ti.experimental.ResourceScope(self)
+        s.values = s.field(ti.i32, shape=s.dim('n'), initialization='zero')
+    @ti.kernel
+    def fill(self, value: ti.i32):
+        for i in self.values:
+            self.values[i] = value + i
+@ti.data_oriented
+class Model:
+    def __init__(self, n: int):
+        s = ti.experimental.ResourceScope(self)
+        s.storage = Storage(n)
+@ti.kernel
+def answer() -> ti.i32:
+    return 7
+''', initializer='from .model import Model, answer\n')
+    caller = ti.field(ti.i32, shape=3)
+    caller[0] = 19
+    runtime = ti.lang.impl.get_runtime()
+    baseline = runtime.prog._debug_snode_metadata_stats()['active_tree_count']
+    archive, publish = Module.archive, _package._publish_package
+    boundaries, storage_constructions, graphs = [], [], []
+    construct = OwnerGraph.construct
+
+    def construct_once(graph, identity, **kwargs):
+        if not graphs:
+            graphs.append(weakref.ref(graph))
+        if identity == 'definition_fixture.model.Storage' and not kwargs.get('path'):
+            storage_constructions.append(identity)
+        return construct(graph, identity, **kwargs)
+
+    def save(module, path, **kwargs):
+        # Storage's own layout is sufficient; Model must not construct another
+        # Storage allocation just to publish its ordinary Host constructor.
+        assert runtime.prog._debug_snode_metadata_stats()['active_tree_count'] == baseline + 1
+        # The numerical Storage owner also supplies its Host layout contract.
+        assert len(storage_constructions) == 1
+        boundaries.append('archive')
+        result = archive(module, path, **kwargs)
+        if change_source:
+            source = Path(sys.modules['definition_fixture.model'].__file__)
+            with source.open('a', encoding='utf8') as stream:
+                stream.write('\n# concurrent source change\n')
+        return result
+
+    def publish_released(*args):
+        assert graphs[0]() is None
+        assert runtime.prog._debug_snode_metadata_stats()['active_tree_count'] == baseline
+        assert caller[0] == 19
+        boundaries.append('publish')
+        return publish(*args)
+
+    monkeypatch.setattr(Module, 'archive', save)
+    monkeypatch.setattr(_package, '_publish_package', publish_released)
+    monkeypatch.setattr(OwnerGraph, 'construct', construct_once)
+    output = tmp_path / 'sdk'
+    if change_source:
+        with pytest.raises(_package.PackageExportError, match='Source changed during export'):
+            ti.aot.export_package(package, output)
+        assert boundaries == ['archive'] and not output.exists()
+        assert not list(tmp_path.glob('.forge-package-*'))
+    else:
+        manifest = ti.aot.export_package(package, output)
+        assert boundaries == ['archive', 'publish']
+        with Runtime(manifest['target']) as target, load_package(target, output) as code:
+            assert code.host.answer() == 7
+            for n in (3, 7):
+                model = code.host.Model(n)
+                np.testing.assert_array_equal(model.storage.values.to_numpy(), np.zeros(n, dtype=np.int32))
+                model.storage.fill(n)
+                np.testing.assert_array_equal(model.storage.values.to_numpy(), n + np.arange(n))
+    assert runtime.prog._debug_snode_metadata_stats()['active_tree_count'] == baseline
+    assert caller[0] == 19
 
 
 OWNER_INPUT_SOURCE = """
@@ -6036,6 +6157,22 @@ def test_package_allocation_slice_preserves_layout_dependencies():
         with pytest.raises(ValueError, match=message):
             index.select([path])
     assert list(index.select([("buffer", "left")])[0]) == expected
+
+
+def test_package_allocation_slice_follows_owner_alias_members():
+    from taichi_forge.aot._package_resource_slice import allocation_schema
+
+    schema = {
+        'storage': {'kind': 'owner_input'},
+        'alias': {'kind': 'owner_input', 'reference_path': ['storage', 'nested']},
+        'unused': {'kind': 'owner'},
+        'values': {'kind': 'borrowed_field', 'source_path': ['alias', 'data']},
+    }
+    selected, children = allocation_schema(schema, [('values',)])
+    assert list(selected) == ['storage', 'alias', 'values']
+    assert children == {'alias': {('data',)}, 'storage': {('nested', 'data')}}
+    with pytest.raises(ValueError, match='concrete member'):
+        allocation_schema(schema, [('unused',)])
 
 
 def test_package_allocation_slice_releases_temporary_schema_without_gc():

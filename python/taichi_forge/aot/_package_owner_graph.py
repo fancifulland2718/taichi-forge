@@ -37,6 +37,7 @@ class OwnerGraph:
         self.imported, self.module = imported, module
         self.field_trees = field_trees
         self._contexts = {}
+        self._schemas = {}
         self._resource_contexts = {}
         self._allocation_schemas = {}
         self._field_witnesses = {}
@@ -53,7 +54,33 @@ class OwnerGraph:
         key = identity, tuple(sorted((choices or {}).items()))
         if key not in self._contexts:
             self._contexts[key] = self.construct(identity, choices=choices)
+        if not choices:
+            self._schemas[identity] = self._contexts[key][1]
         return self._contexts[key]
+
+    def contract(self, identity):
+        """Extract this owner's native layout without its unused solver graph.
+
+        Keep the pointer-free declaration afterwards. Physical allocation groups
+        still use the shared witness pool, including their source dependencies.
+        """
+        result = self.construct(identity, contract_only=True)
+        self._schemas[identity] = result[1]
+        return result
+
+    def schema(self, identity):
+        if identity not in self._schemas:
+            self.contract(identity)
+        return self._schemas[identity]
+
+    def release_module(self, module):
+        # Numerical owner instances are needed while this module's entries and
+        # variants are captured. Later Host queries need only their schemas;
+        # borrowed allocation views and native groups retain independent reuse.
+        self._contexts = {
+            key: value for key, value in self._contexts.items()
+            if self.definitions[key[0]][0] != module
+        }
 
     def _validate(self, identity, ancestors):
         if identity not in self.definitions:
@@ -65,7 +92,8 @@ class OwnerGraph:
                 for choice in item.get("owner_alternatives", [item]):
                     self._validate(choice["owner_type"], (*ancestors, identity))
 
-    def construct(self, identity, *, resource_only=False, references=(), choices=None, path=(), resource_paths=None):
+    def construct(self, identity, *, resource_only=False, references=(), choices=None, path=(), resource_paths=None,
+                  contract_only=False):
         import taichi_forge as ti
         from taichi_forge.lang.matrix import MatrixType
         from taichi_forge_runtime._static_values import read_static_key
@@ -88,6 +116,16 @@ class OwnerGraph:
         name, class_name, original = self.definitions[identity]
         schema = original
         source_children = {}
+        if contract_only and any(item["kind"] in ("owner", "owner_input") for item in original.values()):
+            from ._package_resource_slice import AllocationSchema
+
+            # Host layout extraction needs local declarations and the resources
+            # they actually reference, not every owned child's numerical state.
+            paths = [tuple(item.get("path", (key,))) for key, item in original.items()
+                     if item["kind"] not in ("owner", "owner_input", "host_owner_sequence")]
+            if identity not in self._allocation_schemas:
+                self._allocation_schemas[identity] = AllocationSchema(original)
+            _, source_children = self._allocation_schemas[identity].select(paths)
         if resource_paths is not None:
             from ._package_resource_slice import AllocationSchema
 
@@ -222,6 +260,8 @@ class OwnerGraph:
         children, child_values = {}, {}
         for attribute, item in schema.items():
             if item["kind"] in ("owner", "owner_input"):
+                if contract_only and attribute not in source_children:
+                    continue
                 child_choices = dict(choices or {})
                 child_schema = self.definitions[item["owner_type"]][2]
                 inputs = [
@@ -280,7 +320,7 @@ class OwnerGraph:
                         )
                 value, _, child, expanded = self.construct(
                     item["owner_type"],
-                    resource_only=resource_only or item["kind"] == "owner_input",
+                    resource_only=contract_only or resource_only or item["kind"] == "owner_input",
                     references=references,
                     choices=child_choices,
                     path=(*path, attribute),
@@ -313,6 +353,8 @@ class OwnerGraph:
                 declarations[attribute] = Record(optional=item.get("optional", False))
                 continue
             if item["kind"] in ("owner", "owner_input"):
+                if attribute not in children:
+                    continue
                 record = (
                     _ConditionalOwnerRecord(item["conditions"].items())
                     if item.get("conditions") else Record()
@@ -377,6 +419,8 @@ class OwnerGraph:
         from ._component import _capture_id
 
         for attribute, item in schema.items():
+            if attribute not in children:
+                continue
             for member, target in item.get("input_references", {}).items():
                 child_schema = children[attribute][1]
                 source = child_schema[member]

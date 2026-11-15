@@ -179,6 +179,23 @@ class StaticPreparation:
             for name, reasons in uses[False].items():
                 self.uses.setdefault(name, set()).update(reasons)
 
+        # The structural-use analysis is complete. Its parent/read/write maps
+        # hold millions of AST references in large packages and are never used
+        # by classify()/project(). Only task-context refinement still needs the
+        # syntax of helpers in that conservative call closure.
+        self._local_values.clear()
+        self._numeric_locals.clear()
+        self._value_uses.clear()
+        self._syntax = {
+            identity: (function, None, kind)
+            for identity, (function, _, kind) in self._syntax.items()
+            if function.name in self.task_context_functions
+        }
+
+    def release_entry(self, kernel):
+        identity = kernel.func.__module__ + "." + kernel.func.__qualname__
+        self._contexts = {key: value for key, value in self._contexts.items() if key[1] != identity}
+
     @staticmethod
     def _threaded(node, parents, kind):
         while (node := parents.get(id(node))) is not None:
