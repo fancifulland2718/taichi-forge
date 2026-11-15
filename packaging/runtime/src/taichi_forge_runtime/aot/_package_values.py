@@ -48,10 +48,7 @@ def check_admission(owner, contract):
         for binding in admission.get("input_presence", {}).values():
             if (path_value(owner, binding["path"]) is not None) is not binding["present"]:
                 raise ValueError("Optional Field input presence changed after construction")
-        presence = {
-            name: operator.index(path_value(owner, binding["path"]))
-            for name, binding in admission.get("input_guard_values", {}).items()
-        }
+        presence = {}
         for name, binding in admission.get("dynamic_input_presence", {}).items():
             value = path_value(owner, binding["path"])
             if binding.get("boolean") and type(value) is not bool:
@@ -61,10 +58,20 @@ def check_admission(owner, contract):
                 raise ValueError("Optional input presence changed outside its preparation binding")
             presence[name] = int(actual)
 
+        def guard_value(name):
+            if name not in presence:
+                # Branch paths are ordered: a preceding presence predicate can
+                # make a later record-member guard unreachable. Read that value
+                # only when its branch is reached, without inventing a value for
+                # absent records or masking invalid reachable scalar inputs.
+                binding = admission["input_guard_values"][name]
+                presence[name] = operator.index(path_value(owner, binding["path"]))
+            return presence[name]
+
         def required(paths):
             return any(
                 all(
-                    bool(evaluate_extent(expression, presence.__getitem__, min_value=-(2**31), max_value=2**31 - 1))
+                    bool(evaluate_extent(expression, guard_value, min_value=-(2**31), max_value=2**31 - 1))
                     is truth
                     for expression, truth in path
                 )

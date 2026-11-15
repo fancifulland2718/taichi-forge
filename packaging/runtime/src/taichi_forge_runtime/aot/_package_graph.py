@@ -447,12 +447,16 @@ class Graph:
             elif schema["kind"] == "compound":
                 value = self.plan.value(self.package._module, name, value)
             values[name] = value
-        captured = {
-            name: (self.plan_values[(id(owner), schema["name"])][2]
-                   if (id(owner), schema["name"]) in self.plan_values else capture_value(owner, schema))
-            for name, (owner, schema) in self.captures.items()
-            if schema["kind"] != "local_tensor_workspace"
-        }
+        captured = {}
+        for name, (owner, schema) in self.captures.items():
+            if schema["kind"] == "local_tensor_workspace":
+                continue
+            parameter = self.plan_values.get((id(owner), schema["name"]))
+            value = parameter[2] if parameter is not None else _MISSING_PLAN_VALUE
+            # Absence remains a plan guard above, never a scalar ABI value.
+            # Admission has already checked the branch requirements; preserve
+            # the entry capture's nullable-record contract for an absent member.
+            captured[name] = capture_value(owner, schema) if value is _MISSING_PLAN_VALUE else value
         for expressions, inputs in self.range_checks:
             check_model_static_ranges(expressions, lambda name: captured[inputs[name]])
         resources = []

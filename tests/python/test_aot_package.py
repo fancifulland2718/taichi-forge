@@ -12261,7 +12261,52 @@ class Model:
         assert "OPTIONAL_RECORD_SOURCE_FREE_OK" in result.stdout
 
 
-@pytest.mark.parametrize("guard", ("plain", "and_backend", "or_false"))
+def test_package_admission_reads_record_guards_only_on_reached_branches():
+    from types import SimpleNamespace
+
+    from taichi_forge_runtime.aot._package_values import check_admission
+
+    present = ["dim", "primary_present"]
+    selected = ["cmp_eq", ["dim", "primary_kind"], ["const", 1]]
+    owner = SimpleNamespace(primary=None, aux=None, primary_present=False, aux_present=False)
+    contract = {"admission": {
+        "constraints": {}, "dimensions": {},
+        "input_guard_values": {"primary_kind": {"path": ["primary", "kind"]}},
+        "dynamic_input_presence": {
+            "primary_present": {"path": ["primary"], "flag_path": ["primary_present"]},
+            "aux_present": {"path": ["aux"], "flag_path": ["aux_present"]},
+        },
+        # The dependency precedes its source record in the serialized mapping.
+        "input_records": {
+            "aux": {"path": ["aux"], "required_when": [[[present, True], [selected, True]]]},
+            "primary": {"path": ["primary"], "required_when": [[[present, True]]]},
+        },
+    }}
+    check_admission(owner, contract)
+    owner.primary, owner.primary_present = SimpleNamespace(kind=0), True
+    check_admission(owner, contract)
+    owner.primary.kind = 1
+    with pytest.raises(ValueError, match="record presence is required"):
+        check_admission(owner, contract)
+    owner.aux, owner.aux_present = object(), True
+    check_admission(owner, contract)
+    owner.aux, owner.aux_present = None, False
+    owner.primary.kind = None
+    with pytest.raises(TypeError):
+        check_admission(owner, contract)
+    owner.primary.kind = 2**31
+    with pytest.raises(ValueError, match="i32"):
+        check_admission(owner, contract)
+    owner.primary = None  # Changing presence without preparing remains invalid.
+    with pytest.raises(ValueError, match="presence changed outside"):
+        check_admission(owner, contract)
+    owner.primary_present = False
+    contract["admission"]["input_records"]["primary"]["required_when"] = [[]]
+    with pytest.raises(ValueError, match="record presence is required"):
+        check_admission(owner, contract)
+
+
+@pytest.mark.parametrize("guard", ("plain", "and_backend", "or_false", "record_value"))
 @test_utils.test(arch=[ti.cpu, ti.cuda], offline_cache=False)
 def test_package_optional_records_keep_required_branch_dependencies(tmp_path, monkeypatch, guard):
     source = """
@@ -12311,11 +12356,23 @@ class Model:
         )
     elif guard == "or_false":
         source = source.replace("self.primary is not None):", "self.primary is not None or False):")
+    elif guard == "record_value":
+        source = source.replace("    values: object", "    values: object\n    kind: int = 1")
+        source = source.replace(
+            "        if primary is not None:",
+            "        if primary is not None:\n            first.value('kind', ti.i32, affects_plan=True)",
+        )
+        source = source.replace(
+            "            self.output[None] = self.primary.values[0] + self.aux.values[0]",
+            "            if ti.static(self.primary.kind == 1):\n"
+            "                self.output[None] = self.primary.values[0] + self.aux.values[0]\n"
+            "            else:\n                self.output[None] = 5",
+        )
     package = _source_package(tmp_path, monkeypatch, source)
     manifest = ti.aot.export_package(package, tmp_path / "sdk")
     # Only the explicit algorithm option remains static; two record-presence
     # axes share each implementation and required reads are checked at bind.
-    assert manifest["version"] == 64
+    assert manifest["version"] == (80 if guard == "record_value" else 64)
     assert sorted(len(entry["variants"]) for entry in manifest["entry_families"].values()) == [2]
     for name in tuple(sys.modules):
         if name == "definition_fixture" or name.startswith("definition_fixture."):
@@ -12326,11 +12383,14 @@ class Model:
         values = runtime.ndarray("i32", (1,))
         values.from_numpy(np.array([11], dtype=np.int32))
         packet = module.Packet(values)
-        for primary, aux, empty, expected in (
+        valid = [
             (packet, packet, False, 22),
             (None, packet, False, 11),
             (None, None, True, 7),
-        ):
+        ]
+        if guard == "record_value":
+            valid.append((module.Packet(values, 0), None, False, 5))
+        for primary, aux, empty, expected in valid:
             owner = module.Model(empty)
             owner.prepare(primary, aux)
             owner.step()
@@ -12338,6 +12398,32 @@ class Model:
             with owner.graph().bind({}) as call:
                 call.run()
             assert int(owner.output.to_numpy()) == expected
+        if guard == "record_value":
+            import struct
+
+            owner = module.Model(True)
+            owner.prepare(None, None)
+            absent = owner.graph()
+            with absent.bind({}) as prepared:
+                owner.prepare(packet, packet)
+                with pytest.raises(ValueError, match="Plan parameter"):
+                    absent.bind({})
+                prepared.run()
+                assert int(owner.output.to_numpy()) == 7
+            present = owner.graph()
+            owner.prepare(None, None)
+            with pytest.raises(ValueError, match="Plan parameter"):
+                present.bind({})
+            for invalid_kind in (None, 2**31):
+                owner.output.from_numpy(np.array(99, dtype=np.int32))
+                owner.prepare(module.Packet(values, invalid_kind), packet)
+                # With both records present, ordinary scalar binding still
+                # rejects invalid values before numerical work is submitted.
+                with pytest.raises((TypeError, ValueError, struct.error)):
+                    owner.step()
+                with pytest.raises((TypeError, ValueError, struct.error)):
+                    owner.graph().bind({})
+                assert int(owner.output.to_numpy()) == 99
         for primary, aux, empty in ((packet, None, True), (None, None, False)):
             owner = module.Model(empty)
             owner.output.from_numpy(np.array(99, dtype=np.int32))
