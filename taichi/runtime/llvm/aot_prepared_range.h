@@ -5,8 +5,37 @@
 #include "llvm/IR/Constants.h"
 #include "llvm/IR/Instructions.h"
 #include "llvm/IR/Intrinsics.h"
+#include "llvm/IR/IntrinsicsNVPTX.h"
+#include "llvm/IR/Module.h"
 
 namespace taichi::lang {
+
+// A model-dependent launch is archived with an upper block bound. Once every
+// input to that bound is a prepared constant, backend register allocation must
+// see the selected block too. Keep the original task binding/validation and
+// all other entry attributes (including explicit register/occupancy policy).
+inline bool specialize_prepared_cuda_block_bound(llvm::Function &entry,
+                                                 int upper, int selected) {
+  if (selected <= 0 || selected > upper)
+    return false;
+  auto *annotations = entry.getParent()->getNamedMetadata("nvvm.annotations");
+  if (!annotations)
+    return false;
+  for (auto *node : annotations->operands()) {
+    if (node->getNumOperands() != 3)
+      continue;
+    auto *function = llvm::dyn_cast_or_null<llvm::ValueAsMetadata>(node->getOperand(0));
+    auto *name = llvm::dyn_cast_or_null<llvm::MDString>(node->getOperand(1));
+    auto *value = llvm::mdconst::dyn_extract_or_null<llvm::ConstantInt>(node->getOperand(2));
+    if (function && function->getValue() == &entry && name &&
+        name->getString() == "maxntidx" && value && value->getSExtValue() == upper) {
+      node->replaceOperandWith(2, llvm::ConstantAsMetadata::get(
+          llvm::ConstantInt::get(value->getType(), selected)));
+      return true;
+    }
+  }
+  return false;
+}
 
 // A consumer-side proof over the linked library. The producer cannot inspect
 // an extracted callee when it records unproven_call. Do not turn that absence
@@ -17,6 +46,7 @@ class AotPreparedRangeAnalysis {
   struct Result {
     bool empty_has_no_effects{false};
     bool independent_iterations{false};
+    bool cuda_block_collective{false};
   };
 
   Result inspect(llvm::Function *entry) {
@@ -50,10 +80,32 @@ class AotPreparedRangeAnalysis {
     // Even a body containing collectives or unknown calls has no effects when
     // this canonical range is empty. Nonempty ranges additionally need a proof
     // that their body cannot observe the removed physical groups.
-    return {true, body->getArg(1)->use_empty() && independent(body)};
+    if (!body->getArg(1)->use_empty())
+      return {true, false, false};
+    const auto proof = inspect_body(body);
+    return {true, proof == BodyProof::independent,
+            proof == BodyProof::block_collective};
   }
 
  private:
+  enum class BodyProof { unproven, independent, block_collective };
+
+  static bool local_collective(const llvm::Function &function) {
+    // The same block/warp barrier family admitted by the producer. Do not
+    // include grid/cluster barriers, register queries or arbitrary convergent
+    // calls. Removing empty blocks preserves all lanes in productive blocks.
+    switch (function.getIntrinsicID()) {
+      case llvm::Intrinsic::nvvm_barrier0:
+      case llvm::Intrinsic::nvvm_barrier0_and:
+      case llvm::Intrinsic::nvvm_barrier0_or:
+      case llvm::Intrinsic::nvvm_barrier0_popc:
+      case llvm::Intrinsic::nvvm_bar_warp_sync:
+        return true;
+      default:
+        return false;
+    }
+  }
+
   static bool scalar_intrinsic(const llvm::Function &function) {
     switch (function.getIntrinsicID()) {
       case llvm::Intrinsic::abs:
@@ -106,35 +158,46 @@ class AotPreparedRangeAnalysis {
            name == "__nvvm_reflect";
   }
 
-  bool independent(llvm::Function *function) {
+  BodyProof inspect_body(llvm::Function *function) {
     const auto known = proofs_.find(function);
     if (known != proofs_.end())
       return known->second;
     // A back edge in the call graph stays unproved. Memoize shared callees so
     // a multi-task library is inspected once, without inlining or cloning it.
-    proofs_[function] = false;
-    if (function->isIntrinsic() || function->isDeclaration())
-      return proofs_[function] = scalar_intrinsic(*function);
+    proofs_[function] = BodyProof::unproven;
+    if (function->isIntrinsic() || function->isDeclaration()) {
+      return proofs_[function] = local_collective(*function)
+          ? BodyProof::block_collective
+          : scalar_intrinsic(*function) ? BodyProof::independent
+                                        : BodyProof::unproven;
+    }
+    auto proof = BodyProof::independent;
     for (auto &block : *function) {
       for (auto &instruction : block) {
-        // Shared/local cooperation is qualified by a different producer proof.
-        // Do not recover it from partially lowered library code here.
+        // Shared storage requires the existing whole-block qualification,
+        // never independent-iteration/device-range dispatch permission.
         auto shared = [](llvm::Type *type) {
           return type->isPointerTy() && type->getPointerAddressSpace() == 3;
         };
         if (shared(instruction.getType()))
-          return false;
+          proof = BodyProof::block_collective;
         for (const auto &operand : instruction.operands())
           if (uses_shared_pointer(operand.get()))
-            return false;
+            proof = BodyProof::block_collective;
         if (auto *call = llvm::dyn_cast<llvm::CallBase>(&instruction)) {
           auto *callee = call->getCalledFunction();
-          if (!callee || call->isConvergent() || !independent(callee))
-            return false;
+          if (!callee)
+            return BodyProof::unproven;
+          const auto called = inspect_body(callee);
+          if (called == BodyProof::unproven ||
+              (call->isConvergent() && called != BodyProof::block_collective))
+            return BodyProof::unproven;
+          if (called == BodyProof::block_collective)
+            proof = called;
         }
       }
     }
-    return proofs_[function] = true;
+    return proofs_[function] = proof;
   }
 
   static bool uses_shared_pointer(const llvm::Value *value) {
@@ -148,7 +211,7 @@ class AotPreparedRangeAnalysis {
     return false;
   }
 
-  std::unordered_map<llvm::Function *, bool> proofs_;
+  std::unordered_map<llvm::Function *, BodyProof> proofs_;
 };
 
 }  // namespace taichi::lang

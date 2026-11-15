@@ -925,6 +925,43 @@ class Model:
             np.testing.assert_array_equal(owner.out.to_numpy(), expected)
 
 
+@test_utils.test(arch=ti.cuda, offline_cache=False, saturating_grid_dim=2)
+def test_package_prepared_library_block_helpers_keep_cooperation(tmp_path, monkeypatch):
+    source = '''import taichi_forge as ti
+@ti.real_func
+def helper(value: ti.i32) -> ti.i32:
+    return value * 3
+@ti.data_oriented
+class Model:
+    def __init__(self, n: int, block: int):
+        self.n, self.block = n, block
+        scope = ti.experimental.ResourceScope(self)
+        scope.dim('block')
+        scope.out = scope.field(ti.i32, shape=scope.dim('n'))
+    @ti.kernel
+    def step(self, gain: ti.i32):
+        ti.loop_config(block_dim=self.block)
+        for work in range(self.n * self.block):
+            values = ti.simt.block.SharedArray((64,), ti.i32)
+            lane, group = work % self.block, work // self.block
+            values[lane] = helper(work) + gain
+            ti.simt.block.sync()
+            if lane == 0:
+                self.out[group] = values[1]
+            ti.simt.block.sync()
+'''
+    package = _source_package(tmp_path, monkeypatch, source)
+    ti.aot.export_package(package, tmp_path / 'sdk', artifact_format='bc-library')
+    with Runtime('cuda') as runtime, load_package(runtime, tmp_path / 'sdk') as code:
+        models = [code.host.Model(n, block) for n, block in ((1, 32), (7, 64), (257, 32))]
+        for gain in (2, 9):
+            for owner in reversed(models):
+                owner.step(gain)
+            for owner in models:
+                np.testing.assert_array_equal(
+                    owner.out.to_numpy(), (np.arange(owner.n) * owner.block + 1) * 3 + gain)
+
+
 @test_utils.test(arch=ti.cuda, offline_cache=False)
 def test_package_library_guards_live_device_range_bounds(tmp_path, monkeypatch):
     from itertools import product

@@ -70,6 +70,15 @@ and leaves model specialization and final device optimization to consumption.
 Ordinary export does not enable compiler lifecycle telemetry or per-entry
 diagnostics. This policy does not change other artifact formats or ordinary JIT.
 
+On a CUDA specialization miss, linked helper analysis can recover the existing
+whole-block range qualification for shared storage and known block/warp barriers.
+Only complete empty blocks are removed; productive lanes, alignment checks,
+mutable bounds and unknown physical-thread behavior keep their original rules.
+When all inputs to a model-dependent block size are prepared constants, its
+backend launch bound also uses the selected size. This avoids allocating registers
+for the producer's larger placeholder bound. Explicit register and occupancy
+options, generic code and binding validation remain unchanged.
+
 Build-time analysis follows immutable `ti.static` local aliases and resolvable
 helper parameters to their condition uses. Helpers made of range schedules
 can remain independently guarded loops in one entry, preserving each loop's

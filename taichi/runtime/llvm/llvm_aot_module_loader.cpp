@@ -490,6 +490,20 @@ aot::Kernel *LlvmAotModule::specialize_kernel(
         return false;
     return true;
   };
+  if (arch() == Arch::cuda) {
+    for (const auto &task : tasks) {
+      if (!task.host_block_dim || !fixed_bound(*task.host_block_dim))
+        continue;
+      const auto block = task.host_block_dim->evaluate(
+          context.get_context().arg_buffer, kernel.args_size);
+      // Invalid or still-live block inputs retain normal binding validation.
+      if (!block || *block <= 0 || *block > task.block_dim ||
+          (*block % 32 != 0 && (*block & (*block - 1)) != 0))
+        continue;
+      if (auto *entry = module.getFunction(task.name))
+        specialize_prepared_cuda_block_bound(*entry, task.block_dim, *block);
+    }
+  }
   for (auto it = tasks.begin(); it != tasks.end();) {
     auto &range = it->range_bounds;
     bool empty_has_no_effects = false;
@@ -500,6 +514,11 @@ aot::Kernel *LlvmAotModule::specialize_kernel(
       empty_has_no_effects = proof.empty_has_no_effects;
       if (proof.independent_iterations)
         range->empty_group_elision = EmptyRangeGroupProof::independent_iterations;
+      else if (proof.cuda_block_collective && !it->one_to_one &&
+               !it->external_shared_staged && !it->thread_local_bytes &&
+               !it->may_mutate_sparse_topology &&
+               it->sparse_list_op == OffloadedTask::kSparseListOpNone)
+        range->empty_group_elision = EmptyRangeGroupProof::cuda_block_collective;
     }
     if (tasks.size() == 1 || it->task_type != OffloadedTaskType::range_for || !range ||
         (range->empty_group_elision != EmptyRangeGroupProof::independent_iterations &&

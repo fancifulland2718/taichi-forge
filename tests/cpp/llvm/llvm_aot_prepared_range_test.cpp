@@ -71,6 +71,7 @@ TEST(AotPreparedRange, UnknownAndPhysicalCallsKeepNonemptyLaunch) {
     const auto proof = analysis.inspect(module->getFunction("entry"));
     EXPECT_TRUE(proof.empty_has_no_effects);
     EXPECT_FALSE(proof.independent_iterations) << name;
+    EXPECT_FALSE(proof.cuda_block_collective) << name;
   }
 }
 
@@ -89,6 +90,56 @@ TEST(AotPreparedRange, CollectiveTlsIndirectAndAssemblyStayUnproved) {
     const auto proof = analysis.inspect(module->getFunction("entry"));
     EXPECT_TRUE(proof.empty_has_no_effects);
     EXPECT_FALSE(proof.independent_iterations) << body;
+  }
+}
+
+TEST(AotPreparedRange, LinkedBlockBarrierUsesOnlyAlignedWholeGroups) {
+  llvm::LLVMContext context;
+  auto module = range_module(context, "call void @helper(i32 %i)", R"(
+    @shared = internal addrspace(3) global [32 x i32] undef
+    declare void @llvm.nvvm.barrier0()
+    define internal void @helper(i32 %i) {
+      %lane = and i32 %i, 31
+      %p = getelementptr [32 x i32], ptr addrspace(3) @shared, i32 0, i32 %lane
+      store i32 %i, ptr addrspace(3) %p
+      call void @llvm.nvvm.barrier0()
+      ret void
+    })");
+  ASSERT_TRUE(module);
+  AotPreparedRangeAnalysis analysis;
+  const auto proof = analysis.inspect(module->getFunction("entry"));
+  EXPECT_TRUE(proof.empty_has_no_effects);
+  EXPECT_FALSE(proof.independent_iterations);
+  ASSERT_TRUE(proof.cuda_block_collective);
+  RangeForBounds range;
+  range.host_launch.emplace();
+  range.host_launch->begin.factor = 0;
+  range.host_launch->end.offsets = {0};
+  range.empty_group_elision = EmptyRangeGroupProof::cuda_block_collective;
+  int count = 64 * 32;
+  EXPECT_EQ(range.launch_grid(8160, 32, &count, sizeof(count)), 64);
+  EXPECT_FALSE(range.supports_device_dispatch());
+  count = 33;
+  EXPECT_EQ(range.launch_grid(8160, 32, &count, sizeof(count)), 8160);
+  count = 64 * 32;
+  std::vector<std::pair<uint64_t, uint64_t>> mutable_args{{0, sizeof(count)}};
+  EXPECT_EQ(range.launch_grid(8160, 32, &count, sizeof(count), &mutable_args), 8160);
+}
+
+TEST(AotPreparedRange, LocalBarrierDoesNotAdmitUnknownOrGridCalls) {
+  for (const auto *name : {"external", "llvm.nvvm.read.ptx.sreg.nctaid.x"}) {
+    llvm::LLVMContext context;
+    auto module = range_module(context, "call void @helper()",
+        "declare void @llvm.nvvm.barrier0()\n"
+        "declare i32 @" + std::string(name) + "()\n"
+        "define internal void @helper() {\n call void @llvm.nvvm.barrier0()\n"
+        " %x = call i32 @" + name + "()\n ret void\n}\n");
+    ASSERT_TRUE(module);
+    AotPreparedRangeAnalysis analysis;
+    const auto proof = analysis.inspect(module->getFunction("entry"));
+    EXPECT_TRUE(proof.empty_has_no_effects);
+    EXPECT_FALSE(proof.independent_iterations);
+    EXPECT_FALSE(proof.cuda_block_collective);
   }
 }
 
@@ -117,6 +168,28 @@ TEST(AotPreparedRange, ScalarMathDoesNotRequireInlining) {
   ASSERT_TRUE(module);
   AotPreparedRangeAnalysis analysis;
   EXPECT_TRUE(analysis.inspect(module->getFunction("entry")).independent_iterations);
+}
+
+TEST(AotPreparedRange, PreparedBlockBoundKeepsOtherBackendPolicies) {
+  llvm::LLVMContext context;
+  auto module = range_module(context, "", R"(
+    !nvvm.annotations = !{!0, !1, !2, !3}
+    !0 = !{ptr @entry, !"maxntidx", i32 1024}
+    !1 = !{ptr @entry, !"minctasm", i32 2}
+    !2 = !{ptr @entry, !"maxnreg", i32 192}
+    !3 = !{ptr @body, !"maxntidx", i32 256}
+  )");
+  ASSERT_TRUE(module);
+  auto &entry = *module->getFunction("entry");
+  EXPECT_FALSE(specialize_prepared_cuda_block_bound(entry, 1024, 0));
+  EXPECT_FALSE(specialize_prepared_cuda_block_bound(entry, 1024, 2048));
+  ASSERT_TRUE(specialize_prepared_cuda_block_bound(entry, 1024, 32));
+  auto *annotations = module->getNamedMetadata("nvvm.annotations");
+  const int expected[] = {32, 2, 192, 256};
+  for (int i = 0; i < 4; ++i)
+    EXPECT_EQ(llvm::mdconst::extract<llvm::ConstantInt>(
+                  annotations->getOperand(i)->getOperand(2))->getSExtValue(), expected[i]);
+  EXPECT_FALSE(llvm::verifyModule(*module, &llvm::errs()));
 }
 
 }  // namespace
