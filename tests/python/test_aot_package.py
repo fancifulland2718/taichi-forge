@@ -24306,3 +24306,50 @@ class Model:
                 loaded.launch = True
                 with pytest.raises(ValueError, match='presence|requires|input'):
                     loaded.step()
+
+
+@test_utils.test(arch=ti.cpu, offline_cache=False)
+def test_package_input_syntax_reuse_keeps_contexts_and_passes_separate(tmp_path, monkeypatch):
+    from taichi_forge.aot import _package, _package_function_inputs as inputs
+
+    source = CYCLIC_WRITE_INVENTORY_SOURCE.replace(
+        'def append_step(solver, builder):\n    builder.dispatch(solver.step)',
+        'def append_step(solver, builder, enabled):\n'
+        '    if enabled:\n        builder.dispatch(solver.step)\n'
+        '    else:\n        builder.dispatch(solver.unrelated)'
+    ).replace('        append_step(self, builder)\n',
+              '        append_step(self, builder, True)\n        append_step(self, builder, False)\n')
+    package = _source_package(tmp_path, monkeypatch, source)
+    result = _package._preflight_package(package)
+    sources, imported = result[0], result[4]
+    module = package.model.__name__
+    owner = module + '.Model'
+    tree = next(item[4] for item in sources if item[0] == module)
+    helper = next(node for node in tree.body if isinstance(node, ast.FunctionDef) and node.name == 'append_step')
+    original = ast.dump(helper, include_attributes=True)
+    built = []
+    original_init = inputs._FunctionSyntax.__init__
+
+    def initialize(self, node):
+        built.append(node)
+        original_init(self, node)
+
+    monkeypatch.setattr(inputs._FunctionSyntax, '__init__', initialize)
+    inventory, failures = inputs.discover(sources, imported, resource_inventory=(owner, 'record'))
+    assert not failures
+    assert inventory == {(owner, ('values',)), (owner, ('unused',))}
+    assert sum(node is helper for node in built) == 1
+    assert ast.dump(helper, include_attributes=True) == original
+
+    # A later discovery pass must observe current source, even if the function
+    # object and original AST identities remain the same.
+    for node in ast.walk(helper):
+        if isinstance(node, ast.Attribute) and node.attr == 'step':
+            node.attr = 'unrelated'
+    built.clear()
+    inventory, failures = inputs.discover(sources, imported, resource_inventory=(owner, 'record'))
+    assert not failures
+    assert inventory == {(owner, ('unused',))}
+    assert sum(node is helper for node in built) == 1
+    assert package.model.constructors == 0
+    assert ti.lang.impl.get_runtime().get_num_compiled_functions() == 0

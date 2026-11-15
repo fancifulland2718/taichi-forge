@@ -291,6 +291,74 @@ def _returns_on_all_paths(body):
     )
 
 
+class _FunctionSyntax:
+    """Conservative lexical facts shared by one discovery pass's input contexts.
+
+    These facts depend only on the original source, never on a receiver, a
+    selected branch or a projected source sequence. Keep all argument-dependent
+    reachability and escape decisions in build_context.
+    """
+
+    def __init__(self, node):
+        nodes = []
+        pending = list(reversed(node.body))
+        while pending:
+            part = pending.pop()
+            if isinstance(part, ast.Lambda):
+                parameters = part.args
+                if not (parameters.posonlyargs or parameters.args or parameters.kwonlyargs
+                        or parameters.vararg or parameters.kwarg
+                        or any(isinstance(child, (ast.NamedExpr, ast.Yield, ast.YieldFrom))
+                               for child in ast.walk(part.body))):
+                    pending.append(part.body)
+                continue
+            if isinstance(part, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+                continue
+            nodes.append(part)
+            pending.extend(reversed(list(ast.iter_child_nodes(part))))
+
+        self.stores, self.imports, self.aliases, self.reads = {}, {}, {}, {}
+        self.calls, self.writes = [], set()
+        for part in nodes:
+            if isinstance(part, ast.Name):
+                counts = self.reads if isinstance(part.ctx, ast.Load) else self.stores
+                counts[part.id] = counts.get(part.id, 0) + 1
+            if isinstance(part, (ast.Import, ast.ImportFrom)):
+                for item in part.names:
+                    name = item.asname or (item.name if isinstance(part, ast.ImportFrom) else item.name.split('.')[0])
+                    self.imports[name] = self.imports.get(name, 0) + 1
+            if isinstance(part, ast.Assign) and len(part.targets) == 1:
+                assignments = [(part.targets[0], part.value)]
+                while assignments:
+                    target, expression = assignments.pop()
+                    if isinstance(target, ast.Name):
+                        self.aliases[target.id] = expression
+                    elif (isinstance(target, (ast.Tuple, ast.List))
+                          and isinstance(expression, (ast.Tuple, ast.List))
+                          and len(target.elts) == len(expression.elts)):
+                        assignments.extend(reversed(list(zip(target.elts, expression.elts))))
+            if isinstance(part, (ast.Subscript, ast.Attribute)) and not isinstance(part.ctx, ast.Load):
+                self.writes.update(self.names(part.value))
+            if isinstance(part, ast.Call):
+                exposed = [*part.args, *(keyword.value for keyword in part.keywords)]
+                if isinstance(part.func, ast.Attribute):
+                    exposed.append(part.func.value)
+                self.calls.append((part, tuple((item, self.names(item)) for item in exposed)))
+
+        self.dependencies = {
+            name: self.names(expression) for name, expression in self.aliases.items()
+            if not isinstance(expression, (ast.Dict, ast.DictComp, ast.Tuple, ast.List))
+        }
+        self.record_dependencies = {
+            name: self.dependencies[name] for name, expression in self.aliases.items()
+            if isinstance(expression, (ast.Name, ast.Attribute))
+        }
+
+    @staticmethod
+    def names(expression):
+        return frozenset(part.id for part in ast.walk(expression) if isinstance(part, ast.Name))
+
+
 def discover(sources, imported, *, preparation_receivers=None, resource_inventory=None):
     from taichi_forge.types.annotations import Template
     from taichi_forge.graph import GraphBuilder
@@ -465,6 +533,7 @@ def discover(sources, imported, *, preparation_receivers=None, resource_inventor
     invalid = set()
     return_cache = {}
     binding_domains = {}
+    syntax = {}
 
     def source_callable(expression, namespace):
         if resource_inventory is not None and hasattr(expression, '_package_source_callable'):
@@ -716,28 +785,17 @@ def discover(sources, imported, *, preparation_receivers=None, resource_inventor
                     for child in ast.iter_child_nodes(statement):
                         walk(child)
 
-                for statement in node.body:
-                    walk(statement)
-                stores, aliases = {}, {}
-
-                def alias(target, expression):
-                    if isinstance(target, ast.Name):
-                        aliases[target.id] = expression
-                    elif isinstance(target, (ast.Tuple, ast.List)) and isinstance(expression, (ast.Tuple, ast.List)):
-                        if len(target.elts) == len(expression.elts):
-                            for child, item in zip(target.elts, expression.elts):
-                                alias(child, item)
-
-                for part in nodes:
-                    if isinstance(part, ast.Name) and not isinstance(part.ctx, ast.Load):
-                        stores[part.id] = stores.get(part.id, 0) + 1
-                    if isinstance(part, (ast.Import, ast.ImportFrom)):
-                        for item in part.names:
-                            name = item.asname or (item.name if isinstance(part, ast.ImportFrom) else item.name.split(".")[0])
-                            if name in arguments:
-                                stores[name] = stores.get(name, 0) + 1
-                    if isinstance(part, ast.Assign) and len(part.targets) == 1:
-                        alias(part.targets[0], part.value)
+                if function not in syntax:
+                    syntax[function] = _FunctionSyntax(node)
+                lexical = syntax[function]
+                stores, aliases = lexical.stores, lexical.aliases
+                # Imported names invalidate only matching incoming arguments, as
+                # before. Never add that context-specific fact to the summary.
+                imported_arguments = lexical.imports.keys() & arguments.keys()
+                if imported_arguments:
+                    stores = dict(stores)
+                    for name in imported_arguments:
+                        stores[name] = stores.get(name, 0) + lexical.imports[name]
                 local_names = set(stores) | set(inspect.signature(function).parameters)
 
                 def source_value(expression):
@@ -778,19 +836,9 @@ def discover(sources, imported, *, preparation_receivers=None, resource_inventor
 
                 # A mapping passed through ordinary forwarding must remain unchanged.
                 # Unknown calls and item writes invalidate its source, including aliases.
-                tainted, record_tainted, dependencies = set(), set(), {}
-                for name, expression in aliases.items():
-                    if not isinstance(expression, (ast.Dict, ast.DictComp, ast.Tuple, ast.List)):
-                        dependencies[name] = {part.id for part in ast.walk(expression) if isinstance(part, ast.Name)}
-                record_dependencies = {
-                    name: dependencies[name]
-                    for name, expression in aliases.items()
-                    if isinstance(expression, (ast.Name, ast.Attribute))
-                }
-                reads = {}
-                for part in nodes:
-                    if isinstance(part, ast.Name) and isinstance(part.ctx, ast.Load):
-                        reads[part.id] = reads.get(part.id, 0) + 1
+                tainted, record_tainted = set(lexical.writes), set(lexical.writes)
+                dependencies, record_dependencies = lexical.dependencies, lexical.record_dependencies
+                reads = lexical.reads
 
                 def retained(name, visited=()):
                     if name in visited:
@@ -817,59 +865,47 @@ def discover(sources, imported, *, preparation_receivers=None, resource_inventor
                         return member(declared_receiver(expression.value, visiting), expression.attr)
                     return None
 
-                for part in nodes:
-                    if isinstance(part, (ast.Subscript, ast.Attribute)) and not isinstance(part.ctx, ast.Load):
-                        tainted.update(n.id for n in ast.walk(part.value) if isinstance(n, ast.Name))
-                        record_tainted.update(n.id for n in ast.walk(part.value) if isinstance(n, ast.Name))
-                    if isinstance(part, ast.Call):
-                        resolved = source_value(part.func)
-                        if isinstance(part.func, ast.Attribute):
-                            receiver = declared_receiver(part.func.value)
-                            if isinstance(receiver, _Owner):
-                                resolved = static_member(classes[receiver.identity], part.func.attr, None)
-                        known = (
-                            (inspect.isfunction(resolved) and (resolved in functions or resolved in kernels))
-                            or _plain_record(resolved)
-                            or resolved is builtins.getattr
+                for part, exposed in lexical.calls:
+                    resolved = source_value(part.func)
+                    if isinstance(part.func, ast.Attribute):
+                        receiver = declared_receiver(part.func.value)
+                        if isinstance(receiver, _Owner):
+                            resolved = static_member(classes[receiver.identity], part.func.attr, None)
+                    known = (
+                        (inspect.isfunction(resolved) and (resolved in functions or resolved in kernels))
+                        or _plain_record(resolved)
+                        or resolved is builtins.getattr
+                    )
+                    # Known local forwarding parameters are resolved below. Their
+                    # mapping effects are checked in their own source context.
+                    if isinstance(part.func, ast.Name) and isinstance(arguments.get(part.func.id), _Kernel):
+                        known = True
+                    pure_mapping_use = isinstance(part.func, ast.Attribute) and (
+                        (part.func.attr in ("dispatch", "private_scalar") and graph_source(part.func.value))
+                        or (part.func.attr == "items" and not part.args and not part.keywords)
+                    )
+                    # A proven Graph private_scalar consumes a Python numeric value;
+                    # reading a frozen record member here cannot mutate the record.
+                    # An unrelated object's method with this name is still opaque.
+                    if not pure_mapping_use and not getattr(part, "_package_resource_metadata", False):
+                        tainted.update(
+                            name for _, names in exposed for name in names
+                            if not known or retained(name)
                         )
-                        # Known local forwarding parameters are resolved below. Their
-                        # mapping effects are checked in their own source context.
-                        if isinstance(part.func, ast.Name) and isinstance(arguments.get(part.func.id), _Kernel):
-                            known = True
-                        pure_mapping_use = isinstance(part.func, ast.Attribute) and (
-                            (part.func.attr in ("dispatch", "private_scalar") and graph_source(part.func.value))
-                            or (part.func.attr == "items" and not part.args and not part.keywords)
+                        # Reading several members of a frozen record to supply a
+                        # Kernel does not expose the record itself for mutation.
+                        # Unknown Host calls and repeated whole-record forwarding
+                        # retain the conservative escape check.
+                        record_tainted.update(
+                            name for item, names in exposed for name in names
+                            if (
+                                not known
+                                or resolved not in kernels
+                                and resolved is not builtins.getattr
+                                and isinstance(item, ast.Name)
+                                and record_retained(name)
+                            )
                         )
-                        # A proven Graph private_scalar consumes a Python numeric value;
-                        # reading a frozen record member here cannot mutate the record.
-                        # An unrelated object's method with this name is still opaque.
-                        if not pure_mapping_use and not getattr(part, "_package_resource_metadata", False):
-                            exposed = [*part.args, *(k.value for k in part.keywords)]
-                            if isinstance(part.func, ast.Attribute):
-                                exposed.append(part.func.value)
-                            tainted.update(
-                                n.id
-                                for item in exposed
-                                for n in ast.walk(item)
-                                if isinstance(n, ast.Name) and (not known or retained(n.id))
-                            )
-                            # Reading several members of a frozen record to supply a
-                            # Kernel does not expose the record itself for mutation.
-                            # Unknown Host calls and repeated whole-record forwarding
-                            # retain the conservative escape check.
-                            record_tainted.update(
-                                n.id
-                                for item in exposed
-                                for n in ast.walk(item)
-                                if isinstance(n, ast.Name)
-                                and (
-                                    not known
-                                    or resolved not in kernels
-                                    and resolved is not builtins.getattr
-                                    and isinstance(item, ast.Name)
-                                    and record_retained(n.id)
-                                )
-                            )
                 for taint_set, edges in ((tainted, dependencies), (record_tainted, record_dependencies)):
                     pending_taints = list(taint_set)
                     while pending_taints:
@@ -1288,7 +1324,7 @@ def discover(sources, imported, *, preparation_receivers=None, resource_inventor
                 # These callbacks are local to this lexical context. Break their
                 # recursive cells on success and failure, including nested returns.
                 # Assign our references; never clear the caller's source or facts.
-                walk = alias = graph_source = retained = record_retained = None
+                walk = graph_source = retained = record_retained = None
                 declared_receiver = value = call_target = proven_condition = None
                 condition_value = source_projection = sequence_environment = None
                 sequence_method = sequence_cached = source_value = None
