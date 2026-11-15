@@ -284,6 +284,35 @@ def construct_fields(
             if item["kind"] == "record":
                 write_member(owner, name, SimpleNamespace(), schema)
 
+        # A unit-sized witness is invalid for a positive Field axis such as
+        # width // 2. Propagate that axis's lower bound through aliases and
+        # constant divisors before constructing any native tree. These values
+        # only size build-owned witnesses; the original dimension expressions
+        # remain in the published contract and consumer specialization facts.
+        minima = {}
+        pending = [(expression, 1, ()) for item in fields.values()
+                   for expression in item.get("dimension_expressions", {}).values()]
+        while pending:
+            expression, minimum, visiting = pending.pop()
+            if expression[0] == "dim":
+                name = expression[1]
+                if name in visiting:
+                    raise ValueError(f"Cyclic derived dimension {name!r}")
+                spec = schema.get(name, {})
+                if spec.get("kind") != "dimension" or "owner_dimension" in spec:
+                    continue  # Referenced owner witnesses keep their source layout.
+                if spec.get("expression"):
+                    pending.append((spec["expression"], minimum, (*visiting, name)))
+                else:
+                    if minimum > 2**31 - 1:
+                        raise ValueError("Declared extent needs a legal symbolic construction witness")
+                    minima[name] = max(minima.get(name, 1), minimum)
+            elif (expression[0] == "floordiv" and expression[2][0] == "const"
+                  and expression[2][1] > 0):
+                pending.append((expression[1], minimum * expression[2][1], visiting))
+            # Other algebra keeps the existing witness and validation rules.
+            # This is not a search over model values or a constraint solver.
+
         def witness(name, visiting=()):
             if name in visiting:
                 raise ValueError(f"Cyclic derived dimension {name!r}")
@@ -293,7 +322,8 @@ def construct_fields(
                     raise ValueError("Referenced dimension needs a legal symbolic construction witness")
                 return value
             expression = schema[name].get("expression")
-            value = evaluate_extent(expression, lambda key: witness(key, (*visiting, name))) if expression else 1
+            value = (evaluate_extent(expression, lambda key: witness(key, (*visiting, name)))
+                     if expression else minima.get(name, 1))
             if not 0 <= value <= 2**31 - 1:
                 raise ValueError("Declared dimension needs a legal symbolic construction witness")
             write_member(owner, name, value, schema)

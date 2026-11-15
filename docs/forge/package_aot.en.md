@@ -898,6 +898,14 @@ across helpers reject. CPU/CUDA local checks include source-free new sizes,
 JIT agreement and failed-construction cleanup. Conditional refinements require
 separate qualification.
 
+For positive Field axes reached through dimension aliases and division by a
+positive constant, export chooses a legal build-only witness instead of assuming
+every independent dimension is one. The published relation remains unchanged;
+consumer sizes and specialization still come from the actual instance. CPU/CUDA
+checks cover chained divisors, two sizes, live values, and rejection without
+resource leaks for zero axes or inconsistent derived values. This is not a
+general solver for model constraints or a change to consumer size admission.
+
 Small ordinary capacity helpers can also express these relations with local
 arithmetic and `minimum`/`maximum`. Export proves their source through the same
 dimension algebra without calling them. A returning `hasattr(extent, 'minimum')`

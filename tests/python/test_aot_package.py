@@ -188,6 +188,53 @@ def test_package_sampled_texture_rejects_cpu_before_compilation(tmp_path, monkey
     assert ti.lang.impl.get_runtime().get_num_compiled_functions() == before
 
 
+@test_utils.test(arch=[ti.cpu, ti.cuda], offline_cache=False)
+def test_package_constant_divisor_field_witness_preserves_consumer_dimensions(tmp_path, monkeypatch):
+    source = '''
+import taichi_forge as ti
+constructors = 0
+@ti.data_oriented
+class Model:
+    def __init__(self, n: int, wrong=False):
+        global constructors
+        constructors += 1
+        self.n = n
+        self.half = n // 2
+        self.rows = self.half // 3 + int(wrong)
+        scope = ti.experimental.ResourceScope(self)
+        half = scope.derived_dim('half', scope.dim('n') // 2)
+        rows = scope.derived_dim('rows', half // 3)
+        scope.output = scope.field(ti.i32, shape=(rows, scope.dim('n')))
+        scope.intermediate = scope.field(ti.i32, shape=half)
+    @ti.kernel
+    def step(self, gain: ti.i32):
+        for i, j in self.output:
+            self.output[i, j] = i * self.n + j + gain
+        for i in self.intermediate:
+            self.intermediate[i] = i + self.rows
+'''
+    package = _source_package(tmp_path, monkeypatch, source)
+    arch = ti.cfg.arch.name
+    manifest = ti.aot.export_package(package.model, tmp_path/'sdk',
+        **({'artifact_format': 'bc-library'} if arch == 'cuda' else {}))
+    assert package.model.constructors == 0
+    assert len(manifest['entries']) == 1
+    with Runtime(arch) as runtime, load_package(runtime, tmp_path/'sdk') as code:
+        models = [(package.Model(n), code.host.Model(n)) for n in (12, 29)]
+        for gain in (3, 17):
+            for original, loaded in reversed(models):
+                original.step(gain)
+                loaded.step(gain)
+                assert loaded.output.shape == (loaded.n // 6, loaded.n)
+                np.testing.assert_array_equal(loaded.output.to_numpy(), original.output.to_numpy())
+                np.testing.assert_array_equal(loaded.intermediate.to_numpy(), original.intermediate.to_numpy())
+        registered = set(runtime._resources)
+        for n, wrong in ((1, False), (12, True)):
+            with pytest.raises((ValueError, RuntimeError), match='positive i32|does not match'):
+                code.host.Model(n, wrong)
+            assert set(runtime._resources) == registered
+
+
 @test_utils.test(arch=ti.cpu, offline_cache=False)
 def test_package_type_only_import_does_not_enter_runtime_closure(tmp_path, monkeypatch):
     source_root = tmp_path / 'src'
