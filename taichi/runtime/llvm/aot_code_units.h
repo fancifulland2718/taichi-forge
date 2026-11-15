@@ -17,6 +17,7 @@
 #include "llvm/Transforms/Utils/ValueMapper.h"
 #include "taichi/runtime/llvm/aot_artifact_integrity.h"
 #include "taichi/runtime/llvm/llvm_module_codec.h"
+#include "taichi/system/profiler.h"
 
 namespace taichi::lang::LLVM {
 
@@ -33,6 +34,7 @@ struct CodeUnitArtifact {
 // The module is already a normalized private copy. AOT finalization may run
 // here, before either the exported symbol or the content digest is published.
 inline CodeUnitArtifact encode_code_unit(llvm::Module &unit) {
+  TI_COMPILE_PROFILER("cpp.compile.llvm.code_unit.encode");
   std::string canonical;
   llvm::raw_string_ostream canonical_stream(canonical);
   encode_llvm_module(unit, canonical_stream, LLVMModuleEncoding::bitcode);
@@ -53,6 +55,7 @@ using CodeUnitSnapshotFinalizer =
 inline CodeUnitArtifact finalize_code_unit_snapshot(
     const std::string &snapshot,
     const CodeUnitFinalizer &finalize = {}) {
+  TI_COMPILE_PROFILER("cpp.compile.llvm.code_unit.normalize");
   // Identified type names belong to the LLVMContext, not just this module.
   // Normalize in a private context without mutating the producer/JIT types.
   llvm::LLVMContext context;
@@ -81,6 +84,7 @@ inline void export_code_units(
     bool split_selected_closure = false,
     const std::function<void(const llvm::Function *, const CodeUnitArtifact &)> &observe = {},
     const std::function<std::optional<CodeUnitArtifact>(const llvm::Function *)> &reuse_source = {}) {
+  TI_COMPILE_PROFILER("cpp.compile.llvm.code_unit.extract");
   std::map<const llvm::Function *, CodeUnitArtifact> extracted;
   std::vector<llvm::Function *> roots;
   for (auto &function : module)
@@ -177,11 +181,13 @@ inline void export_code_units(
     if (!supported)
       continue;
     llvm::ValueToValueMapTy values;
-    auto unit =
-        llvm::CloneModule(module, values, [&](const llvm::GlobalValue *value) {
+    auto unit = [&] {
+      TI_COMPILE_PROFILER("cpp.compile.llvm.code_unit.clone");
+      return llvm::CloneModule(module, values, [&](const llvm::GlobalValue *value) {
           return definitions.count(value) != 0 &&
                  (!rewrite_caller || value != root);
         });
+    }();
     if (rewrite_caller) {
       // This body is consumed by extraction. Move it into the private unit
       // instead of copying every instruction and deleting the original below.
@@ -287,7 +293,10 @@ inline void export_code_units(
     // Renaming a type in the producer context would mutate other modules.
     std::string snapshot;
     llvm::raw_string_ostream snapshot_stream(snapshot);
-    encode_llvm_module(*unit, snapshot_stream, LLVMModuleEncoding::bitcode);
+    {
+      TI_COMPILE_PROFILER("cpp.compile.llvm.code_unit.snapshot");
+      encode_llvm_module(*unit, snapshot_stream, LLVMModuleEncoding::bitcode);
+    }
     unit.reset();
     // The complete snapshot is available before the private-context parse.
     // A build-owned finalizer may reuse that exact immutable input; a name or

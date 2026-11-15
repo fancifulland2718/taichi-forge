@@ -3610,10 +3610,16 @@ void TaskCodeGenLLVM::visit(FuncCallStmt *stmt) {
       argument_types.push_back(llvm::PointerType::get(*llvm_context, 0));
     }
     const auto context = LLVM::function_code_context(kernel);
-    const auto key = context.cache
-        ? context.identity(*stmt->func, cuda_root_binding_tree_ids) : "";
-    auto unit_lock = !key.empty() ? context.cache->lock_function(key)
-                                  : std::unique_lock<std::mutex>{};
+    const auto key = [&] {
+      TI_COMPILE_PROFILER("cpp.compile.llvm.function_identity");
+      return context.cache
+          ? context.identity(*stmt->func, cuda_root_binding_tree_ids) : "";
+    }();
+    auto unit_lock = [&] {
+      TI_COMPILE_PROFILER("cpp.compile.llvm.function_lock_wait");
+      return !key.empty() ? context.cache->lock_function(key)
+                         : std::unique_lock<std::mutex>{};
+    }();
     const auto cached = !key.empty() ? context.cache->find(key) : nullptr;
     if (cached) {
       TI_COMPILE_PROFILER("cpp.compile.llvm.function_unit_reuse");
@@ -3639,6 +3645,7 @@ void TaskCodeGenLLVM::visit(FuncCallStmt *stmt) {
         current_callable = old_callable;
       }  // Complete the function before freezing its independent LLVM unit.
       if (!key.empty()) {
+        TI_COMPILE_PROFILER("cpp.compile.llvm.function_record");
         auto *function = func_map.at(stmt->func);
         if (const auto recorded = context.cache->record(key, *module, function))
           LLVM::register_function_code(*module, *recorded, function);
@@ -3843,33 +3850,31 @@ llvm::Value *TaskCodeGenLLVM::get_struct_arg(const std::vector<int> &index,
 llvm::Value *TaskCodeGenLLVM::get_args_ptr(const Callable *callable,
                                            llvm::Value *context) {
   auto *runtime_context_type = get_runtime_type("RuntimeContext");
-  auto *args_type = tlctx->get_data_type(callable->args_type);
   auto *zero = tlctx->get_constant(0);
   // The address of the arg buffer is the first element of RuntimeContext
   auto *args_ptr =
       builder->CreateGEP(runtime_context_type, context, {zero, zero});
-  // casting from i8 ** to args_type **
+  // LLVM pointers are opaque. Lower the argument layout only for the typed
+  // GEP/load that consumes it, not merely to obtain this pointer-to-pointer.
+  // Real-function argument structs can contain a large captured owner layout.
   args_ptr = builder->CreatePointerCast(
-      args_ptr,
-      llvm::PointerType::get(llvm::PointerType::get(args_type, 0), 0));
+      args_ptr, llvm::PointerType::get(*llvm_context, 0));
   // loading the address of the arg buffer (args_type *)
   args_ptr =
-      builder->CreateLoad(llvm::PointerType::get(args_type, 0), args_ptr);
+      builder->CreateLoad(llvm::PointerType::get(*llvm_context, 0), args_ptr);
   return args_ptr;
 }
 void TaskCodeGenLLVM::set_args_ptr(Callable *callable,
                                    llvm::Value *context,
                                    llvm::Value *ptr) {
   auto *runtime_context_type = get_runtime_type("RuntimeContext");
-  auto *args_type = tlctx->get_data_type(callable->args_type);
   auto *zero = tlctx->get_constant(0);
   // The address of the arg buffer is the first element of RuntimeContext
   auto *args_ptr =
       builder->CreateGEP(runtime_context_type, context, {zero, zero});
-  // casting from i8 ** to args_type **
+  // Storing an opaque pointer does not require reconstructing its pointee ABI.
   args_ptr = builder->CreatePointerCast(
-      args_ptr,
-      llvm::PointerType::get(llvm::PointerType::get(args_type, 0), 0));
+      args_ptr, llvm::PointerType::get(*llvm_context, 0));
   // storing the address of the arg buffer (args_type *)
   builder->CreateStore(ptr, args_ptr);
 };
