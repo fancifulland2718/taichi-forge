@@ -18980,6 +18980,94 @@ def prepare(owner, active):
 """
 
 
+@pytest.mark.parametrize("declared_presence", [False, True])
+@test_utils.test(arch=[ti.cpu, ti.cuda], offline_cache=False)
+def test_package_conditional_preparation_declares_whole_group_presence(tmp_path, monkeypatch, declared_presence):
+    source = """
+import taichi_forge as ti
+from resource_contexts import resource_group
+@ti.data_oriented
+class Model:
+    def __init__(self, n: int, prepared: bool, law: bool):
+        self.n, self.prepared, self.law = n, prepared, law
+        self.storage_active = False
+        declarations = ti.experimental.ResourceScope(self)
+        declarations.static('prepared', choices=(False, True))
+        declarations.static('law', choices=(False, True))
+        declarations.static('storage_active', choices=(False, True))
+        with resource_group(self, 'output', initialization='zero') as fields:
+            fields.out = fields.field(ti.i32, shape=fields.dim('n'))
+        if self.prepared:
+            prepare(self)
+    @ti.kernel
+    def step(self):
+        for i in self.out:
+            if ti.static(self.law):
+                self.out[i] = i + self.phase[i] + self.scratch[i]
+            else:
+                self.out[i] = 7
+    def graph(self):
+        builder = ti.graph.GraphBuilder()
+        builder.dispatch(self.step)
+        return builder.compile()
+
+def prepare(owner):
+    owner.storage_active = True
+    declarations = ti.experimental.ResourceScope(owner)
+    declarations.static('storage_active', choices=(False, True))
+"""
+    allocation = """    with resource_group(owner, 'phase', initialization='zero') as fields:
+        fields.phase = fields.field(ti.i32, shape=fields.dim('n'))
+    if owner.law:
+        with resource_group(owner, 'law', initialization='zero') as fields:
+            fields.scratch = fields.field(ti.i32, shape=fields.dim('n'))
+"""
+    source += ("    if owner.storage_active:\n" + textwrap.indent(allocation, "    ")
+               if declared_presence else allocation)
+    package, _ = _resource_context_fixture(tmp_path, monkeypatch, model=source)
+    manifest = ti.aot.export_package(package, tmp_path / "sdk")
+    assert not manifest["entry_families"]
+    step = next(entry for entry in manifest["entries"].values() if entry["definition"].endswith(".Model.step"))
+    phase = next(item for item in step["captures"] if item["name"] == "phase")
+    if declared_presence:
+        assert phase["nullable_boolean"] == ["storage_active"]
+        assert phase["optional_array"]["ndim"] == 1
+        schema = manifest["owners"]["definition_fixture.model.Model"]
+        assert schema["phase"]["conditions"] == {"storage_active": True}
+        assert schema["scratch"]["conditions"] == {"storage_active": True, "law": True}
+    else:
+        assert "nullable_boolean" not in phase and "optional_array" not in phase
+    with Runtime(manifest["target"]) as runtime, load_package(runtime, tmp_path / "sdk") as code:
+        for prepared, law in ((False, False), (True, False), (True, True)):
+            normal = package.Model(5, prepared, law)
+            normal.step()
+            loaded = code.host.Model(5, prepared, law)
+            assert hasattr(loaded, "phase") == prepared
+            assert hasattr(loaded, "scratch") == (prepared and law)
+            assert loaded.storage_active == prepared
+            if not declared_presence and not prepared:
+                # A conditional caller alone does not declare allocation
+                # presence. Missing ordinary fields must still be rejected.
+                with pytest.raises(AttributeError, match="phase"):
+                    loaded.step()
+                continue
+            loaded.step()
+            np.testing.assert_array_equal(loaded.out.to_numpy(), normal.out.to_numpy())
+            with loaded.graph().bind({}) as bound:
+                loaded.law = not law
+                bound.run()
+            np.testing.assert_array_equal(loaded.out.to_numpy(), normal.out.to_numpy())
+        if declared_presence:
+            invalid = code.host.Model(5, False, True)
+            invalid.out.from_numpy(np.full(5, 99, dtype=np.int32))
+            with pytest.raises(ValueError, match="presence"):
+                invalid.step()
+            with pytest.raises(ValueError, match="presence"):
+                invalid.graph().bind({})
+            np.testing.assert_array_equal(invalid.out.to_numpy(), 99)
+            assert not hasattr(invalid, "phase") and not hasattr(invalid, "scratch")
+
+
 @test_utils.test(arch=[ti.cpu, ti.cuda], offline_cache=False)
 @pytest.mark.parametrize("second", ["same", "different", "kernel_only"])
 def test_package_preparation_reuses_identical_static_domains(tmp_path, monkeypatch, second):
