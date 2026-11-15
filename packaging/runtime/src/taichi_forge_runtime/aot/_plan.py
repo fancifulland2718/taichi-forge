@@ -7,7 +7,7 @@ import json
 import math
 from pathlib import Path
 
-_MAX_EXECUTION_PLAN_VERSION = 27
+_MAX_EXECUTION_PLAN_VERSION = 28
 
 
 def _resource_version(resources):
@@ -41,6 +41,8 @@ def _unique_fields(pairs):
 def _control_version(steps):
     version = 1
     for op in steps:
+        if isinstance(op, dict) and op.get("kind") == "kernel" and "specialization" in op:
+            version = max(version, 28)
         if isinstance(op, dict) and op.get("kind") == "branch":
             lowering = op.get("lowering")
             host = isinstance(lowering, dict) and lowering.get("kind") in ("cuda_host", "vulkan_host")
@@ -56,6 +58,11 @@ def _control_version(steps):
             version = max(version, 9)
         if isinstance(op, dict) and op.get("kind") == "vulkan_parallel":
             version = max(version, 27)
+        if isinstance(op, dict) and op.get("kind") in ("cuda_parallel", "vulkan_parallel"):
+            if isinstance(op.get("branches"), list):
+                for branch in op["branches"]:
+                    if isinstance(branch, list):
+                        version = max(version, _control_version(branch))
         if isinstance(op, dict) and op.get("kind") == "kernel" and "launch" in op:
             launch = op["launch"]
             bounded = isinstance(launch, dict) and launch.get("kind") in ("cpu_exact", "cuda_logical_exact")
@@ -401,7 +408,7 @@ class ExecutionPlan:
                     required = {"kind", "predicate", "max_iterations", "condition", "body"}
                     optional, names = {"continue_while_nonzero", "lowering"}, ("predicate",)
                 elif kind == "kernel":
-                    required, optional = {"kind", "entry", "arguments"}, {"label", "launch"}
+                    required, optional = {"kind", "entry", "arguments"}, {"label", "launch", "specialization"}
                     names = ("entry",)
                 elif kind == "copy":
                     required = {"kind", "source", "destination"}
@@ -439,6 +446,18 @@ class ExecutionPlan:
                     if name != "entry":
                         arguments.add(op[name])
                 for key in (optional & set(op)) - set(names):
+                    if kind == "kernel" and key == "specialization":
+                        selected = op[key]
+                        if ("launch" in op or not isinstance(selected, dict)
+                                or set(selected) != {"constant_args"}
+                                or not isinstance(selected["constant_args"], list)
+                                or not isinstance(op["arguments"], list)):
+                            raise ValueError("Specialization requires ordinary launches and constant_args")
+                        indices = selected["constant_args"]
+                        if (any(type(i) is not int or not 0 <= i < len(op["arguments"]) for i in indices)
+                                or len(set(indices)) != len(indices)):
+                            raise ValueError("Specialization constants must be unique kernel argument indices")
+                        continue
                     if kind == "kernel" and key == "launch":
                         launch = op[key]
                         if not isinstance(launch, dict):

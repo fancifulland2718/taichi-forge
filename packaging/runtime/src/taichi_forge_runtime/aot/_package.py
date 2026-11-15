@@ -1554,7 +1554,8 @@ class entry:
             return previous.run(reuse=True)
         selected = self._select(owner)
         contract = selected.contract
-        from ._package_calls import CachedCall, OwnerGuard, reusable_value
+        from ._package_calls import CachedCall, OwnerGuard, reusable_value, specialization_constant_args
+        from ._package_values import owner_type
 
         check_admission(owner, contract)
         selected._check_layout(owner)
@@ -1612,10 +1613,8 @@ class entry:
             with buffers as prepared:
                 call = kernel.bind(*prepared)
                 specialize = selected.symbol in package._specialization_entries
-                constant_args = tuple(
-                    len(contract["arguments"]) + index
-                    for index, item in enumerate(contract["captures"])
-                    if item["kind"] == "dimension" or "prepare_static" in item
+                constant_args = specialization_constant_args(
+                    contract, package.manifest["owners"].get(owner_type(owner), {})
                 ) if specialize else ()
                 library = package.manifest.get("artifact_format") == "bc-library"
                 # Host arrays must upload/download on every call. Mutable

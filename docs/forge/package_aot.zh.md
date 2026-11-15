@@ -237,12 +237,14 @@ with Runtime("cuda") as runtime:
 包命名空间，延迟导入的子模块绑定自己的代码 owner；每个实例持有自己的资源。
 调用复用已有 Runtime 的参数快照/租约，不通过切换模块共享资源指针选实例。
 
-普通 package 调用（包括混合模式）在相同绑定首次复用时，默认对适用的 CPU/CUDA
-bitcode 或 Vulkan 1.3 SPIR-V 执行消费时特化并保留原生准备。首次调用仍使用通用 AOT；
-模型维度从原合同自动选择，普通整数参数、数组内容和实例地址不固定为代码常量。
+普通 package 调用（包括混合模式）默认对适用的 CPU/CUDA bitcode 或 Vulkan 1.3
+SPIR-V 执行消费时特化并保留原生准备。CUDA `bc-library` 在首次绑定时特化；普通
+`bc` 和 SPIR-V 在相同绑定首次复用时特化，首次调用仍使用通用 AOT。
+固定标量来自原合同的模型维度、prepare-static 及 `affects_plan=True` 的整数标量捕获；
+声明的名称、路径和 dtype 须与入口一致。普通参数、未标记值、数组内容和实例地址不固定。
 新实例可以共享代码，但各自保存参数快照。Host 数组仍按原路径传输；不复用陈旧数据。
 device-range 任务和非适用代码格式保持通用 AOT，不吞掉特化编译错误或回退私有源码。
-跨进程特化缓存与避免首次通用代码物化仍未实现，首次与第二次调用成本须分别记录。
+跨进程特化缓存仍未实现，普通 `bc` 的首次通用代码物化仍保留；首次与第二次调用成本分开记录。
 当前资源寿命到 `LoadedPackage.close()`，尚未提供独立对象退休政策。
 
 调用方也可以保留 Forge 前端，用自己的 JIT Kernel 创建、填充和处理输入输出；
@@ -1360,7 +1362,7 @@ AOT 库自动借用当前 JIT Program；不另建计算设备。传入标量/固
 
 普通 `owner.method(...)` 自动在实例上复用未变化的原生 PreparedCall、参数帧和局部 workspace，
 不需要用户增加 `prepare()`。首调及相关配置、输入资源或参数变化时执行原准入/绑定；
-同一绑定首次复用时才建立原生 PreparedCall，单次调用和持续变化的标量不反复准备原生图。
+CUDA `bc-library` 在首次调用建立原生 PreparedCall；其他格式在同一绑定首次复用时准备。
 准备阶段直接使用 JIT/AOT 数组的权威视图，将参数帧、资源引用、线程块大小和共享内存大小
 交给既有原生执行机制固定。稳定热调用只比较相关 Host 输入并沿原租约提交，不重新解析
 准入合同、编码数组描述符或重建原生启动上下文。改变绑定时退休旧调用会等待在途工作；
@@ -1383,9 +1385,13 @@ CUDA bitcode 的低层 `BoundCall.prepare(specialize=True, constant_args=(...))`
 回调只在能证明继承同一 RuntimeContext 时参与，`real_func` 自建参数上下文不混用。
 这不需要原数值 Python 源码，也不改变发行 TCM 或枚举模型组合。
 
-此选项目前用于单 Kernel 的局部试验，普通 package 调用和 Graph prepare 默认不启用。
-相容代码在加载模块内复用，实例/在途生命周期沿用已有机制。普通入口查找仍可能先
-编译通用代码；首次特化是额外成本。同模块命中不再编译，但跨进程仅复用已有 CUDA
+普通 package 调用采用上述自动策略。CPU/CUDA package Graph 在 `bind()` 的私有准备
+副本中，对适用的普通 bitcode 入口复用同一特化规则；公开 `Graph.plan` 保持通用。
+Graph 策略参数变化须重建 Graph，已绑定调用保留原快照。ExecutionPlan v28 的逐核
+`specialization.constant_args` 传递整数位置；提交时可更新的标量即使列入候选也保持活值。
+设备条件数组不被读回或固定。特殊 launch、binding family、SNode instance 和 managed
+kernel resource 不属于本批 Graph 特化范围。独立 CUDA domain 的早期准入仍可能先物化
+通用核。相容代码在加载模块内复用，实例/在途生命周期沿用已有机制；跨进程仅复用已有 CUDA
 后端/驱动缓存，仍要执行 LLVM 优化，并无完整特化磁盘缓存。应同时记录首次准备、
 缓存后准备、稳定调用耗时和实际本地代码占用，再决定是否启用；不能只看热核时间。
 特化代码缓存与原生调用准备复用承担不同职责。前者保存相容目标代码，后者保存实例的

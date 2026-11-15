@@ -6,6 +6,32 @@
 #include "taichi/program/storage_view.h"
 
 namespace taichi::lang::aot {
+TEST(ExecutionPlan, SpecializationRequiresV28AndScalarCandidateIndices) {
+  const std::string source = R"({"version":28,"operations":[
+    {"kind":"kernel","entry":"step","arguments":["out","mode"],
+     "specialization":{"constant_args":[1]}}]})";
+  const auto plan = ExecutionPlan::parse(source);
+  const auto &kernel = std::get<ExecutionPlan::Kernel>(plan.operations[0]);
+  ASSERT_TRUE(kernel.specialization);
+  EXPECT_EQ(*kernel.specialization, (std::vector<std::uint32_t>{1}));
+  for (const auto &[before, after] :
+       std::vector<std::pair<std::string, std::string>>{
+           {"\"version\":28", "\"version\":27"},
+           {"[1]", "[1,1]"}, {"[1]", "[2]"}, {"[1]", "[-1]"},
+           {"[1]", "[true]"}, {"[1]", "[1.0]"}, {"[1]", "1"},
+           {"\"constant_args\":[1]", "\"unknown\":[1]"},
+           {"\"constant_args\":[1]", "\"constant_args\":[1],\"unknown\":true"},
+           {"\"entry\":\"step\"", "\"entry\":\"step\",\"launch\":{\"kind\":\"cpu_exact\",\"extent\":\"n\",\"capacity\":3}"}}) {
+    auto invalid = source;
+    invalid.replace(invalid.find(before), before.size(), after);
+    EXPECT_THROW(ExecutionPlan::parse(invalid), std::invalid_argument) << invalid;
+  }
+  auto descriptors = source;
+  descriptors.replace(descriptors.find("[1]"), 3, "[]");
+  EXPECT_TRUE(std::get<ExecutionPlan::Kernel>(ExecutionPlan::parse(descriptors).operations[0])
+                  .specialization->empty());
+}
+
 TEST(ExecutionPlan, KernelClosureIncludesInitializationAndNestedRegions) {
   ExecutionPlan plan;
   plan.initialization.emplace_back(ExecutionPlan::Kernel{"init"});

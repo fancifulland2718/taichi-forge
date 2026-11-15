@@ -38,6 +38,32 @@ def specialization_entries(path, target, entries):
     return frozenset(name for name in entries if name not in excluded and aliases.get(name, name) not in excluded)
 
 
+def specialization_constant_args(contract, owner_schema):
+    """Select fixed scalar facts from the existing declaration and entry ABI.
+
+    Plan-affecting integer captures are model policy, observed by OwnerGuard
+    (or snapshotted by Graph.bind). Ordinary arguments, unmarked values and
+    device contents remain live. A declaration with a different path or dtype
+    cannot authorize specialization of a similarly named capture.
+    """
+    result = []
+    for index, capture in enumerate(contract["captures"], len(contract["arguments"])):
+        if capture["kind"] == "dimension" or "prepare_static" in capture:
+            result.append(index)
+            continue
+        name = capture["name"]
+        declaration = owner_schema.get(name, {})
+        if (capture["kind"] == declaration.get("kind") == "value"
+                and declaration.get("affects_plan") is True
+                and capture.get("dtype") in ("i8", "i16", "i32", "i64", "u8", "u16", "u32", "u64")
+                and capture["dtype"] == declaration.get("dtype")
+                and not capture.get("element_shape")
+                and not declaration.get("element", {}).get("element_shape")
+                and tuple(capture.get("path", (name,))) == tuple(declaration.get("path", (name,)))):
+            result.append(index)
+    return tuple(result)
+
+
 def _token(value):
     # Exact types distinguish bool/int and +0/-0. Keep the observed objects
     # alive in the guard/call so an identity cannot be recycled underneath it.

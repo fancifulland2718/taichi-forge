@@ -11588,6 +11588,115 @@ def test_package_specialization_policy_uses_native_task_and_format_contract(tmp_
     assert not specialization_entries(tmp_path, "x64", entries)
 
 
+def test_package_fixed_policy_requires_matching_scalar_declaration():
+    from taichi_forge_runtime.aot._package_calls import specialization_constant_args
+
+    captures = [dict(name='n', kind='dimension', dtype='i32'),
+                dict(name='policy', path=['settings', 'mode'], kind='value', dtype='i32'),
+                dict(name='live', kind='value', dtype='i32'),
+                dict(name='gain', kind='value', dtype='f32'),
+                dict(name='tensor', kind='value', dtype='i32', element_shape=[2])]
+    contract = dict(arguments=[dict(name='delta', kind='value', dtype='i32')], captures=captures)
+    schema = {item['name']: dict(item, affects_plan=True) for item in captures[1:]}
+    del schema['live']['affects_plan']
+    assert specialization_constant_args(contract, schema) == (1, 2)
+    schema['policy']['path'] = ['other', 'mode']
+    assert specialization_constant_args(contract, schema) == (1,)
+    schema['policy']['path'] = ['settings', 'mode']
+    schema['policy']['dtype'] = 'u32'
+    assert specialization_constant_args(contract, schema) == (1,)
+    assert specialization_constant_args(contract, {}) == (1,)
+
+
+@pytest.mark.parametrize('graph', [False, True])
+@test_utils.test(arch=[ti.cpu, ti.cuda], offline_cache=False)
+def test_package_fixed_policy_specialization_keeps_live_values_and_instances(tmp_path, monkeypatch, graph):
+    from taichi_forge_runtime.aot import _plan
+
+    source = '''
+import taichi_forge as ti
+@ti.data_oriented
+class Model:
+    def __init__(self, n: int, policy: int):
+        self.n, self.policy, self.live = n, policy, 2
+        scope = ti.experimental.ResourceScope(self)
+        scope.value('policy', ti.i32, affects_plan=True)
+        scope.value('live', ti.i32)
+        scope.out = scope.field(ti.i32, shape=scope.dim('n'), initialization='zero')
+    @ti.kernel
+    def step(self, delta: ti.i32):
+        for i in range(self.n):
+            if self.policy == 0:
+                self.out[i] += self.live + delta
+            else:
+                self.out[i] += 3 * self.live + delta
+    def graph(self):
+        builder = ti.graph.GraphBuilder()
+        builder.dispatch(self.step, ti.graph.Arg(ti.graph.ArgKind.SCALAR, 'delta', ti.i32),
+                         template_args={'self': self})
+        return builder.compile()
+'''
+    package = _source_package(tmp_path, monkeypatch, source)
+    manifest = ti.aot.export_package(package, tmp_path / 'sdk', arch=ti.cfg.arch,
+                                    artifact_format='bc-library' if ti.cfg.arch == ti.cuda else None)
+    entries = [item for item in manifest['entries'].values()
+               if 'definition_fixture.model.Model.step' in item['definitions']]
+    assert len(entries) == 1  # Policy values do not multiply producer implementations.
+    contract = entries[0]
+    expected = tuple(1 + i for i, item in enumerate(contract['captures'])
+                     if item['kind'] == 'dimension' or item['name'] == 'policy')
+    plans = []
+    original_prepare = _plan.ExecutionPlan.prepare
+    def prepare(plan, *args, **kwargs):
+        plans.append(json.loads(plan.to_json()))
+        return original_prepare(plan, *args, **kwargs)
+    monkeypatch.setattr(_plan.ExecutionPlan, 'prepare', prepare)
+    with ti.aot.borrow_runtime() as runtime, load_package(runtime, tmp_path / 'sdk') as code:
+        a, b = code.host.Model(7, 0), code.host.Model(7, 1)
+        ga, gb = (a.graph(), b.graph()) if graph else (None, None)
+        if graph:
+            operation = json.loads(ga.plan.to_json())['operations'][0]
+            assert 'specialization' not in operation  # Public plan remains reusable in other domains.
+
+        def step(owner, plan, delta):
+            if graph:
+                plan.run(dict(delta=delta))
+            else:
+                owner.step(delta)
+
+        for _ in range(2):
+            step(a, ga, 1)
+            step(b, gb, 1)
+        if graph:
+            assert plans and plans[0]['version'] == 28
+            assert tuple(plans[0]['operations'][0]['specialization']['constant_args']) == expected
+        if not graph:
+            ready = next(iter(a._forge_package_calls.values()))
+            assert ready.prepared is not None and ready.constant_args == expected
+        np.testing.assert_array_equal(a.out.to_numpy(), np.full(7, 6))
+        np.testing.assert_array_equal(b.out.to_numpy(), np.full(7, 14))
+        a.out.from_numpy(np.full(7, 100, np.int32))
+        a.live = 5
+        step(a, ga, 4)
+        step(a, ga, 4)
+        np.testing.assert_array_equal(a.out.to_numpy(), np.full(7, 118))
+        np.testing.assert_array_equal(b.out.to_numpy(), np.full(7, 14))
+        old = ga.bind(dict(delta=2)) if graph else None
+        a.policy = 1
+        if graph:
+            with pytest.raises(ValueError, match='Plan parameter.*changed'):
+                ga.run(dict(delta=2))
+            ga = a.graph()
+        for _ in range(2):
+            step(a, ga, 2)
+        np.testing.assert_array_equal(a.out.to_numpy(), np.full(7, 152))
+        if old is not None:
+            old.run()  # Already bound graph retains its original policy/value snapshot.
+            old.close()
+            np.testing.assert_array_equal(a.out.to_numpy(), np.full(7, 159))
+        np.testing.assert_array_equal(b.out.to_numpy(), np.full(7, 14))
+
+
 @test_utils.test(arch=[ti.cpu, ti.cuda], offline_cache=False)
 def test_package_core_consumes_caller_jit_storage_without_allocation_sources(tmp_path, monkeypatch):
     source = """

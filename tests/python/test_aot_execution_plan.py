@@ -6,6 +6,39 @@ from taichi_forge_runtime.aot import ExecutionPlan, Scalar
 from taichi_forge_runtime.aot._plan import _MAX_EXECUTION_PLAN_VERSION
 
 
+def test_specialization_intent_snapshots_indices_and_requires_v28():
+    selected = dict(constant_args=[1])
+    operation = dict(kind="kernel", entry="step", arguments=["out", "mode"], specialization=selected)
+    plan = ExecutionPlan([operation])
+    selected["constant_args"].clear()
+    document = json.loads(plan.to_json())
+    assert document["version"] == 28
+    assert document["operations"][0]["specialization"] == dict(constant_args=[1])
+    assert ExecutionPlan.from_json(plan.to_json()).to_json() == plan.to_json()
+    with pytest.raises(ValueError, match="version 28"):
+        ExecutionPlan.from_json(json.dumps(dict(document, version=27)))
+    operation = document["operations"][0]
+    for selected in (None, True, {}, dict(unknown=[]), dict(constant_args=1),
+                     dict(constant_args=[True]), dict(constant_args=[1.0]),
+                     dict(constant_args=[-1]), dict(constant_args=[2]),
+                     dict(constant_args=[1, 1]), dict(constant_args=[], unknown=1)):
+        with pytest.raises(ValueError):
+            ExecutionPlan([dict(operation, specialization=selected)])
+    with pytest.raises(ValueError):
+        ExecutionPlan([dict(operation, launch=dict(kind="cpu_exact", extent="n", capacity=3))])
+    for region in (
+        dict(kind="while", predicate="p", max_iterations=3, condition=[operation], body=[operation]),
+        dict(kind="branch", selector="p", selection="nonzero", has_default=False,
+             lowering=dict(kind="cpu", version=1), condition=[], bodies=[[operation]]),
+        dict(kind="cuda_parallel", branches=[[operation], [operation]]),
+    ):
+        nested = ExecutionPlan([region])
+        assert json.loads(nested.to_json())["version"] == 28
+        assert ExecutionPlan.from_json(nested.to_json()).to_json() == nested.to_json()
+    assert json.loads(ExecutionPlan([dict(operation, specialization=dict(constant_args=[]))]).to_json())["version"] == 28
+    assert json.loads(ExecutionPlan([{k: v for k, v in operation.items() if k != "specialization"}]).to_json())["version"] == 1
+
+
 def test_tensor_member_components_are_explicit_and_versioned():
     member = dict(kind="ndarray_member", name="lane", array="records", path="inner.m", component=[1, 2])
     extent = dict(kind="extent", name="n", dtype="i32", array="lane", axis=0)

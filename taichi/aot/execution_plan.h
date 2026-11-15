@@ -21,7 +21,7 @@ namespace taichi::lang::aot {
 // handles, backend commands and storage ownership. Binding consumes this only
 // in the cold phase; replay retains no JSON or symbolic argument lookups.
 struct ExecutionPlan {
-  static constexpr std::uint32_t kMaxVersion = 27;
+  static constexpr std::uint32_t kMaxVersion = 28;
   struct Kernel {
     struct BoundedRange {
       bool cuda{false};
@@ -36,6 +36,9 @@ struct ExecutionPlan {
     std::string label;
     std::optional<std::string> indirect_packet;
     std::optional<BoundedRange> bounded_range;
+    // Presence enables prepare-time code specialization from this binding.
+    // Named submission parameters are live even when listed as candidates.
+    std::optional<std::vector<std::uint32_t>> specialization;
   };
   struct Copy {
     std::string destination;

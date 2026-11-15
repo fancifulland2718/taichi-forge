@@ -482,12 +482,56 @@ class Graph:
         # Native preparation owns immutable instance bindings and their leases.
         # Replaying the returned call does not interpret operations in Python.
         plan = self.plan.with_argument_resources(resources) if resources else self.plan
+        plan = self._specialized_plan(plan)
         values = {name: self.package.runtime._adapt_package_array(value) for name, value in values.items()}
         prepared = plan.prepare(self.package._module, values)
         # A cached call must not create Graph -> call -> Graph ownership cycles.
         # Native owners already retain the module and every argument resource.
         prepared._forge_package_graph = weakref.ref(self)
         return prepared
+
+    def _specialized_plan(self, plan):
+        # Only the cold preparation copy selects code. The exposed generic plan
+        # remains reusable with other binding strategies and SNode instances.
+        if (plan.binding_strategy is not None
+                or self.package.runtime.arch not in ("cpu", "x64", "arm64", "cuda")):
+            return plan
+        from ._package_calls import specialization_constant_args
+
+        document = json.loads(plan.to_json())
+        pending = list(document["operations"]) + document.get("initialization", [])
+        changed = False
+        ordinary = {"value", "dimension", "compound", "ndarray", "dense_field",
+                    "model_tensor_field", "local_tensor_workspace"}
+        while pending:
+            operation = pending.pop()
+            kind = operation["kind"]
+            if kind == "while":
+                pending.extend(operation["condition"] + operation["body"])
+            elif kind == "branch":
+                pending.extend(operation["condition"])
+                for region in operation["bodies"]:
+                    pending.extend(region)
+            elif kind in ("cuda_parallel", "vulkan_parallel"):
+                for region in operation["branches"]:
+                    pending.extend(region)
+            elif (kind == "kernel" and "launch" not in operation
+                  and operation["entry"] in self.package._specialization_entries):
+                contract = self.package.manifest["entries"][operation["entry"]]
+                if not all(spec["kind"] in ordinary for spec in (*contract["arguments"], *contract["captures"])):
+                    continue  # Managed resources retain a qualified kernel identity.
+                schema = {}
+                if contract["captures"]:
+                    capture = operation["arguments"][len(contract["arguments"])]
+                    owner = self.captures[capture][0]
+                    schema = self.package.manifest["owners"].get(owner_type(owner), {})
+                operation["specialization"] = dict(
+                    constant_args=list(specialization_constant_args(contract, schema)))
+                changed = True
+        if not changed:
+            return plan
+        document.pop("version")
+        return ExecutionPlan(**document)
 
     def _binding_guards(self):
         from ._package_calls import OwnerGuard

@@ -353,7 +353,8 @@ ExecutionPlan ExecutionPlan::parse(const std::string &json) {
           }
           operations.emplace_back(std::move(loop));
         } else if (kind == "kernel") {
-          fields(step, {"kind", "entry", "arguments", "label", "launch"});
+          fields(step, {"kind", "entry", "arguments", "label", "launch",
+                        "specialization"});
           Kernel kernel{name(step["entry"]), {}, {}};
           if (auto found = step.obj.inner.find("launch");
               found != step.obj.inner.end()) {
@@ -413,6 +414,26 @@ ExecutionPlan ExecutionPlan::parse(const std::string &json) {
           for (const auto &value : step["arguments"].arr.inner) {
             kernel.arguments.push_back(name(value));
             arguments.insert(kernel.arguments.back());
+          }
+          if (auto found = step.obj.inner.find("specialization");
+              found != step.obj.inner.end()) {
+            if (version < 28 || kernel.indirect_packet || kernel.bounded_range)
+              throw std::invalid_argument(
+                  "Kernel specialization requires plan version 28 and ordinary launches");
+            fields(found->second, {"constant_args"});
+            const auto &indices = found->second["constant_args"];
+            if (!indices.is_arr())
+              throw std::invalid_argument("Specialization constants must be an array");
+            kernel.specialization.emplace();
+            std::set<std::uint32_t> unique;
+            for (const auto &value : indices.arr.inner) {
+              const auto index = integer(value);
+              if (index >= kernel.arguments.size() ||
+                  !unique.insert(static_cast<std::uint32_t>(index)).second)
+                throw std::invalid_argument(
+                    "Specialization constants must be unique kernel argument indices");
+              kernel.specialization->push_back(static_cast<std::uint32_t>(index));
+            }
           }
           operations.emplace_back(std::move(kernel));
         } else if (kind == "copy") {

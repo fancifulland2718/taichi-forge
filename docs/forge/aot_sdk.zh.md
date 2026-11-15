@@ -1639,13 +1639,18 @@ Vulkan 复用固定命令。返回对象可重复调用、读取 `info`，使用
 不同实例仍持有独立参数、资源和退休租约。热调用复用原生准备，不重复特化。
 未指定的标量仍为代码的运行时输入；改变其值需新的不可变准备，但可命中相同代码。
 
-此选项目前用于普通 Kernel，不接受 Graph、device-range 任务或 CUDA PTX/cubin。
+此选项用于普通 Kernel，不接受 device-range 任务或 CUDA PTX/cubin。CPU/CUDA
+ExecutionPlan v28 可为普通 kernel operation 指定 `specialization: {"constant_args": [...]}`，
+准备时复用同一机制；提交时可更新的标量不被固定。特殊 launch、binding family、SNode
+instance 和 managed kernel resource 尚不支持该意图。
 CPU range 回调的完整特化需要包含参数来源标记的新导出；旧 bitcode 仅折叠能证明的
 位置。Vulkan 的额外整数能力仍须在导出时声明，例如 `caps=["spirv_has_int64"]`。
 原有资源准入范围不变，包括 Vulkan 对交错 Field 切片借用的限制。
 显式 `BoundCall.prepare()` 仍默认 `specialize=False`。普通 package 调用（包括混合
-模式）已在稳定绑定首次复用时默认选择适用的特化，并从合同选择模型维度参数；
-普通变化标量不参与代码身份。不适用任务/格式保留通用 AOT，首次调用仍走原路径。
+模式）默认选择适用特化：CUDA `bc-library` 在首次绑定时，普通 `bc`/SPIR-V 在稳定绑定
+首次复用时进行。从合同选择模型维度、prepare-static 及 `affects_plan=True` 的整数
+标量捕获；普通变化标量不参与代码身份。CPU/CUDA package Graph 在绑定的私有准备副本
+中复用该规则，公开 Plan 保持通用。不适用任务/格式保留通用 AOT。
 本轮只验证局部数组、模型尺寸、别名、实例与准备复用，未完成全引擎后端资格。
 通用代码与特化代码的重复编译消除、跨进程特化缓存均后置；新进程仍可能重新特化，
 首次准备成本须计入首次可用时间，不生成额外发行 TCM。

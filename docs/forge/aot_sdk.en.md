@@ -2371,17 +2371,23 @@ Warm calls reuse native preparation without specializing again. Unselected
 scalars remain runtime code inputs; changing their values requires another
 immutable preparation but can reuse the same code.
 
-This option currently accepts ordinary Kernels, excluding Graphs, device-range
-tasks and CUDA PTX/cubin. Complete CPU range-callback specialization requires a
+This option accepts ordinary Kernels, excluding device-range tasks and CUDA
+PTX/cubin. CPU/CUDA ExecutionPlan v28 can set per-kernel
+`specialization: {"constant_args": [...]}` to use the same preparation mechanism.
+Mutable submission scalars remain live. Special launches, binding families, SNode
+instances and managed kernel resources do not support this intent yet.
+Complete CPU range-callback specialization requires a
 new export carrying argument-origin attributes; older bitcode folds only proven
 locations. Vulkan integer capabilities must still be declared at export, for
 example `caps=["spirv_has_int64"]`. Existing resource admission limits remain,
 including sliced interleaved Field borrowing on Vulkan. Explicit
 `BoundCall.prepare()` still defaults to `specialize=False`. Ordinary package
-calls, including hybrid mode, now select eligible specialization on the first
-reuse of a stable binding, using declared model dimensions as scalar facts.
-Ordinary changing scalars stay out of code identity. Unsupported tasks/formats
-retain generic AOT; the initial call keeps the existing ordinary launch path.
+calls, including hybrid mode, select eligible specialization on the first binding
+for CUDA `bc-library`, or on the first reuse for ordinary `bc`/SPIR-V. Scalar facts
+come from declared dimensions, prepare-static captures and integer scalar captures
+marked `affects_plan=True`. Ordinary changing scalars stay out of code identity.
+CPU/CUDA package Graph binding uses the same rule in a private preparation copy;
+the public Plan stays generic. Unsupported tasks/formats retain generic AOT.
 Qualification covers local array, model-size, alias, instance and preparation
 reuse fixtures, not the full engine. Eliminating duplicate generic/specialized
 compilation and adding a cross-process specialization cache are deferred. New

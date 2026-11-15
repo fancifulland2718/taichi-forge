@@ -2407,6 +2407,23 @@ static TiPreparedExecution prepare_execution_plan_impl(
           bound->context->mutable_argument_ranges.emplace_back(
               patches.back().argument_offset, patches.back().bytes);
         }
+        if (kernel->specialization) {
+          if ((!arch_is_cpu(rt.arch) && rt.arch != taichi::Arch::cuda) ||
+              family || prepared->snode_instance || !bound->kernel_resources.empty())
+            throw MemoryBindingError(
+                "Plan specialization requires ordinary CPU/CUDA bindings without "
+                "binding families, SNode instances or managed kernel resources");
+          std::vector<std::uint32_t> constants;
+          for (const auto index : *kernel->specialization) {
+            // Submission parameters override fixed candidates in every region.
+            // The original scalar patch range remains present in the launch
+            // context, and device predicate/extent contents are never read.
+            if (!parameter_slots.count(kernel->arguments.at(index)))
+              constants.push_back(index);
+          }
+          bound->kernel = bound->owner->get().specialize_kernel(
+              *bound->kernel, *bound->context, constants);
+        }
         bound->context->append_dispatch_label(kernel->label);
         DevicePtr indirect_packet{kDeviceNullPtr};
         DevicePtr bounded_extent{kDeviceNullPtr};

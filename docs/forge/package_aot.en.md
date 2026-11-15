@@ -350,14 +350,16 @@ package has its own Python namespace. Lazy submodules bind to their own code
 owner, and instances retain separate resources. Calls reuse the existing Runtime
 argument snapshots and leases; no shared module resource pointer is switched
 to select an instance. Ordinary package calls, including hybrid mode, default
-to eligible CPU/CUDA bitcode or Vulkan 1.3 SPIR-V specialization when a stable
-binding is first reused. The initial call still uses generic AOT. Scalar code
-facts come from declared model dimensions, not ordinary integer arguments;
-array contents and instance addresses remain dynamic. Native preparation is
+to eligible CPU/CUDA bitcode or Vulkan 1.3 SPIR-V specialization. CUDA
+`bc-library` specializes on the first binding; ordinary `bc` and SPIR-V specialize
+on the first reuse, after an initial generic call. Fixed scalar facts come from
+declared dimensions, prepare-static captures and integer scalar captures marked
+`affects_plan=True`, with matching names, paths and dtypes. Ordinary arguments,
+unmarked values, array contents and instance addresses remain dynamic. Native preparation is
 retained per instance. Host arrays still transfer through their original path.
 Device-range tasks and unsupported formats retain generic AOT; specialization
 errors are not swallowed. Cross-process specialization caching and eliminating
-initial generic compilation remain deferred; record first and second calls
+ordinary `bc` initial generic compilation remain deferred; record first and second calls
 separately. Allocation lifetime currently ends at `LoadedPackage.close()`;
 independent object retirement is not implemented.
 
@@ -1061,8 +1063,8 @@ Ordinary `owner.method(...)` calls automatically reuse an unchanged native Prepa
 argument frame and local workspace on the instance; no explicit `prepare()`
 is required. The first call and changes to relevant configuration, resources or
 arguments use the existing admission/binding path. Native preparation occurs on the
-first reuse of an unchanged binding: one-off calls and continuously changing scalars
-do not repeatedly prepare native graphs. Preparation consumes authoritative
+first call for CUDA `bc-library`, or the first reuse of an unchanged binding for
+other formats. Preparation consumes authoritative
 JIT/AOT array views and fixes argument frames, resource references, block sizes and
 shared-memory sizes through the existing native execution mechanism. Stable hot
 calls compare the relevant Host inputs and submit with the original leases, without
@@ -1097,11 +1099,17 @@ only when their RuntimeContext provenance is proven; a `real_func`'s separate
 argument context is not confused with the kernel ABI. No numerical Python source,
 distribution changes or enumeration of model combinations is required.
 
-This option currently targets individual bound kernels. Ordinary package calls
-and Graph preparation do not enable it by default. Compatible executable code is
-shared within the loaded module, with existing instance and in-flight ownership.
-Ordinary entry lookup can still compile generic code first, so initial
-specialization is additional work. A module-local hit avoids compilation, but a
+Ordinary package calls use the automatic policy above. CPU/CUDA package Graphs
+apply the same facts to eligible ordinary bitcode entries in a private preparation
+copy during `bind()`; the public `Graph.plan` stays generic. Changed plan policy
+requires rebuilding the Graph; already bound calls retain their snapshots.
+ExecutionPlan v28 carries per-kernel `specialization.constant_args`. Mutable
+submission parameters remain live even if listed as candidates; device predicate
+contents are never read back or fixed. Special launches, binding families, SNode
+instances and managed kernel resources are outside this Graph specialization
+scope. Independent CUDA domain admission can still materialize generic code early.
+Compatible code is shared within the loaded module with existing instance and
+in-flight ownership. A module-local hit avoids compilation, but a
 new process only benefits from existing CUDA backend/driver caches and still runs
 LLVM optimization; there is no complete persistent specialization cache yet.
 Measure initial preparation, cached preparation, steady execution and local code
