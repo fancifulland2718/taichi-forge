@@ -1229,6 +1229,16 @@ def scope_declarations(
     def optional_arm(body):
         fields, records, borrows = set(), {}, set()
         for node in body:
+            if isinstance(node, ast.If):
+                left, right = optional_arm(node.body), optional_arm(node.orelse)
+                # A nested type choice is present only when every arm provides
+                # the same resources. Normal statement analysis still proves
+                # its guards and checks mutually exclusive owner constructors.
+                if (left is None or right is None or left != right or left[1]):
+                    return None
+                fields.update(left[0])
+                borrows.update(left[2])
+                continue
             call = node.value if isinstance(node, (ast.Assign, ast.AnnAssign, ast.Expr)) else None
             scope, method = operation(call)
             if method in ("field", "vector_field", "matrix_field"):

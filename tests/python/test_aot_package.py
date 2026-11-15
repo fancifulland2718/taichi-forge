@@ -11172,7 +11172,8 @@ def test_package_child_choices_do_not_expand_unused_sibling(tmp_path, monkeypatc
 
 
 @test_utils.test(arch=ti.cpu, offline_cache=False)
-def test_package_child_choices_preserve_optional_parent_branch(tmp_path, monkeypatch):
+@pytest.mark.parametrize("explicit_absence,complete", [(False, True), (True, True), (True, False)])
+def test_package_child_choices_preserve_optional_parent_branch(tmp_path, monkeypatch, explicit_absence, complete):
     source = CHILD_CHOICES_SOURCE.replace("n: int, second: bool", "n: int, second: bool, enabled: bool")
     source = source.replace(
         "        scope.static('second', choices=(False, True))",
@@ -11186,6 +11187,11 @@ def test_package_child_choices_preserve_optional_parent_branch(tmp_path, monkeyp
     start = source.index("        if self.second:\n            scope.child")
     end = source.index("    @ti.kernel", start)
     source = source[:start] + "        if self.enabled:\n" + textwrap.indent(source[start:end], "    ") + source[end:]
+    if explicit_absence:
+        source = source.replace("        self.child = None\n", "")
+        source = source.replace("    @ti.kernel", "        else:\n            scope.record('child', None, optional=True)\n    @ti.kernel", 1)
+    if not complete:
+        source = source.replace("scope.child = First(self)", "pass")
     source = source.replace(
         "            self.out[i] = self.child.evaluate(i)",
         """
@@ -11195,6 +11201,11 @@ def test_package_child_choices_preserve_optional_parent_branch(tmp_path, monkeyp
 """,
     )
     package = _source_package(tmp_path, monkeypatch, source)
+    if not complete:
+        with pytest.raises(ti.aot.PackageExportError):
+            ti.aot.export_package(package, tmp_path / "sdk")
+        assert not (tmp_path / "sdk").exists()
+        return
     manifest = ti.aot.export_package(package, tmp_path / "sdk")
     from taichi_forge_runtime.aot import Runtime, load_package
 
