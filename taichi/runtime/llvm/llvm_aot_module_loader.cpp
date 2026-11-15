@@ -911,7 +911,8 @@ std::unique_ptr<llvm_aot::KernelImpl> LlvmAotModule::load_kernel_payload(
   TI_ERROR_IF(compiled_kernel_launch_abi(
                   *compiled.get_internal_data().compiled_data.module) != launch_abi,
               "AOT LLVM code does not match its kernel launch ABI: {}", name);
-  if (defer_registration && !gated && metadata_.kernel_format == "bc-library") {
+  if (defer_registration && !gated &&
+      is_llvm_aot_bitcode_format(metadata_.kernel_format)) {
     // Contract/dependency validation above still happens at lookup. A prepared
     // consumer can now compile only its specialization; an ordinary consumer
     // registers the generic implementation when it first needs its handle.

@@ -323,6 +323,64 @@ TEST(LLVMAotOwnership, LoadedEntryRequiresLauncherAndRegistration) {
       llvm_aot::KernelImpl(&launcher, handle, Arch::vulkan, "invalid", data));
 }
 
+TEST(LLVMAotOwnership, DeferredAliasesShareRegistrationWithoutRetainingIR) {
+  for (const auto arch : {Arch::x64, Arch::cuda}) {
+    LoadedEntryLauncher launcher;
+    int registrations = 0;
+    auto token = std::make_shared<int>(7);
+    std::weak_ptr<int> factory_token = token;
+    std::weak_ptr<llvm::LLVMContext> compiler_context;
+    std::unique_ptr<llvm_aot::KernelImpl> callable;
+    {
+      LLVM::CompiledKernelData::InternalData data;
+      data.compiled_data.module_context_owner =
+          std::make_shared<llvm::LLVMContext>();
+      compiler_context = data.compiled_data.module_context_owner;
+      data.compiled_data.module = std::make_unique<llvm::Module>(
+          "deferred", *data.compiled_data.module_context_owner);
+      callable = std::make_unique<llvm_aot::KernelImpl>(
+          &launcher, KernelLaunchHandle{}, arch, "physical", data,
+          std::vector<std::vector<int>>{}, [&, token] {
+            ++registrations;
+            KernelLaunchHandle result;
+            result.set_launch_id(*token);
+            return result;
+          });
+    }
+    token.reset();
+    EXPECT_TRUE(compiler_context.expired());
+    EXPECT_FALSE(factory_token.expired());
+    llvm_aot::KernelImpl alias(*callable, "public", {});
+    EXPECT_EQ(registrations, 0);  // Lookup and public aliasing do not compile.
+    EXPECT_EQ(alias.handle().get_launch_id(), 7);
+    EXPECT_EQ(callable->handle().get_launch_id(), 7);
+    EXPECT_EQ(alias.handle().get_launch_id(), 7);
+    EXPECT_EQ(registrations, 1);
+    EXPECT_TRUE(factory_token.expired());
+  }
+}
+
+TEST(LLVMAotOwnership, DeferredAliasesShareFailureAndReleaseFactory) {
+  LoadedEntryLauncher launcher;
+  LLVM::CompiledKernelData::InternalData data;
+  int attempts = 0;
+  auto token = std::make_shared<int>(1);
+  std::weak_ptr<int> factory_token = token;
+  llvm_aot::KernelImpl callable(
+      &launcher, KernelLaunchHandle{}, Arch::x64, "physical", data,
+      {}, [&, token]() -> KernelLaunchHandle {
+        attempts += *token;
+        throw std::runtime_error("deferred registration failed");
+      });
+  token.reset();
+  llvm_aot::KernelImpl alias(callable, "public", {});
+  EXPECT_THROW(alias.handle(), std::runtime_error);
+  EXPECT_THROW(callable.handle(), std::runtime_error);
+  EXPECT_THROW(alias.handle(), std::runtime_error);
+  EXPECT_EQ(attempts, 1);
+  EXPECT_TRUE(factory_token.expired());
+}
+
 }  // namespace
 }  // namespace taichi::lang
 #endif

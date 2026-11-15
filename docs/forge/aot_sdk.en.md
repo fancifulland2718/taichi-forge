@@ -2383,16 +2383,26 @@ example `caps=["spirv_has_int64"]`. Existing resource admission limits remain,
 including sliced interleaved Field borrowing on Vulkan. Explicit
 `BoundCall.prepare()` still defaults to `specialize=False`. Ordinary package
 calls, including hybrid mode, select eligible specialization on the first binding
-for CUDA `bc-library`, or on the first reuse for ordinary `bc`/SPIR-V. Scalar facts
+for CPU/CUDA `bc` and CUDA `bc-library`; SPIR-V prepares on the first stable binding
+reuse. Scalar facts
 come from declared dimensions, prepare-static captures and integer scalar captures
 marked `affects_plan=True`. Ordinary changing scalars stay out of code identity.
 CPU/CUDA package Graph binding uses the same rule in a private preparation copy;
 the public Plan stays generic. Unsupported tasks/formats retain generic AOT.
 Qualification covers local array, model-size, alias, instance and preparation
-reuse fixtures, not the full engine. Eliminating duplicate generic/specialized
-compilation and adding a cross-process specialization cache are deferred. New
-processes can specialize again; count preparation in first-use cost. No extra
-distribution TCM is created.
+reuse fixtures, not the full engine. Eligible LLVM entry lookup validates code and
+dependencies, then releases private IR without compiling the generic executable.
+Specialization compiles the selected version; explicitly running generic code
+materializes it once. Aliases share that registration. Host transfers and changed
+live values still use fresh argument frames while compatible specialized code is
+reused. Frequent live-value changes can therefore incur preparation and retirement
+cost on each call, even without recompilation; first-use specialization does not
+guarantee lower total time for that workload. Independent CUDA-domain preflight
+may still materialize generic code.
+Cross-process specialization caching remains deferred. New processes can
+specialize again; compare preparation plus completed simulation steps over the
+actual reuse interval, rather than compilation counts alone. No extra distribution
+TCM or persistent compiler-IR cache is created.
 
 The corresponding C API is `ti_prepare_kernel_ext` /
 `ti_prepare_compute_graph_ext` with `TiNdArrayBinding` /

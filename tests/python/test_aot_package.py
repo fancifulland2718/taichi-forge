@@ -1176,8 +1176,13 @@ class Model:
             aot.step(5)
 
 
-@test_utils.test(arch=ti.cuda, offline_cache=False)
-def test_package_library_prepares_host_arrays_and_preserves_live_arguments(tmp_path, monkeypatch):
+@test_utils.test(arch=[ti.cpu, ti.cuda], offline_cache=False)
+@pytest.mark.parametrize("artifact_format", ["bc", "bc-library"])
+def test_package_library_prepares_host_arrays_and_preserves_live_arguments(tmp_path, monkeypatch, artifact_format):
+    from taichi_forge_runtime.aot import _runtime
+
+    if artifact_format == "bc-library" and ti.cfg.arch != ti.cuda:
+        pytest.skip("bc-library is CUDA-only")
     source = '''import taichi_forge as ti
 @ti.data_oriented
 class Model:
@@ -1195,16 +1200,28 @@ class Model:
         return out[0]
 '''
     package = _source_package(tmp_path, monkeypatch, source)
-    manifest = ti.aot.export_package(package, tmp_path / 'sdk', artifact_format='bc-library')
+    manifest = ti.aot.export_package(package, tmp_path / 'sdk', artifact_format=artifact_format)
     entries = [v for v in manifest['entries'].values() if v['definition'].endswith('.Model.update')]
-    assert len(entries) == 1
-    with Runtime('cuda') as runtime, load_package(runtime, tmp_path / 'sdk') as code:
+    # Ordinary bc keeps producer static variants; library export defers this
+    # selection. First-use preparation must work with either existing format.
+    assert len(entries) == (1 if artifact_format == "bc-library" else 3)
+    prepares = []
+    prepare = _runtime.BoundCall.prepare
+
+    def prepared(call, **kwargs):
+        assert kwargs["specialize"] is True
+        prepares.append(kwargs)
+        return prepare(call, **kwargs)
+
+    monkeypatch.setattr(_runtime.BoundCall, "prepare", prepared)
+    with Runtime('cuda' if ti.cfg.arch == ti.cuda else 'cpu') as runtime, load_package(runtime, tmp_path / 'sdk') as code:
         for mode in range(3):
             jit, aot = package.model.Model(mode), code.host.Model(mode)
             expected, actual = np.arange(7, dtype=np.int32), np.arange(7, dtype=np.int32)
             for gain in (5, -2):
                 assert aot.update(actual, gain) == jit.update(expected, gain)
                 np.testing.assert_array_equal(actual, expected)
+        assert len(prepares) == 6  # Every Host transfer uses a fresh value frame.
 
 
 @test_utils.test(arch=ti.cuda, offline_cache=False)
@@ -9828,13 +9845,14 @@ class Model:
     monkeypatch.setattr(_package, "check_admission", checked)
     monkeypatch.setattr(_runtime.Kernel, "bind", bound)
     monkeypatch.setattr(_runtime.BoundCall, "prepare", prepared)
+    first_specialization = ti.cfg.arch in (ti.cpu, ti.cuda)
     with ti.aot.borrow_runtime() as runtime, load_package(runtime, tmp_path / "sdk") as code:
         a, b = code.host.Model(7), code.host.Model(13)
         a.prepare(None)
         b.prepare(None)
         a.step(2)
         b.step(3)
-        assert counts["prepare"] == 0  # Do not prepare one-off calls speculatively.
+        assert counts["prepare"] == (2 if first_specialization else 0)
         a.step(2)
         b.step(3)
         initial = counts.copy()
@@ -9849,9 +9867,14 @@ class Model:
         assert counts == initial  # Natural syntax reuses binding on each instance.
         np.testing.assert_array_equal(a.output.to_numpy(), np.full(7, 8))
         np.testing.assert_array_equal(b.output.to_numpy(), np.full(13, 12))
+        if ti.cfg.arch == ti.cuda:
+            from taichi_forge._lib import core
+            code_count = core.query_int64("cuda_artifact_entry_points_loaded")
         a.step(5)
         assert counts["bind"] == initial["bind"] + 1
-        assert counts["prepare"] == initial["prepare"]
+        assert counts["prepare"] == initial["prepare"] + int(first_specialization)
+        if ti.cfg.arch == ti.cuda:
+            assert core.query_int64("cuda_artifact_entry_points_loaded") == code_count
         data = runtime.ndarray("f32", 7)
         data.write(np.full(7, 10, dtype=np.float32))
         a.prepare(data)
@@ -9859,8 +9882,8 @@ class Model:
         count = counts.copy()
         data.write(np.full(7, 20, dtype=np.float32))
         a.step(1)
-        assert counts == {**count, "prepare": count["prepare"] + 1}
-        # First reuse promotes the binding, but device contents remain live.
+        assert counts == {**count, "prepare": count["prepare"] + int(not first_specialization)}
+        # Device contents remain live whether preparation was first-use or reuse.
         np.testing.assert_array_equal(a.output.to_numpy(), np.full(7, 45))
         a.n = 8
         with pytest.raises(ValueError, match="shape|dimension|Dimension|layout"):
@@ -9874,9 +9897,14 @@ class Model:
         with pytest.raises(RuntimeError, match="closed|retired dependency"):
             a.step(1)
         prepared_count = counts["prepare"]
+        if ti.cfg.arch == ti.cuda:
+            code_count = core.query_int64("cuda_artifact_entry_points_loaded")
         for gain in (4, 5, 6):
             b.step(gain)
-        assert counts["prepare"] == prepared_count  # Changing inputs stay ordinary AOT.
+        assert counts["prepare"] == prepared_count + 3 * int(first_specialization)
+        if ti.cfg.arch == ti.cuda:
+            # New value frames share code; ordinary gain is not a code fact.
+            assert core.query_int64("cuda_artifact_entry_points_loaded") == code_count
         assert b.read(0) == 27
         assert b.read(0) == 27  # Promoted calls preserve ordinary return semantics.
         b.step(7)

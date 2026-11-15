@@ -1616,7 +1616,7 @@ class entry:
                 constant_args = specialization_constant_args(
                     contract, package.manifest["owners"].get(owner_type(owner), {})
                 ) if specialize else ()
-                library = package.manifest.get("artifact_format") == "bc-library"
+                specialize_first = specialize and package.runtime.arch in ("x64", "arm64", "cuda")
                 # Host arrays must upload/download on every call. Mutable
                 # tensor/scalar wrappers also require a fresh value snapshot.
                 reusable = not buffers.pending and all(
@@ -1634,12 +1634,12 @@ class entry:
                         previous.close()
                     cache[self] = ready
                     retained = True
-                    return ready.run(reuse=specialize and library)
+                    return ready.run(reuse=specialize_first)
                 else:
                     if previous is not None:
                         previous.close()
                     cache.pop(self, None)
-                if specialize and library:
+                if specialize_first:
                     # Host transfers still happen for every invocation. Native
                     # code specialization is cached independently of that frame.
                     with call.prepare(specialize=True, constant_args=constant_args) as ready:

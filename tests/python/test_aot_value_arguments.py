@@ -144,16 +144,20 @@ def test_prepared_bitcode_specialization_keeps_shapes_and_instances_independent(
 
 @test_utils.test(arch=[ti.cpu, ti.cuda], offline_cache=False)
 @pytest.mark.parametrize("archive", [False, True])
-def test_prepared_metadata_reuse_preserves_artifact_snapshot(tmp_path, archive):
+@pytest.mark.parametrize("artifact_format", ["bc", "bc-library"])
+def test_prepared_metadata_reuse_preserves_artifact_snapshot(tmp_path, archive, artifact_format):
     from zipfile import ZipFile, ZIP_DEFLATED
     from taichi_forge_runtime.aot import Scalar
+
+    if artifact_format == "bc-library" and ti.cfg.arch != ti.cuda:
+        pytest.skip("bc-library is CUDA-only")
 
     @ti.kernel
     def update(data: ti.types.ndarray(ti.i32, 1), increment: ti.i32):
         for i in data:
             data[i] += increment
 
-    module = ti.aot.Module(artifact_format="bc-library" if ti.cfg.arch == ti.cuda else "bc")
+    module = ti.aot.Module(artifact_format=artifact_format)
     module.add_kernel(update)
     artifact = tmp_path / "snapshot.tcm"
     module.archive(str(artifact))
@@ -188,17 +192,20 @@ def test_prepared_metadata_reuse_preserves_artifact_snapshot(tmp_path, archive):
         else:
             with pytest.raises(RuntimeError, match="metadata changed"):
                 prepare(2)
-            if ti.cfg.arch == ti.cuda:
-                with pytest.raises(RuntimeError, match="metadata changed"):
-                    kernel.run(data, Scalar("i32", 4))
+            with pytest.raises(RuntimeError, match="metadata changed"):
+                kernel.run(data, Scalar("i32", 4))
         # A newly loaded module must not accept the corrupted metadata.
         with pytest.raises(RuntimeError, match="checksum mismatch"):
             runtime.load_module(path)
 
 
 @test_utils.test(arch=[ti.cpu, ti.cuda], offline_cache=False)
-def test_prepared_real_function_arguments_have_their_own_layout(tmp_path):
+@pytest.mark.parametrize("artifact_format", ["bc", "bc-library"])
+def test_prepared_real_function_arguments_have_their_own_layout(tmp_path, artifact_format):
     from taichi_forge_runtime.aot import Scalar
+
+    if artifact_format == "bc-library" and ti.cfg.arch != ti.cuda:
+        pytest.skip("bc-library is CUDA-only")
 
     @ti.real_func
     def leaf(value: ti.i32, count: ti.i32) -> ti.i32:
@@ -221,7 +228,7 @@ def test_prepared_real_function_arguments_have_their_own_layout(tmp_path):
     def update(data: ti.types.ndarray(ti.i32, 1), count: ti.i32, mode: ti.i32):
         shared(mode, data, count)
 
-    module = ti.aot.Module(artifact_format="bc-library" if ti.cfg.arch == ti.cuda else "bc")
+    module = ti.aot.Module(artifact_format=artifact_format)
     module.add_kernel(update)
     artifact = tmp_path / "real-arguments.tcm"
     module.archive(str(artifact))
