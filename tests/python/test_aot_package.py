@@ -14302,6 +14302,23 @@ def test_package_while_private_arrays_are_prepared_per_invocation(tmp_path, monk
             with a.graph(5).submit({}) as ticket:
                 ticket.wait()
             np.testing.assert_array_equal(a.values.to_numpy(), np.arange(1, 4) * 7)
+            # Implicit replay reuses its private arrays, but the recorded reset
+            # must still initialize the counter/predicate for each invocation.
+            reusable = a.graph(5)
+            reusable.run({})
+            prepared = reusable._cached_call
+            reusable.run({})
+            assert reusable._cached_call is prepared
+            np.testing.assert_array_equal(a.values.to_numpy(), np.arange(1, 4) * 7)
+            if sys.argv[3] == 'True':
+                a.limit = 2
+                try:
+                    reusable.run({})
+                except ValueError as error:
+                    assert 'Plan parameter' in str(error)
+                else:
+                    raise AssertionError('cached Graph accepted a changed plan')
+                a.limit = 1
         try:
             Runtime.execution_control_capabilities(runtime)
         except RuntimeError:
@@ -14329,6 +14346,112 @@ def test_package_while_private_arrays_are_prepared_per_invocation(tmp_path, monk
     )
     assert result.returncode == 0, result.stdout + result.stderr
     assert "PACKAGE_WHILE_OK" in result.stdout
+
+
+@test_utils.test(arch=[ti.cpu, ti.cuda], offline_cache=False)
+def test_package_reuses_tensor_captures_and_implicit_graph_bindings(tmp_path, monkeypatch):
+    import struct
+    from taichi_forge_runtime.aot import _runtime, _plan
+
+    package = _source_package(tmp_path, monkeypatch, """
+import taichi_forge as ti
+@ti.data_oriented
+class Model:
+    def __init__(self, n: int):
+        self.n = n
+        self.bias = ti.Vector([1.0, 2.0], ti.f32)
+        s = ti.experimental.ResourceScope(self)
+        s.value('bias', ti.types.vector(2, ti.f32))
+        s.output = s.field(ti.f32, shape=s.dim('n'))
+    @ti.kernel
+    def step(self, gain: ti.f32):
+        for i in range(self.n):
+            self.output[i] = self.output[i] + gain + self.bias[0] + self.bias[1]
+    def graph(self):
+        b = ti.graph.GraphBuilder()
+        b.dispatch(self.step, ti.graph.Arg(ti.graph.ArgKind.SCALAR, 'gain', ti.f32), template_args={'self': self})
+        return b.compile()
+""")
+    ti.aot.export_package(package, tmp_path / "sdk", arch=ti.cfg.arch,
+                          artifact_format="bc-library" if ti.cfg.arch == ti.cuda else None)
+    counts = dict(kernel=0, graph=0)
+    kernel_prepare, graph_prepare = _runtime.BoundCall.prepare, _plan.ExecutionPlan.prepare
+    def kernel(*args, **kwargs):
+        counts['kernel'] += 1
+        return kernel_prepare(*args, **kwargs)
+    def graph(*args, **kwargs):
+        counts['graph'] += 1
+        return graph_prepare(*args, **kwargs)
+    monkeypatch.setattr(_runtime.BoundCall, 'prepare', kernel)
+    monkeypatch.setattr(_plan.ExecutionPlan, 'prepare', graph)
+    with ti.aot.borrow_runtime() as runtime, load_package(runtime, tmp_path / "sdk") as code:
+        a, b = code.host.Model(7), code.host.Model(13)
+        for _ in range(2):
+            a.step(1.0)
+            b.step(2.0)
+        initial = counts.copy()
+        for _ in range(3):
+            a.step(1.0)
+            b.step(2.0)
+        assert counts == initial
+        np.testing.assert_array_equal(a.output.to_numpy(), np.full(7, 20))
+        np.testing.assert_array_equal(b.output.to_numpy(), np.full(13, 25))
+        a.bias[0] = 5.0  # Same object, different CPU value bytes.
+        a.step(1.0)
+        a.step(1.0)
+        np.testing.assert_array_equal(a.output.to_numpy(), np.full(7, 36))
+        ga, gb = a.graph(), b.graph()
+        ga.run(dict(gain=1.0))
+        gb.run(dict(gain=2.0))
+        initial = counts.copy()
+        original_wait = runtime.wait
+        def no_wait():
+            raise AssertionError('unchanged replay entered retirement')
+        monkeypatch.setattr(runtime, 'wait', no_wait)
+        for _ in range(3):
+            ga.run(dict(gain=1.0))
+            with gb.submit(dict(gain=2.0)) as ticket:
+                ticket.wait()
+        monkeypatch.setattr(runtime, 'wait', original_wait)
+        assert counts == initial
+        np.testing.assert_array_equal(a.output.to_numpy(), np.full(7, 68))
+        np.testing.assert_array_equal(b.output.to_numpy(), np.full(13, 45))
+        # Device contents are live, not part of the binding signature.
+        a.output.from_numpy(np.full(7, 100, np.float32))
+        ga.run(dict(gain=1.0))
+        assert counts == initial
+        np.testing.assert_array_equal(a.output.to_numpy(), np.full(7, 108))
+        old = ga.bind(dict(gain=1.0))  # Explicit snapshots remain independent.
+        a.bias[1] = 7.0
+        ga.run(dict(gain=1.0))
+        old.run()
+        old.close()
+        np.testing.assert_array_equal(a.output.to_numpy(), np.full(7, 129))
+        current = ga._cached_call
+        with pytest.raises(struct.error, match='float'):
+            ga.run(dict(gain='invalid scalar'))
+        assert ga._cached_call is current
+        ga.run(dict(gain=1.0))
+        assert ga._cached_call is current
+        # Values may change repeatedly without retaining historical bindings.
+        for gain in range(5):
+            ga.run(dict(gain=float(gain)))
+            runtime.wait()
+            assert sum(kind == 'prepared' for kind, _ in runtime._resources) == 4
+        np.testing.assert_array_equal(b.output.to_numpy(), np.full(13, 45))
+        original = a.output
+        original_values = original.to_numpy()
+        replacement = code.host.Model(7)
+        a.output = replacement.output
+        ga.run(dict(gain=4.0))
+        rebound = ga._cached_call
+        ga.run(dict(gain=4.0))
+        assert ga._cached_call is rebound
+        np.testing.assert_array_equal(a.output.to_numpy(), np.full(7, 32))
+        np.testing.assert_array_equal(original.to_numpy(), original_values)
+        a.output.close()
+        with pytest.raises(RuntimeError, match='closed|retired dependency'):
+            ga.run(dict(gain=4.0))
 
 
 @test_utils.test(arch=[ti.cpu, ti.cuda, ti.vulkan], offline_cache=False)

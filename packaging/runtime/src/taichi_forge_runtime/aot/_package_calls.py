@@ -8,6 +8,7 @@ No module-global resource pointer is changed to select an instance.
 import operator
 import struct
 
+from ._package_values import HostTensor
 
 _MISSING = object()
 _PATH_KEYS = frozenset(
@@ -49,13 +50,43 @@ def _token(value):
         return kind, tuple(_token(x) for x in value)
     if kind is dict:
         return kind, tuple((_token(k), _token(v)) for k, v in value.items())
+    if isinstance(value, HostTensor):
+        # CPU value storage only. Device arrays retain their identity token;
+        # changing their contents must neither read them back nor reprepare.
+        array = value.entries
+        return kind, array.dtype.str, array.shape, array.tobytes()
     return kind, id(value)
+
+
+def reusable_value(value):
+    """Values whose complete mutable contents are represented by _token."""
+    if type(value) in (bool, int, float) or isinstance(value, HostTensor):
+        return True
+    if type(value) in (tuple, list):
+        return all(reusable_value(item) for item in value)
+    if type(value) is dict:
+        return all(reusable_value(item) for item in value.values())
+    return False
 
 
 class OwnerGuard:
     """Read only contract dependencies; do not repeat schema interpretation."""
 
     def __init__(self, entry, selected, owner):
+        candidates = [entry, selected]
+        if entry.family and "owner_inputs" in entry.family:
+            from ._package_values import owner_type
+
+            candidates.append(entry._selected[entry.family["owner_inputs"][owner_type(owner)]])
+        self._initialize(entry.package, owner, (selected.contract,), candidates)
+
+    @classmethod
+    def for_graph(cls, package, owner, contracts):
+        guard = cls.__new__(cls)
+        guard._initialize(package, owner, contracts, ())
+        return guard
+
+    def _initialize(self, package, owner, contracts, candidates):
         paths = set()
 
         def path(value):
@@ -75,12 +106,14 @@ class OwnerGuard:
                 for child in value:
                     visit(child)
 
-        contract = selected.contract
-        visit(contract.get("admission", {}))
-        for binding in contract.get("admission", {}).get("owner_bindings", {}).values():
-            for name in ("_forge_package_contract", "_forge_package_type", "_forge_package_owner"):
-                path((*binding["path"], name))
-        for spec in contract["captures"]:
+        captures = []
+        for contract in contracts:
+            visit(contract.get("admission", {}))
+            for binding in contract.get("admission", {}).get("owner_bindings", {}).values():
+                for name in ("_forge_package_contract", "_forge_package_type", "_forge_package_owner"):
+                    path((*binding["path"], name))
+            captures.extend(contract["captures"])
+        for spec in captures:
             visit(spec)
             if spec["kind"] != "local_tensor_workspace" and not spec.get("dimension_relations"):
                 path(spec.get("path", (spec["name"],)))
@@ -91,18 +124,13 @@ class OwnerGuard:
                 allocated = path_value(owner, prefix)
                 if allocated is None:
                     continue
-                schema = entry.package.manifest["owners"].get(owner_type(allocated), {})
+                schema = package.manifest["owners"].get(owner_type(allocated), {})
                 selections = getattr(allocated, "_forge_package_member_layouts", {}).get(
                     spec.get("layout_member", spec["name"]), {})
                 for name in selections:
                     path((*prefix, *(name if isinstance(name, tuple) else schema.get(name, {}).get("path", (name,)))))
         # Selection is a guard too: a previously selected variant cannot hide
         # a changed static option or concrete receiver contract.
-        candidates = [entry, selected]
-        if entry.family and "owner_inputs" in entry.family:
-            from ._package_values import owner_type
-
-            candidates.append(entry._selected[entry.family["owner_inputs"][owner_type(owner)]])
         for candidate in candidates:
             family = candidate.family
             if family:

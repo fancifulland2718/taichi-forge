@@ -487,9 +487,12 @@ For entries in the same package, retained Host recorders can use
 `compile()` builds an existing `ExecutionPlan` referencing exported symbols;
 it creates no combination TCM. `graph.bind(arguments)` returns the native
 prepared call for repeated `run()` or `submit()` replay. `graph.run(arguments)`
-and `graph.submit(arguments)` prepare anew for each invocation; they are not the
-preferred steady-state path. The latter returns the existing Runtime ticket,
-which retains in-flight resource leases.
+and `graph.submit(arguments)` retain one current implicit binding when supported
+Host values and resource identities are unchanged. Changed bindings re-enter
+admission/preparation and retire the previous call; historical combinations are
+not retained. Device array contents remain live. The latter returns the existing
+Runtime ticket, which retains in-flight resource leases. Explicit `bind()` always
+creates an independent snapshot, including its private workspace.
 Normal Host code can also pass a result of `graph.bind(...)` to the same Graph's
 `run` or `submit`; replay performs no new preparation and rejects another Graph's
 bindings. An unset deferred Plan parameter is recorded as absent rather than
@@ -1056,8 +1059,14 @@ argument combinations are not cached. Preparation neither recompiles numerical
 definitions nor adds model-specific distribution code. Device contents remain live,
 and instances do not share mutable state. Explicit Host buffers still upload and
 read back on every call, and mutable tensor arguments take fresh value snapshots.
+Captured Host vector/matrix values are compared by their CPU value bytes; an
+in-place change creates a fresh snapshot, while unchanged captures reuse the
+prepared call. This comparison never reads device array contents.
 CPU/CUDA device assertion polling requires explicit development debug mode;
 release waits and transfers do not insert error queries.
+`Runtime.wait()` completes ordinary default-stream CUDA replay as well as owned
+execution domains before releasing pending owners, even when prepared objects
+remain alive.
 
 For CUDA bitcode, low-level `BoundCall.prepare(specialize=True, constant_args=(...))`
 offers experimental preparation-time backend specialization. It folds ABI reads

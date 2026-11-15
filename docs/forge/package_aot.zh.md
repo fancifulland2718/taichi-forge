@@ -330,8 +330,10 @@ Field 合同也未因此扩大为任意可写输入。
 `GraphBuilder.dispatch`、顺序节点和 `append`。`compile()` 生成引用已导出符号的
 既有 `ExecutionPlan`，不生成组合 TCM。`graph.bind(arguments)` 返回原生 prepared
 call，可反复 `run()` 或 `submit()`；`graph.run(arguments)` / `graph.submit(arguments)`
-是每次重新 prepare 的单次便利调用，后者返回已有 Runtime ticket 并持有在途资源租约，
-不推荐作为稳态路径。绑定方法保留 owner 捕获；prepare 对每个实例的标量/张量值及原生
+在受支持的 Host 值和资源身份不变时保留并复用当前一份隐式绑定；变化时重新准入、准备并
+退休旧调用，不累计历史参数组合。设备数组内容保持实时读取。后者返回已有 Runtime ticket
+并持有在途资源租约。显式 `bind()` 始终创建独立快照及私有工作区。
+绑定方法保留 owner 捕获；prepare 对每个实例的标量/张量值及原生
 资源取快照。正常 Host 也可复用 `graph.submit(graph.bind(...))`，后续提交同一已绑定对象
 不重新准备；跨 Graph 的绑定明确拒绝。晚期准备中声明但尚不存在的 Plan 参数记录缺席状态，
 不阻断无关入口；参数后来出现或改变时，旧 Graph 重新绑定仍要求重新构图。
@@ -1356,7 +1358,11 @@ AOT 库自动借用当前 JIT Program；不另建计算设备。传入标量/固
 不缓存历史参数组合。准备不重新编译数值定义，也不把模型尺寸变成新的发行代码副本。
 设备内容始终实时读取，实例之间不共享可变状态。显式 Host 数组仍每次上传/回写，
 可变张量参数仍获取新的值快照；不能缓存它们的结果或省略这些必要传输。
+捕获的 Host 向量/矩阵按 CPU 值字节比较：原地修改会生成新快照，未变化时复用准备对象；
+该比较不会回读设备数组内容。
 CPU/CUDA 开发断言轮询由显式 debug 模式启用，发行模式的同步和传输不插入错误查询。
+`Runtime.wait()` 在释放 pending owner 前完成普通默认流 CUDA replay 及所属执行域；
+即使 prepared 对象仍存活，也不能把实际等待推迟到它的析构阶段。
 
 CUDA bitcode 的低层 `BoundCall.prepare(specialize=True, constant_args=(...))`
 提供实验性的准备期后端特化。它使用已绑定 ndarray 的形状/步长，以及显式指定的整数

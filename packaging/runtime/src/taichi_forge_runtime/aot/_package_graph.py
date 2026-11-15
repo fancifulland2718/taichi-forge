@@ -10,6 +10,7 @@ import copy
 import itertools
 import json
 from types import SimpleNamespace
+import weakref
 
 from ._plan import ExecutionPlan
 from ._runtime import PreparedCall, Scalar
@@ -364,6 +365,11 @@ class Graph:
         self.admissions = admissions or []
         self.range_checks = range_checks or []
         self.plan_values = plan_values or {}
+        self._cached_call = None
+        self._cached_values = ()
+        self._cached_tokens = ()
+        self._cached_guards = ()
+        package._graphs.add(self)
 
     def written_resources(self):
         """Inspect compiled effects without allocating, preparing or submitting."""
@@ -478,26 +484,75 @@ class Graph:
         plan = self.plan.with_argument_resources(resources) if resources else self.plan
         values = {name: self.package.runtime._adapt_package_array(value) for name, value in values.items()}
         prepared = plan.prepare(self.package._module, values)
-        prepared._forge_package_graph = self
+        # A cached call must not create Graph -> call -> Graph ownership cycles.
+        # Native owners already retain the module and every argument resource.
+        prepared._forge_package_graph = weakref.ref(self)
         return prepared
+
+    def _binding_guards(self):
+        from ._package_calls import OwnerGuard
+
+        groups = {}
+        def group(owner):
+            return groups.setdefault(id(owner), (owner, []))[1]
+        for owner, contract in self.admissions:
+            group(owner).append(contract)
+        for owner, spec in self.captures.values():
+            group(owner).append(dict(captures=[spec]))
+        for owner, spec, _ in self.plan_values.values():
+            group(owner).append(dict(captures=[spec]))
+        return tuple((owner, OwnerGuard.for_graph(self.package, owner, contracts))
+                     for owner, contracts in groups.values())
+
+    def _clear_cached(self):
+        if self._cached_call is not None:
+            self._cached_call.close()
+        self._cached_call = None
+        self._cached_values = self._cached_tokens = self._cached_guards = ()
 
     def _prepared(self, arguments):
         self.package._check()
         if isinstance(arguments, PreparedCall):
-            if getattr(arguments, "_forge_package_graph", None) is not self:
+            if getattr(arguments, "_forge_package_graph", lambda: None)() is not self:
                 raise ValueError("Prepared Graph arguments belong to another recording")
             return arguments
-        return self.bind(arguments)
+        if arguments.keys() != self.arguments.keys():
+            raise ValueError("Graph binding must supply exactly its declared arguments")
+        from ._package_calls import _token, reusable_value
+
+        values = tuple(arguments[name] for name in self.arguments)
+        tokens = tuple(_token(value) for value in values)
+        if (self._cached_call is not None and tokens == self._cached_tokens
+                and all(guard.matches(owner) for owner, guard in self._cached_guards)):
+            return self._cached_call
+        # Keep at most the current implicit binding. Explicit bind() continues
+        # to create independent snapshots and workspaces for its caller.
+        guards = self._binding_guards()
+        reusable = all(spec['kind'] == 'ndarray' or reusable_value(value)
+                       for spec, value in zip(self.arguments.values(), values))
+        reusable = reusable and all(
+            spec['kind'] not in ('value', 'dimension') or reusable_value(capture_value(owner, spec))
+            for owner, spec in self.captures.values())
+        prepared = self.bind(arguments)  # Full admission on every changed binding.
+        try:
+            self._clear_cached()
+        except BaseException:
+            prepared.close()
+            raise
+        if reusable:
+            self._cached_call, self._cached_values = prepared, values
+            self._cached_tokens, self._cached_guards = tokens, guards
+        return prepared
 
     def run(self, arguments):
-        # Convenience for one submission. Repeated replay uses bind(...).run().
-        # Runtime retains in-flight preparations until the usual synchronization.
-        self._prepared(arguments).run()
+        with self.package._call_lock:
+            self._prepared(arguments).run()
 
     def submit(self, arguments):
-        """Prepare one immutable call and return the existing Runtime ticket.
+        """Reuse the current immutable binding and return a Runtime ticket.
 
-        The ticket and Runtime retain its resource leases. Repeated execution
-        with unchanged bindings can use bind(...).submit() explicitly.
+        Changed bindings re-enter preparation. Explicit bind() retains an
+        independent snapshot; the ticket and Runtime retain resource leases.
         """
-        return self._prepared(arguments).submit()
+        with self.package._call_lock:
+            return self._prepared(arguments).submit()

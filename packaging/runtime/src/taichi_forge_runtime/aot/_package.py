@@ -19,6 +19,7 @@ import operator
 from pathlib import Path
 import sys
 import threading
+import weakref
 from types import SimpleNamespace
 
 from ._runtime import NdArray, Scalar
@@ -1553,7 +1554,7 @@ class entry:
             return previous.run(reuse=True)
         selected = self._select(owner)
         contract = selected.contract
-        from ._package_calls import CachedCall, OwnerGuard
+        from ._package_calls import CachedCall, OwnerGuard, reusable_value
 
         check_admission(owner, contract)
         selected._check_layout(owner)
@@ -1622,8 +1623,10 @@ class entry:
                 reusable = not buffers.pending and all(
                     item["kind"] != "value" or type(value) in (bool, int, float)
                     for item, value in zip(contract["arguments"], values)
-                ) and not any(
-                    item["kind"] == "value" and item.get("element_shape") for item in contract["captures"]
+                ) and all(
+                    item["kind"] != "value" or not item.get("element_shape")
+                    or reusable_value(captured[item["name"]])
+                    for item in contract["captures"]
                 )
                 if reusable:
                     ready = CachedCall(guard, values, call, workspaces,
@@ -1931,6 +1934,7 @@ class LoadedPackage:
         self._arrays, self._kernels = [], {}
         self._call_lock = threading.RLock()
         self._call_caches = []
+        self._graphs = weakref.WeakSet()
         self._empty_inputs = {}
         self._graph_ids = itertools.count()
         self._closed, self._entered = False, False
@@ -1991,6 +1995,9 @@ class LoadedPackage:
     def close(self):
         if self._closed:
             return
+        for graph in tuple(self._graphs):
+            graph._clear_cached()
+        self._graphs.clear()
         self._module.close()
         for cache in self._call_caches:
             for call in cache.values():

@@ -185,6 +185,10 @@ void LlvmRuntime::wait() {
     if (arch == taichi::Arch::cuda)
       taichi::lang::CUDAContext::check_runtime_health();
 #endif
+    // Ordinary prepared replay uses the default stream, outside execution
+    // domains. Complete it before Python may release its pending owners.
+    if (arch == taichi::Arch::cuda)
+      executor_->synchronize();
     synchronize_execution_domains();
     // Device assertion polling launches a query kernel and reads a scalar back
     // even when no assertion fired. It belongs to explicit development mode,

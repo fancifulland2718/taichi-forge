@@ -14,6 +14,63 @@ from tests import test_utils
 
 
 @test_utils.test(arch=ti.cuda, offline_cache=False)
+def test_runtime_wait_completes_retained_ordinary_prepared_replay(tmp_path):
+    import ctypes as C
+    from taichi_forge_runtime.aot import Runtime
+
+    @ti.kernel
+    def slow(out: ti.types.ndarray(ti.f32, 1), iterations: ti.i32):
+        for i in range(out.shape[0]):
+            x = out[i]
+            for _ in range(iterations):
+                x = ti.sin(x) * 0.5 + 0.1
+            out[i] = x
+
+    module = ti.aot.Module(artifact_format="bc-library")
+    module.add_kernel(slow)
+    path = tmp_path / "wait.tcm"
+    module.archive(str(path))
+    with Runtime("cuda") as runtime:
+        loaded = runtime.load_module(str(path))
+        out = runtime.ndarray("f32", (1,))
+        out.write(bytes(4))
+        driver = C.WinDLL('nvcuda.dll') if os.name == 'nt' else C.CDLL('libcuda.so.1')
+        def api(name, argtypes):
+            call = getattr(driver, name)
+            call.argtypes, call.restype = argtypes, C.c_int
+            return call
+        with runtime.execution_domain(capacity=1, instance_capacity=1) as domain:
+            context = domain.info['context']
+        push = api('cuCtxPushCurrent_v2', [C.c_void_p])
+        pop = api('cuCtxPopCurrent_v2', [C.POINTER(C.c_void_p)])
+        create = api('cuEventCreate', [C.POINTER(C.c_void_p), C.c_uint])
+        record = api('cuEventRecord', [C.c_void_p, C.c_void_p])
+        query = api('cuEventQuery', [C.c_void_p])
+        sync = api('cuEventSynchronize', [C.c_void_p])
+        destroy = api('cuEventDestroy_v2', [C.c_void_p])
+        event = C.c_void_p()
+        assert push(context) == 0
+        assert create(C.byref(event), 2) == 0
+        with loaded.kernel("slow").bind(out, Scalar("i32", 1000000)).prepare() as prepared:
+            # Retain the call: wait must complete replay without a destructor
+            # or a readback accidentally supplying the missing synchronization.
+            # Use a driver event: Runtime.wait also marks its own tickets done,
+            # so querying one of those would not independently prove completion.
+            try:
+                for _ in range(2):
+                    prepared.run()
+                    assert record(event, None) == 0
+                    runtime.wait()
+                    assert query(event) == 0
+                    assert prepared._handle is not None
+            finally:
+                assert sync(event) == 0
+                assert destroy(event) == 0
+                previous = C.c_void_p()
+                assert pop(C.byref(previous)) == 0
+
+
+@test_utils.test(arch=ti.cuda, offline_cache=False)
 @pytest.mark.parametrize("cleanup", [None, False, True])
 def test_bitcode_library_shares_real_function_and_validates_dependencies(tmp_path, cleanup):
     import numpy as np
