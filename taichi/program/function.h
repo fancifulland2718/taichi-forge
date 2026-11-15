@@ -43,8 +43,9 @@ class Function : public Callable {
     return inline_returns_lvalue_;
   }
 
-  // Automatic JIT boundaries share lowering work but retain ti.func's final
-  // inline policy. Explicit real_func and AOT library functions keep theirs.
+  // Automatic JIT/AOT boundaries share lowering work but retain ti.func's final
+  // backend inline policy. AOT archives keep the boundary until consumption;
+  // explicit real_func definitions retain their own policy.
   void set_backend_inline(bool value) {
     backend_inline_ = value;
   }

@@ -79,7 +79,13 @@ class PackageCompilation(FunctionLibrary):
             # Keep the existing task boundary instead of extracting a wrapper
             # whose transitive body requires that task's execution context.
             return None
-        return super().library_function(source, args, dependencies=dependencies)
+        function = super().library_function(source, args, dependencies=dependencies)
+        if function is not None:
+            # Retain the source ti.func's backend policy, just as JIT does.
+            # Library export keeps separate LLVM units and runs no inliner;
+            # only consumer optimization exposes the private argument buffers.
+            function._backend_inline_function = True
+        return function
 
     def reuse_function(self, identity, context):
         state = self._retained_functions.get(identity)

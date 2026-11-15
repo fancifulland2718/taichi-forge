@@ -260,5 +260,5 @@ class JitFunctionLibrary(FunctionLibrary):
             return None
         function = super().library_function(source, args, dependencies=dependencies)
         if function is not None:
-            function._jit_inline_function = True
+            function._backend_inline_function = True
         return function

@@ -656,7 +656,7 @@ class Func:
             is_real_function=self.is_real_function,
         )
         fn = impl.get_runtime().prog.create_function(key)
-        if getattr(self, '_jit_inline_function', False):
+        if getattr(self, '_backend_inline_function', False):
             fn._set_backend_inline(True)
 
         def func_body():

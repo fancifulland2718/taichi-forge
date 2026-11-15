@@ -36,7 +36,11 @@ argument values do not create variants. Model-extent provenance, Python/resource
 returns, static rebinding and other unproven return types keep inline lowering.
 `pyfunc` and AD are not automatically converted.
 Ordinary JIT definitions are unchanged. Consumers optimize after specializing
-actual arguments and resources. Automatic boundaries require calls already inside
+actual arguments and resources. Extracted `ti.func` helpers retain the same backend
+inline policy as JIT, including helpers with several call sites. The producer still
+stores shared function bodies without running an inliner; consumption links and
+optimizes them with the actual specialization facts. Explicit `ti.real_func`
+definitions retain their own policy. Automatic boundaries require calls already inside
 an iteration or device function. Helpers contributing top-level parallel loops,
 and helpers with explicit thread-block operations, remain inline to preserve
 offload and shared-memory semantics.

@@ -1973,7 +1973,7 @@ class Model:
     @ti.func
     def shared(self, value: ti.i32):
         for i in range(self.n):
-            self.out[i] = self.untyped(value) + self.leaf(i) - 4
+            self.out[i] = self.untyped(value) + self.leaf(i) + self.leaf(i) - i - 8
     @ti.kernel
     def first(self, value: ti.i32):
         for _ in range(1):
