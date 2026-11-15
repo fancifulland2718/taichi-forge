@@ -1324,7 +1324,8 @@ void launch_kernel_result(Runtime &rt,
                           const TiNdArrayBinding *bindings,
                           bool copy_result,
                           uint64_t result_size,
-                          void *result_data) {
+                          void *result_data,
+                          const std::vector<uint32_t> *constant_args = nullptr) {
   auto bound = capi::bind_kernel_arguments(rt, kernel, arg_count, args,
                                            binding_count, bindings);
   if (!bound)
@@ -1332,6 +1333,9 @@ void launch_kernel_result(Runtime &rt,
   if (copy_result && (result_size != bound->kernel->ret_size ||
                       (result_size && !result_data)))
     throw MemoryBindingError("Return storage must match the compiled buffer size");
+  if (constant_args)
+    bound->kernel = bound->owner->get().specialize_kernel(
+        *bound->kernel, *bound->context, *constant_args);
   if (!bound->context->result_buffer_size) {
     bound->kernel->launch(*bound->context);
     return;
@@ -1382,6 +1386,25 @@ void ti_launch_kernel_with_result_ext(
   std::lock_guard<std::recursive_mutex> lock(rt.submission_mutex());
   launch_kernel_result(rt, kernel, arg_count, args, binding_count, bindings,
                         true, result_size, result_data);
+  TI_CAPI_TRY_CATCH_END();
+}
+
+void ti_launch_kernel_specialized_ext(
+    TiRuntime runtime, TiKernel kernel, uint32_t arg_count,
+    const TiArgument *args, uint32_t binding_count,
+    const TiNdArrayBinding *bindings, uint32_t constant_count,
+    const uint32_t *constant_args, uint64_t result_size, void *result_data) {
+  TI_CAPI_TRY_CATCH_BEGIN();
+  TI_CAPI_ARGUMENT_NULL(runtime);
+  if (constant_count)
+    TI_CAPI_ARGUMENT_NULL(constant_args);
+  auto &rt = *reinterpret_cast<Runtime *>(runtime);
+  std::lock_guard<std::recursive_mutex> lock(rt.submission_mutex());
+  std::vector<uint32_t> indices;
+  if (constant_count)
+    indices.assign(constant_args, constant_args + constant_count);
+  launch_kernel_result(rt, kernel, arg_count, args, binding_count, bindings,
+                       true, result_size, result_data, &indices);
   TI_CAPI_TRY_CATCH_END();
 }
 

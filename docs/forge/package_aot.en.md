@@ -350,16 +350,16 @@ package has its own Python namespace. Lazy submodules bind to their own code
 owner, and instances retain separate resources. Calls reuse the existing Runtime
 argument snapshots and leases; no shared module resource pointer is switched
 to select an instance. Ordinary package calls, including hybrid mode, default
-to eligible CPU/CUDA bitcode or Vulkan 1.3 SPIR-V specialization. CUDA
-`bc-library` specializes on the first binding; ordinary `bc` and SPIR-V specialize
-on the first reuse, after an initial generic call. Fixed scalar facts come from
+to eligible CPU/CUDA bitcode or Vulkan 1.3 SPIR-V specialization. CPU/CUDA `bc`
+and CUDA `bc-library` specialize on the first binding; SPIR-V specializes on the
+first reuse, after an initial generic call. Fixed scalar facts come from
 declared dimensions, prepare-static captures and integer scalar captures marked
 `affects_plan=True`, with matching names, paths and dtypes. Ordinary arguments,
 unmarked values, array contents and instance addresses remain dynamic. Native preparation is
 retained per instance. Host arrays still transfer through their original path.
 Device-range tasks and unsupported formats retain generic AOT; specialization
-errors are not swallowed. Cross-process specialization caching and eliminating
-ordinary `bc` initial generic compilation remain deferred; record first and second calls
+errors are not swallowed. Cross-process specialization caching remains deferred;
+record first and second calls
 separately. Allocation lifetime currently ends at `LoadedPackage.close()`;
 independent object retirement is not implemented.
 
@@ -1061,19 +1061,30 @@ cached-process first calls separately; faster first loading does not establish f
 
 Ordinary `owner.method(...)` calls automatically reuse an unchanged native PreparedCall,
 argument frame and local workspace on the instance; no explicit `prepare()`
-is required. The first call and changes to relevant configuration, resources or
-arguments use the existing admission/binding path. Native preparation occurs on the
-first call for CUDA `bc-library`, or the first reuse of an unchanged binding for
-other formats. Preparation consumes authoritative
+is required. The first call and changes to relevant configuration or resources
+use the existing admission/binding path. Eligible CPU/CUDA bitcode specializes
+on first use and prepares a reusable initial binding. When only ordinary scalar,
+vector, matrix or structure values change, the existing ABI snapshots current
+values and the ordinary native launcher submits the same specialized code.
+These updates do not construct a CUDA Graph per call. Consecutive identical
+inputs can promote to fixed replay; historical value frames are not retained.
+SPIR-V keeps its existing preparation-on-reuse policy. Preparation consumes authoritative
 JIT/AOT array views and fixes argument frames, resource references, block sizes and
 shared-memory sizes through the existing native execution mechanism. Stable hot
 calls compare the relevant Host inputs and submit with the original leases, without
 reinterpreting admission schemas, rebuilding array descriptors or native launch
-contexts. Changed bindings retire the old call and wait for in-flight work; historical
+contexts. Retiring an existing fixed preparation still completes its in-flight
+work. Ordinary live-value launches retain normal pending owners without retiring
+a prepared execution on every update; historical
 argument combinations are not cached. Preparation neither recompiles numerical
 definitions nor adds model-specific distribution code. Device contents remain live,
 and instances do not share mutable state. Explicit Host buffers still upload and
 read back on every call, and mutable tensor arguments take fresh value snapshots.
+Explicit by-value vectors, matrices and structures are compared using their
+compiler-encoded ABI contents. In-place NumPy changes read current values rather
+than reusing an old snapshot by Python identity. Device contents of resource
+ndarrays are never compared. Explicit low-level `BoundCall.prepare()` retains its
+immutable value snapshot even if the caller subsequently mutates its objects.
 Captured Host vector/matrix values are compared by their CPU value bytes; an
 in-place change creates a fresh snapshot, while unchanged captures reuse the
 prepared call. This comparison never reads device array contents.

@@ -1160,6 +1160,13 @@ class BoundCall:
         self._result = C.create_string_buffer(layout.size) if layout is not None and layout.size else None
 
     def run(self):
+        return self._run()
+
+    def _run_specialized(self, constant_args):
+        """Submit this value snapshot with cached specialized code, without a Graph."""
+        return self._run(constant_args=constant_args)
+
+    def _run(self, *, constant_args=None):
         module = self._entry._module
         runtime = module._runtime
         with runtime._lock:
@@ -1168,6 +1175,24 @@ class BoundCall:
                 owner._check()
             # Even a failing launch may have submitted earlier native work.
             runtime._pending.update(self._owners)
+            if constant_args is not None:
+                if isinstance(self._entry, Graph):
+                    raise ValueError("Specialized launch accepts individual bound kernels")
+                if any(type(index) is not int or index < 0 or index >= len(self._arguments) for index in constant_args):
+                    raise ValueError("constant_args must contain valid integer argument indices")
+                runtime._api.load_specialized_launch()
+                indices = (C.c_uint32 * len(constant_args))(*constant_args)
+                layout = self._entry._return_layout
+                runtime._api.call(
+                    runtime._api.ti_launch_kernel_specialized_ext,
+                    runtime._handle, self._entry._handle,
+                    len(self._arguments), self._arguments,
+                    len(self._bindings), self._bindings, len(indices), indices,
+                    layout.size if layout is not None else 0, self._result,
+                )
+                if self._result is not None:
+                    runtime._pending.clear()
+                return layout.decode(self._result if self._result is not None else b"") if layout is not None else None
             if self._result is not None:
                 runtime._api.call(
                     runtime._api.ti_launch_kernel_with_result_ext,

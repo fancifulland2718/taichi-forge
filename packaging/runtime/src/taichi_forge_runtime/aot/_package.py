@@ -1550,8 +1550,14 @@ class entry:
             cache = cache_owner._forge_package_calls = {}
             package._call_caches.append(cache)
         previous = cache.get(self)
-        if previous is not None and previous.matches(owner, values):
-            return previous.run(reuse=True)
+        if previous is not None:
+            if previous.matches(owner, values):
+                return previous.run(reuse=True)
+            updated = previous.bind_values(owner, values)
+            if updated is not None:
+                previous.close()
+                cache[self] = updated
+                return updated.run()
         selected = self._select(owner)
         contract = selected.contract
         from ._package_calls import CachedCall, OwnerGuard, reusable_value, specialization_constant_args
@@ -1629,22 +1635,27 @@ class entry:
                 )
                 if reusable:
                     ready = CachedCall(guard, values, call, workspaces,
-                                       specialize=specialize, constant_args=constant_args)
+                                       specialize=specialize, constant_args=constant_args,
+                                       specialized_launch=specialize_first, arguments=prepared,
+                                       argument_specs=contract["arguments"])
                     if previous is not None:
                         previous.close()
                     cache[self] = ready
                     retained = True
-                    return ready.run(reuse=specialize_first)
+                    # First use keeps the default specialization/preparation.
+                    # Changed inputs launch the same specialized code directly;
+                    # only a subsequent identical binding promotes to fixed
+                    # replay. Continuously changing values never build a Graph
+                    # per call, and no historical value frames accumulate.
+                    return ready.run(reuse=specialize_first and previous is None)
                 else:
                     if previous is not None:
                         previous.close()
                     cache.pop(self, None)
                 if specialize_first:
-                    # Host transfers still happen for every invocation. Native
-                    # code specialization is cached independently of that frame.
-                    with call.prepare(specialize=True, constant_args=constant_args) as ready:
-                        ready.run()
-                        return ready.result() if ready._return_layout is not None else None
+                    # Host transfers still happen for every invocation, using
+                    # the same specialization without a disposable fixed frame.
+                    return call._run_specialized(constant_args)
                 return call.run()
         finally:
             # BoundCall retains memory even on a partially submitted failure.

@@ -1221,7 +1221,7 @@ class Model:
             for gain in (5, -2):
                 assert aot.update(actual, gain) == jit.update(expected, gain)
                 np.testing.assert_array_equal(actual, expected)
-        assert len(prepares) == 6  # Every Host transfer uses a fresh value frame.
+        assert len(prepares) == 0  # Host transfers use specialized ordinary launches, not disposable Graphs.
 
 
 @test_utils.test(arch=ti.cuda, offline_cache=False)
@@ -9845,6 +9845,8 @@ class Model:
     monkeypatch.setattr(_package, "check_admission", checked)
     monkeypatch.setattr(_runtime.Kernel, "bind", bound)
     monkeypatch.setattr(_runtime.BoundCall, "prepare", prepared)
+    if not specialize:
+        monkeypatch.setattr(_runtime.BoundCall, "_run_specialized", lambda call, _: call.run())
     first_specialization = ti.cfg.arch in (ti.cpu, ti.cuda)
     with ti.aot.borrow_runtime() as runtime, load_package(runtime, tmp_path / "sdk") as code:
         a, b = code.host.Model(7), code.host.Model(13)
@@ -9872,7 +9874,9 @@ class Model:
             code_count = core.query_int64("cuda_artifact_entry_points_loaded")
         a.step(5)
         assert counts["bind"] == initial["bind"] + 1
-        assert counts["prepare"] == initial["prepare"] + int(first_specialization)
+        assert counts["prepare"] == initial["prepare"]
+        if first_specialization:
+            assert counts["admission"] == initial["admission"]
         if ti.cfg.arch == ti.cuda:
             assert core.query_int64("cuda_artifact_entry_points_loaded") == code_count
         data = runtime.ndarray("f32", 7)
@@ -9882,7 +9886,7 @@ class Model:
         count = counts.copy()
         data.write(np.full(7, 20, dtype=np.float32))
         a.step(1)
-        assert counts == {**count, "prepare": count["prepare"] + int(not first_specialization)}
+        assert counts == {**count, "prepare": count["prepare"] + 1}
         # Device contents remain live whether preparation was first-use or reuse.
         np.testing.assert_array_equal(a.output.to_numpy(), np.full(7, 45))
         a.n = 8
@@ -9901,7 +9905,7 @@ class Model:
             code_count = core.query_int64("cuda_artifact_entry_points_loaded")
         for gain in (4, 5, 6):
             b.step(gain)
-        assert counts["prepare"] == prepared_count + 3 * int(first_specialization)
+        assert counts["prepare"] == prepared_count
         if ti.cfg.arch == ti.cuda:
             # New value frames share code; ordinary gain is not a code fact.
             assert core.query_int64("cuda_artifact_entry_points_loaded") == code_count
@@ -13956,6 +13960,105 @@ def test_package_uses_native_struct_layout_and_compound_values(tmp_path, monkeyp
         np.testing.assert_array_equal(
             np.frombuffer(b.matrices.read(), np.float32).reshape(19, 2, 2), [[[3, 6], [9, 15]]] * 19
         )
+        vector = np.array([2, 3, 4], np.float32)
+        matrix = np.array([[1, 2], [3, 5]], np.float32)
+        record = dict(value=7, vector=np.array([11, 13, 17], np.float32), matrix=np.zeros((2, 2), np.float32))
+        a.advance(a.records, a.vectors, a.matrices, a.output, vector, matrix, record)
+        vector[2], matrix[1, 1], record["vector"][0] = 9, 12, 13
+        a.advance(a.records, a.vectors, a.matrices, a.output, vector, matrix, record)
+        np.testing.assert_array_equal(np.frombuffer(a.output.read(), np.float32), np.arange(7) + 41)
+        np.testing.assert_array_equal(np.frombuffer(b.output.read(), np.float32), np.arange(19) + 27)
+
+
+@test_utils.test(arch=[ti.cpu, ti.cuda], offline_cache=False)
+@pytest.mark.parametrize("artifact_format", ["bc", "bc-library"])
+def test_package_live_value_snapshots_share_specialized_code(tmp_path, monkeypatch, artifact_format):
+    from taichi_forge_runtime.aot import _runtime
+
+    if artifact_format == "bc-library" and ti.cfg.arch != ti.cuda:
+        pytest.skip("CPU bitcode libraries are not qualified")
+    package = _source_package(tmp_path, monkeypatch, """
+import taichi_forge as ti
+@ti.data_oriented
+class Model:
+    def __init__(self, n: int):
+        self.n = n
+        scope = ti.experimental.ResourceScope(self)
+        scope.output = scope.field(ti.f32, shape=scope.dim('n'))
+    @ti.kernel
+    def update(self, slot: ti.i32, p: ti.types.vector(3, ti.f32),
+               q: ti.types.vector(4, ti.f32), gain: ti.f32):
+        for i in range(self.n):
+            if i == slot:
+                self.output[i] = p[0] + 2*p[1] + 3*p[2] + q[0] + q[3] + gain
+    @ti.kernel
+    def read(self, slot: ti.i32) -> ti.f32:
+        return self.output[slot]
+""")
+    ti.aot.export_package(package, tmp_path / "sdk", artifact_format=artifact_format)
+    jit = package.Model(8)
+    prepares = []
+    prepare = _runtime.BoundCall.prepare
+
+    def observed(call, **kwargs):
+        prepares.append(call)
+        return prepare(call, **kwargs)
+
+    monkeypatch.setattr(_runtime.BoundCall, "prepare", observed)
+    with Runtime(ti.cfg.arch.name) as runtime, load_package(runtime, tmp_path / "sdk") as code:
+        a, b = code.host.Model(8), code.host.Model(11)
+        p = np.array([1, 2, 3], dtype=np.float32)
+        q = np.array([1, 0, 0, 0], dtype=np.float32)
+        a.update(0, p, q, 1.0)
+        b.update(0, p, q, -1.0)
+        jit.update(0, p, q, 1.0)
+        assert len(prepares) == 2
+        original = next(iter(a._forge_package_calls.values()))
+        # Explicit preparations keep their existing immutable value semantics.
+        with original.call.prepare(specialize=True, constant_args=original.constant_args) as fixed:
+            before = len(prepares)
+            if ti.cfg.arch == ti.cuda:
+                from taichi_forge._lib import core
+                loaded = core.query_int64("cuda_artifact_entry_points_loaded")
+            for i in range(1, 8):
+                p[:] = [i, i+1, -i]
+                q[3] = i
+                a.update(i, p, q, float(i))
+                b.update(i, p, q, -float(i))
+                jit.update(i, p, q, float(i))
+            # No intermediate waits: every launch must retain its own value
+            # snapshot even when the same numpy objects are overwritten.
+            assert len(prepares) == before
+            np.testing.assert_array_equal(a.output.to_numpy(), jit.output.to_numpy())
+            expected_b = np.zeros(11, dtype=np.float32)
+            expected_b[:8] = jit.output.to_numpy() - 2*np.arange(8)
+            expected_b[0] -= 2
+            np.testing.assert_array_equal(b.output.to_numpy(), expected_b)
+            if ti.cfg.arch == ti.cuda:
+                assert core.query_int64("cuda_artifact_entry_points_loaded") == loaded
+            # Equal bytes in a new vector object can reuse/promote the binding.
+            a.update(7, p.copy(), q.copy(), 7.0)
+            assert len(prepares) == before + 1
+            a.update(7, p.copy(), q.copy(), 7.0)
+            assert len(prepares) == before + 1
+            # Invalid changed values reject before any submission or retirement.
+            with pytest.raises(ValueError, match="shape"):
+                a.update(7, np.zeros(4), q, 7.0)
+            assert len(prepares) == before + 1
+            # Mutable nested Python sequences have the same by-value contract.
+            pv, qv = p.tolist(), q.tolist()
+            pv[0] = -23
+            a.update(7, pv, qv, 7.0)
+            jit.update(7, pv, qv, 7.0)
+            pv[0] = -31
+            a.update(6, pv, qv, 6.0)
+            jit.update(6, pv, qv, 6.0)
+            for slot in (7, 6, 0):
+                assert a.read(slot) == jit.read(slot)
+            fixed.run()
+            assert a.read(0) == 16.0
+        # Closing with ordinary launches still pending follows normal leases.
+        a.update(4, p, q, 4.0)
 
 
 @test_utils.test(arch=[ti.cpu, ti.cuda, ti.vulkan], offline_cache=False)

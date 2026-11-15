@@ -462,6 +462,19 @@ class Api:
         function.restype = Handle
         setattr(self, name, function)
 
+    def load_specialized_launch(self):
+        name = "ti_launch_kernel_specialized_ext"
+        if getattr(self, name, None) is not None:
+            return
+        try:
+            function = getattr(self.library, name)
+        except AttributeError as error:
+            raise NotImplementedError("The selected Forge runtime has no specialized kernel launch") from error
+        function.argtypes = [Handle, Handle, UInt, C.POINTER(Argument), UInt, C.POINTER(Binding),
+                             UInt, C.POINTER(UInt), C.c_uint64, C.c_void_p]
+        function.restype = None
+        setattr(self, name, function)
+
     def load_cuda_external_memory(self):
         if getattr(self, "ti_import_cuda_external_memory_ext", None) is not None:
             return

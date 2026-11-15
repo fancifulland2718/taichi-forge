@@ -1,10 +1,11 @@
 """Reuse ordinary definition-call binding while its observed inputs stay fixed.
 
-This caches native prepared execution, not device results. Changes re-enter
-the existing admission/binding path; replay retains the native resource leases.
+This caches native prepared execution, not device results. Resource/owner changes
+re-enter admission; live values keep the binding and snapshot their current bytes.
 No module-global resource pointer is changed to select an instance.
 """
 
+import ctypes as C
 import operator
 import struct
 
@@ -188,15 +189,62 @@ class OwnerGuard:
 
 
 class CachedCall:
-    def __init__(self, guard, values, call, workspaces, *, specialize=False, constant_args=()):
+    def __init__(self, guard, values, call, workspaces, *, arguments, argument_specs,
+                 specialize=False, constant_args=(), specialized_launch=False):
         self.guard, self.values, self.call = guard, values, call
-        self.tokens = tuple(_token(x) for x in values)
+        self.value_layout = call._entry._argument_layout
+        # Compare by-value tensors/records through their compiler-owned ABI,
+        # never Python identity. The tokens describe the actual bound snapshot.
+        self.tokens = tuple(
+            self._encoded_token(call._arguments[index])
+            if index in self.value_layout.encoders else _token(value)
+            for index, value in enumerate(values)
+        )
         self.workspaces = tuple(workspaces)
         self.prepared = None
         self.specialize, self.constant_args = specialize, constant_args
+        self.specialized_launch = specialized_launch
+        self.arguments, self.argument_specs = tuple(arguments), tuple(argument_specs)
+
+    @staticmethod
+    def _encoded_token(argument):
+        value = argument.value.value
+        return C.string_at(value.data, value.size)
 
     def matches(self, owner, values):
-        return tuple(_token(x) for x in values) == self.tokens and self.guard.matches(owner)
+        if not self.guard.matches(owner):
+            return False
+        buffers = []
+        return tuple(
+            self._encoded_token(self.value_layout.encode(index, value, buffers))
+            if index in self.value_layout.encoders else _token(value)
+            for index, value in enumerate(values)
+        ) == self.tokens
+
+    def bind_values(self, owner, values):
+        """Refresh explicit values when every resource and owner fact is unchanged."""
+        if not self.specialized_launch or not self.guard.matches(owner):
+            return None
+        from ._runtime import Scalar
+
+        arguments = list(self.arguments)
+        for index, (spec, value) in enumerate(zip(self.argument_specs, values)):
+            if spec["kind"] == "value":
+                if type(value) not in (bool, int, float):
+                    return None
+                arguments[index] = Scalar(spec["dtype"], value)
+            elif spec["kind"] == "compound":
+                arguments[index] = value
+            elif _token(value) != self.tokens[index]:
+                return None
+        # The common ABI binder snapshots/validates all values before replacing
+        # the cached invocation. Fixed dimensions, workspaces, optional presence,
+        # resource layouts and selection are already covered by OwnerGuard.
+        call = self.call._entry.bind(*arguments)
+        return CachedCall(self.guard, values, call, self.workspaces,
+                          specialize=self.specialize, constant_args=self.constant_args,
+                          specialized_launch=True, arguments=arguments,
+                          argument_specs=self.argument_specs)
 
     def run(self, *, reuse=False):
         # Eligible LLVM packages prepare on their first call, before any generic
@@ -205,6 +253,8 @@ class CachedCall:
         if reuse and self.prepared is None:
             self.prepared = self.call.prepare(specialize=self.specialize, constant_args=self.constant_args)
         if self.prepared is None:
+            if self.specialized_launch:
+                return self.call._run_specialized(self.constant_args)
             return self.call.run()
         # Existing backend preparation consumes authoritative JIT/AOT views,
         # freezes launch geometry and retains its own argument frame. Shared

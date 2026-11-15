@@ -1420,6 +1420,16 @@ TI_DLL_EXPORT void TI_API_CALL ti_launch_kernel_with_result_ext(
     TiRuntime runtime, TiKernel kernel, uint32_t arg_count,
     const TiArgument *args, uint32_t binding_count,
     const TiNdArrayBinding *bindings, uint64_t result_size, void *result_data);
+// Submit current CPU/CUDA bitcode argument values using the same specialization as
+// ti_prepare_kernel_specialized_ext, without constructing a fixed execution.
+// Binding validation, asynchronous void launches and host return completion
+// follow ti_launch_kernel_with_result_ext. Only constant_args and descriptor
+// facts specialize code; other scalar/tensor values remain live on each call.
+TI_DLL_EXPORT void TI_API_CALL ti_launch_kernel_specialized_ext(
+    TiRuntime runtime, TiKernel kernel, uint32_t arg_count,
+    const TiArgument *args, uint32_t binding_count,
+    const TiNdArrayBinding *bindings, uint32_t constant_count,
+    const uint32_t *constant_args, uint64_t result_size, void *result_data);
 TI_DLL_EXPORT void TI_API_CALL ti_launch_compute_graph_with_bindings_ext(
     TiRuntime runtime, TiComputeGraph graph, uint32_t arg_count,
     const TiNamedArgument *args, uint32_t binding_count,
