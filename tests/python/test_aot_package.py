@@ -2009,6 +2009,62 @@ class Model:
     caller_tree.destroy()
 
 
+@pytest.mark.parametrize("failure", [False, True])
+@test_utils.test(arch=ti.cpu, offline_cache=False)
+def test_package_witness_retirement_batches_cache_cleanup(monkeypatch, failure):
+    from taichi_forge.aot._package_compilation import PackageCompilation
+    from taichi_forge._snode.snode_tree import SNodeTree
+
+    caller = ti.field(ti.i32, shape=3)
+
+    @ti.kernel
+    def fill(value: ti.i32):
+        for i in caller:
+            caller[i] = value + i
+
+    fill(7)
+    caller_cache = dict(fill._primal.compiled_kernels)
+    runtime = ti.lang.impl.get_runtime()
+    baseline = runtime.prog._debug_snode_metadata_stats()["active_tree_count"]
+    compilation = PackageCompilation()
+    for n in (2, 4, 8):
+        field = ti.field(ti.i32)
+        builder = ti.FieldsBuilder()
+        builder.dense(ti.i, n).place(field)
+        compilation.field_trees.append(builder._finalize_for_aot())
+    trees = tuple(compilation.field_trees)
+    clear, destroy = runtime.clear_compiled_functions, SNodeTree._destroy
+    flushes = []
+
+    def clear_once():
+        flushes.append(sum(tree.destroyed for tree in trees))
+        clear()
+
+    def destroy_with_failure(tree, **kwargs):
+        if failure and tree is trees[1]:
+            raise RuntimeError("injected private tree retirement failure")
+        return destroy(tree, **kwargs)
+
+    monkeypatch.setattr(runtime, "clear_compiled_functions", clear_once)
+    monkeypatch.setattr(SNodeTree, "_destroy", destroy_with_failure)
+    if failure:
+        with pytest.raises(RuntimeError, match="injected private tree retirement"):
+            compilation._release()
+        assert flushes == [1]
+        assert compilation.field_trees == list(trees[:2])
+        assert not trees[0].destroyed and not trees[1].destroyed and trees[2].destroyed
+        assert trees[2] not in runtime._pending_aot_snode_trees
+        monkeypatch.setattr(SNodeTree, "_destroy", destroy)
+    compilation._release()
+    assert flushes == ([1, 3] if failure else [3])
+    assert not compilation.field_trees
+    assert all(tree.destroyed for tree in trees)
+    assert runtime.prog._debug_snode_metadata_stats()["active_tree_count"] == baseline
+    assert fill._primal.compiled_kernels == caller_cache
+    fill(11)
+    np.testing.assert_array_equal(caller.to_numpy(), np.arange(3) + 11)
+
+
 @pytest.mark.parametrize('failure', ('transient', 'persistent', 'archive'))
 @test_utils.test(arch=ti.cpu, offline_cache=False)
 def test_package_publication_preserves_completed_output(tmp_path, monkeypatch, failure):
@@ -5950,6 +6006,154 @@ def test_package_type_resolution_releases_build_references_without_gc(failure):
     gc.disable()
     try:
         assert all(reference() is None for reference in resolve())
+    finally:
+        if automatic:
+            gc.enable()
+
+
+def test_package_function_input_discovery_releases_source_inventory_without_gc():
+    import gc
+    import types
+    import weakref
+    from taichi_forge.aot._package_function_inputs import discover
+
+    def ordinary():
+        pass
+
+    def analyze():
+        tree = ast.parse("def ordinary(): pass")
+        module = types.ModuleType("sample")
+        module.ordinary = ordinary
+        reference = weakref.ref(tree.body[0])
+        sources = [("sample", None, None, "", tree, None, {}, [])]
+        assert discover(sources, {"sample": module}, preparation_receivers=set()) == ({}, [])
+        assert len(tree.body) == 1 and tree.body[0].name == "ordinary"
+        return reference
+
+    automatic = gc.isenabled()
+    gc.disable()
+    try:
+        assert analyze()() is None
+    finally:
+        if automatic:
+            gc.enable()
+
+
+@pytest.mark.parametrize("failure", [False, True])
+@pytest.mark.parametrize("partial", [False, True])
+def test_package_constructor_input_resolution_releases_sources_without_gc(failure, partial):
+    import gc
+    import types
+    import weakref
+    from taichi_forge.aot._package_inputs import resolve_inputs
+
+    class Inventory(dict):
+        pass
+
+    def resolve():
+        class Storage:
+            pass
+
+        class Model:
+            def __init__(self, source):
+                pass
+
+        if not failure:
+            Model.__init__.__annotations__["source"] = Storage
+        module = types.ModuleType("sample")
+        module.Storage, module.Model = Storage, Model
+        tree = ast.parse("class Storage: pass\nclass Model: pass")
+        schema = Inventory(source=dict(kind="owner_input", input_parameter="source"))
+        sources = [("sample", None, None, "", tree, None, {"Storage": {}, "Model": schema}, [])]
+        references = [weakref.ref(value) for value in (tree, module, schema)]
+        try:
+            resolve_inputs(sources, {"sample": module}, partial=partial)
+        except ValueError as error:
+            assert failure and not partial and "requires a proven source" in str(error)
+        else:
+            assert not failure or partial
+        if not failure:
+            assert schema["source"]["owner_type"] == "sample.Storage"
+        return references
+
+    automatic = gc.isenabled()
+    gc.disable()
+    try:
+        assert all(reference() is None for reference in resolve())
+    finally:
+        if automatic:
+            gc.enable()
+
+
+@pytest.mark.parametrize("failure", [None, "source", "type"])
+def test_package_field_like_resolution_releases_inventory_without_gc(failure):
+    import gc
+    import types
+    import weakref
+    from taichi_forge.aot._package_field_like import resolve_field_likes
+    from taichi_forge.tools._compiled_host import decorator_resolver
+
+    class Inventory(dict):
+        pass
+
+    def resolve():
+        module = types.ModuleType("sample")
+        module.ti = ti
+        tree = ast.parse("import taichi_forge as ti")
+        dtype = "self.missing.dtype" if failure == "type" else "ti.f32"
+        original = Inventory(kind="dense_field", type_node=ast.parse(dtype, mode="eval").body,
+                             shape=[3], dimension_sources={}, allocation=[1, 0])
+        schema = Inventory(values=original, copy=dict(
+            kind="field_like", source_path=["missing" if failure == "source" else "values"],
+            allocation=[2, 0], scope_allocation=[2, 0], layout="AOS"))
+        references = [weakref.ref(value) for value in (module, original, schema)]
+        sources = [("sample", None, None, "", tree, decorator_resolver(tree), {"Model": schema}, [])]
+        try:
+            resolve_field_likes(sources, {"sample": module})
+        except ValueError as error:
+            assert failure and "declared complete Field" in str(error)
+        else:
+            assert not failure
+            assert schema["copy"]["kind"] == "dense_field"
+            assert schema["copy"]["shape"] == [3]
+            assert schema["copy"] is not original
+        return references
+
+    automatic = gc.isenabled()
+    gc.disable()
+    try:
+        assert all(reference() is None for reference in resolve())
+    finally:
+        if automatic:
+            gc.enable()
+
+
+@pytest.mark.parametrize("failure", [False, True])
+def test_package_dimension_relations_release_environment_without_gc(failure):
+    import gc
+    import weakref
+    from taichi_forge.aot._component import Dimension
+    from taichi_forge.aot._package_records import dimension_relations
+
+    class Environment(ti.aot.Component):
+        pass
+
+    def resolve():
+        component = Environment(n=Dimension())
+        reference = weakref.ref(component)
+        try:
+            result = dimension_relations(component, ["missing" if failure else "n"])
+        except KeyError:
+            assert failure
+        else:
+            assert not failure
+            assert result["n"]["path"] == ["n"]
+        return reference
+
+    automatic = gc.isenabled()
+    gc.disable()
+    try:
+        assert resolve()() is None
     finally:
         if automatic:
             gc.enable()

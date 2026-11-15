@@ -162,82 +162,90 @@ def resolve_field_likes(sources, imported_modules):
                     return resolver.visit(scalar)
                 return self.generic_visit(node)
 
-        # A storage type belongs to the source declaration. The clone
-        # must not try to resolve that attribute on its own, unrelated owner.
-        field["type_node"] = SourceTypes().visit(field["type_node"])
-        dtype_origin, dtype_prefix = source_owner, prefix
-        if metadata_policies:
-            if any(policy != metadata_policies[0] for policy in metadata_policies[1:]) or field.get("struct_field"):
-                raise ValueError("Derived Field dtype choices require one scalar source policy")
-            dtype_origin, nested, policy = metadata_policies[0]
-            dtype_prefix = [*prefix, *nested]
-            field["dtype_policy"] = copy.deepcopy(policy)
-        # The clone owns its placement. Its sizes are read from the proved
-        # original namespace in retained Host construction, never from a model
-        # witness or another instance's allocation.
-        field.update(
-            allocation=item["allocation"],
-            scope_allocation=item["scope_allocation"],
-            group=item["group"] if "group_builder" in item else "field_like_" + name,
-            layout=item["layout"],
-            shape=[remap.get(axis, axis) for axis in original["shape"]],
-            dimension_sources={remap[key]: source_expression + "." + key for key in original["dimension_sources"]},
-            dimension_expressions={},
-            like_source_path=item["source_path"],
-            type_declaration_module=original.get(
-                "type_declaration_module", original.get("declaration_module", owners[source_owner][0])
-            ),
-            declaration_module=item.get("declaration_module", owners[owner][0]),
-        )
-        for policy_kind in ("dtype_policy", "shape_policy"):
-            if policy_kind not in field:
-                continue
-            policy = field[policy_kind]
-            policy_owner = dtype_origin if policy_kind == "dtype_policy" else source_owner
-            policy_prefix = dtype_prefix if policy_kind == "dtype_policy" else prefix
-            source_condition = policy.get("condition_path")
-            if source_condition is None:
-                source_condition = owners[policy_owner][1][policy["condition"]].get("path", [policy["condition"]])
-            condition_path = [*policy_prefix, *source_condition]
-            # One original layout choice controls both allocations. The clone
-            # has independent storage but no additional static selection axis.
-            field[policy_kind] = {**policy, "condition": _capture_id(tuple(condition_path)),
-                                  "condition_path": condition_path}
-            if policy_kind == "shape_policy":
-                field[policy_kind].update({branch: [remap.get(axis, axis) for axis in policy[branch]]
-                                           for branch in ("if_true", "if_false")})
-        field.pop("declaration_owner", None)
-        if "declaration_owner" in item:
-            field["declaration_owner"] = item["declaration_owner"]
-        for key in (
-            "local_type_source",
-            "member_initialization_node",
-            "member_initialization_source",
-            "dimension_alias_checks",
-            "placement_alias",
-            "placement",
-            "group_builder",
-            "order",
-            "order_policy",
-            "order_source",
-            "conditions",
-            "constraints",
-        ):
-            field.pop(key, None)
-        if "group_builder" in item:
-            # Clone the element/layout contract, not the source tree owner.
-            # Explicit construction owns all copies in this original group.
-            field["group_builder"] = copy.deepcopy(item["group_builder"])
-        for node in ast.walk(field["type_node"]):
-            axis = getattr(node, "_package_model_extent", None)
-            if axis in remap:
-                node._package_model_extent = remap[axis]
-        schema[name] = field
+        try:
+            # A storage type belongs to the source declaration. The clone
+            # must not try to resolve that attribute on its own, unrelated owner.
+            field["type_node"] = SourceTypes().visit(field["type_node"])
+            dtype_origin, dtype_prefix = source_owner, prefix
+            if metadata_policies:
+                if any(policy != metadata_policies[0] for policy in metadata_policies[1:]) or field.get("struct_field"):
+                    raise ValueError("Derived Field dtype choices require one scalar source policy")
+                dtype_origin, nested, policy = metadata_policies[0]
+                dtype_prefix = [*prefix, *nested]
+                field["dtype_policy"] = copy.deepcopy(policy)
+            # The clone owns its placement. Its sizes are read from the proved
+            # original namespace in retained Host construction, never from a model
+            # witness or another instance's allocation.
+            field.update(
+                allocation=item["allocation"],
+                scope_allocation=item["scope_allocation"],
+                group=item["group"] if "group_builder" in item else "field_like_" + name,
+                layout=item["layout"],
+                shape=[remap.get(axis, axis) for axis in original["shape"]],
+                dimension_sources={remap[key]: source_expression + "." + key for key in original["dimension_sources"]},
+                dimension_expressions={},
+                like_source_path=item["source_path"],
+                type_declaration_module=original.get(
+                    "type_declaration_module", original.get("declaration_module", owners[source_owner][0])
+                ),
+                declaration_module=item.get("declaration_module", owners[owner][0]),
+            )
+            for policy_kind in ("dtype_policy", "shape_policy"):
+                if policy_kind not in field:
+                    continue
+                policy = field[policy_kind]
+                policy_owner = dtype_origin if policy_kind == "dtype_policy" else source_owner
+                policy_prefix = dtype_prefix if policy_kind == "dtype_policy" else prefix
+                source_condition = policy.get("condition_path")
+                if source_condition is None:
+                    source_condition = owners[policy_owner][1][policy["condition"]].get("path", [policy["condition"]])
+                condition_path = [*policy_prefix, *source_condition]
+                # One original layout choice controls both allocations. The clone
+                # has independent storage but no additional static selection axis.
+                field[policy_kind] = {**policy, "condition": _capture_id(tuple(condition_path)),
+                                      "condition_path": condition_path}
+                if policy_kind == "shape_policy":
+                    field[policy_kind].update({branch: [remap.get(axis, axis) for axis in policy[branch]]
+                                               for branch in ("if_true", "if_false")})
+            field.pop("declaration_owner", None)
+            if "declaration_owner" in item:
+                field["declaration_owner"] = item["declaration_owner"]
+            for key in (
+                "local_type_source",
+                "member_initialization_node",
+                "member_initialization_source",
+                "dimension_alias_checks",
+                "placement_alias",
+                "placement",
+                "group_builder",
+                "order",
+                "order_policy",
+                "order_source",
+                "conditions",
+                "constraints",
+            ):
+                field.pop(key, None)
+            if "group_builder" in item:
+                # Clone the element/layout contract, not the source tree owner.
+                # Explicit construction owns all copies in this original group.
+                field["group_builder"] = copy.deepcopy(item["group_builder"])
+            for node in ast.walk(field["type_node"]):
+                axis = getattr(node, "_package_model_extent", None)
+                if axis in remap:
+                    node._package_model_extent = remap[axis]
+            schema[name] = field
+        finally:
+            SourceTypes = original = metadata_policies = None
 
-    for owner, (_, schema) in owners.items():
-        for name, item in tuple(schema.items()):
-            if item["kind"] == "field_like":
-                resolve(owner, name)
+    try:
+        for owner, (_, schema) in owners.items():
+            for name, item in tuple(schema.items()):
+                if item["kind"] == "field_like":
+                    resolve(owner, name)
+    finally:
+        # The mutually recursive resolvers and local type visitor share these
+        # cells. Release our inventory references, never caller-owned schemas.
+        allocation = resolve = owners = imported_modules = kinds = None
 
 
 def project_field_likes(environment, schema):

@@ -446,136 +446,141 @@ def resolve_inputs(sources, imported, *, partial=False):
         )
         return {value, absent} if optional else {value}
 
-    while True:
-        changed = False
-        inventory_cache.clear()  # Forwarded owner types may have resolved in the previous iteration.
-        for (owner, name), item in aliases.items():
-            resolved = member_type(owner, item["reference_path"])
-            if resolved is None:
-                continue
-            source_type, source_member = resolved
-            if source_member:
-                raise ValueError(f"Owner reference {owner}.{name} requires an object source")
-            if item.get("owner_type") != source_type:
-                item["owner_type"] = source_type
-                changed = True
-        for sites in calls.values():
-            if any(expand_sequence_parameter(*site) for site in sites):
-                return resolve_inputs(sources, imported, partial=partial)
-            if any(expand_write_inventory(*site) for site in sites):
-                return resolve_inputs(sources, imported, partial=partial)
-        for (owner, name), item in inputs.items():
-            observed_all = {
-                identity
-                for caller, args, _ in calls.get(owner, ())
-                for identity in (input_types(caller, args.get(item["input_parameter"])) or ())
-            }
-            observed = observed_all - {absent}
-            if absent in observed_all and item.get("optional_capable") and not item.get("optional_input"):
-                item["optional_input"] = True
-                changed = True
-            if (owner, name) in annotated and observed - {origin(item)}:
-                raise ValueError(f"Owner input {owner}.{name} contradicts its declared source type")
-            if len(observed) > 1:
-                if any(site.get('inherited_input_forward') for _, _, site in calls.get(owner, ())):
-                    raise ValueError('Inherited constructor inputs require one proven source type: ' + owner)
-                # Another input can still be resolving through a parent or
-                # preparation constructor in this same fixed-point pass.
-                # Build typed contexts only after every argument has a source;
-                # final admission below still rejects an unresolved input.
-                if any(
-                    input_types(caller, args.get(parameter['input_parameter'])) is None
-                    for (identity, _), parameter in inputs.items() if identity == owner
-                    for caller, args, _ in calls.get(owner, ())
-                ):
+    try:
+        while True:
+            changed = False
+            inventory_cache.clear()  # Forwarded owner types may have resolved in the previous iteration.
+            for (owner, name), item in aliases.items():
+                resolved = member_type(owner, item["reference_path"])
+                if resolved is None:
                     continue
-                split_constructor_inputs(sources, owner, inputs, calls.get(owner, ()), input_types)
-                return resolve_inputs(sources, imported, partial=partial)
-            if observed and origin(item) is None:
-                source_type, source_member = observed.pop()
-                if item["kind"] == "owner_input":
-                    if source_member:
-                        raise ValueError(f"Owner input {owner}.{name} requires an object source")
+                source_type, source_member = resolved
+                if source_member:
+                    raise ValueError(f"Owner reference {owner}.{name} requires an object source")
+                if item.get("owner_type") != source_type:
                     item["owner_type"] = source_type
-                else:
-                    if not source_member:
-                        raise ValueError(f"Field input {owner}.{name} requires a declared allocation member")
-                    item.update(source_type=source_type, source_member=list(source_member))
-                changed = True
-        if not changed:
-            break
-    # Preparation functions may declare additional child constructors. Their
-    # receiver discovery needs the input facts already provable from ordinary
-    # construction, but admission must wait until those declarations are added.
-    # The caller always runs complete resolution before compiling or exporting.
-    if partial:
-        return
-    for (owner, name), item in aliases.items():
-        if "owner_type" not in item:
-            raise ValueError(f"Owner reference {owner}.{name} requires a resolved declared owner path")
-    for owner, (schema, _) in owners.items():
-        for item in schema.values():
-            if "owner_dimension" not in item:
+                    changed = True
+            for sites in calls.values():
+                if any(expand_sequence_parameter(*site) for site in sites):
+                    return resolve_inputs(sources, imported, partial=partial)
+                if any(expand_write_inventory(*site) for site in sites):
+                    return resolve_inputs(sources, imported, partial=partial)
+            for (owner, name), item in inputs.items():
+                observed_all = {
+                    identity
+                    for caller, args, _ in calls.get(owner, ())
+                    for identity in (input_types(caller, args.get(item["input_parameter"])) or ())
+                }
+                observed = observed_all - {absent}
+                if absent in observed_all and item.get("optional_capable") and not item.get("optional_input"):
+                    item["optional_input"] = True
+                    changed = True
+                if (owner, name) in annotated and observed - {origin(item)}:
+                    raise ValueError(f"Owner input {owner}.{name} contradicts its declared source type")
+                if len(observed) > 1:
+                    if any(site.get('inherited_input_forward') for _, _, site in calls.get(owner, ())):
+                        raise ValueError('Inherited constructor inputs require one proven source type: ' + owner)
+                    # Another input can still be resolving through a parent or
+                    # preparation constructor in this same fixed-point pass.
+                    # Build typed contexts only after every argument has a source;
+                    # final admission below still rejects an unresolved input.
+                    if any(
+                        input_types(caller, args.get(parameter['input_parameter'])) is None
+                        for (identity, _), parameter in inputs.items() if identity == owner
+                        for caller, args, _ in calls.get(owner, ())
+                    ):
+                        continue
+                    split_constructor_inputs(sources, owner, inputs, calls.get(owner, ()), input_types)
+                    return resolve_inputs(sources, imported, partial=partial)
+                if observed and origin(item) is None:
+                    source_type, source_member = observed.pop()
+                    if item["kind"] == "owner_input":
+                        if source_member:
+                            raise ValueError(f"Owner input {owner}.{name} requires an object source")
+                        item["owner_type"] = source_type
+                    else:
+                        if not source_member:
+                            raise ValueError(f"Field input {owner}.{name} requires a declared allocation member")
+                        item.update(source_type=source_type, source_member=list(source_member))
+                    changed = True
+            if not changed:
+                break
+        # Preparation functions may declare additional child constructors. Their
+        # receiver discovery needs the input facts already provable from ordinary
+        # construction, but admission must wait until those declarations are added.
+        # The caller always runs complete resolution before compiling or exporting.
+        if partial:
+            return
+        for (owner, name), item in aliases.items():
+            if "owner_type" not in item:
+                raise ValueError(f"Owner reference {owner}.{name} requires a resolved declared owner path")
+        for owner, (schema, _) in owners.items():
+            for item in schema.values():
+                if "owner_dimension" not in item:
+                    continue
+                reference, dimension = item["owner_dimension"]
+                source_type = schema[reference].get("owner_type")
+                source = owners.get(source_type, ({}, None))[0].get(dimension, {})
+                if source.get("kind") != "dimension" or source.get("conditions") or source.get("owner_dimension"):
+                    raise ValueError(
+                        f"Referenced dimension {owner}.{reference}.{dimension} requires an unconditional declared source dimension"
+                    )
+        for (owner, name), item in inputs.items():
+            if (owner, name) in annotated:
                 continue
-            reference, dimension = item["owner_dimension"]
-            source_type = schema[reference].get("owner_type")
-            source = owners.get(source_type, ({}, None))[0].get(dimension, {})
-            if source.get("kind") != "dimension" or source.get("conditions") or source.get("owner_dimension"):
-                raise ValueError(
-                    f"Referenced dimension {owner}.{reference}.{dimension} requires an unconditional declared source dimension"
+            sites = calls.get(owner, ())
+            if (
+                not sites
+                or origin(item) is None
+                or any(
+                    (actual := input_types(caller, args.get(item["input_parameter"]))) is None
+                    or not actual <= ({origin(item), absent} if item.get("optional_input") else {origin(item)})
+                    for caller, args, _ in sites
                 )
-    for (owner, name), item in inputs.items():
-        if (owner, name) in annotated:
-            continue
-        sites = calls.get(owner, ())
-        if (
-            not sites
-            or origin(item) is None
-            or any(
-                (actual := input_types(caller, args.get(item["input_parameter"]))) is None
-                or not actual <= ({origin(item), absent} if item.get("optional_input") else {origin(item)})
-                for caller, args, _ in sites
+            ):
+                raise ValueError(f"Owner input {owner}.{name} requires a proven source at every declared constructor call")
+        for (owner, name), item in inputs.items():
+            if item["kind"] == "owner_input":
+                # Retain a call-site identity proof as well as the input's type.
+                # A parent's Child(self) borrows that parent, not another instance
+                # whose static choices can vary independently. Other callers still
+                # use the child's standalone input contract.
+                for caller, arguments, declaration in calls.get(owner, ()):
+                    expression = arguments.get(item["input_parameter"])
+                    path = []
+                    while isinstance(expression, ast.Attribute):
+                        path.insert(0, expression.attr)
+                        expression = expression.value
+                    if (
+                        isinstance(expression, ast.Name) and expression.id == "self"
+                        and member_type(caller, path) == (item["owner_type"], ())
+                        and declaration.get("kind") == "owner"
+                    ):
+                        declaration.setdefault("input_references", {})[name] = path
+            if item["kind"] != "borrowed_field":
+                continue
+            # A private provenance link exposes the original allocation to the
+            # existing Component layout/alias machinery. It creates no runtime state.
+            source = "_forge_package_source_" + name
+            item["source_path"] = [source, *item["source_member"]]
+            if item.get("optional_input") and not item.get("conditions"):
+                presence = "_forge_package_input_present_" + item["input_parameter"]
+                owners[owner][0][presence] = dict(
+                    kind="static",
+                    choices=[("bool", False), ("bool", True)],
+                    kernel_only=False,
+                    presence_parameter=item["input_parameter"],
+                    presence_owner=owner,
+                    presence_nonnull=True,
+                )
+                item["conditions"] = {presence: True}
+            owners[owner][0][source] = dict(
+                kind="owner_input",
+                owner_type=item["source_type"],
+                field_input=name,
+                **({"conditions": item["conditions"]} if item.get("conditions") else {}),
             )
-        ):
-            raise ValueError(f"Owner input {owner}.{name} requires a proven source at every declared constructor call")
-    for (owner, name), item in inputs.items():
-        if item["kind"] == "owner_input":
-            # Retain a call-site identity proof as well as the input's type.
-            # A parent's Child(self) borrows that parent, not another instance
-            # whose static choices can vary independently. Other callers still
-            # use the child's standalone input contract.
-            for caller, arguments, declaration in calls.get(owner, ()):
-                expression = arguments.get(item["input_parameter"])
-                path = []
-                while isinstance(expression, ast.Attribute):
-                    path.insert(0, expression.attr)
-                    expression = expression.value
-                if (
-                    isinstance(expression, ast.Name) and expression.id == "self"
-                    and member_type(caller, path) == (item["owner_type"], ())
-                    and declaration.get("kind") == "owner"
-                ):
-                    declaration.setdefault("input_references", {})[name] = path
-        if item["kind"] != "borrowed_field":
-            continue
-        # A private provenance link exposes the original allocation to the
-        # existing Component layout/alias machinery. It creates no runtime state.
-        source = "_forge_package_source_" + name
-        item["source_path"] = [source, *item["source_member"]]
-        if item.get("optional_input") and not item.get("conditions"):
-            presence = "_forge_package_input_present_" + item["input_parameter"]
-            owners[owner][0][presence] = dict(
-                kind="static",
-                choices=[("bool", False), ("bool", True)],
-                kernel_only=False,
-                presence_parameter=item["input_parameter"],
-                presence_owner=owner,
-                presence_nonnull=True,
-            )
-            item["conditions"] = {presence: True}
-        owners[owner][0][source] = dict(
-            kind="owner_input",
-            owner_type=item["source_type"],
-            field_input=name,
-            **({"conditions": item["conditions"]} if item.get("conditions") else {}),
-        )
+    finally:
+        # Recursive local resolvers must not retain the complete source and
+        # owner inventory until the next full GC. Results contain plain facts.
+        member_type = input_type = declared_fields = sequence_sources = input_types = None

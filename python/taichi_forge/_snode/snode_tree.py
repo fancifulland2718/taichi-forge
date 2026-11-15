@@ -18,6 +18,9 @@ class SNodeTree:
         impl.get_runtime().register_runtime_object(self)
 
     def destroy(self):
+        self._destroy()
+
+    def _destroy(self, *, clear_compiled_functions=True):
         if self.destroyed:
             raise TaichiRuntimeError("SNode tree has been destroyed")
         if self.prog != impl.get_runtime().prog:
@@ -42,7 +45,8 @@ class SNodeTree:
         # Drop only specializations whose compiled dependency set references
         # this tree. Unrelated specializations remain reusable; their backend
         # registrations and frontend definitions are still live.
-        runtime.clear_compiled_functions()
+        if clear_compiled_functions:
+            runtime.clear_compiled_functions()
 
     def _mark_destroyed(self):
         self.destroyed = True

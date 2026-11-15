@@ -78,6 +78,11 @@ def dimension_relations(environment, names):
         for child in extent_dependencies(declaration.expression) if declaration.expression else ():
             visit(child)
 
-    for name in names:
-        visit(name)
-    return relations
+    try:
+        for name in names:
+            visit(name)
+        return relations
+    finally:
+        # The recursive closure must not keep its Component alive after these
+        # plain dimension facts have been returned, including on invalid input.
+        visit = None

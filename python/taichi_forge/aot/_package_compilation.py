@@ -209,11 +209,17 @@ class PackageCompilation(FunctionLibrary):
         # Ordinary Module exports and caller-owned Fields retain their trees.
         # Retire after the builder and definition leases have been released.
         runtime = impl.get_runtime()
+        retired_trees = False
         try:
             while self.field_trees:
                 tree = self.field_trees[-1]
                 if not tree.destroyed:
-                    tree.destroy()
+                    # All private code leases are gone. Each native retirement
+                    # still validates/notifies its dependents; scan the shared
+                    # Python kernel cache once after the owned batch, not once
+                    # for every compile-only layout witness.
+                    tree._destroy(clear_compiled_functions=False)
+                    retired_trees = True
                 self.field_trees.pop()
         finally:
             # A partial failure retains the remaining ownership for a retry.
@@ -222,3 +228,7 @@ class PackageCompilation(FunctionLibrary):
                 runtime._pending_aot_snode_trees = deque(
                     tree for tree in runtime._pending_aot_snode_trees if not tree.destroyed
                 )
+            if retired_trees:
+                # Also release cache leases for the successful prefix if a
+                # later tree failed. Remaining trees stay owned for retry.
+                runtime.clear_compiled_functions()

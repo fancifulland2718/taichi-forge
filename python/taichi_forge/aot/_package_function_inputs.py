@@ -1684,4 +1684,4 @@ def discover(sources, imported, *, preparation_receivers=None, resource_inventor
                 )
         return result, list(dict.fromkeys(failures))
     finally:
-        build_context = member = inventory_input = None
+        build_context = member = inventory_input = attribute = None
