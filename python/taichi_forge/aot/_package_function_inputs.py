@@ -1245,6 +1245,14 @@ def discover(sources, imported, *, preparation_receivers=None, resource_inventor
                         return left if left == right else None
                     if isinstance(expression, ast.Call):
                         cls = source(expression.func)
+                        if (resource_inventory is not None and cls is inspect.signature
+                                and len(expression.args) == 1 and not expression.keywords):
+                            candidate = child(expression.args[0])
+                            if _callable_fact(candidate):
+                                # Public signatures describe a proven callable without
+                                # invoking it. Retain its provenance if this metadata
+                                # later escapes to an unknown Host operation.
+                                return _CallableMetadata(candidate)
                         if resource_inventory is not None and cls is builtins.callable and len(expression.args) == 1 and not expression.keywords:
                             source_only_calls.add(id(expression))
                             candidate = child(expression.args[0])

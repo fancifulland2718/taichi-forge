@@ -7058,6 +7058,30 @@ def test_package_write_inventory_rejects_unproven_record_recipes(tmp_path, monke
 
 
 @test_utils.test(arch=ti.cpu, offline_cache=False)
+@pytest.mark.parametrize('escaped', [False, True])
+def test_package_write_inventory_public_callable_signature(tmp_path, monkeypatch, escaped):
+    source = 'import inspect\n' + CYCLIC_WRITE_INVENTORY_SOURCE.replace(
+        'def append_step(solver, builder):\n    builder.dispatch(solver.step)',
+        '''def append_step(solver, builder):
+    signature = inspect.signature(solver.step)
+    parameters = signature.parameters
+    builder.dispatch(solver.step)
+''')
+    if escaped:
+        source = source.replace('    parameters = signature.parameters',
+                                '    opaque(signature)\n    parameters = signature.parameters')
+    package = _source_package(tmp_path, monkeypatch, source)
+    before = ti.lang.impl.get_runtime().get_num_compiled_functions()
+    if escaped:
+        with pytest.raises(ValueError, match='proven source'):
+            ti.aot.check_package(package)
+    else:
+        assert ti.aot.check_package(package)['declaration_check'] == 'passed'
+    assert package.model.constructors == 0
+    assert ti.lang.impl.get_runtime().get_num_compiled_functions() == before
+
+
+@test_utils.test(arch=ti.cpu, offline_cache=False)
 @pytest.mark.parametrize('use', ['metadata', 'effectful', 'escaped'])
 def test_package_write_inventory_proves_scope_factory_metadata(tmp_path, monkeypatch, use):
     factory = RESOURCE_FACTORY_SOURCE
