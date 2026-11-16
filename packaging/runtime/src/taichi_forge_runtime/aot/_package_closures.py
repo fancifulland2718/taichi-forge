@@ -170,23 +170,39 @@ class _FunctionEntry:
         )
         self._entries = {}
         self._resource_entries = {}
+        self._input_entries = {}
         for owner, cases in owners.items():
             if owner not in package.manifest["owners"] or not isinstance(cases, list) or not cases:
                 raise ValueError("Free Kernel receiver is outside the declared package")
-            choices, resource_choices, seen = {}, [], set()
+            choices, resource_choices, input_choices, seen = {}, [], [], set()
             for case in cases:
                 if (
                     not isinstance(case, dict)
-                    or set(case) not in ({"symbol", "values"}, {"symbol", "values", "resources"})
+                    or set(case) not in ({"symbol", "values"}, {"symbol", "values", "resources"},
+                                        {"symbol", "values", "inputs", "context"},
+                                        {"symbol", "values", "resources", "inputs", "context"})
                     or not isinstance(case["symbol"], str)
                     or not isinstance(case["values"], dict)
                     or not isinstance(case.get("resources", {}), dict)
                 ):
                     raise ValueError("Free Kernel has an invalid template input case")
+                inputs = case.get("inputs", {})
+                context = case.get("context", owner)
+                if "inputs" in case:
+                    if (package.manifest["version"] < 91 or not isinstance(inputs, dict)
+                            or len(inputs) < 2 or inputs.get(receiver) != owner
+                            or not inputs.keys() <= set(templates)
+                            or not isinstance(context, str)
+                            or any(not isinstance(kind, str) or kind not in package.manifest["owners"]
+                                   for kind in inputs.values())
+                            or package.manifest["owners"].get(context) != {
+                                "_arg_" + key: dict(kind="owner_input", owner_type=value) for key, value in inputs.items()}):
+                        raise ValueError("Free Kernel has an invalid independent input context")
                 resources = case.get("resources", {})
-                if set(resources) & case["values"].keys() or set(resources) | case["values"].keys() != set(
-                    self.static_parameters
-                ):
+                if (set(resources) & case["values"].keys()
+                        or (set(resources) | case["values"].keys()) & inputs.keys()
+                        or set(resources) | case["values"].keys() | (inputs.keys() - {receiver})
+                        != set(self.static_parameters)):
                     raise ValueError("Free Kernel has an invalid template input case")
                 if (
                     resources
@@ -199,10 +215,11 @@ class _FunctionEntry:
                     )
                 ):
                     raise ValueError("Free Kernel has invalid template resource paths")
-                if any(not _declared_field_path(package, owner, path) for path in resources.values()):
+                if any(not _declared_field_path(package, context, path) for path in resources.values()):
                     raise ValueError("Template resource path is outside its declared owner")
                 values = {name: static_key(read_static_key(value)) for name, value in case["values"].items()}
                 key = tuple(
+                    ("owner", inputs[name]) if name in inputs else
                     ("path", tuple(resources[name])) if name in resources else ("static", values[name])
                     for name in self.static_parameters
                 )
@@ -214,7 +231,7 @@ class _FunctionEntry:
                     n for n in parameters if n not in templates
                 ]:
                     raise ValueError("Free Kernel receiver binding differs from its numerical ABI")
-                if resources:
+                if resources or inputs:
                     contracts = (
                         [bound.contract]
                         if bound.family is None
@@ -222,16 +239,22 @@ class _FunctionEntry:
                             _entry_contract(package.manifest, variant["symbol"]) for variant in bound.family["variants"]
                         ]
                     )
+                    template_paths = {**resources, **{name: ["_arg_" + name] for name in inputs}}
                     for contract in contracts:
                         if any(
-                            resources.get(name) != path for name, path in contract.get("template_resources", {}).items()
+                            template_paths.get(name) != path
+                            for name, path in contract.get("template_resources", {}).items()
                         ):
                             raise ValueError("Template resource paths differ from the compiled resource ABI")
-                    resource_choices.append((values, resources, bound))
+                    if inputs:
+                        input_choices.append((values, resources, inputs, context, bound))
+                    else:
+                        resource_choices.append((values, resources, bound))
                 else:
                     choices[tuple(values[name] for name in self.static_parameters)] = bound
             self._entries[owner] = choices
             self._resource_entries[owner] = resource_choices
+            self._input_entries[owner] = input_choices
 
     def _bind(self, inputs):
         self.package._check()
@@ -239,12 +262,14 @@ class _FunctionEntry:
         identity = owner_type(owner)
         if getattr(owner, "_forge_package_owner", None) is not self.package or identity not in self._entries:
             raise ValueError("Free Kernel requires its declared receiver in the same package")
-        try:
-            key = tuple(static_key(inputs[name]) for name in self.static_parameters)
-        except ValueError:
-            key = None
-        selected = self._entries[identity].get(key)
-        matches = [] if selected is None else [selected]
+        selected = None
+        if self._entries[identity]:
+            try:
+                key = tuple(static_key(inputs[name]) for name in self.static_parameters)
+            except ValueError:
+                key = None
+            selected = self._entries[identity].get(key)
+        matches = [] if selected is None else [(selected, owner)]
         for values, paths, candidate in self._resource_entries[identity]:
             try:
                 valid = all(static_key(inputs[name]) == value for name, value in values.items()) and all(
@@ -253,10 +278,48 @@ class _FunctionEntry:
             except (AttributeError, ValueError):
                 valid = False
             if valid:
-                matches.append(candidate)
-        if len({candidate.symbol for candidate in matches}) != 1:
+                matches.append((candidate, owner))
+        for values, paths, types, context, candidate in self._input_entries[identity]:
+            try:
+                valid = (all(static_key(inputs[name]) == value for name, value in values.items())
+                         and all(owner_type(inputs[name]) == kind
+                                 and getattr(inputs[name], "_forge_package_owner", None) is self.package
+                                 for name, kind in types.items())
+                         and all(path_value(inputs[path[0].removeprefix("_arg_")], path[1:]) is inputs[name]
+                                 for name, path in paths.items()))
+            except (AttributeError, ValueError, KeyError):
+                valid = False
+            if valid:
+                matches.append((candidate, (context, types)))
+        if len({(candidate.symbol, None if context is owner else context[0])
+                for candidate, context in matches}) != 1:
             raise ValueError("Free Kernel template inputs are outside their definition-proven domain")
-        return matches[0].__get__(owner)
+        candidate, context = matches[0]
+        if context is owner:
+            return candidate.__get__(owner)
+        identity, types = context
+        # Keep one ordinary-call cache per receiver/function. Each Graph gets an
+        # immutable view of its actual input objects; replacing the last view
+        # never rewrites a previously prepared Graph or accumulates value cases.
+        with self.package._call_lock:
+            contexts = getattr(owner, "_forge_package_function_contexts", None)
+            if contexts is None:
+                contexts = owner._forge_package_function_contexts = {}
+            previous = contexts.get(self)
+            if (previous is not None and previous._forge_package_contract == identity
+                    and all(getattr(previous, "_arg_" + name) is inputs[name] for name in types)):
+                view = previous
+            else:
+                cache = previous._forge_package_calls if previous is not None else {}
+                if previous is None:
+                    self.package._call_caches.append(cache)
+                view = SimpleNamespace(**{"_arg_" + name: inputs[name] for name in types},
+                                       _forge_package_owner=self.package,
+                                       _forge_package_contract=identity,
+                                       _forge_package_member_layouts={},
+                                       _forge_package_calls=cache)
+                contexts[self] = view
+            return candidate.__get__(view)
 
     def __call__(self, *args, **kwargs):
         bound = self.signature.bind(*args, **kwargs)

@@ -1667,7 +1667,7 @@ class entry:
                 call = kernel.bind(*prepared)
                 specialize = selected.symbol in package._specialization_entries
                 constant_args = specialization_constant_args(
-                    contract, package.manifest["owners"].get(owner_type(owner), {})
+                    contract, package.manifest["owners"].get(owner_type(owner), {}), package.manifest["owners"]
                 ) if specialize else ()
                 specialize_first = specialize and package.runtime.arch in ("x64", "arm64", "cuda")
                 # Host arrays must upload/download on every call. Mutable
@@ -1896,6 +1896,7 @@ class LoadedPackage:
                 88,
                 89,
                 90,
+                91,
             )
             or self.manifest.get("kind") != "forge_definition_package_prototype"
         ):

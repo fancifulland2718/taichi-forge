@@ -1,7 +1,7 @@
 """Resolve declared construction types without executing application constructors."""
 
 import copy
-from types import MappingProxyType
+from types import MappingProxyType, SimpleNamespace
 
 
 def owner_bindings(environment, schema, used):
@@ -41,6 +41,7 @@ class OwnerGraph:
         self._resource_contexts = {}
         self._allocation_schemas = {}
         self._field_witnesses = {}
+        self._call_contexts = set()
         self.definitions = {
             name + "." + owner: (name, source_class(tree, owner), copy.deepcopy(schema))
             for name, _, _, _, tree, _, schemas, _ in sources
@@ -48,6 +49,16 @@ class OwnerGraph:
         }
         for identity in self.definitions:
             self._validate(identity, ())
+
+    def register_call_context(self, identity, inputs):
+        """Compose declared input views without an application owner or constructor."""
+        schema = {"_arg_" + key: dict(kind="owner_input", owner_type=value) for key, value in inputs.items()}
+        if identity in self.definitions:
+            if self.definitions[identity][2] != schema:
+                raise ValueError("Call context changed its declared input types")
+            return
+        self.definitions[identity] = (*identity.rsplit(".", 1), schema)
+        self._call_contexts.add(identity)
 
     def context(self, identity, choices=None):
         """Reuse definition witnesses across kernels, never consumer instances."""
@@ -259,7 +270,7 @@ class OwnerGraph:
                     if key not in item.get("conditions", {})
                 }
         imported = self.imported[name]
-        owner = object.__new__(getattr(imported, class_name))
+        owner = SimpleNamespace() if identity in self._call_contexts else object.__new__(getattr(imported, class_name))
         # Dimensions and field_like may read child allocation metadata before
         # this owner's fields are allocated. Build each declared child once;
         # attach owned children after the parent's record namespaces exist.

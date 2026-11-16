@@ -1874,12 +1874,22 @@ def _export_package(package, output, *, arch, caps, source_root, compilation, ar
                 compiled_definitions.append(definition)
         for class_name in schemas:
             for call in function_inputs.get(name + "." + class_name, ()):
+                call_owner = class_name
+                if call["owner_inputs"]:
+                    call_owner = "__call_" + hashlib.sha256(
+                        json.dumps(call["owner_inputs"], sort_keys=True).encode()).hexdigest()
+                    owner_graph.register_call_context(name + "." + call_owner, call["owner_inputs"])
+                    manifest["owners"][name + "." + call_owner] = {
+                        "_arg_" + key: dict(kind="owner_input", owner_type=value)
+                        for key, value in call["owner_inputs"].items()
+                    }
+                    manifest["version"] = max(91, manifest["version"])
                 compiled_definitions.append(
                     dict(
-                        owner=class_name,
+                        owner=call_owner,
                         node=call["node"],
                         kind="kernel",
-                        name=class_name
+                        name=call_owner
                         + ".__function_"
                         + hashlib.sha256(
                             json.dumps(
@@ -1891,6 +1901,8 @@ def _export_package(package, output, *, arch, caps, source_root, compilation, ar
                         function_receiver=call["receiver"],
                         function_templates=call["templates"],
                         function_resources=call["resources"],
+                        function_owner_inputs=call["owner_inputs"],
+                        function_owner_type=name + "." + class_name,
                     )
                 )
         numerical_owners = {
@@ -2230,6 +2242,7 @@ def _export_package(package, output, *, arch, caps, source_root, compilation, ar
                         definition["function_receiver"],
                         *definition["function_templates"],
                         *definition["function_resources"],
+                        *definition["function_owner_inputs"],
                     }
                 ]
                 if "function_kernel" in definition
@@ -2288,7 +2301,8 @@ def _export_package(package, output, *, arch, caps, source_root, compilation, ar
                 if "function_kernel" not in definition:
                     return None
                 return {
-                    definition["function_receiver"]: receiver,
+                    **({key: getattr(receiver, "_arg_" + key) for key in definition["function_owner_inputs"]}
+                       if definition["function_owner_inputs"] else {definition["function_receiver"]: receiver}),
                     **{key: read_static_key(value) for key, value in definition["function_templates"].items()},
                     **{key: reduce(getattr, path, receiver) for key, path in definition["function_resources"].items()},
                 }
@@ -2717,6 +2731,7 @@ def _export_package(package, output, *, arch, caps, source_root, compilation, ar
                                 definition["function_receiver"],
                                 *definition["function_templates"],
                                 *definition["function_resources"],
+                                *definition["function_owner_inputs"],
                             }
                         ],
                         owners={},
@@ -2726,7 +2741,9 @@ def _export_package(package, output, *, arch, caps, source_root, compilation, ar
                 if definition["function_resources"]:
                     manifest["version"] = max(manifest["version"], 52)
                     case["resources"] = definition["function_resources"]
-                cases = descriptor["owners"].setdefault(name + "." + owner_name, [])
+                if definition["function_owner_inputs"]:
+                    case.update(inputs=definition["function_owner_inputs"], context=name + "." + owner_name)
+                cases = descriptor["owners"].setdefault(definition["function_owner_type"], [])
                 if case not in cases:
                     cases.append(case)
             if "closure_kernel" in definition:

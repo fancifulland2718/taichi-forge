@@ -531,7 +531,7 @@ class Graph:
                     owner = self.captures[capture][0]
                     schema = self.package.manifest["owners"].get(owner_type(owner), {})
                 operation["specialization"] = dict(
-                    constant_args=list(specialization_constant_args(contract, schema)))
+                    constant_args=list(specialization_constant_args(contract, schema, self.package.manifest["owners"])))
                 changed = True
         if not changed:
             return plan

@@ -12459,6 +12459,13 @@ def test_package_fixed_policy_requires_matching_scalar_declaration():
     schema['policy']['dtype'] = 'u32'
     assert specialization_constant_args(contract, schema) == (1,)
     assert specialization_constant_args(contract, {}) == (1,)
+    schema['policy']['dtype'] = 'i32'
+    nested = dict(settings=dict(kind='owner_input', owner_type='Settings'))
+    settings = dict(mode=dict(kind='value', dtype='i32', affects_plan=True),
+                    live=dict(kind='value', dtype='i32'))
+    assert specialization_constant_args(contract, nested, {'Settings': settings}) == (1, 2)
+    settings['mode']['dtype'] = 'u32'
+    assert specialization_constant_args(contract, nested, {'Settings': settings}) == (1,)
 
 
 @pytest.mark.parametrize('graph', [False, True])
@@ -24412,6 +24419,156 @@ class Model:
 class Derived(Model):
     pass
 """
+
+
+INDEPENDENT_OWNER_INPUTS_SOURCE = '''
+import taichi_forge as ti
+constructors = 0
+@ti.kernel
+def combine(output: ti.template(), source: ti.template(), field: ti.template(), gain: ti.f32):
+    for i in output.values:
+        output.values[i] = source.values[i % source.n] * gain + field[0]
+
+@ti.data_oriented
+class Model:
+    def __init__(self, n: int):
+        global constructors
+        constructors += 1
+        self.n = n
+        scope = ti.experimental.ResourceScope(self)
+        scope.values = scope.field(ti.f32, shape=scope.dim('n'))
+    @ti.kernel
+    def add(self, source: ti.template(), gain: ti.f32):
+        for i in self.values:
+            self.values[i] += source.values[i % source.n] * gain
+    def update(self, source: 'Model', gain):
+        combine(self, source, source.values, gain)
+    def update_method(self, source: 'Model', gain):
+        self.add(source, gain)
+    def graph(self, source: 'Model'):
+        builder = ti.graph.GraphBuilder()
+        gain = ti.graph.Arg(ti.graph.ArgKind.SCALAR, 'gain', ti.f32)
+        builder.dispatch(combine, gain, template_args={'output': self, 'source': source, 'field': source.values})
+        return builder.compile()
+'''
+
+
+@test_utils.test(arch=[ti.cpu, ti.cuda], offline_cache=False)
+def test_package_independent_owner_inputs_preserve_binding_and_graph(tmp_path, monkeypatch):
+    package = _source_package(tmp_path, monkeypatch, INDEPENDENT_OWNER_INPUTS_SOURCE)
+    manifest = ti.aot.export_package(package, tmp_path / 'sdk')
+    assert manifest['version'] == 91
+    assert sys.modules['definition_fixture.model'].constructors == 0
+    assert len([item for item in manifest['entries'].values()
+                if item['definition'].endswith(('.combine', '.Model.add'))]) == 2
+    ref, source = package.Model(7), package.Model(3)
+    source.values.from_numpy(np.arange(3, dtype=np.float32) + 2)
+    ref.update(source, 3)
+    ref.update_method(source, 2)
+    expected = ref.values.to_numpy()
+    with Runtime(manifest['target']) as runtime, load_package(runtime, tmp_path / 'sdk') as code:
+        a, b, c = code.host.Model(7), code.host.Model(3), code.host.Model(5)
+        b.values.from_numpy(np.arange(3, dtype=np.float32) + 2)
+        c.values.from_numpy(np.arange(5, dtype=np.float32) + 11)
+        a.update(b, 3)
+        view = next(iter(a._forge_package_function_contexts.values()))
+        first_call = next(iter(view._forge_package_calls.values()))
+        a.update(b, 3)
+        assert next(iter(view._forge_package_calls.values())) is first_call
+        assert first_call.prepared is not None
+        a.update_method(b, 2)
+        np.testing.assert_array_equal(a.values.to_numpy(), expected)
+        prepared = a.graph(b).bind(dict(gain=4))
+        a.update(c, 5)
+        b.values.from_numpy(np.full(3, 9, dtype=np.float32))
+        prepared.run()
+        np.testing.assert_array_equal(a.values.to_numpy(), np.full(7, 45))
+        prepared.close()
+        # Same object in two typed slots must preserve the original alias.
+        b.update_method(b, 2)
+        np.testing.assert_array_equal(b.values.to_numpy(), np.full(3, 27))
+        count = len(code._call_caches)
+        for other in (b, c, b, c):
+            a.update(other, 2)
+        assert len(code._call_caches) == count
+        np.testing.assert_array_equal(a.values.to_numpy(), 2 * (11 + np.arange(7) % 5) + 11)
+        with pytest.raises(ValueError, match='template inputs'):
+            code.host.model.combine(a, b, c.values, 1)
+        with load_package(runtime, tmp_path / 'sdk') as other:
+            with pytest.raises(ValueError, match='template inputs'):
+                a.update(other.host.Model(3), 1)
+    probe = tmp_path / 'independent_inputs_consume.py'
+    probe.write_text('''
+import importlib.abc, sys
+import numpy as np
+from taichi_forge_runtime.aot import Runtime, load_package
+class RejectSource(importlib.abc.MetaPathFinder):
+    def find_spec(self, fullname, path=None, target=None):
+        if fullname.split('.')[0] in ('taichi', 'taichi_forge', 'definition_fixture'):
+            raise ImportError(fullname)
+sys.meta_path.insert(0, RejectSource())
+with Runtime(sys.argv[2]) as runtime, load_package(runtime, sys.argv[1]) as code:
+    a, b = code.host.Model(19), code.host.Model(2)
+    b.values.from_numpy(np.full(2, 7, dtype=np.float32))
+    a.update(b, 3)
+    np.testing.assert_array_equal(a.values.to_numpy(), np.full(19, 28))
+    with a.graph(b).bind(dict(gain=2)) as call:
+        b.values.from_numpy(np.full(2, 11, dtype=np.float32))
+        call.run()
+        np.testing.assert_array_equal(a.values.to_numpy(), np.full(19, 33))
+print('INDEPENDENT_INPUTS_SOURCE_FREE_OK')
+''', encoding='utf8')
+    result = subprocess.run(
+        [sys.executable, '-B', str(probe), str(tmp_path / 'sdk'), manifest['target']], cwd=tmp_path,
+        env=dict(os.environ, PYTHONPATH=str(Path(__file__).parents[2] / 'packaging/runtime/src'),
+                 TAICHI_NATIVE_RUNTIME_DIR=str(Path(utils._loaded_native_runtime_path).parent),
+                 TAICHI_RUNTIME_DIR=utils._runtime_bitcode_dir()),
+        capture_output=True, text=True, timeout=90)
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert 'INDEPENDENT_INPUTS_SOURCE_FREE_OK' in result.stdout
+
+
+@test_utils.test(arch=[ti.cpu, ti.cuda], offline_cache=False)
+def test_package_independent_owner_inputs_keep_static_selection(tmp_path, monkeypatch):
+    source = INDEPENDENT_OWNER_INPUTS_SOURCE.replace(
+        'self.n = n', 'self.n = n\n        self.enabled = False')
+    source = source.replace("scope.values = scope.field", "scope.static('enabled', choices=(False, True), kernel_only=True)\n        scope.values = scope.field")
+    source = source.replace('self.values[i] += source.values[i % source.n] * gain',
+                            'if ti.static(source.enabled):\n                self.values[i] += source.values[i % source.n] * gain')
+    package = _source_package(tmp_path, monkeypatch, source)
+    manifest = ti.aot.export_package(package, tmp_path / 'sdk')
+    with Runtime(manifest['target']) as runtime, load_package(runtime, tmp_path / 'sdk') as code:
+        a, b = code.host.Model(11), code.host.Model(3)
+        a.values.from_numpy(np.zeros(11, dtype=np.float32))
+        b.values.from_numpy(np.full(3, 7, dtype=np.float32))
+        a.update_method(b, 2)
+        np.testing.assert_array_equal(a.values.to_numpy(), np.zeros(11))
+        b.enabled = True
+        a.update_method(b, 2)
+        np.testing.assert_array_equal(a.values.to_numpy(), np.full(11, 14))
+        b.enabled = False
+        a.update_method(b, 3)
+        np.testing.assert_array_equal(a.values.to_numpy(), np.full(11, 14))
+
+
+@pytest.mark.parametrize('change', ['version', 'type', 'context', 'path'])
+@test_utils.test(arch=ti.cpu, offline_cache=False)
+def test_package_independent_owner_inputs_reject_malformed_contract(tmp_path, monkeypatch, change):
+    package = _source_package(tmp_path, monkeypatch, INDEPENDENT_OWNER_INPUTS_SOURCE)
+    manifest = ti.aot.export_package(package, tmp_path / 'sdk')
+    case = next(iter(manifest['function_entries']['definition_fixture.model.combine']['owners'].values()))[0]
+    if change == 'version':
+        manifest['version'] = 90
+    elif change == 'type':
+        case['inputs']['source'] = 'unknown.Owner'
+    elif change == 'context':
+        case['context'] = 'definition_fixture.model.Model'
+    else:
+        case['resources']['field'] = ['_arg_source', 'n']
+    (tmp_path / 'sdk/package.json').write_text(json.dumps(manifest), encoding='utf8')
+    with Runtime(manifest['target']) as runtime:
+        with pytest.raises(ValueError, match='input context|resource path'):
+            load_package(runtime, tmp_path / 'sdk')
 
 
 @test_utils.test(arch=[ti.cpu, ti.cuda], offline_cache=False)

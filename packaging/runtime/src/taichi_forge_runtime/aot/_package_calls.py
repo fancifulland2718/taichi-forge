@@ -42,7 +42,7 @@ def specialization_entries(path, target, entries):
                      and not any(item["kind"] == "texture" for item in entries[name]["arguments"]))
 
 
-def specialization_constant_args(contract, owner_schema):
+def specialization_constant_args(contract, owner_schema, owners=None):
     """Select fixed scalar facts from the existing declaration and entry ABI.
 
     Plan-affecting integer captures are model policy, observed by OwnerGuard
@@ -57,13 +57,35 @@ def specialization_constant_args(contract, owner_schema):
             continue
         name = capture["name"]
         declaration = owner_schema.get(name, {})
+        capture_path = tuple(capture.get("path", (name,)))
+        if not declaration and owners is not None:
+            schema, remaining = owner_schema, capture_path
+            while remaining:
+                match = next(((key, item) for key, item in schema.items()
+                              if tuple(item.get("path", (key,))) == remaining), None)
+                if match is not None:
+                    key, declaration = match
+                    break
+                parent = next(((tuple(item.get("path", (key,))), item) for key, item in schema.items()
+                               if item["kind"] in ("owner", "owner_input")
+                               and remaining[:len(item.get("path", (key,)))] == tuple(item.get("path", (key,)))
+                               and 0 < len(item.get("path", (key,))) < len(remaining)), None)
+                if parent is None:
+                    break
+                prefix, item = parent
+                identity = item["owner_type"]
+                schema, remaining = owners.get(identity, {}), remaining[len(prefix):]
+            if declaration:
+                # The input path is proven by the package's owner contracts;
+                # qualify only this local view, never mutate the shared schema.
+                declaration = {**declaration, "path": capture_path}
         if (capture["kind"] == declaration.get("kind") == "value"
                 and declaration.get("affects_plan") is True
                 and capture.get("dtype") in ("i8", "i16", "i32", "i64", "u8", "u16", "u32", "u64")
                 and capture["dtype"] == declaration.get("dtype")
                 and not capture.get("element_shape")
                 and not declaration.get("element", {}).get("element_shape")
-                and tuple(capture.get("path", (name,))) == tuple(declaration.get("path", (name,)))):
+                and capture_path == tuple(declaration.get("path", (name,)))):
             result.append(index)
     return tuple(result)
 

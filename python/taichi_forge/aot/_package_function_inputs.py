@@ -512,9 +512,23 @@ def discover(sources, imported, *, preparation_receivers=None, resource_inventor
                         # so postponed annotations need no eval/import hooks.
                         node = functions[function][1]
                         for parameter in (*node.args.posonlyargs, *node.args.args, *node.args.kwonlyargs):
-                            if (parameter.arg != "self" and parameter.annotation is not None
-                                    and _source_value(parameter.annotation, function.__globals__) is GraphBuilder):
+                            if parameter.arg == "self" or parameter.annotation is None:
+                                continue
+                            annotation = parameter.annotation
+                            if isinstance(annotation, ast.Constant) and isinstance(annotation.value, str):
+                                try:
+                                    annotation = ast.parse(annotation.value, mode="eval").body
+                                except SyntaxError:
+                                    continue
+                            declared = _source_value(annotation, function.__globals__)
+                            if declared is GraphBuilder:
                                 inputs[parameter.arg] = _Graph()
+                            elif inspect.isclass(declared):
+                                kind = declared.__module__ + "." + declared.__qualname__
+                                if classes.get(kind) is declared:
+                                    # A public input is independent even when it
+                                    # has the same declared type as self.
+                                    inputs[parameter.arg] = _Owner(kind, identity + ":" + parameter.arg)
                         pending.append((function, inputs, (function,), None))
 
     inventory = set()
@@ -1420,10 +1434,10 @@ def discover(sources, imported, *, preparation_receivers=None, resource_inventor
                         return
                     origin, definition, parameters = kernels[callee]
                     receivers = [key for key in parameters if isinstance(inputs.get(key), _Owner)]
-                    if len(receivers) != 1:
+                    if not receivers:
                         failures.append(
                             f"{module}:{call.lineno}: free Kernel {origin}.{definition['name']} "
-                            "requires one definition-proven owner receiver"
+                            "requires a definition-proven owner receiver"
                         )
                         invalid.add(callee)
                         return
@@ -1431,28 +1445,37 @@ def discover(sources, imported, *, preparation_receivers=None, resource_inventor
                     owner = inputs[receiver]
                     try:
                         values, resources = [], []
+                        owner_inputs = tuple((key, inputs[key].identity) for key in receivers) if len(receivers) > 1 else ()
                         for key in parameters:
-                            if key == receiver:
+                            if key in receivers:
                                 continue
                             item = inputs.get(key)
                             if isinstance(item, _Resource):
                                 if item.optional:
                                     raise ValueError("Optional Field forwarding requires its declared presence binding")
                                 path = (*item.owner.path, *item.path)
-                                if (item.owner.root or item.owner.identity) != (owner.root or owner.identity) or path[
-                                    : len(owner.path)
-                                ] != owner.path:
+                                sources = [
+                                    name for name in receivers
+                                    if (item.owner.root or item.owner.identity)
+                                    == (inputs[name].root or inputs[name].identity)
+                                    and path[:len(inputs[name].path)] == inputs[name].path
+                                ]
+                                if not sources:
                                     raise ValueError("Resource is outside its template receiver")
-                                resources.append((key, path[len(owner.path) :]))
+                                source = max(sources, key=lambda name: len(inputs[name].path))
+                                relative = path[len(inputs[source].path):]
+                                resources.append((key, ("_arg_" + source, *relative) if owner_inputs else relative))
                             else:
                                 values.append((key, _literal_key(item)))
-                    except ValueError:
+                    except ValueError as error:
                         failures.append(
-                            f"{module}:{call.lineno}: free Kernel {origin}.{definition['name']} has an unproven template input"
+                            f"{module}:{call.lineno}: free Kernel {origin}.{definition['name']} "
+                            f"has an unproven template input {key!r}: {error}"
                         )
                         invalid.add(callee)
                         return
-                    domains.setdefault(callee, set()).add((owner.identity, receiver, tuple(values), tuple(resources)))
+                    domains.setdefault(callee, set()).add(
+                        (owner.identity, receiver, tuple(values), tuple(resources), owner_inputs))
                     covered.add(id(call))
 
                 def forward_call(callee, receiver, call, selected_values=None):
@@ -1697,7 +1720,7 @@ def discover(sources, imported, *, preparation_receivers=None, resource_inventor
             if kernel in invalid:
                 continue
             module, definition, parameters = kernels[kernel]
-            receivers = {receiver for _, receiver, _, _ in identities}
+            receivers = {receiver for _, receiver, _, _, _ in identities}
             if len(receivers) != 1:
                 failures.append(f"{module}.{definition['name']}: template receiver position changes between definitions")
                 continue
@@ -1707,7 +1730,7 @@ def discover(sources, imported, *, preparation_receivers=None, resource_inventor
                 item["free_template"] = receiver
                 item["function_templates"] = parameters
                 item["function_identity"] = public_identity
-            for identity, _, values, resources in sorted(identities, key=repr):
+            for identity, _, values, resources, owner_inputs in sorted(identities, key=repr):
                 result.setdefault(identity, []).append(
                     dict(
                         kernel=kernel,
@@ -1715,6 +1738,7 @@ def discover(sources, imported, *, preparation_receivers=None, resource_inventor
                         receiver=receiver,
                         templates=dict(values),
                         resources=dict(resources),
+                        owner_inputs=dict(owner_inputs),
                         node=definition["node"],
                     )
                 )

@@ -30,6 +30,18 @@ absent inputs, both ranks, live data, Graph calls, source-free consumption and i
 declarations. This does not add conditional owner-type inference or a new derived-
 dimension expression language.
 
+Format 91 binds multiple independent declared owner inputs to an original Kernel
+or method, including Graph dispatch. Types come from proven Host calls or explicit
+annotations naming classes in the exported source closure. The compiler composes
+their existing resource views; it executes no application constructor and creates
+no scene owner. Runtime calls retain the actual objects and existing resource
+leases. Rebinding does not rewrite an older Graph snapshot. Ordinary calls keep
+one latest input view per receiver/function and reuse preparation while bindings
+remain stable; field data stays live. Static layout choices and declared fixed
+integer policy remain eligible for ordinary consumer specialization. A separate
+Field template must still belong to one of the supplied owners; arbitrary external
+Field provenance and complete renderer qualification are not implied.
+
 For normal Component capture, a read-only record view does not become another
 ownership path to its provider. A typed view of a Dense Field already owned by the
 same component reuses that allocation's layout and initialization path; the declared
