@@ -1,14 +1,17 @@
 #pragma once
 
+#include <algorithm>
 #include <cstdint>
 #include <map>
 #include <set>
 
 #include "llvm/Config/llvm-config.h"
+#include "llvm/Transforms/IPO/AlwaysInliner.h"
 #include "llvm/Transforms/InstCombine/InstCombine.h"
 #include "llvm/Transforms/Scalar/DCE.h"
 #include "llvm/Transforms/Scalar/EarlyCSE.h"
 #include "llvm/Transforms/Scalar/SimplifyCFG.h"
+#include "llvm/Transforms/Scalar/SROA.h"
 #include "llvm/Transforms/Utils/Mem2Reg.h"
 #include "taichi/runtime/llvm/aot_code_units.h"
 
@@ -22,6 +25,8 @@ class AotIRFinalizer {
   void export_units(llvm::Module &module,
                     bool optimize,
                     bool allow_resource_relocations) {
+    if (optimize)
+      specialize_helpers(module);
     export_code_units(
         module, [](const auto &, const auto &) {}, allow_resource_relocations,
         nullptr, true, nullptr,
@@ -142,6 +147,57 @@ class AotIRFinalizer {
   }
 
  private:
+  // Source ti.func bodies are compiled and cached as generic functions first.
+  // Apply their existing backend-inline contract only to this build-owned
+  // artifact, before extraction, hashes and publication. This exposes facts
+  // already present at the call site; it never binds an entry's scene inputs.
+  // Streaming seal and ordinary dump share this stage. The marker prevents a
+  // sealed root from paying for it again at archive time.
+  static void specialize_helpers(llvm::Module &module) {
+    constexpr auto marker = "taichi.aot.helper_specialization.v1";
+    if (module.getNamedMetadata(marker))
+      return;
+    const bool needed =
+        std::any_of(module.begin(), module.end(), [](const auto &function) {
+          return !function.isDeclaration() && !function.use_empty() &&
+                 function.hasFnAttribute(kRealFunctionUnit) &&
+                 function.hasFnAttribute(llvm::Attribute::AlwaysInline) &&
+                 !function.hasFnAttribute(llvm::Attribute::NoInline) &&
+                 !function.hasOptNone();
+        });
+    if (needed) {
+      TI_COMPILE_PROFILER("cpp.compile.llvm.aot_helper_specialization");
+      // Proxies must be destroyed before the analyses they refer to.
+      llvm::LoopAnalysisManager lam;
+      llvm::FunctionAnalysisManager fam;
+      llvm::CGSCCAnalysisManager cgam;
+      llvm::ModuleAnalysisManager mam;
+      llvm::PassBuilder passes;
+      passes.registerModuleAnalyses(mam);
+      passes.registerCGSCCAnalyses(cgam);
+      passes.registerFunctionAnalyses(fam);
+      passes.registerLoopAnalyses(lam);
+      passes.crossRegisterProxies(lam, fam, cgam, mam);
+      llvm::ModulePassManager pipeline;
+      pipeline.addPass(llvm::AlwaysInlinerPass());
+      // Most frontend temporaries are plain scalar allocas. Promote those
+      // cheaply before SROA analyzes the remaining private aggregate buffers.
+      pipeline.addPass(
+          llvm::createModuleToFunctionPassAdaptor(llvm::PromotePass()));
+      // The generic helper ABI uses a private argument buffer. After inlining,
+      // scalarize that local storage so the ordinary final cleanup can fold
+      // fixed helper arguments while leaving dynamic entry loads intact.
+      pipeline.addPass(llvm::createModuleToFunctionPassAdaptor(
+          llvm::SROAPass(llvm::SROAOptions::ModifyCFG)));
+      pipeline.addPass(llvm::GlobalDCEPass());
+      pipeline.run(module, mam);
+    }
+    module.getOrInsertNamedMetadata(marker)->addOperand(llvm::MDNode::get(
+        module.getContext(),
+        {llvm::MDString::get(module.getContext(), "backend-inline-sroa-v1"),
+         llvm::MDString::get(module.getContext(), LLVM_VERSION_STRING)}));
+  }
+
   struct Unit {
     CodeUnitArtifact artifact;
     std::set<std::string> references;
@@ -170,10 +226,10 @@ class AotIRFinalizer {
   static void clean(llvm::Module &module) {
     TI_ERROR_IF(module.getDataLayoutStr().empty(),
                 "AOT cleanup requires an effective target DataLayout");
-    llvm::ModuleAnalysisManager mam;
-    llvm::CGSCCAnalysisManager cgam;
-    llvm::FunctionAnalysisManager fam;
     llvm::LoopAnalysisManager lam;
+    llvm::FunctionAnalysisManager fam;
+    llvm::CGSCCAnalysisManager cgam;
+    llvm::ModuleAnalysisManager mam;
     llvm::PassBuilder passes;
     passes.registerModuleAnalyses(mam);
     passes.registerCGSCCAnalyses(cgam);

@@ -85,8 +85,9 @@ class PackageCompilation(FunctionLibrary):
         function = super().library_function(source, args, dependencies=dependencies)
         if function is not None:
             # Retain the source ti.func's backend policy, just as JIT does.
-            # Library export keeps separate LLVM units and runs no inliner;
-            # only consumer optimization exposes the private argument buffers.
+            # Compile/cache its generic body first. AOT artifact finalization
+            # applies this policy on private IR after frontend reuse; scene
+            # parameter specialization remains a consumer operation.
             function._backend_inline_function = True
         return function
 
