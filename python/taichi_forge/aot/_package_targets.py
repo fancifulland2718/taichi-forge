@@ -62,19 +62,23 @@ def select_target_branches(tree, kind, target, module, fail, *, include_host=Fal
                 continue
             writes = {}
             locals_ = {n.arg for n in ast.walk(function.args) if isinstance(n, ast.arg)}
-            for node in ast.walk(function):
+            # Both checks read the same syntax. Branch rewriting starts only
+            # after them; never reuse this snapshot on the rewritten body.
+            nodes = tuple(ast.walk(function))
+            for node in nodes:
                 name = key(node)
                 if name is not None and isinstance(getattr(node, "ctx", None), ast.Store):
                     writes[name] = writes.get(name, 0) + 1
                     if isinstance(node, ast.Name):
                         locals_.add(name)
-            for node in ast.walk(function):
+            for node in nodes:
                 if backend_query(node, kind) or backend_constant(node, kind) is not None:
                     root = node
                     while isinstance(root, (ast.Call, ast.Attribute)):
                         root = root.func if isinstance(root, ast.Call) else root.value
                     if isinstance(root, ast.Name) and root.id in locals_:
                         fail(module, node, "Backend selection cannot use a shadowed frontend name")
+            del nodes
             aliases = set()
 
             def value(node):

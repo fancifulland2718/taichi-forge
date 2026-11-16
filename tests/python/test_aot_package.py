@@ -1200,6 +1200,55 @@ def cooperative(enabled: ti.template()):
             gc.enable()
 
 
+def test_package_static_analysis_refreshes_after_in_place_syntax_change():
+    from taichi_forge.aot._package_static import StaticPreparation
+    from taichi_forge.tools._compiled_host import decorator_resolver
+
+    source = '''import taichi_forge as ti
+@ti.func
+def helper(value):
+    return value + 1
+'''
+    tree = ast.parse(source)
+    sources = [('model', None, None, source, tree, decorator_resolver(tree), None, None)]
+    first = StaticPreparation(sources)
+    assert 'helper' not in first.task_context_functions
+    # Normalization may change an existing source tree between analyses. A
+    # short-lived syntax inventory must not hide a newly required task scope.
+    function = tree.body[1]
+    function.body.insert(0, ast.parse('ti.simt.block.sync()').body[0])
+    second = StaticPreparation(sources)
+    assert 'helper' in second.task_context_functions
+    assert second._function_task_context('model.helper', {}, set())
+    function.body.pop(0)
+    third = StaticPreparation(sources)
+    assert 'helper' not in third.task_context_functions
+
+
+def test_package_static_analysis_keeps_same_named_function_syntax_distinct():
+    from taichi_forge.aot._package_static import StaticPreparation
+    from taichi_forge.tools._compiled_host import decorator_resolver
+
+    source = '''import taichi_forge as ti
+def first_factory():
+    @ti.func
+    def helper(self):
+        if ti.static(self.first):
+            self.output[0] = 1
+    return helper
+def second_factory():
+    @ti.func
+    def helper(self):
+        if ti.static(self.second):
+            self.output[0] = 2
+    return helper
+'''
+    tree = ast.parse(source)
+    proof = StaticPreparation([('model', None, None, source, tree, decorator_resolver(tree), None, None)])
+    assert proof.uses['first'] == {'prepare_condition'}
+    assert proof.uses['second'] == {'prepare_condition'}
+
+
 @test_utils.test(arch=ti.cuda, offline_cache=False)
 def test_package_library_keeps_caller_array_templates_inline(tmp_path, monkeypatch):
     from taichi_forge.lang._function_library import FunctionLibrary

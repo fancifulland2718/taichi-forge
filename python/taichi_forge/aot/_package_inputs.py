@@ -207,15 +207,19 @@ def resolve_inputs(sources, imported, *, partial=False):
     for target, site in _inherited_input_calls(owners, inputs):
         calls.setdefault(target, []).append(site)
     untyped_targets = {owner for owner, name in inputs if (owner, name) not in annotated} | sequence_parameters
-    for name, _, _, _, tree, *_ in sources:
-        for node in ast.walk(tree):
-            if not isinstance(node, ast.Call) or (name, node.lineno, node.col_offset) in declared_sites:
-                continue
-            constructor = _source_value(node.func, vars(imported[name]))
-            if not partial and inspect.isclass(constructor) and classes.get(constructor) in untyped_targets:
-                raise ValueError(
-                    "Unscoped constructor input requires declared source provenance: " + classes[constructor]
-                )
+    # Preparation discovery needs provisional input facts, not admission of
+    # every ordinary Host constructor call. The complete pass below remains
+    # authoritative after preparation declarations and input families exist.
+    if not partial:
+        for name, _, _, _, tree, *_ in sources:
+            for node in ast.walk(tree):
+                if not isinstance(node, ast.Call) or (name, node.lineno, node.col_offset) in declared_sites:
+                    continue
+                constructor = _source_value(node.func, vars(imported[name]))
+                if inspect.isclass(constructor) and classes.get(constructor) in untyped_targets:
+                    raise ValueError(
+                        "Unscoped constructor input requires declared source provenance: " + classes[constructor]
+                    )
 
     def origin(item):
         if item["kind"] == "owner_input":

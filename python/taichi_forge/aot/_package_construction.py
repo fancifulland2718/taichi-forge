@@ -138,13 +138,34 @@ def discover_construction_methods(tree, namespace, module, fail, kind):
         methods = {n.name: n for n in cls.body if isinstance(n, ast.FunctionDef)}
         constructor = methods.get("__init__")
         selected, active = set(), set()
+        # This class's construction fixed point changes only analysis facts,
+        # not method syntax. Reuse syntax queries, but keep factory/context
+        # proofs live: their semantic environment is not a cached result.
+        syntax = {}
+
+        def syntax_of(function):
+            if function not in syntax:
+                nodes = tuple(ast.walk(function))
+                call_nodes = tuple(node for node in nodes if isinstance(node, ast.Call))
+                persistent = {
+                    id(statement.value)
+                    for statement in nodes
+                    if isinstance(statement, (ast.Assign, ast.AnnAssign))
+                    and any(
+                        isinstance(target, ast.Attribute)
+                        and isinstance(target.value, ast.Name)
+                        and target.value.id == "self"
+                        for target in (statement.targets if isinstance(statement, ast.Assign) else [statement.target])
+                    )
+                }
+                syntax[function] = nodes, call_nodes, persistent
+            return syntax[function]
 
         def calls(function):
             return [
                 n
-                for n in ast.walk(function)
-                if isinstance(n, ast.Call)
-                and isinstance(n.func, ast.Attribute)
+                for n in syntax_of(function)[1]
+                if isinstance(n.func, ast.Attribute)
                 and isinstance(n.func.value, ast.Name)
                 and n.func.value.id == "self"
                 and n.func.attr in methods
@@ -153,18 +174,9 @@ def discover_construction_methods(tree, namespace, module, fail, kind):
             ]
 
         def allocates(function):
-            for call in (n for n in ast.walk(function) if isinstance(n, ast.Call)):
-                if qualified_kind(call, kind) == "ndarray" and not any(
-                    isinstance(statement, (ast.Assign, ast.AnnAssign))
-                    and statement.value is call
-                    and any(
-                        isinstance(target, ast.Attribute)
-                        and isinstance(target.value, ast.Name)
-                        and target.value.id == "self"
-                        for target in (statement.targets if isinstance(statement, ast.Assign) else [statement.target])
-                    )
-                    for statement in ast.walk(function)
-                ):
+            _, call_nodes, persistent = syntax_of(function)
+            for call in call_nodes:
+                if qualified_kind(call, kind) == "ndarray" and id(call) not in persistent:
                     # Ordinary Host helpers may allocate temporary argument
                     # arrays. The existing Runtime projection handles those;
                     # they are not persistent owner declaration methods.
@@ -269,7 +281,7 @@ def discover_construction_methods(tree, namespace, module, fail, kind):
                     isinstance(n, (ast.Yield, ast.YieldFrom, ast.AsyncFunctionDef))
                     or isinstance(n, ast.Return)
                     and n is not method.body[-1]
-                    for n in ast.walk(method)
+                    for n in syntax_of(method)[0]
                 ):
                     fail(module, method, "Construction resource methods permit only a terminal Host return")
                 selected.add(method.name)
@@ -298,7 +310,7 @@ def discover_construction_methods(tree, namespace, module, fail, kind):
             if name == "__init__" or name in selected or method.decorator_list or not allocates(method):
                 continue
             contexts = []
-            for part in ast.walk(method):
+            for part in syntax_of(method)[0]:
                 if not isinstance(part, ast.With) or len(part.items) != 1:
                     continue
                 call = part.items[0].context_expr
@@ -349,7 +361,7 @@ def discover_construction_methods(tree, namespace, module, fail, kind):
                 not method.args.args
                 or method.args.args[0].arg != "self"
                 or method.args.posonlyargs
-                or any(isinstance(n, (ast.Yield, ast.YieldFrom, ast.AsyncFunctionDef)) for n in ast.walk(method))
+                or any(isinstance(n, (ast.Yield, ast.YieldFrom, ast.AsyncFunctionDef)) for n in syntax_of(method)[0])
             ):
                 fail(module, method, "Preparation resource methods require an ordinary synchronous owner receiver")
             if any(
@@ -362,7 +374,7 @@ def discover_construction_methods(tree, namespace, module, fail, kind):
                     "Matrix.field",
                     "Struct.field",
                 )
-                for n in ast.walk(method)
+                for n in syntax_of(method)[0]
             ):
                 fail(module, method, "Preparation resource allocations require explicit group contexts")
             # Match free Host preparation: allocations after a bare return
@@ -373,6 +385,7 @@ def discover_construction_methods(tree, namespace, module, fail, kind):
             # Existing owner methods also allow Host result returns and nested
             # helpers. Do not impose free-preparation admission on those forms.
             method.body = _guard_returns(method.body, module, fail, validate=False)
+            syntax.pop(method, None)
             method._package_preparation_method = True
             method._package_construction_order = len(selected) + method.lineno
             facts.append(
@@ -384,8 +397,10 @@ def discover_construction_methods(tree, namespace, module, fail, kind):
                 )
             )
             selected.add(name)
+        syntax.clear()
+        class_nodes = tuple(ast.walk(cls)) if selected else ()
         for name in selected:
-            for node in ast.walk(cls):
+            for node in class_nodes:
                 if (
                     isinstance(node, ast.Attribute)
                     and isinstance(node.value, ast.Name)

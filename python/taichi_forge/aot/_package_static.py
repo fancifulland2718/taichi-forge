@@ -30,8 +30,9 @@ class StaticPreparation:
         self._task_context_methods = set()
         functions = []
         for module, _, _, _, tree, kind, _, _ in sources:
-            tree_parents = {id(child): node for node in ast.walk(tree) for child in ast.iter_child_nodes(node)}
-            for function in ast.walk(tree):
+            tree_nodes = tuple(ast.walk(tree))
+            tree_parents = {id(child): node for node in tree_nodes for child in ast.iter_child_nodes(node)}
+            for function in tree_nodes:
                 # Name-based closure analysis must not mistake a shadowing
                 # parameter, callable alias or ordinary Host method for a
                 # decorated helper. Ambiguity retains producer specialization.
@@ -65,11 +66,19 @@ class StaticPreparation:
                     self._task_context_methods.add(identity)
                 functions.append((identity, function, kind))
                 self._names.setdefault(function.name, set()).add(identity)
+        # This analysis does not rewrite syntax. The same function nodes and
+        # parent relation serve local-use, call-graph and structural-use passes;
+        # retain them only until this constructor finishes its classification.
+        # Distinct nested definitions can share a qualified analysis name;
+        # their lexical parent relations still belong to different AST nodes.
+        function_syntax = {}
         for identity, function, kind in functions:
-            parents = {id(child): node for node in ast.walk(function) for child in ast.iter_child_nodes(node)}
+            nodes = tuple(ast.walk(function))
+            parents = {id(child): node for node in nodes for child in ast.iter_child_nodes(node)}
+            function_syntax[id(function)] = nodes, parents
             self._syntax[identity] = function, parents, kind
             reads, stores, aliases = {}, {}, {}
-            for node in ast.walk(function):
+            for node in nodes:
                 if isinstance(node, ast.Name):
                     (reads if isinstance(node.ctx, ast.Load) else stores).setdefault(node.id, []).append(node)
             # Only immutable, dominating aliases are followed. Branch-local
@@ -83,10 +92,10 @@ class StaticPreparation:
                             and all(read.lineno > statement.end_lineno for read in reads.get(name, ()))):
                         aliases[id(statement)] = name
             if any(isinstance(node, (ast.FunctionDef, ast.Lambda)) and node is not function
-                   for node in ast.walk(function)):
+                   for node in nodes):
                 aliases.clear()
             self._local_values[id(function)] = reads, stores, aliases
-            self._numeric_locals[id(function)] = self._numeric_assignments(function, parents, kind, stores)
+            self._numeric_locals[id(function)] = self._numeric_assignments(function, parents, kind, stores, nodes=nodes)
         # A call name qualifies only when every definition with that name in
         # the source closure is a proven inline schedule. Recursive/unresolved
         # groups never bootstrap themselves into this set.
@@ -119,11 +128,11 @@ class StaticPreparation:
         self.execution_functions = set()
         self.task_context_functions = set()
         calls = {}
-        for _, function, kind in functions:
+        for identity, function, kind in functions:
             if any(kind(d) == "real_func" for d in function.decorator_list):
                 continue
             called = calls.setdefault(function.name, set())
-            for node in ast.walk(function):
+            for node in function_syntax[id(function)][0]:
                 task_context = (
                     isinstance(node, ast.Attribute) and node.attr in ("loop_config", "SharedArray", "simt")
                 )
@@ -148,10 +157,10 @@ class StaticPreparation:
                 break
             self.task_context_functions.update(extra)
         for identity, function, kind in functions:
-            parents = {id(child): node for node in ast.walk(function) for child in ast.iter_child_nodes(node)}
+            nodes, parents = function_syntax[id(function)]
             uses = {False: {}, True: {}}
             edges = set()
-            for node in ast.walk(function):
+            for node in nodes:
                 if isinstance(node, ast.Call):
                     callee = getattr(node.func, "attr", getattr(node.func, "id", ""))
                     edges.add((callee, self._threaded(node, parents, kind)))
@@ -190,6 +199,7 @@ class StaticPreparation:
         self._local_values.clear()
         self._numeric_locals.clear()
         self._value_uses.clear()
+        function_syntax.clear()
         self._syntax = {
             identity: (function, None, kind)
             for identity, (function, _, kind) in self._syntax.items()
@@ -324,7 +334,7 @@ class StaticPreparation:
         return result
 
     @staticmethod
-    def _numeric_assignments(function, parents, kind, stores):
+    def _numeric_assignments(function, parents, kind, stores, *, nodes=None):
         """Locals already materialized as DSL values, never Python aliases."""
         parameters = {arg.arg for arg in (*function.args.posonlyargs, *function.args.args,
                                          *function.args.kwonlyargs)}
@@ -334,7 +344,7 @@ class StaticPreparation:
             parameters.add(function.args.kwarg.arg)
         if any(isinstance(part, (ast.Import, ast.ImportFrom, ast.Global, ast.Nonlocal))
                or isinstance(part, (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda, ast.ClassDef))
-               and part is not function for part in ast.walk(function)):
+               and part is not function for part in (ast.walk(function) if nodes is None else nodes)):
             return {}
         result = {}
         for statement in function.body:
