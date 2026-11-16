@@ -1231,6 +1231,22 @@ def scope_declarations(
 
     def optional_arm(body):
         fields, records, borrows = set(), {}, set()
+        owners = set()
+
+        def declared_owner_path(reference):
+            # Recognize aliases of declared owners, including one introduced
+            # earlier in this arm. Normal declaration/type checks still follow.
+            path = []
+            while isinstance(reference, ast.Attribute):
+                path.insert(0, reference.attr)
+                reference = reference.value
+            return (
+                path and isinstance(reference, ast.Name) and reference.id == "self"
+                and (path[0] in owners or
+                     {**(earlier or {}), **declarations}.get(path[0], {}).get("kind")
+                     in ("owner", "owner_input"))
+            )
+
         for node in body:
             if isinstance(node, ast.If):
                 left, right = optional_arm(node.body), optional_arm(node.orelse)
@@ -1271,10 +1287,12 @@ def scope_declarations(
             elif method == "owner_reference" and isinstance(node, ast.Expr):
                 if (len(call.args) != 2 or call.keywords
                         or not isinstance(call.args[0], ast.Constant)
-                        or not isinstance(call.args[1], ast.Name)
-                        or call.args[1].id not in typed_owner_parameters):
+                        or not (isinstance(call.args[1], ast.Name)
+                                and call.args[1].id in typed_owner_parameters
+                                or declared_owner_path(call.args[1]))):
                     return None
                 fields.add(call.args[0].value)
+                owners.add(call.args[0].value)
             elif isinstance(node, (ast.Assign, ast.AnnAssign)) and isinstance(call, ast.Name):
                 targets = node.targets if isinstance(node, ast.Assign) else [node.target]
                 if (len(targets) == 1 and isinstance(targets[0], ast.Attribute)
@@ -1282,6 +1300,7 @@ def scope_declarations(
                         and call.id in typed_owner_parameters and stores[call.id] == 1
                         and call.id not in deleted):
                     fields.add(targets[0].attr)
+                    owners.add(targets[0].attr)
             elif isinstance(node, ast.Assign) and len(node.targets) == 1 and isinstance(call, ast.Call):
                 target = node.targets[0]
                 if isinstance(target, ast.Attribute) and scope_binding(target.value) in scopes:
@@ -1290,6 +1309,7 @@ def scope_declarations(
 
                     if inspect.isclass(_source_value(call.func, namespace)):
                         fields.add(target.attr)
+                        owners.add(target.attr)
         return fields, records, borrows
 
     def paired_records(statement):

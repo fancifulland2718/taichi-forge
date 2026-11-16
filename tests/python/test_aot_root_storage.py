@@ -155,3 +155,182 @@ def test_aot_module_array_exports_strided_field_layout(tmp_path):
     assert metadata["version"] == 2
     assert metadata["views"]["strided"]["index_strides_bytes"] == [8]
     assert metadata["views"]["strided"]["element_strides_bytes"] == []
+
+
+@pytest.mark.parametrize("source_kind", ["typed_input", "owned"])
+def test_optional_owner_member_alias_keeps_source_and_presence(tmp_path, monkeypatch, source_kind):
+    import importlib.util
+    from taichi_forge.aot._package import _analyze
+
+    source = '''
+import taichi_forge as ti
+@ti.data_oriented
+class Query:
+    def __init__(self):
+        scope = ti.experimental.ResourceScope(self)
+        scope.value = scope.field(ti.f32, shape=())
+    @ti.func
+    def read(self) -> ti.f32:
+        return self.value[None]
+@ti.data_oriented
+class Producer:
+    def __init__(self):
+        scope = ti.experimental.ResourceScope(self)
+        scope.query = Query()
+@ti.data_oriented
+class Model:
+    def __init__(self, producer: Producer = None):
+        scope = ti.experimental.ResourceScope(self)
+        if producer is None:
+            scope.record('producer', None, optional=True)
+            scope.record('query', None, optional=True)
+        else:
+            scope.owner_reference('producer', producer)
+            scope.owner_reference('query', self.producer.query)
+'''
+    if source_kind == "owned":
+        source = source[:source.index("    def __init__(self, producer: Producer = None):")] + '''
+    def __init__(self, enabled=True):
+        self.enabled = enabled
+        scope = ti.experimental.ResourceScope(self)
+        scope.static('enabled', choices=(False, True))
+        if self.enabled:
+            scope.producer = Producer()
+        else:
+            scope.record('producer', None, optional=True)
+        if self.enabled:
+            scope.owner_reference('query', self.producer.query)
+        else:
+            scope.record('query', None, optional=True)
+'''
+    name = "optional_owner_member_alias_" + source_kind
+    path = tmp_path / (name + ".py")
+    path.write_text(source, encoding="utf8")
+    spec = importlib.util.spec_from_file_location(name, path)
+    module = importlib.util.module_from_spec(spec)
+    monkeypatch.setitem(sys.modules, name, module)
+    spec.loader.exec_module(module)
+    _, _, owners, _ = _analyze(name, source, vars(module), "x64", defer_owners=False)
+    model = owners["Model"]
+    assert model["query"]["reference_path"] == ["producer", "query"]
+    assert model["query"]["optional_presence"]
+    assert model["query"]["conditions"] == model["producer"]["conditions"]
+
+
+@pytest.mark.parametrize("reference", ["self.undeclared.query", "self.value.query", "producer.query", "self.get_query()"])
+def test_optional_owner_alias_rejects_undeclared_sources(tmp_path, monkeypatch, reference):
+    import importlib.util
+    from taichi_forge.aot._package import _analyze, PackageExportError
+
+    source = '''
+import taichi_forge as ti
+@ti.data_oriented
+class Model:
+    def __init__(self, producer=None, enabled=True):
+        self.enabled = enabled
+        scope = ti.experimental.ResourceScope(self)
+        scope.static('enabled', choices=(False, True))
+        scope.value = scope.field(ti.f32, shape=())
+        if self.enabled:
+            scope.owner_reference('query', REFERENCE)
+        else:
+            scope.record('query', None, optional=True)
+    def get_query(self):
+        raise AssertionError('declaration analysis must not execute getters')
+'''.replace("REFERENCE", reference)
+    name = "invalid_optional_owner_alias"
+    path = tmp_path / (name + ".py")
+    path.write_text(source, encoding="utf8")
+    spec = importlib.util.spec_from_file_location(name, path)
+    module = importlib.util.module_from_spec(spec)
+    monkeypatch.setitem(sys.modules, name, module)
+    spec.loader.exec_module(module)
+    with pytest.raises(PackageExportError, match="Owner input requires a named constructor parameter or declared owner path"):
+        _analyze(name, source, vars(module), "x64", defer_owners=False)
+
+
+@pytest.mark.parametrize("member", ["same", "different", "missing", "same_field", "different_field"])
+def test_owner_choice_alias_requires_a_common_member_source(tmp_path, monkeypatch, member):
+    import importlib.util
+
+    source = '''
+import taichi_forge as ti
+@ti.data_oriented
+class Query:
+    def __init__(self):
+        scope = ti.experimental.ResourceScope(self)
+        scope.value = scope.field(ti.f32, shape=())
+        scope.other = scope.field(ti.f32, shape=())
+    @ti.func
+    def read(self) -> ti.f32:
+        return self.value[None]
+@ti.data_oriented
+class OtherQuery:
+    def __init__(self):
+        scope = ti.experimental.ResourceScope(self)
+        scope.value = scope.field(ti.f32, shape=())
+    @ti.func
+    def read(self) -> ti.f32:
+        return 2 * self.value[None]
+@ti.data_oriented
+class ProducerA:
+    def __init__(self):
+        scope = ti.experimental.ResourceScope(self)
+        scope.query = Query()
+@ti.data_oriented
+class ProducerB:
+    def __init__(self):
+        scope = ti.experimental.ResourceScope(self)
+        SECOND_QUERY
+@ti.data_oriented
+class Model:
+    def __init__(self, first=True):
+        self.first = first
+        scope = ti.experimental.ResourceScope(self)
+        scope.static('first', choices=(False, True))
+        if self.first:
+            scope.producer = ProducerA()
+        else:
+            scope.producer = ProducerB()
+        scope.owner_reference('query', self.producer.query)
+    @ti.kernel
+    def read(self) -> ti.f32:
+        return self.query.read()
+'''.replace("SECOND_QUERY", {
+        "same": "scope.query = Query()",
+        "different": "scope.query = OtherQuery()",
+        "missing": "scope.other = Query()",
+        "same_field": "scope.query = Query()",
+        "different_field": "scope.query = Query()",
+    }[member])
+    if member.endswith("_field"):
+        source = source.replace("@ti.data_oriented\nclass Model:", '''@ti.data_oriented
+class Consumer:
+    def __init__(self, value):
+        scope = ti.experimental.ResourceScope(self)
+        scope.borrow('value', value, source_scope=True, dimensions={})
+    @ti.func
+    def read(self) -> ti.f32:
+        return self.value[None]
+@ti.data_oriented
+class Model:''')
+        source = source.replace("        scope.query = Query()", "        scope.query = Query()\n"
+                                "        scope.borrow('selected', self.query.value, source_scope=True, dimensions={})")
+        if member == "different_field":
+            left, right = source.split("class ProducerB:")
+            source = left + "class ProducerB:" + right.replace("self.query.value", "self.query.other", 1)
+        source = source.replace("scope.owner_reference('query', self.producer.query)",
+                                "scope.query = Consumer(self.producer.selected)")
+    name = "owner_choice_member_alias_" + member
+    path = tmp_path / (name + ".py")
+    path.write_text(source, encoding="utf8")
+    spec = importlib.util.spec_from_file_location(name, path)
+    module = importlib.util.module_from_spec(spec)
+    monkeypatch.setitem(sys.modules, name, module)
+    spec.loader.exec_module(module)
+    if member in ("same", "same_field"):
+        report = ti.aot.check_package(module, arch="cpu", source_root=tmp_path)
+        assert name in report["modules"]
+    else:
+        with pytest.raises(ValueError, match="child implementation choice requires a resolved source type"):
+            ti.aot.check_package(module, arch="cpu", source_root=tmp_path)

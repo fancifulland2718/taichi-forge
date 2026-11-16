@@ -2438,7 +2438,7 @@ def _export_package(package, output, *, arch, caps, source_root, compilation, ar
                 if compilation.static_preparation is not None:
                     environment, compilation_schema, _ = compilation.static_preparation.project(
                         environment, compilation_schema, code.kernel)
-                if any(item["kind"] == "owner_input" and item.get("dynamic_input_record")
+                if any(item["kind"] in ("owner", "owner_input") and item.get("dynamic_input_record")
                        for item in compilation_schema.values()):
                     # Reuses the optional typed-owner and nullable resource
                     # contracts already understood by the version 93 consumer.

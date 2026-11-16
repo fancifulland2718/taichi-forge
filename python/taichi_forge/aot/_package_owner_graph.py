@@ -474,6 +474,14 @@ class OwnerGraph:
                     prefix = tuple(item.get('path', (attribute,)))
                     child_numerical_paths = tuple(member[len(prefix):] for member in numerical_paths
                                                   if member[:len(prefix)] == prefix)
+                elif item["kind"] == "owner_input" and not contract_only:
+                    # Ordinary owner methods use the same query dependency
+                    # projection as free-kernel call contexts. A borrowed
+                    # query may itself own numeric children used by its methods.
+                    prefix = tuple(item.get('path', (attribute,)))
+                    parent_paths = self._numerical_paths(identity, self._device_paths.get(identity, ()))
+                    child_numerical_paths = tuple(member[len(prefix):] for member in parent_paths
+                                                  if member[:len(prefix)] == prefix)
                 value, _, child, expanded = self.construct(
                     item["owner_type"],
                     resource_only=contract_only or resource_only or item["kind"] == "owner_input",

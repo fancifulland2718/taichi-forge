@@ -378,6 +378,13 @@ class Dimension:
         return primitive_types.i32
 
 
+@dataclass(frozen=True)
+class _ConditionalDimension(Dimension):
+    """A query extent whose declaration requires an input presence guard."""
+
+    conditions: tuple = ()
+
+
 def _dimension_value(component, owner, name, visiting=()):
     declaration = component.declarations.get(name)
     if not isinstance(declaration, Dimension) or name in visiting:
@@ -2375,7 +2382,7 @@ class _Capture:
         layout_array = isinstance(declaration, _LayoutArray) and bool(declaration.conditions)
         conditional_choice = isinstance(declaration, _ChoiceRecord) and bool(declaration.conditions)
         if conditional_array or layout_array or conditional_choice or isinstance(
-            declaration, (_ConditionalDenseField, _ConditionalModelTensorField, _ConditionalRecord)
+            declaration, (_ConditionalDenseField, _ConditionalModelTensorField, _ConditionalRecord, _ConditionalDimension)
         ):
             self.resource_conditions[name] = declaration.conditions
             present = True
@@ -2383,7 +2390,9 @@ class _Capture:
             for condition, expected in declaration.conditions:
                 predicate = self.declarations.get(condition)
                 if isinstance(predicate, (_InputRecord, _InputPresence)):
-                    if expected is not True or not isinstance(declaration, (_ConditionalDenseField, _ConditionalRecord)):
+                    if expected is not True or not isinstance(
+                        declaration, (_ConditionalDenseField, _ConditionalRecord, _ConditionalDimension)
+                    ):
                         raise TaichiCompilationError("Dynamic storage requires a whole present-only Dense group")
                     record_path = self.component._paths[condition]
                     self.attribute(ctx, record_path[-1], prefix=record_path[:-1])
@@ -2392,7 +2401,7 @@ class _Capture:
                         # Dense members record requirements at their use sites.
                         dynamic_record = True
                         continue
-                    if ctx is not None and ctx.is_in_static_scope():
+                    if isinstance(declaration, _ConditionalDenseField) and ctx is not None and ctx.is_in_static_scope():
                         return _OptionalArrayReference(path)
                     if not _argument_binding:
                         self.input_requirements.setdefault(condition, set()).add(tuple(self.input_guards))

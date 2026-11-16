@@ -1,7 +1,8 @@
 """Project optional input records and complete allocation groups.
 
-Whole optional Dense groups retain their native layout and allocation lifetime;
-partial or mixed-layout conditions keep the existing specialization contract.
+Whole optional Dense groups retain their native layout and allocation lifetime.
+Borrowed query ports may project conditional members of a shared allocation;
+the original owner still retains its complete layout contract.
 """
 
 def project_input_records(owner, schema, declarations):
@@ -167,17 +168,32 @@ def project_owned_records(environment, schema, *, borrowed=False, uses=()):
     from taichi_forge_runtime._dimensions import extent_dependencies
 
     declarations = dict(environment.declarations)
+    query_paths = [tuple(item.get("path", (key,))) for key, item in schema.items()
+                   if item["kind"] == "owner_input"] if borrowed else []
     for name, record in schema.items():
         conditions = record.get("conditions", {})
-        if (record["kind"] != ("owner_input" if borrowed else "owner") or record.get("owner_alternatives")
-                or record.get("dynamic_input_record") or len(conditions) != 1):
+        path = tuple(record.get("path", (name,)))
+        # A query can contain an optional numeric view of externally owned
+        # buffers. Its namespace is owned, but none of its storage is allocated
+        # here. Keep outer construction guards; project only local presence.
+        nested_view = borrowed and record["kind"] == "owner" and any(
+            len(path) > len(prefix) and path[:len(prefix)] == prefix for prefix in query_paths)
+        if (record["kind"] != ("owner_input" if borrowed else "owner") and not nested_view
+                or record.get("owner_alternatives") or record.get("dynamic_input_record") or not conditions):
             continue
-        flag, expected = next(iter(conditions.items()))
+        local = [(key, value) for key, value in conditions.items()
+                 if not nested_view or environment._paths[key][:-1] == path[:-1]]
+        if len(local) != 1:
+            continue
+        flag, expected = local[0]
+        parents = {key: value for key, value in conditions.items() if key != flag}
         predicate = schema[flag]
-        if (expected is not True or predicate["kind"] != "static" or predicate.get("conditions")
+        if (parents and not nested_view or expected is not True or predicate["kind"] != "static"
+                or predicate.get("conditions", {}) != parents
+                or any(schema[key]["kind"] != "static" or schema[key].get("dynamic_storage_condition")
+                       or schema[key].get("prepare_static") for key in parents)
                 or {tuple(v) for v in predicate["choices"]} != {("bool", False), ("bool", True)}):
             continue
-        path = tuple(record.get("path", (name,)))
         members = {key: item for key, item in schema.items()
                    if len(item.get("path", (key,))) > len(path)
                    and tuple(item.get("path", (key,)))[:len(path)] == path}
@@ -200,9 +216,13 @@ def project_owned_records(environment, schema, *, borrowed=False, uses=()):
                               or item.get("conditions") != conditions for key, item in members.items()):
             continue
         storage = {key: item for key, item in members.items() if item["kind"] == "dense_field"}
+        external_view = nested_view and any(item["kind"] == "ndarray" for item in members.values()) and all(
+            item["kind"] == "dimension" or item["kind"] == "ndarray" and item.get("external")
+            and not item.get("optional_input") for item in members.values())
         groups = {declarations[key].group for key in storage if isinstance(declarations[key], DenseField)}
         axes = {key for key, item in members.items() if item["kind"] == "dimension"}
-        if (not storage or any(item.get("struct_field") or item["element"].get("model_tensor")
+        if (not storage and not external_view or nested_view and not external_view
+                or any(item.get("struct_field") or item["element"].get("model_tensor")
                                or not borrowed and not item.get("group_builder") for item in storage.values())
                 or any(isinstance(value, DenseField) and value.group in groups and key not in storage
                        for key, value in declarations.items())
@@ -248,6 +268,59 @@ def project_owned_records(environment, schema, *, borrowed=False, uses=()):
                 # it is not an allocation owned by the query's caller.
                 value = declarations[key]
                 declarations[key] = Array(value.dtype, value.ndim, value.shape, value.resource_id)
+    environment._set_declarations(declarations)
+
+
+def project_query_groups(environment, schema, uses):
+    """Bind optional query fields independently of their producer's tree.
+
+    The source owner still constructs and owns the original complete layout.
+    Query captures carry actual Dense views, so fields sharing that tree need
+    not share presence. Conditional extents retain the same admission guard.
+    """
+    from taichi_forge.types import primitive_types
+    from taichi_forge_runtime._dimensions import extent_dependencies
+    from ._component import DenseField, _ConditionalDenseField, _ConditionalDimension, _InputPresence
+
+    declarations = dict(environment.declarations)
+    inputs = [tuple(item.get("path", (key,))) for key, item in schema.items() if item["kind"] == "owner_input"]
+    for flag, predicate in list(schema.items()):
+        path = environment._paths[flag]
+        if (predicate["kind"] != "static" or predicate.get("dynamic_storage_condition")
+                or not any(path[:len(prefix)] == prefix for prefix in inputs)
+                or {tuple(v) for v in predicate["choices"]} != {("bool", False), ("bool", True)}
+                or uses.get(path[-1], {"prepare_condition"}) != {"prepare_condition"}):
+            continue
+        parents = predicate.get("conditions", {})
+        if any(schema[key]["kind"] != "static" or schema[key].get("dynamic_storage_condition") for key in parents):
+            continue
+        conditions = {**parents, flag: True}
+        members = {key: item for key, item in schema.items() if flag in item.get("conditions", {})}
+        storage = {key: item for key, item in members.items() if item["kind"] == "dense_field"}
+        axes = {key for key, item in members.items() if item["kind"] == "dimension"}
+        if (not storage or any(item["kind"] not in ("dimension", "dense_field")
+                               or item.get("conditions") != conditions for item in members.values())
+                or any(item.get("struct_field") or item["element"].get("model_tensor")
+                       or not isinstance(declarations[key], DenseField) for key, item in storage.items())
+                or any(flag in item.get(guards, {}) for item in schema.values()
+                       for guards in ("choice_guards", "shape_guards", "dtype_guards", "source_guards"))
+                or any(key not in members and (
+                    axes.intersection(item.get("shape", ()))
+                    or axes.intersection(extent_dependencies(item["expression"]) if item.get("expression") else ())
+                    or any(axes.intersection(extent_dependencies(axis)) for axis in item.get("shape_expressions", ())))
+                       for key, item in schema.items())):
+            continue
+        schema[flag] = {**predicate, "dynamic_storage_condition": True,
+                        "input_presence_attribute": flag, "prepare_static": True}
+        declarations[flag] = _InputPresence(primitive_types.i32)
+        for key, original in members.items():
+            item = schema[key] = {**original, "input_record": flag}
+            value = declarations[key]
+            if key in storage:
+                declarations[key] = _ConditionalDenseField(value.dtype, value.shape, value.group, ((flag, True),))
+                item.update(dynamic_input_storage=True, shape=list(value.shape))
+            else:
+                declarations[key] = _ConditionalDimension(value.kind, value.capacity, value.expression, ((flag, True),))
     environment._set_declarations(declarations)
 
 

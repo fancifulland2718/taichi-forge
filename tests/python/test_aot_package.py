@@ -40,6 +40,234 @@ class Model:
 """
 
 
+@test_utils.test(arch=ti.cuda, offline_cache=False)
+def test_package_query_borrows_conditional_fields_from_shared_tree(tmp_path, monkeypatch):
+    source = '''
+import taichi_forge as ti
+@ti.data_oriented
+class Leaf:
+    def __init__(self, n):
+        self.n = n
+        scope = ti.experimental.ResourceScope(self)
+        scope.values = scope.field(ti.f32, shape=scope.dim('n'), initialization='zero')
+@ti.data_oriented
+class Query:
+    def __init__(self, n, extra_count, enabled):
+        self.n, self.count, self.enabled = n, extra_count, enabled
+        self.extra_count = extra_count
+        fields = ti.FieldsBuilder()
+        scope = ti.experimental.ResourceScope(self, builder=fields)
+        scope.static('enabled', choices=(False, True))
+        scope.base = scope.field(ti.f32, shape=scope.dim('n'))
+        self.extra = None
+        if self.enabled:
+            size = scope.derived_dim('extra_count', scope.dim('count'))
+            scope.extra = scope.field(ti.f32, shape=size)
+        self.tree = fields.finalize()
+        child_scope = ti.experimental.ResourceScope(self)
+        child_scope.child = Leaf(n)
+    @ti.func
+    def sample(self, index) -> ti.f32:
+        value = self.base[index % self.n] + self.child.values[index % self.child.n]
+        if ti.static(self.enabled):
+            for j in range(self.extra_count):
+                value += self.extra[j]
+        return value
+@ti.data_oriented
+class Model:
+    def __init__(self, n):
+        self.n = n
+        scope = ti.experimental.ResourceScope(self)
+        scope.out = scope.field(ti.f32, shape=scope.dim('n'))
+    def bind(self, query: Query):
+        scope = ti.experimental.ResourceScope(self)
+        scope.owner_reference('query', query)
+    @ti.kernel
+    def step(self):
+        for i in range(self.n):
+            self.out[i] = self.query.sample(i)
+    @ti.kernel
+    def required(self) -> ti.i32:
+        return self.query.extra_count
+    def graph(self):
+        builder = ti.graph.GraphBuilder()
+        builder.dispatch(self.step)
+        return builder.compile()
+'''
+    package = _source_package(tmp_path, monkeypatch, source)
+    cases = ((3, -7, False), (4, 2, True), (7, 5, True))
+    expected = []
+    # Record the original JIT result before exporting or consuming the package.
+    for n, extra_count, enabled in cases:
+        normal = package.Model(n)
+        query = package.model.Query(n, extra_count, enabled)
+        query.base.fill(3)
+        if enabled:
+            query.extra.fill(2)
+        normal.bind(query)
+        normal.step()
+        expected.append(normal.out.to_numpy())
+    output = tmp_path / 'sdk'
+    manifest = ti.aot.export_package(package, output, artifact_format='bc-library')
+    entries = [item for item in manifest['entries'].values() if item['definition'].endswith('Model.step')]
+    assert len(entries) == 1
+    with Runtime(manifest['target']) as runtime, load_package(runtime, output) as code:
+        instances = []
+        for (n, extra_count, enabled), baseline in zip(cases, expected):
+            loaded = code.host.Model(n)
+            query = code.host.model.Query(n, extra_count, enabled)
+            query.base.from_numpy(np.full(n, 3, np.float32))
+            if enabled:
+                query.extra.from_numpy(np.full(extra_count, 2, np.float32))
+            loaded.bind(query)
+            loaded.step()
+            loaded.step()
+            np.testing.assert_array_equal(loaded.out.to_numpy(), baseline)
+            prepared = next(iter(loaded._forge_package_calls.values()))
+            assert prepared.specialize and prepared.prepared is not None
+            if not enabled:
+                with pytest.raises(ValueError, match='configuration|presence'):
+                    loaded.required()
+            else:
+                assert loaded.required() == extra_count
+                original_extra = query.extra
+                query.extra = None
+                try:
+                    with pytest.raises(ValueError):
+                        loaded.step()
+                finally:
+                    query.extra = original_extra
+            if enabled:
+                query.extra.from_numpy(np.full(extra_count, 5, np.float32))
+            loaded.graph().run({})
+            np.testing.assert_array_equal(loaded.out.to_numpy(), np.full(n, 3 + (5 * extra_count if enabled else 0)))
+            instances.append(loaded)
+        # A new allocation changes binding, without making its unused extent valid.
+        rebound = code.host.model.Query(3, -11, False)
+        rebound.base.from_numpy(np.full(3, 9, np.float32))
+        instances[-1].bind(rebound)
+        instances[-1].step()
+        np.testing.assert_array_equal(instances[-1].out.to_numpy(), np.full(7, 9))
+        rebound.child.values.from_numpy(np.full(3, 4, np.float32))
+        instances[-1].step()
+        np.testing.assert_array_equal(instances[-1].out.to_numpy(), np.full(7, 13))
+        np.testing.assert_array_equal(instances[0].out.to_numpy(), np.full(3, 3))
+    probe = tmp_path / 'consume_shared_query.py'
+    probe.write_text(textwrap.dedent('''
+        import importlib.abc, sys
+        import numpy as np
+        class NoSource(importlib.abc.MetaPathFinder):
+            def find_spec(self, fullname, path=None, target=None):
+                if fullname.split('.')[0] in ('taichi', 'taichi_forge', 'definition_fixture'):
+                    raise AssertionError(fullname)
+        sys.meta_path.insert(0, NoSource())
+        from taichi_forge_runtime.aot import Runtime, load_package
+        with Runtime(sys.argv[2]) as runtime, load_package(runtime, sys.argv[1]) as code:
+            model = code.host.Model(5)
+            for count, enabled in ((-9, False), (2, True)):
+                query = code.host.model.Query(3, count, enabled)
+                query.base.from_numpy(np.full(3, 4, np.float32))
+                if enabled:
+                    query.extra.from_numpy(np.full(count, 3, np.float32))
+                model.bind(query)
+                model.step()
+                model.graph().run({})
+                assert list(model.out.to_numpy()) == [10.0 if enabled else 4.0] * 5
+                if not enabled:
+                    try:
+                        model.required()
+                    except ValueError:
+                        pass
+                    else:
+                        raise AssertionError('absent dimension accepted')
+        print('SHARED_QUERY_SOURCE_FREE_OK')
+    '''), encoding='utf8')
+    result = subprocess.run(
+        [sys.executable, '-B', str(probe), str(output), manifest['target']], cwd=tmp_path,
+        env=dict(os.environ, PYTHONPATH=str(Path(__file__).parents[2] / 'packaging/runtime/src'),
+                 TAICHI_NATIVE_RUNTIME_DIR=str(Path(utils._loaded_native_runtime_path).parent),
+                 TAICHI_RUNTIME_DIR=utils._runtime_bitcode_dir()),
+        capture_output=True, text=True, timeout=90)
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert 'SHARED_QUERY_SOURCE_FREE_OK' in result.stdout
+
+
+@test_utils.test(arch=ti.cuda, offline_cache=False)
+def test_package_nested_external_query_preserves_parent_guard(tmp_path, monkeypatch):
+    source = '''
+import taichi_forge as ti
+@ti.data_oriented
+class View:
+    def __init__(self, values):
+        self.n = values.shape[0]
+        scope = ti.experimental.ResourceScope(self)
+        scope.borrow('values', values, external=True, dtype=ti.f32, shape=(scope.dim('n'),))
+@ti.data_oriented
+class Query:
+    def __init__(self, values=None):
+        scope = ti.experimental.ResourceScope(self)
+        if values is not None:
+            scope.view = View(values)
+        else:
+            scope.record('view', None, optional=True)
+    @ti.func
+    def sample(self) -> ti.f32:
+        result = 1.0
+        if ti.static(self.view is not None):
+            for i in range(self.view.n):
+                result += self.view.values[i]
+        return result
+@ti.data_oriented
+class Model:
+    def __init__(self, enabled):
+        self.enabled = enabled
+        scope = ti.experimental.ResourceScope(self)
+        scope.static('enabled', choices=(False, True))
+        scope.out = scope.field(ti.f32, shape=())
+    def bind(self, query: Query):
+        scope = ti.experimental.ResourceScope(self)
+        if self.enabled:
+            scope.owner_reference('query', query)
+        else:
+            scope.record('query', None, optional=True)
+    @ti.kernel
+    def step(self):
+        result = 0.0
+        if ti.static(self.enabled):
+            result = self.query.sample()
+        self.out[None] = result
+'''
+    package = _source_package(tmp_path, monkeypatch, source)
+    output = tmp_path / 'sdk'
+    manifest = ti.aot.export_package(package, output, artifact_format='bc-library')
+    entries = [item for item in manifest['entries'].values() if item['definition'].endswith('Model.step')]
+    # The outer owner guard still selects construction. The borrowed leaf's
+    # presence is prepared from the actual binding, not another producer axis.
+    assert len(entries) == 2
+    with Runtime(manifest['target']) as runtime, load_package(runtime, output) as code:
+        values = runtime.ndarray('f32', (4,))
+        values.from_numpy(np.full(4, 2, np.float32))
+        models = []
+        for enabled, present, expected in ((False, False, 0), (True, False, 1), (True, True, 9)):
+            model = code.host.Model(enabled)
+            model.bind(code.host.model.Query(values if present else None))
+            model.step()
+            model.step()
+            assert model.out.to_numpy() == expected
+            models.append(model)
+        values.from_numpy(np.full(4, 3, np.float32))
+        models[-1].step()
+        assert models[-1].out.to_numpy() == 13
+        models[-1].query.view.values = None
+        with pytest.raises(ValueError):
+            models[-1].step()
+        models[-1].query.view.values = values
+        models[-1].bind(code.host.model.Query())
+        models[-1].step()
+        assert models[-1].out.to_numpy() == 1
+        assert models[0].out.to_numpy() == 0
+
+
 @pytest.mark.parametrize('layout_variant', [False, True])
 @test_utils.test(arch=ti.cuda, offline_cache=False)
 def test_package_optional_query_owners_share_prepared_code(tmp_path, monkeypatch, layout_variant):
