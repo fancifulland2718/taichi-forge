@@ -247,6 +247,17 @@ def discover_construction_methods(tree, namespace, module, fail, kind):
                     elif isinstance(statement, ast.If):
                         body(statement.body, guarded(statement.test, guards, True))
                         body(statement.orelse, guarded(statement.test, guards, False))
+                    elif (isinstance(statement, ast.Try) and statement.handlers
+                          and not statement.finalbody
+                          and all(handler.body and isinstance(handler.body[-1], ast.Raise)
+                                  and handler.body[-1].exc is None
+                                  and not any(isinstance(part, ast.Return) for part in ast.walk(handler))
+                                  for handler in statement.handlers)):
+                        # Cleanup handlers rethrow: only the normal body can
+                        # produce a usable owner. Retain the actual try/except
+                        # in Host code, and do not admit allocations in handlers.
+                        body(statement.body, guards)
+                        body(statement.orelse, guards)
 
             body(function.body, conditions)
             return sites

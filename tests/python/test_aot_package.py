@@ -7083,6 +7083,59 @@ def test_package_write_inventory_rejects_unproven_record_recipes(tmp_path, monke
 
 
 @test_utils.test(arch=ti.cpu, offline_cache=False)
+@pytest.mark.parametrize('cleanup', ['reraise', 'swallow', 'early_return'])
+def test_package_construction_method_preserves_reraising_cleanup(tmp_path, monkeypatch, cleanup):
+    source = '''import taichi_forge as ti
+@ti.data_oriented
+class Model:
+    def __init__(self, n, fail=False):
+        self.n = n
+        self.tree = None
+        try:
+            self.allocate()
+            if fail:
+                raise ValueError('construction failed')
+        except BaseException:
+            self.close()
+            raise
+    def allocate(self):
+        fields = ti.FieldsBuilder()
+        scope = ti.experimental.ResourceScope(self, builder=fields)
+        scope.values = scope.field(ti.i32, shape=scope.dim('n'), initialization='zero')
+        self.tree = fields.finalize()
+    def close(self):
+        if self.tree is not None:
+            self.tree.destroy()
+            self.tree = None
+    @ti.kernel
+    def fill(self):
+        for i in self.values:
+            self.values[i] = i + 5
+'''
+    if cleanup == 'swallow':
+        source = source.replace('            raise\n', '            pass\n')
+    elif cleanup == 'early_return':
+        source = source.replace('            raise\n', '            if fail:\n                return\n            raise\n')
+    package = _source_package(tmp_path, monkeypatch, source)
+    if cleanup != 'reraise':
+        with pytest.raises(ValueError, match='direct statement|declared owner guard'):
+            ti.aot.check_package(package)
+        return
+    manifest = ti.aot.export_package(package, tmp_path / 'sdk')
+    with Runtime(manifest['target']) as runtime, load_package(runtime, tmp_path / 'sdk') as code:
+        before = set(runtime._resources)
+        with pytest.raises(ValueError, match='construction failed'):
+            code.host.Model(9, True)
+        assert set(runtime._resources) == before
+        normal, loaded = package.Model(7), code.host.Model(7)
+        normal.fill()
+        loaded.fill()
+        np.testing.assert_array_equal(loaded.values.to_numpy(), normal.values.to_numpy())
+        normal.close()
+        loaded.close()
+
+
+@test_utils.test(arch=ti.cpu, offline_cache=False)
 def test_package_owner_input_keeps_allocation_dimensions_without_device_reads(tmp_path, monkeypatch):
     source = '''import taichi_forge as ti
 @ti.data_oriented
