@@ -2796,6 +2796,10 @@ def _export_package(package, output, *, arch, caps, source_root, compilation, ar
                 or definition["kind"] not in ("kernel", "pyfunc")
                 or definition.get("requires_owner")
                 or definition.get("error_interface")
+                # Template methods already use function_entries with their
+                # typed receiver and actual call tuples, including inherited
+                # methods. They have no ordinary per-owner member entry.
+                or definition.get("free_template")
             ):
                 continue
             methods = {

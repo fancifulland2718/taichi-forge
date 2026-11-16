@@ -4799,6 +4799,56 @@ print('TYPED_OWNER_SOURCE_FREE_OK')
     assert "TYPED_OWNER_SOURCE_FREE_OK" in result.stdout
 
 
+@pytest.mark.parametrize("inherited", [False, True])
+@test_utils.test(arch=[ti.cpu, ti.cuda], offline_cache=False)
+def test_package_typed_owner_template_methods_keep_function_projection(tmp_path, monkeypatch, inherited):
+    source = TYPED_OWNER_INPUT_SOURCE.replace(
+        "def step(self, gain: ti.f32):", "def step(self, gain: ti.f32, bias: ti.template()):"
+    ).replace("gain * self.source.read(i)", "gain * self.source.read(i) + bias")
+    source = source.replace("builder.dispatch(self.first.step, gain)",
+                            "builder.dispatch(self.first.step, gain, template_args={'bias': 2})")
+    source = source.replace("builder.dispatch(self.second.step, gain)",
+                            "builder.dispatch(self.second.step, gain, template_args={'bias': 2})")
+    definition = "definition_fixture.model.Reader.step"
+    if inherited:
+        begin = source.index("    @ti.kernel\n    def step")
+        end = source.index("    @ti.kernel\n    def common", begin)
+        method = source[begin:end]
+        source = source[:begin] + source[end:]
+        source = source.replace("@ti.data_oriented\nclass Reader:",
+                                "class ReaderMixin:\n" + method + "\n@ti.data_oriented\nclass Reader(ReaderMixin):")
+        definition = "definition_fixture.model.ReaderMixin.step"
+    package = _source_package(tmp_path, monkeypatch, source)
+    manifest = ti.aot.export_package(package, tmp_path / "sdk")
+    assert package.model.constructors == 0
+    owners = manifest["input_families"]["definition_fixture.model.Reader"]
+    assert len(owners) == 2
+    function = manifest["function_entries"][definition]
+    assert set(function["owners"]) == {item["owner"] for item in owners}
+    assert sum(item["definition"].endswith(".step") for item in manifest["entries"].values()) == 2
+    assert sum(item["definition"].endswith(".common") for item in manifest["entries"].values()) == 1
+    original = package.Model(7, 5)
+    original.first.step(2, 2)
+    original.second.step(2, 2)
+    expected = [reader.output.to_numpy() for reader in (original.first, original.second)]
+    with Runtime(manifest["target"]) as runtime, load_package(runtime, tmp_path / "sdk") as code:
+        a, b = code.host.Model(7, 5), code.host.Model(11, 13)
+        with a.graph().bind(dict(gain=2)) as call:
+            b.first.step(-2, 2)
+            b.second.step(-2, 2)
+            call.run()
+            for reader, reference in zip((a.first, a.second), expected):
+                np.testing.assert_array_equal(reader.output.to_numpy(), reference)
+            np.testing.assert_array_equal(b.first.output.to_numpy(), -4)
+            np.testing.assert_array_equal(b.second.output.to_numpy(), 12)
+            a.scalar.values.from_numpy(np.full(7, 5, dtype=np.float32))
+            call.run()
+            np.testing.assert_array_equal(a.first.output.to_numpy(), 18)
+        assert a.first.common() == a.second.common() == 7
+        with pytest.raises(ValueError, match="definition-proven domain"):
+            a.first.step(2, 99)
+
+
 @test_utils.test(arch=ti.cpu, offline_cache=False)
 def test_package_typed_owner_tuples_do_not_copy_code_for_unused_inputs(tmp_path, monkeypatch):
     source = (
