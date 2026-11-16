@@ -649,5 +649,10 @@ class StaticPreparation:
                 projected[name] = {**schema[name], "prepare_static": True}
         result = copy.copy(environment)
         result._set_declarations(declarations)
+        from ._package_optional import project_owned_records
+
+        # Query input eligibility depends on this entry's numeric predicates.
+        # Producer-only configuration must not force query presence variants.
+        project_owned_records(result, projected, borrowed=True, uses=self.entry_uses(identity))
         self._contexts[key] = result, projected, facts
         return result, projected, facts

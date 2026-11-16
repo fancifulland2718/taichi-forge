@@ -1910,11 +1910,13 @@ class LoadedPackage:
             raise ValueError("Application source package is missing its import boundary")
         if self.manifest["target"] != runtime.arch:
             raise ValueError("Package target differs from Runtime")
-        if self.manifest["version"] < 93 and any(
-            item["kind"] == "owner" and item.get("dynamic_input_record")
+        if self.manifest["version"] < 93 and (any(
+            item["kind"] in ("owner", "owner_input") and item.get("dynamic_input_record")
             for schema in self.manifest.get("owners", {}).values() for item in schema.values()
-        ):
-            raise ValueError("Optional owned records require definition package version 93")
+        ) or any(binding.get("optional")
+                 for entry in self.manifest["entries"].values()
+                 for binding in entry.get("admission", {}).get("owner_bindings", {}).values())):
+            raise ValueError("Optional typed owner records require definition package version 93")
         if self.manifest["version"] < 88 and any(
             member.get("external") and member.get("shape_policy")
             for schema in self.manifest.get("owners", {}).values() for member in schema.values()

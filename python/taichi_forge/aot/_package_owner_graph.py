@@ -7,16 +7,31 @@ from types import MappingProxyType, SimpleNamespace
 
 def _member_paths(node, receiver):
     """Read explicit device member paths, without traversing Host construction."""
-    paths = set()
+    paths, presence = set(), set()
+    attributes = {id(part.value) for part in ast.walk(node) if isinstance(part, ast.Attribute)}
+    presence_reads = {
+        id(part.left) for part in ast.walk(node)
+        if isinstance(part, ast.Compare) and len(part.ops) == 1
+        and isinstance(part.ops[0], (ast.Is, ast.IsNot))
+        and isinstance(part.comparators[0], ast.Constant) and part.comparators[0].value is None
+    }
     for part in ast.walk(node):
-        if not isinstance(part, ast.Attribute):
+        if isinstance(part, ast.Name) and part.id == receiver and id(part) not in attributes:
+            # An owner passed to an unresolved helper/alias can expose any of
+            # its methods. Keep the existing complete device view in that case.
+            paths.add(())
+        if not isinstance(part, ast.Attribute) or id(part) in attributes:
             continue
-        path = []
+        path, presence_only = [], id(part) in presence_reads
         while isinstance(part, ast.Attribute):
             path.append(part.attr)
             part = part.value
         if isinstance(part, ast.Name) and part.id == receiver:
-            paths.add(tuple(reversed(path)))
+            (presence if presence_only else paths).add(tuple(reversed(path)))
+    # A nullable check does not expose all methods of a child whose concrete
+    # query is already named in this body. A bare owner alias/argument still does.
+    paths.update(path for path in presence
+                 if not any(len(member) > len(path) and member[:len(path)] == path for member in paths))
     return paths
 
 
@@ -66,7 +81,7 @@ class OwnerGraph:
             for name, _, _, _, tree, _, schemas, _ in sources
             for owner, schema in schemas.items()
         }
-        device_paths = {}
+        device_paths, device_methods = {}, {}
         for name, _, _, _, tree, _, _, definitions in sources:
             for definition in definitions:
                 if definition['owner'] is None or definition.get('error_interface'):
@@ -75,16 +90,59 @@ class OwnerGraph:
                 parameters = (*node.args.posonlyargs, *node.args.args)
                 if parameters:
                     owner = name + '.' + source_class(tree, definition['owner'])
-                    device_paths.setdefault(owner, set()).update(_member_paths(node, parameters[0].arg))
-        self._device_paths = {}
+                    paths = _member_paths(node, parameters[0].arg)
+                    if any(isinstance(part, ast.Call) and isinstance(part.func, ast.Name)
+                           and part.func.id == 'super' for part in ast.walk(node)):
+                        paths.add(())
+                    device_paths.setdefault(owner, set()).update(paths)
+                    device_methods.setdefault(owner, {})[node.name] = frozenset(paths)
+        self._device_paths, self._device_methods = {}, {}
+        self._numerical_path_cache = {}
         for identity, (name, cls_name, _) in self.definitions.items():
             cls = getattr(imported[name], cls_name)
             self._device_paths[identity] = frozenset(
                 path for base in cls.__mro__
                 for path in device_paths.get(base.__module__ + '.' + base.__qualname__, ())
             )
+            # Follow the same method override order as the original owner.
+            self._device_methods[identity] = {
+                method: paths for base in reversed(cls.__mro__)
+                for method, paths in device_methods.get(base.__module__ + '.' + base.__qualname__, {}).items()
+            }
         for identity in self.definitions:
             self._validate(identity, ())
+
+    def _numerical_paths(self, identity, paths):
+        """Expand the methods actually queried, using the discovered definitions.
+
+        A borrowed query must not inherit the owner's unrelated producer
+        kernels. Unknown receiver escapes retain the previous complete view.
+        Only path tuples are cached; no extra AST or application owner is kept.
+        """
+        key = identity, frozenset(paths)
+        if key in self._numerical_path_cache:
+            return self._numerical_path_cache[key]
+        pending, visited, result = list(key[1]), set(), set()
+        methods = self._device_methods.get(identity, {})
+        while pending:
+            path = pending.pop()
+            if path in visited:
+                continue
+            visited.add(path)
+            if not path:
+                result.update(self._device_paths.get(identity, ()))
+                # A whole-owner escape also allows passing one of its children
+                # to another helper without an explicit member access here.
+                result.update(tuple(item.get('path', (name,)))
+                              for name, item in self.definitions[identity][2].items()
+                              if item['kind'] in ('owner', 'owner_input'))
+            elif len(path) == 1 and path[0] in methods:
+                pending.extend(methods[path[0]])
+            else:
+                result.add(path)
+        result = frozenset(result)
+        self._numerical_path_cache[key] = result
+        return result
 
     def input_field_type(self, identity, path):
         """Use the declared field ABI without constructing a consumer owner."""
@@ -190,8 +248,9 @@ class OwnerGraph:
         schema = original
         source_children = {}
         if numerical_paths is not None:
-            numerical_paths = frozenset(numerical_paths) | self._device_paths.get(identity, frozenset())
-        if contract_only and any(item["kind"] in ("owner", "owner_input") for item in original.values()):
+            numerical_paths = self._numerical_paths(identity, numerical_paths)
+        if (contract_only or resource_only and numerical_paths is not None) and any(
+                item["kind"] in ("owner", "owner_input") for item in original.values()):
             from ._package_resource_slice import AllocationSchema
 
             # Host layout extraction needs local declarations and the resources
@@ -225,9 +284,12 @@ class OwnerGraph:
                 # before copying, without restoring unrelated Host-owned children.
                 schema = {
                     key: item for key, item in schema.items()
-                    if item['kind'] != 'owner' or numerical_paths is not None and any(
+                    if item['kind'] not in ('owner', 'owner_input')
+                    or key in source_children
+                    or numerical_paths is not None and any(
                         member[:len(item.get('path', (key,)))] == tuple(item.get('path', (key,)))
                         for member in numerical_paths)
+                    or numerical_paths is None and item['kind'] == 'owner_input'
                 }
             if len(references) == 1:
                 # Reuse complete input views and complete allocation groups

@@ -2438,6 +2438,11 @@ def _export_package(package, output, *, arch, caps, source_root, compilation, ar
                 if compilation.static_preparation is not None:
                     environment, compilation_schema, _ = compilation.static_preparation.project(
                         environment, compilation_schema, code.kernel)
+                if any(item["kind"] == "owner_input" and item.get("dynamic_input_record")
+                       for item in compilation_schema.values()):
+                    # Reuses the optional typed-owner and nullable resource
+                    # contracts already understood by the version 93 consumer.
+                    manifest["version"] = max(93, manifest["version"])
                 for key, item in compilation_schema.items():
                     previous = family_schema.get(key)
                     if previous is not None and item["kind"] == previous["kind"] == "static":

@@ -40,6 +40,164 @@ class Model:
 """
 
 
+@pytest.mark.parametrize('layout_variant', [False, True])
+@test_utils.test(arch=ti.cuda, offline_cache=False)
+def test_package_optional_query_owners_share_prepared_code(tmp_path, monkeypatch, layout_variant):
+    source = '''
+import taichi_forge as ti
+@ti.data_oriented
+class Table:
+    def __init__(self, n):
+        self.n = n
+        scope = ti.experimental.ResourceScope(self)
+        scope.values = scope.field(ti.f32, shape=scope.dim('n'), initialization='zero')
+@ti.data_oriented
+class State:
+    def __init__(self, n, table: Table, wide):
+        self.n, self.wide = n, wide
+        self.scale = 3.0
+        scope = ti.experimental.ResourceScope(self)
+        scope.static('wide', choices=(False, True), kernel_only=True)
+        scope.value('scale', ti.f32)
+        scope.values = scope.field(ti.f32, shape=scope.dim('n'), initialization='zero')
+        data = scope.record('data', table)
+        size = data.dim('n')
+        data.borrow('values', table.values, external=True, dtype=ti.f32, shape=(size,))
+    @ti.func
+    def sample(self, index) -> ti.f32:
+        self.values[index] += self.scale
+        value = self.values[index] + self.data.values[index % self.data.n]
+        if ti.static(self.wide):
+            value *= 2.0
+        return value
+@ti.data_oriented
+class Model:
+    def __init__(self, n):
+        self.n, self.enabled = n, False
+        self.state = None
+        scope = ti.experimental.ResourceScope(self)
+        scope.static('enabled', choices=(False, True))
+        scope.out = scope.field(ti.f32, shape=scope.dim('n'), initialization='zero')
+    def bind(self, state: State):
+        self.state = state
+        self.enabled = state is not None
+        scope = ti.experimental.ResourceScope(self)
+        if self.enabled:
+            scope.owner_reference('state', state)
+        else:
+            scope.record('state', None, optional=True)
+    @ti.kernel
+    def step(self):
+        for i in range(self.n):
+            value = 2.0
+            if ti.static(self.state is not None):
+                value += self.state.sample(i)
+            self.out[i] = value
+    @ti.kernel
+    def required(self) -> ti.f32:
+        return self.state.scale
+    def graph(self):
+        builder = ti.graph.GraphBuilder()
+        builder.dispatch(self.step)
+        return builder.compile()
+'''
+    if layout_variant:
+        source = source.replace("scope.static('wide', choices=(False, True), kernel_only=True)",
+                                "scope.static('wide', choices=(False, True))")
+        source = source.replace("scope.values = scope.field(ti.f32, shape=scope.dim('n'), initialization='zero')\n        data",
+                                "scope.values = scope.field(ti.f64 if self.wide else ti.f32, shape=scope.dim('n'), initialization='zero')\n        data")
+    package = _source_package(tmp_path, monkeypatch, source)
+    output = tmp_path / 'sdk'
+    manifest = ti.aot.export_package(package, output, artifact_format='bc-library' if ti.cfg.arch == ti.cuda else 'bc')
+    entries = [v for v in manifest['entries'].values() if v['definition'].endswith('Model.step')]
+    assert len(entries) == (3 if layout_variant else 1)
+    if not layout_variant:
+        assert manifest['version'] == 93
+        captures = entries[0]['captures']
+        presence_index = next(i for i, spec in enumerate(captures)
+                              if spec.get('path', [spec['name']]) == ['enabled'])
+        assert tuple(map(tuple, captures[presence_index]['prepare_static'])) == (('bool', False), ('bool', True))
+    with Runtime(manifest['target']) as runtime, load_package(runtime, output) as code:
+        instances = []
+        for n, present, wide in ((3, False, False), (5, True, False), (7, True, True)):
+            normal, loaded = package.Model(n), code.host.Model(n)
+            table, aot_table = package.model.Table(2), code.host.model.Table(2)
+            table.values.fill(5)
+            aot_table.values.from_numpy(np.full(2, 5, dtype=np.float32))
+            normal.bind(package.model.State(n, table, wide) if present else None)
+            loaded.bind(code.host.model.State(n, aot_table, wide) if present else None)
+            for _ in range(3):
+                normal.step()
+                loaded.step()
+                np.testing.assert_array_equal(loaded.out.to_numpy(), normal.out.to_numpy())
+            ready = next(iter(loaded._forge_package_calls.values()))
+            assert ready.specialize and ready.prepared is not None
+            if not layout_variant:
+                assert presence_index in ready.constant_args
+            if present:
+                table.values.fill(11)
+                aot_table.values.from_numpy(np.full(2, 11, dtype=np.float32))
+            graph = loaded.graph()
+            graph.run({})
+            normal.step()
+            np.testing.assert_array_equal(loaded.out.to_numpy(), normal.out.to_numpy())
+            instances.append(loaded)
+            if not present:
+                with pytest.raises(ValueError, match='configuration' if layout_variant else 'presence'):
+                    loaded.required()
+            else:
+                assert loaded.required() == 3.0
+                state = loaded.state
+                if not layout_variant:
+                    loaded.state = loaded
+                    try:
+                        with pytest.raises(ValueError, match='child owner'):
+                            loaded.step()
+                    finally:
+                        loaded.state = state
+                loaded.bind(None)
+                loaded.step()
+                np.testing.assert_array_equal(loaded.out.to_numpy(), np.full(n, 2))
+                loaded.bind(state)
+                loaded.step()
+                normal.step()
+                np.testing.assert_array_equal(loaded.out.to_numpy(), normal.out.to_numpy())
+        np.testing.assert_array_equal(instances[0].out.to_numpy(), np.full(3, 2))
+    probe = tmp_path / 'consume_query.py'
+    probe.write_text(textwrap.dedent('''
+        import importlib.abc, sys
+        class NoSource(importlib.abc.MetaPathFinder):
+            def find_spec(self, fullname, path=None, target=None):
+                if fullname.split('.')[0] in ('taichi', 'taichi_forge', 'definition_fixture'):
+                    raise AssertionError(fullname)
+        sys.meta_path.insert(0, NoSource())
+        from taichi_forge_runtime.aot import Runtime, load_package
+        with Runtime(sys.argv[2]) as runtime, load_package(runtime, sys.argv[1]) as code:
+            model = code.host.Model(3)
+            table = code.host.model.Table(2)
+            state = code.host.model.State(3, table, True)
+            model.bind(state)
+            model.step()
+            assert list(model.out.to_numpy()) == [8.0] * 3
+            model.bind(None)
+            model.step()
+            assert list(model.out.to_numpy()) == [2.0] * 3
+        print('QUERY_SOURCE_FREE_OK')
+    '''), encoding='utf8')
+    result = subprocess.run(
+        [sys.executable, '-B', str(probe), str(output), manifest['target']], cwd=tmp_path,
+        env=dict(os.environ, PYTHONPATH=str(Path(__file__).parents[2] / 'packaging/runtime/src'),
+                 TAICHI_NATIVE_RUNTIME_DIR=str(Path(utils._loaded_native_runtime_path).parent),
+                 TAICHI_RUNTIME_DIR=utils._runtime_bitcode_dir()),
+        capture_output=True, text=True, timeout=90)
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert 'QUERY_SOURCE_FREE_OK' in result.stdout
+    if not layout_variant:
+        (output / 'package.json').write_text(json.dumps({**manifest, 'version': 92}), encoding='utf8')
+        with Runtime(manifest['target']) as runtime, pytest.raises(ValueError, match='version 93'):
+            load_package(runtime, output)
+
+
 @test_utils.test(arch=[ti.cpu, ti.cuda], offline_cache=False)
 def test_package_optional_owned_numeric_records_share_code(tmp_path, monkeypatch):
     source = '''
@@ -24934,7 +25092,7 @@ class Unused:
         scope.values = scope.field(ti.f32, shape=scope.dim('n'))
 @ti.data_oriented
 class SourceBase:
-    def __init__(self, n, enabled, scaled, indirect):
+    def __init__(self, n, enabled, scaled, indirect, producer: Leaf):
         global constructors
         constructors += 1
         self.enabled, self.scaled, self.indirect = enabled, scaled, indirect
@@ -24942,6 +25100,7 @@ class SourceBase:
         scope.static('enabled', choices=(False, True))
         scope.static('scaled', choices=(False, True))
         scope.static('indirect', choices=(False, True))
+        scope.owner_reference('producer', producer)
         if self.enabled:
             if self.scaled:
                 scope.environment = ScaledLeaf(n)
@@ -24956,13 +25115,25 @@ class SourceBase:
         scope.host_only = Unused(n)
     @ti.func
     def sample(self):
+        return self.sample_environment()
+    @ti.func
+    def sample_environment(self):
         value = 1.0
         if ti.static(self.environment is not None):
             value += self.environment.sample()
         return value
+    @ti.kernel
+    def prepare_host_only(self):
+        # This producer is exported independently, but consumers of sample()
+        # must not construct its unrelated child merely to call the query.
+        self.host_only.values[0] = 7.0
+        self.producer.values[0] = 9.0
 @ti.data_oriented
 class Source(SourceBase):
     pass
+@ti.func
+def query(source: ti.template()):
+    return source.sample()
 @ti.kernel
 def compose(output: ti.template(), lighting: ti.template(), gain: ti.f32):
     for i in output.values:
@@ -24986,17 +25157,23 @@ class Model:
 '''
 
 
+@pytest.mark.parametrize('escaped', [False, True])
 @test_utils.test(arch=[ti.cpu, ti.cuda], offline_cache=False)
-def test_package_numerical_owner_inputs_keep_used_children_without_host_tree(tmp_path, monkeypatch):
+def test_package_numerical_owner_inputs_keep_used_children_without_host_tree(tmp_path, monkeypatch, escaped):
     from taichi_forge.aot._package_owner_graph import OwnerGraph
 
-    package = _source_package(tmp_path, monkeypatch, NUMERICAL_OWNER_CHILDREN_SOURCE)
+    source_text = NUMERICAL_OWNER_CHILDREN_SOURCE
+    if escaped:
+        source_text = source_text.replace('value = lighting.sample()', 'value = query(lighting)')
+    package = _source_package(tmp_path, monkeypatch, source_text)
     construct = OwnerGraph.construct
     borrowed = []
 
     def observed(self, identity, **kwargs):
         if kwargs.get('resource_only') and kwargs.get('numerical_paths') is not None:
-            assert not identity.endswith('.Unused'), 'numerical input constructed its unrelated Host subtree'
+            if not escaped:
+                assert not identity.endswith('.Unused'), 'numerical input constructed its unrelated Host subtree'
+                assert kwargs['path'][-1] != 'producer', 'query constructed its producer-only input'
             borrowed.append((identity, kwargs.get('path')))
         return construct(self, identity, **kwargs)
 
@@ -25005,10 +25182,13 @@ def test_package_numerical_owner_inputs_keep_used_children_without_host_tree(tmp
     assert package.model.constructors == 0
     assert any(name.endswith('.ScaledLeaf') for name, _ in borrowed)
     assert any(path[-1] == 'fixed_gi' for _, path in borrowed)
+    if escaped:
+        assert any(name.endswith('.Unused') for name, _ in borrowed)
+        assert any(path[-1] == 'producer' for _, path in borrowed)
     output = package.Model(7)
     expected = []
     for enabled, scaled, indirect in ((False, False, False), (True, False, True), (True, True, True)):
-        source = package.model.Source(3, enabled, scaled, indirect)
+        source = package.model.Source(3, enabled, scaled, indirect, package.model.Leaf(2))
         if enabled:
             source.environment.values.fill(3)
         if indirect:
@@ -25029,7 +25209,7 @@ expected = json.loads(sys.argv[3])
 with Runtime(sys.argv[2]) as runtime, load_package(runtime, sys.argv[1]) as code:
     output = code.host.Model(7)
     for index, (enabled, scaled, indirect) in enumerate(((False, False, False), (True, False, True), (True, True, True))):
-        source = code.host.model.Source(3, enabled, scaled, indirect)
+        source = code.host.model.Source(3, enabled, scaled, indirect, code.host.model.Leaf(2))
         if enabled:
             source.environment.values.from_numpy(np.full(3, 3, dtype=np.float32))
         if indirect:

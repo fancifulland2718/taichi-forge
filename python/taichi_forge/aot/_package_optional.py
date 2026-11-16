@@ -152,21 +152,24 @@ def project_boolean_groups(schema, declarations):
                 item["input_conditions"] = names
 
 
-def project_owned_records(environment, schema):
+def project_owned_records(environment, schema, *, borrowed=False, uses=()):
     """Project a complete optional child's numeric state through existing ports.
 
     A typed child with no implementation/layout alternatives is a nullable
     namespace, not another numerical algorithm. Keep its Host construction and
     native layouts; use the existing record-presence and Dense argument ABI.
+    Borrowed queries run after entry-specific static classification, so unused
+    producer configuration and prepared numeric predicates need no presence
+    variants. Their complete Field views keep the source owner's native layout.
     """
     from taichi_forge.types import primitive_types
-    from ._component import DenseField, _ConditionalDenseField, _InputPresence, _InputRecord
+    from ._component import Array, DenseField, _ConditionalDenseField, _InputPresence, _InputRecord
     from taichi_forge_runtime._dimensions import extent_dependencies
 
     declarations = dict(environment.declarations)
     for name, record in schema.items():
         conditions = record.get("conditions", {})
-        if (record["kind"] != "owner" or record.get("owner_alternatives")
+        if (record["kind"] != ("owner_input" if borrowed else "owner") or record.get("owner_alternatives")
                 or record.get("dynamic_input_record") or len(conditions) != 1):
             continue
         flag, expected = next(iter(conditions.items()))
@@ -178,14 +181,29 @@ def project_owned_records(environment, schema):
         members = {key: item for key, item in schema.items()
                    if len(item.get("path", (key,))) > len(path)
                    and tuple(item.get("path", (key,)))[:len(path)] == path}
-        if not members or any(item["kind"] not in ("dimension", "value", "dense_field")
-                              or item.get("conditions") != conditions for item in members.values()):
+
+        def numeric_member(key, item):
+            if borrowed and any(item.get(part) for part in (
+                    "owner_alternatives", "choice_guards", "shape_guards", "dtype_guards", "source_guards",
+                    "shape_policy", "dtype_policy", "source_policy")):
+                return False
+            if item["kind"] in ("dimension", "value", "dense_field"):
+                return True
+            if not borrowed:
+                return False
+            return (item["kind"] == "record" and not item.get("optional")
+                    or item["kind"] == "ndarray" and item.get("external") and not item.get("optional_input")
+                    or item["kind"] == "static" and (
+                        item.get("prepare_static") or environment._paths[key][-1] not in uses))
+
+        if not members or any(not numeric_member(key, item)
+                              or item.get("conditions") != conditions for key, item in members.items()):
             continue
         storage = {key: item for key, item in members.items() if item["kind"] == "dense_field"}
         groups = {declarations[key].group for key in storage if isinstance(declarations[key], DenseField)}
         axes = {key for key, item in members.items() if item["kind"] == "dimension"}
         if (not storage or any(item.get("struct_field") or item["element"].get("model_tensor")
-                               or not item.get("group_builder") for item in storage.values())
+                               or not borrowed and not item.get("group_builder") for item in storage.values())
                 or any(isinstance(value, DenseField) and value.group in groups and key not in storage
                        for key, value in declarations.items())
                 or any(flag in item.get("conditions", {}) and key not in members and key != name
@@ -195,20 +213,41 @@ def project_owned_records(environment, schema):
                 or any(key not in members and (
                     axes.intersection(item.get("shape", ()))
                     or axes.intersection(extent_dependencies(item["expression"]) if item.get("expression") else ())
+                    or borrowed and any(axes.intersection(extent_dependencies(axis))
+                                        for axis in item.get("shape_expressions", ()))
                     or tuple(item.get("source_path", ()))[:len(path)] == path)
                        for key, item in schema.items())):
             continue
+        # Entry-specific borrowed views share the original schema dictionaries.
+        # Publish new metadata only in this projection, never in another entry.
+        if borrowed:
+            record = schema[name] = dict(record)
+            predicate = schema[flag] = dict(predicate)
+            # Presence is fixed by the normal preparation binding. Reuse the
+            # existing finite scalar contract so consumption folds the absent
+            # query before device generation, and rebinding invalidates it.
+            predicate["prepare_static"] = True
         record.update(dynamic_input_record=True, input_presence_attribute=flag)
         predicate.update(dynamic_storage_condition=True, input_presence_attribute=flag)
         declarations[name] = _InputRecord(flag)
         declarations[flag] = _InputPresence(primitive_types.i32)
         for key, item in members.items():
+            if borrowed:
+                item = schema[key] = dict(item)
             item["input_record"] = name
             if key in storage:
                 value = declarations[key]
                 declarations[key] = _ConditionalDenseField(value.dtype, value.shape, value.group,
                                                            ((flag, True),))
                 item["dynamic_input_storage"] = True
+                if borrowed:
+                    item["shape"] = list(value.shape)
+            elif borrowed and item["kind"] == "ndarray":
+                # Presence is recorded by the enclosing input namespace. Use
+                # the same nullable external descriptor and lease as records;
+                # it is not an allocation owned by the query's caller.
+                value = declarations[key]
+                declarations[key] = Array(value.dtype, value.ndim, value.shape, value.resource_id)
     environment._set_declarations(declarations)
 
 
