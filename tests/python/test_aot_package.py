@@ -6283,6 +6283,156 @@ class Model:
 '''
 
 
+PREPARED_CHILD_REFERENCE_SOURCE = '''
+import taichi_forge as ti
+preparations = 0
+@ti.data_oriented
+class Child:
+    def __init__(self, n: int):
+        self.n = n
+        scope = ti.experimental.ResourceScope(self)
+        scope.values = scope.field(ti.i32, shape=scope.dim('n'), initialization='zero')
+    @ti.func
+    def read(self, i):
+        return self.values[i]
+@ti.data_oriented
+class Model:
+    def __init__(self, n: int):
+        self.n = n
+        self.has_child = False
+        scope = ti.experimental.ResourceScope(self)
+        scope.static('has_child', choices=(False, True))
+        scope.owner_reference('active', None, optional=True)
+        scope.out = scope.field(ti.i32, shape=scope.dim('n'), initialization='zero')
+    def prepare(self):
+        global preparations
+        preparations += 1
+        child = Child(self.n)
+        self.has_child = True
+        scope = ti.experimental.ResourceScope(self)
+        scope.static('has_child', choices=(False, True))
+        if self.has_child:
+            scope.child = child
+            scope.owner_reference('active', self.child)
+    @ti.kernel
+    def step(self):
+        for i in range(self.n):
+            if ti.static(self.active is not None):
+                self.out[i] = self.active.read(i)
+            else:
+                self.out[i] = -1
+    def graph(self):
+        builder = ti.graph.GraphBuilder()
+        builder.dispatch(self.step)
+        return builder.compile()
+'''
+
+
+@test_utils.test(arch=[ti.cpu, ti.cuda], offline_cache=False)
+def test_package_prepared_child_reference_keeps_identity_and_old_calls(tmp_path, monkeypatch):
+    package = _source_package(tmp_path, monkeypatch, PREPARED_CHILD_REFERENCE_SOURCE)
+    manifest = ti.aot.export_package(package, tmp_path / 'sdk')
+    assert package.model.preparations == 0
+    original = package.Model(5)
+    original.prepare()
+    original.child.values.fill(7)
+    original.step()
+    with Runtime(manifest['target']) as runtime, load_package(runtime, tmp_path / 'sdk') as code:
+        a, b = code.host.Model(5), code.host.Model(11)
+        a.step()
+        np.testing.assert_array_equal(a.out.to_numpy(), -1)
+        a.prepare()
+        assert a.active is a.child
+        old = a.child
+        old.values.from_numpy(np.full(5, 7, np.int32))
+        a.step()
+        np.testing.assert_array_equal(a.out.to_numpy(), original.out.to_numpy())
+        saved = a.graph().bind({})
+        a.prepare()
+        assert a.active is a.child and a.child is not old
+        a.child.values.from_numpy(np.full(5, 19, np.int32))
+        old.values.from_numpy(np.full(5, 23, np.int32))
+        a.step()
+        np.testing.assert_array_equal(a.out.to_numpy(), 19)
+        saved.run()
+        np.testing.assert_array_equal(a.out.to_numpy(), 23)
+        b.prepare()
+        b.child.values.from_numpy(np.full(11, 31, np.int32))
+        b.step()
+        np.testing.assert_array_equal(b.out.to_numpy(), 31)
+        saved.close()
+        # A same-type object from another instance cannot replace the declared path.
+        a.active = b.child
+        with pytest.raises(ValueError, match='identity|reference|binding'):
+            a.step()
+        a.active = a.child
+        a.step()
+        np.testing.assert_array_equal(a.out.to_numpy(), 19)
+    probe = tmp_path / 'consume_prepared_child_reference.py'
+    probe.write_text('''
+import importlib.abc, sys
+import numpy as np
+from taichi_forge_runtime.aot import Runtime, load_package
+class NoSource(importlib.abc.MetaPathFinder):
+    def find_spec(self, fullname, path=None, target=None):
+        if fullname.split('.')[0] in ('taichi', 'taichi_forge', 'definition_fixture'):
+            raise ImportError(fullname)
+sys.meta_path.insert(0, NoSource())
+with Runtime(sys.argv[2]) as runtime, load_package(runtime, sys.argv[1]) as code:
+    a, b = code.host.Model(3), code.host.Model(3)
+    a.step()
+    np.testing.assert_array_equal(a.out.to_numpy(), -1)
+    for model, values in ((a, [2, 5, 7]), (b, [11, 13, 17])):
+        model.prepare()
+        assert model.child is model.active
+        model.child.values.from_numpy(np.array(values, np.int32))
+        model.step()
+        np.testing.assert_array_equal(model.out.to_numpy(), values)
+    a.active = b.child
+    try:
+        a.step()
+    except ValueError:
+        pass
+    else:
+        raise AssertionError('same-shape wrong-instance alias accepted')
+    a.active = a.child
+    a.child.values.from_numpy(np.array([19, 23, 29], np.int32))
+    a.step()
+    np.testing.assert_array_equal(a.out.to_numpy(), [19, 23, 29])
+    np.testing.assert_array_equal(b.out.to_numpy(), [11, 13, 17])
+print('PREPARED_CHILD_REFERENCE_SOURCE_FREE_OK')
+''', encoding='utf8')
+    result = subprocess.run(
+        [sys.executable, '-B', str(probe), str(tmp_path / 'sdk'), manifest['target']],
+        cwd=tmp_path,
+        env=dict(os.environ, PYTHONDONTWRITEBYTECODE='1',
+                 PYTHONPATH=str(Path(__file__).parents[2] / 'packaging/runtime/src'),
+                 TAICHI_NATIVE_RUNTIME_DIR=str(Path(utils._loaded_native_runtime_path).parent),
+                 TAICHI_RUNTIME_DIR=utils._runtime_bitcode_dir()),
+        capture_output=True, text=True, timeout=90)
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert 'PREPARED_CHILD_REFERENCE_SOURCE_FREE_OK' in result.stdout
+
+
+@test_utils.test(arch=ti.cpu, offline_cache=False)
+@pytest.mark.parametrize('case', ['missing_child', 'field_path', 'unguarded_absence'])
+def test_package_prepared_child_reference_requires_owner_path_and_presence(tmp_path, monkeypatch, case):
+    source = PREPARED_CHILD_REFERENCE_SOURCE
+    if case in ('missing_child', 'field_path'):
+        source = source.replace("scope.owner_reference('active', self.child)",
+                                "scope.owner_reference('active', self." +
+                                ('missing' if case == 'missing_child' else 'out') + ")")
+    else:
+        source = source.replace("        if self.has_child:\n            scope.child = child\n"
+                                "            scope.owner_reference('active', self.child)",
+                                "        scope.child = child\n        scope.owner_reference('active', self.child)")
+    package = _source_package(tmp_path, monkeypatch, source)
+    with pytest.raises(ValueError, match='[Oo]wner input|Repeated construction resource'):
+        ti.aot.check_package(package)
+    assert package.model.preparations == 0
+    assert ti.lang.impl.get_runtime().get_num_compiled_functions() == 0
+
+
 @test_utils.test(arch=[ti.cpu, ti.cuda], offline_cache=False)
 def test_package_typed_owner_preparation_rebinds_optional_input(tmp_path, monkeypatch):
     package = _source_package(tmp_path, monkeypatch, PREPARED_OWNER_INPUT_SOURCE)

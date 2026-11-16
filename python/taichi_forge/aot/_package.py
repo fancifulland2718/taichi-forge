@@ -154,7 +154,11 @@ def _owner_schema(
                 children = getattr(function, "_package_preparation_children", ())
                 function._package_preparation_children = tuple(dict.fromkeys((*children, name)))
             if (getattr(function, "_package_preparation_method", False)
-                    and declaration["kind"] == "owner_input" and "owner_type" in declaration):
+                    and declaration["kind"] == "owner_input"
+                    and ("owner_type" in declaration or "reference_path" in declaration)):
+                # Declared child paths use resolve_inputs() to prove the source
+                # type and retain the same runtime identity check as constructor
+                # references. Their type need not be known in this syntax pass.
                 declaration["binding_phase"] = "preparation"
             if getattr(function, "_package_preparation_method", False) and declaration["kind"] == "borrowed_field":
                 if "input_parameter" in declaration:
@@ -168,7 +172,8 @@ def _owner_schema(
                 _fail(module, function, "Preparation resource allocations require explicit group contexts")
             if getattr(function, "_package_preparation_method", False) and (
                 "presence_parameter" in declaration or declaration["kind"] == "host_owner_sequence"
-                or declaration["kind"] == "owner_input" and "owner_type" not in declaration
+                or declaration["kind"] == "owner_input"
+                and "owner_type" not in declaration and "reference_path" not in declaration
             ):
                 _fail(
                     module,
@@ -177,6 +182,14 @@ def _owner_schema(
                 )
             if name in schema and schema[name]["kind"] != "value":
                 previous = schema[name]
+                if (previous.get("initial_owner_absence")
+                        and declaration["kind"] == "owner_input"
+                        and declaration.get("binding_phase") == "preparation"
+                        and declaration.get("reference_path") and declaration.get("conditions")):
+                    # The constructor proves absence before preparation; the
+                    # declared boolean guard supplies the present variant. No
+                    # artificial dead else arm is needed at the binding site.
+                    declaration["optional_presence"] = True
                 if (previous.get("initial_owner_absence")
                         and declaration["kind"] == "owner_input"
                         and declaration.get("binding_phase") == "preparation"

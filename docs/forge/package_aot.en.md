@@ -1404,6 +1404,15 @@ An already bound Graph retains its old resource snapshot; bind it again to use
 new references. The ordinary JIT reference binds before first compilation.
 This does not qualify arbitrary rebinding of compiled JIT template owners or
 export of arbitrary cyclic object graphs.
+Preparation can also reference a child created and registered by that method,
+such as `scope.child = Child(...)` followed by
+`scope.owner_reference('active', self.child)`. The existing declared path resolver
+proves the type, and consumption requires the exact referenced object. A port
+initialized to optional `None` needs a declared boolean presence guard around
+the child and reference publication. This reuses the version 85 contract without
+new runtime checks. Focused CPU/CUDA tests cover live data, independent instances,
+replacement with retained Graph snapshots, invalid paths and wrong-instance
+rejection, including source-free subprocess consumption.
 For bidirectional associations, an existing `record` with typed external Field
 borrows can declare the members actually read while retaining the original
 object and storage. CPU/CUDA positive and negative checks cover back-reference
