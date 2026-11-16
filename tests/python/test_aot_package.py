@@ -24644,6 +24644,81 @@ class Model:
 
 
 @test_utils.test(arch=[ti.cpu, ti.cuda], offline_cache=False)
+def test_package_host_kernel_selection_preserves_bound_receiver(tmp_path, monkeypatch):
+    source = INDEPENDENT_OWNER_INPUTS_SOURCE + '''
+    @ti.kernel
+    def subtract(self, source: ti.template(), gain: ti.f32):
+        for i in self.values:
+            self.values[i] = source.values[i % source.n] - gain
+    def select(self, source: 'Model', gain, add):
+        kernel = self.add if add else self.subtract
+        kernel(source, gain)
+'''
+    # Both entries keep their normal self/source template and live scalar ABI.
+    package = _source_package(tmp_path, monkeypatch, source)
+    manifest = ti.aot.export_package(package, tmp_path / 'sdk')
+    with Runtime(manifest['target']) as runtime, load_package(runtime, tmp_path / 'sdk') as code:
+        output, source = code.host.model.Model(11), code.host.model.Model(3)
+        source.values.from_numpy(np.full(3, 5, dtype=np.float32))
+        output.values.from_numpy(np.ones(11, dtype=np.float32))
+        output.select(source, 2, True)
+        np.testing.assert_array_equal(output.values.to_numpy(), np.full(11, 11))
+        output.select(source, 2, False)
+        np.testing.assert_array_equal(output.values.to_numpy(), np.full(11, 3))
+
+
+@pytest.mark.parametrize('type_checking', [False, True])
+@test_utils.test(arch=[ti.cpu, ti.cuda], offline_cache=False)
+def test_package_public_typed_host_inputs_use_existing_array_ports(tmp_path, monkeypatch, type_checking):
+    source = INDEPENDENT_OWNER_INPUTS_SOURCE.replace(
+        'constructors = 0', 'constructors = 0\nInput = ti.types.ndarray(dtype=ti.f32, ndim=1)')
+    source += '''
+    def external(self, source: 'Model | Alternate', field: Input, gain):
+        combine(self, source, field, gain)
+
+class Alternate(Model):
+    pass
+'''
+    if type_checking:
+        source = source.replace('class Alternate(Model):\n    pass', '')
+        source = 'from typing import TYPE_CHECKING\nif TYPE_CHECKING:\n    from .variant import Alternate\n' + source
+    package = _source_package(
+        tmp_path, monkeypatch, source,
+        initializer=('from .model import Model\nfrom .variant import Alternate\n' if type_checking
+                     else 'from .model import Model\n'),
+        extra_modules=({'variant': 'from .model import Model\nclass Alternate(Model):\n    pass\n'}
+                       if type_checking else None))
+    manifest = ti.aot.export_package(package, tmp_path / 'sdk')
+    assert manifest['version'] == 92
+    assert package.model.constructors == 0
+    reference = package.Model(7)
+    variant = package if type_checking else package.model
+    source_model = variant.Alternate(3)
+    source_model.values.from_numpy(np.full(3, 5, dtype=np.float32))
+    field = ti.field(ti.f32, shape=4)
+    field.from_numpy(np.full(4, 3, dtype=np.float32))
+    reference.external(source_model, field, 2)
+    expected = reference.values.to_numpy()
+    with Runtime(manifest['target']) as runtime, load_package(runtime, tmp_path / 'sdk') as code:
+        output = code.host.model.Model(7)
+        field = runtime.ndarray('f32', (4,))
+        field.write(np.full(4, 3, dtype=np.float32))
+        variant = code.host if type_checking else code.host.model
+        for cls in (code.host.model.Model, variant.Alternate):
+            source_model = cls(3)
+            source_model.values.from_numpy(np.full(3, 5, dtype=np.float32))
+            output.external(source_model, field, 2)
+            np.testing.assert_array_equal(output.values.to_numpy(), expected)
+        field.write(np.full(4, 9, dtype=np.float32))
+        output.external(source_model, field, 2)
+        np.testing.assert_array_equal(output.values.to_numpy(), np.full(7, 19))
+        with pytest.raises(ValueError, match='compatible definition|input'):
+            output.external(source_model, runtime.ndarray('f32', (2, 2)), 2)
+        with pytest.raises(ValueError, match='compatible definition|input'):
+            output.external(source_model, runtime.ndarray('i32', (4,)), 2)
+
+
+@test_utils.test(arch=[ti.cpu, ti.cuda], offline_cache=False)
 def test_package_host_optional_owner_return_preserves_input_presence(tmp_path, monkeypatch):
     source = '''
 import taichi_forge as ti

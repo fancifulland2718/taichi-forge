@@ -14,6 +14,7 @@ from contextlib import contextmanager
 from dataclasses import dataclass, fields, is_dataclass, MISSING
 import inspect
 import importlib.util
+import json
 import types
 
 from taichi_forge_runtime._static_values import static_key
@@ -148,6 +149,13 @@ class _Resource:
     owner: _Owner
     path: tuple
     optional: bool = False
+
+
+@dataclass(frozen=True)
+class _FieldABI:
+    """A public array annotation supplies type/rank, never a storage instance."""
+    element: str
+    ndim: int
 
 
 @dataclass(frozen=True)
@@ -517,6 +525,8 @@ def discover(sources, imported, *, preparation_receivers=None, resource_inventor
         return {}, []
 
     pending = deque()
+    annotation_namespaces = {}
+    module_nodes = {module: tree for module, _, _, _, tree, _, _, _ in sources}
     for identity, cls in classes.items():
         if resource_inventory is not None:
             break
@@ -545,19 +555,46 @@ def discover(sources, imported, *, preparation_receivers=None, resource_inventor
                                     annotation = ast.parse(annotation.value, mode="eval").body
                                 except SyntaxError:
                                     continue
-                            declared = _source_value(annotation, function.__globals__)
+                            namespace = function.__globals__
+                            declared = _source_value(annotation, namespace)
+                            if declared is None:
+                                # TYPE_CHECKING imports may name classes already
+                                # present in the actual source closure. Reuse import
+                                # resolution without importing annotation-only code.
+                                origin = function.__module__
+                                if origin not in annotation_namespaces:
+                                    annotation_namespaces[origin] = source_function_namespace(
+                                        function, module_nodes[origin], imported)
+                                namespace = annotation_namespaces[origin]
+                                declared = _source_value(annotation, namespace)
                             if declared is GraphBuilder:
                                 inputs[parameter.arg] = _Graph()
-                            elif inspect.isclass(declared):
-                                kind = declared.__module__ + "." + declared.__qualname__
-                                if classes.get(kind) is declared:
-                                    # A public input is independent even when it
-                                    # has the same declared type as self.
-                                    inputs[parameter.arg] = _Owner(kind, identity + ":" + parameter.arg)
+                            else:
+                                from ._package_input_families import owner_annotation_types
+                                from ._package_types import type_spec
+                                from taichi_forge.types._argument_descriptor import describe_annotation
+                                from taichi_forge.types.ndarray_type import NdarrayType
+
+                                kinds = owner_annotation_types(annotation, namespace)
+                                if kinds and all(classes.get(kind.__module__ + "." + kind.__qualname__) is kind
+                                                 for kind in kinds):
+                                    root = identity + ":" + parameter.arg
+                                    choices = tuple(_Owner(kind.__module__ + "." + kind.__qualname__, root) for kind in kinds)
+                                    inputs[parameter.arg] = (choices[0] if len(choices) == 1 else
+                                                             _Choice((identity, name, parameter.arg), choices))
+                                elif isinstance(declared, NdarrayType):
+                                    descriptor = describe_annotation(declared)
+                                    if (descriptor.element is not None and descriptor.element.is_complete
+                                            and descriptor.element.category in ('scalar', 'tensor')
+                                            and type(declared.ndim) is int and declared.ndim >= 0
+                                            and not declared.needs_grad):
+                                        element = type_spec(declared.dtype, imported[function.__module__])
+                                        inputs[parameter.arg] = _FieldABI(json.dumps(element, sort_keys=True), declared.ndim)
                         if preparation_receivers is None:
                             for parameter in parameters[1:]:
                                 inputs.setdefault(parameter, _UnboundInput((identity, name, parameter)))
-                        pending.append((function, inputs, (function,), None))
+                        for context in _choice_contexts(inputs):
+                            pending.append((function, context, (function,), None))
 
     inventory = set()
     if resource_inventory is not None:
@@ -1087,7 +1124,8 @@ def discover(sources, imported, *, preparation_receivers=None, resource_inventor
                         for resource, absent in ((left, right), (right, left)):
                             if isinstance(resource, _Resource) and isinstance(absent, _Literal) and absent.value is None:
                                 return _Resource(resource.owner, resource.path, optional=True)
-                        if resource_inventory is not None and left != right:
+                        if left != right and (resource_inventory is not None
+                                              or _callable_fact(left) and _callable_fact(right)):
                             projection = source_projection()
                             key = (getattr(expression, 'lineno', None), getattr(expression, 'col_offset', None),
                                    projection.source_key(expression))
@@ -1490,7 +1528,9 @@ def discover(sources, imported, *, preparation_receivers=None, resource_inventor
                             if key in receivers:
                                 continue
                             item = inputs.get(key)
-                            if isinstance(item, _Resource):
+                            if isinstance(item, _FieldABI):
+                                field_inputs.append((key, None, item))
+                            elif isinstance(item, _Resource):
                                 if item.optional:
                                     raise ValueError("Optional Field forwarding requires its declared presence binding")
                                 path = (*item.owner.path, *item.path)
@@ -1631,20 +1671,20 @@ def discover(sources, imported, *, preparation_receivers=None, resource_inventor
                         continue
                     callee, receiver = target(call.func)
                     if callee not in kernels and callee not in functions:
+                        callback = value(call.func)
+                        if (isinstance(callback, _Choice)
+                                and not any(isinstance(arg, ast.Starred) for arg in call.args)
+                                and all(k.arg is not None for k in call.keywords)):
+                            choices = list(_choice_contexts(dict(
+                                callback=callback, args=tuple(value(arg) for arg in call.args),
+                                kwargs=_Mapping(tuple((k.arg, value(k.value)) for k in call.keywords)))))
+                            if all(isinstance(choice['callback'], (_Host, _Kernel)) for choice in choices):
+                                for choice in choices:
+                                    method = choice['callback']
+                                    forward_call(method.function, method.receiver, call,
+                                                 (choice['args'], choice['kwargs'].items))
+                                continue
                         if resource_inventory is not None:
-                            callback = value(call.func)
-                            if (isinstance(callback, _Choice)
-                                    and not any(isinstance(arg, ast.Starred) for arg in call.args)
-                                    and all(k.arg is not None for k in call.keywords)):
-                                choices = list(_choice_contexts(dict(
-                                    callback=callback, args=tuple(value(arg) for arg in call.args),
-                                    kwargs=_Mapping(tuple((k.arg, value(k.value)) for k in call.keywords)))))
-                                if all(isinstance(choice['callback'], (_Host, _Kernel)) for choice in choices):
-                                    for choice in choices:
-                                        method = choice['callback']
-                                        forward_call(method.function, method.receiver, call,
-                                                     (choice['args'], choice['kwargs'].items))
-                                    continue
                             fact = value(call)
                             if id(call) in source_only_calls:
                                 continue
@@ -1792,7 +1832,8 @@ def discover(sources, imported, *, preparation_receivers=None, resource_inventor
                         templates=dict(values),
                         resources=dict(resources),
                         owner_inputs=dict(owner_inputs),
-                        field_inputs={key: dict(owner_type=kind, path=path) for key, kind, path in field_inputs},
+                        field_inputs={key: (dict(element=json.loads(path.element), ndim=path.ndim) if kind is None else
+                                            dict(owner_type=kind, path=path)) for key, kind, path in field_inputs},
                         node=definition["node"],
                     )
                 )

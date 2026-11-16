@@ -1878,7 +1878,8 @@ def _export_package(package, output, *, arch, caps, source_root, compilation, ar
                 call_owner = class_name
                 try:
                     input_fields = {
-                        key: owner_graph.input_field_type(value["owner_type"], value["path"])
+                        key: (owner_graph.input_field_type(value["owner_type"], value["path"])
+                              if "owner_type" in value else value)
                         for key, value in call["field_inputs"].items()
                     }
                 except ValueError as error:

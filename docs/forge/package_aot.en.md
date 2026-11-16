@@ -71,6 +71,14 @@ presence cases for direct and Graph calls. Different record member mappings are
 not merged into this optional-input proof; unknown and implicit return paths still
 reject. The consumer selects the applicable existing contract from its actual input.
 
+Public Host forwarders can declare a fixed scalar/tensor ndarray type and rank;
+when forwarded to a Kernel template this uses the same format-92 array port.
+Finite unions of declared owner classes retain distinct input contracts. Type-only
+imports may resolve classes already admitted by the package source closure, without
+importing new modules or evaluating annotations. The actual resource must still
+pass dtype/rank/storage admission. A conditional choice between known bound Kernels
+also preserves both callable/receiver sources; the Host retains the actual choice.
+
 For normal Component capture, a read-only record view does not become another
 ownership path to its provider. A typed view of a Dense Field already owned by the
 same component reuses that allocation's layout and initialization path; the declared
