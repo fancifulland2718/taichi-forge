@@ -7172,6 +7172,48 @@ class Model:
             np.testing.assert_array_equal(loaded.query.work.to_numpy(), original.query.work.to_numpy())
 
 
+@test_utils.test(arch=[ti.cpu, ti.cuda], offline_cache=False)
+def test_package_child_query_forwarding_does_not_expand_host_backreferences(tmp_path, monkeypatch):
+    source = '''import taichi_forge as ti
+@ti.data_oriented
+class Query:
+    def __init__(self, source: 'Source'):
+        scope = ti.experimental.ResourceScope(self)
+        scope.owner_reference('source', source)
+        scope.work = scope.field(ti.i32, shape=scope.owner_dim('source', 'n'), initialization='zero')
+@ti.data_oriented
+class Source:
+    def __init__(self, n):
+        self.n = n
+        scope = ti.experimental.ResourceScope(self)
+        scope.dim('n')
+        scope.query = Query(self)
+@ti.data_oriented
+class Model:
+    def __init__(self, n):
+        scope = ti.experimental.ResourceScope(self)
+        scope.source = Source(n)
+        scope.owner_reference('query', self.source.query)
+    @ti.func
+    def write(self, query, value):
+        for i in query.work:
+            query.work[i] = i + value
+    @ti.kernel
+    def run(self, value: ti.i32):
+        self.write(query=self.query, value=value)
+'''
+    package = _source_package(tmp_path, monkeypatch, source)
+    manifest = ti.aot.export_package(package, tmp_path / 'sdk')
+    with Runtime(manifest['target']) as runtime, load_package(runtime, tmp_path / 'sdk') as code:
+        for n in (7, 19):
+            original, loaded = package.Model(n), code.host.Model(n)
+            for value in (5, 11):
+                original.run(value)
+                loaded.run(value)
+                assert loaded.query is loaded.source.query
+                np.testing.assert_array_equal(loaded.query.work.to_numpy(), original.query.work.to_numpy())
+
+
 @test_utils.test(arch=ti.cpu, offline_cache=False)
 @pytest.mark.parametrize('escaped', [False, True])
 def test_package_write_inventory_public_callable_signature(tmp_path, monkeypatch, escaped):
@@ -28831,6 +28873,12 @@ def boolean(self, flag):
         return self.integer_value[0]
 def recursive_literal(self, channel):
     return self.recursive_literal(channel + 'x')
+
+def child(self):
+    return self.forward(value=self.inputs.query) + sample(self.material, 'base')
+
+def unknown_child(self):
+    return external(self.inputs.query)
 ''').body}
     nodes = [*methods.values(), helper, other_helper]
     reader = _MethodInputPaths(
@@ -28841,6 +28889,9 @@ def recursive_literal(self, channel):
         ('has_base_texture',), ('base_values',), ('has_mask_texture',), ('mask_values',)}
     assert reader.parameter('Owner', 'other', 'provider') == {('other_values',)}
     assert reader.parameter('Owner', 'keyword', 'provider') == {('depth',)}
+    assert reader.parameter('Owner', 'child', 'self') == {
+        ('inputs', 'query', 'depth'), ('material', 'has_base_texture'), ('material', 'base_values')}
+    assert reader.parameter('Owner', 'unknown_child', 'self') == {('inputs', 'query')}
     assert reader.parameter('Owner', 'footprint', 'provider') == {
         ('mipmaps',), ('base_mips',), ('has_base_texture',), ('base_values',)}
     assert reader.parameter('Owner', 'boolean', 'self', literals=(('flag', True),)) == {('boolean_value',)}

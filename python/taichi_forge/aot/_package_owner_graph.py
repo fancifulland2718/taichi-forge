@@ -36,12 +36,23 @@ def _member_paths(node, receiver, forwarded=None, method_reads=None, nodes=None)
             if resolved is not None:
                 paths.update(resolved)
                 continue
+        value = part
         path, presence_only = [], id(part) in presence_reads
         while isinstance(part, ast.Attribute):
             path.append(part.attr)
             part = part.value
         if isinstance(part, ast.Name) and part.id == receiver:
-            (presence if presence_only else paths).add(tuple(reversed(path)))
+            prefix = tuple(reversed(path))
+            if forwarded is not None and not presence_only:
+                resolved = forwarded(value, parents)
+                if resolved is not None:
+                    # Passing self.child to an exact helper has the same
+                    # dependency proof as passing a named owner parameter.
+                    # Keep its actual member reads, not a whole-child escape
+                    # that recursively restores unrelated Host backreferences.
+                    paths.update((*prefix, *member) for member in resolved)
+                    continue
+            (presence if presence_only else paths).add(prefix)
     # A nullable check does not expose all methods of a child whose concrete
     # query is already named in this body. A bare owner alias/argument still does.
     paths.update(path for path in presence
