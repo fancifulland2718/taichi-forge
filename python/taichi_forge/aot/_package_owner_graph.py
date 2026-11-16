@@ -5,9 +5,11 @@ import copy
 from types import MappingProxyType, SimpleNamespace
 
 
-def _member_paths(node, receiver):
+def _member_paths(node, receiver, forwarded=None):
     """Read explicit device member paths, without traversing Host construction."""
     paths, presence = set(), set()
+    parents = ({id(child): part for part in ast.walk(node) for child in ast.iter_child_nodes(part)}
+               if forwarded is not None else {})
     attributes = {id(part.value) for part in ast.walk(node) if isinstance(part, ast.Attribute)}
     presence_reads = {
         id(part.left) for part in ast.walk(node)
@@ -17,6 +19,11 @@ def _member_paths(node, receiver):
     }
     for part in ast.walk(node):
         if isinstance(part, ast.Name) and part.id == receiver and id(part) not in attributes:
+            if forwarded is not None:
+                resolved = forwarded(part, parents)
+                if resolved is not None:
+                    paths.update(resolved)
+                    continue
             # An owner passed to an unresolved helper/alias can expose any of
             # its methods. Keep the existing complete device view in that case.
             paths.add(())
@@ -33,6 +40,58 @@ def _member_paths(node, receiver):
     paths.update(path for path in presence
                  if not any(len(member) > len(path) and member[:len(path)] == path for member in paths))
     return paths
+
+
+class _MethodInputPaths:
+    """Summarize declared self-method forwarding, then discard the syntax index."""
+
+    def __init__(self, methods):
+        self.methods, self.cache = methods, {}
+
+    def parameter(self, owner, method, parameter, visiting=frozenset()):
+        key = owner, method, parameter
+        if key in visiting:
+            return frozenset(((),))
+        if key in self.cache:
+            return self.cache[key]
+        node = self.methods[owner][method]
+        parameters = (*node.args.posonlyargs, *node.args.args)
+        receiver = parameters[0].arg
+        # Rebound receivers and nested lexical scopes do not prove the callee.
+        known_receiver = not any(
+            isinstance(part, ast.Name) and part.id == receiver and isinstance(part.ctx, ast.Store)
+            or isinstance(part, (ast.FunctionDef, ast.Lambda)) and part is not node
+            for part in ast.walk(node))
+
+        def forwarded(value, parents):
+            parent = parents.get(id(value))
+            keyword = parent.arg if isinstance(parent, ast.keyword) else None
+            call = parents.get(id(parent)) if isinstance(parent, ast.keyword) else parent
+            if (not known_receiver or not isinstance(call, ast.Call)
+                    or not isinstance(call.func, ast.Attribute)
+                    or not isinstance(call.func.value, ast.Name) or call.func.value.id != receiver
+                    or call.func.attr not in self.methods[owner]
+                    or any(isinstance(arg, ast.Starred) for arg in call.args)
+                    or any(arg.arg is None for arg in call.keywords)):
+                return None
+            callee = self.methods[owner][call.func.attr]
+            if any(getattr(decorator, 'id', getattr(decorator, 'attr', '')) in ('staticmethod', 'classmethod')
+                   for decorator in (*node.decorator_list, *callee.decorator_list)):
+                return None
+            positional = (*callee.args.posonlyargs, *callee.args.args)[1:]
+            if isinstance(parent, ast.keyword):
+                if keyword not in {arg.arg for arg in (*positional, *callee.args.kwonlyargs)}:
+                    return None
+                target = keyword
+            elif value in call.args and call.args.index(value) < len(positional):
+                target = positional[call.args.index(value)].arg
+            else:
+                return None
+            return self.parameter(owner, call.func.attr, target, visiting | {key})
+
+        result = frozenset(_member_paths(node, parameter, forwarded))
+        self.cache[key] = result
+        return result
 
 
 def owner_bindings(environment, schema, used):
@@ -81,7 +140,7 @@ class OwnerGraph:
             for name, _, _, _, tree, _, schemas, _ in sources
             for owner, schema in schemas.items()
         }
-        device_paths, device_methods = {}, {}
+        device_methods = {}
         for name, _, _, _, tree, _, _, definitions in sources:
             for definition in definitions:
                 if definition['owner'] is None or definition.get('error_interface'):
@@ -90,25 +149,37 @@ class OwnerGraph:
                 parameters = (*node.args.posonlyargs, *node.args.args)
                 if parameters:
                     owner = name + '.' + source_class(tree, definition['owner'])
-                    paths = _member_paths(node, parameters[0].arg)
-                    if any(isinstance(part, ast.Call) and isinstance(part.func, ast.Name)
-                           and part.func.id == 'super' for part in ast.walk(node)):
-                        paths.add(())
-                    device_paths.setdefault(owner, set()).update(paths)
-                    device_methods.setdefault(owner, {})[node.name] = frozenset(paths)
+                    device_methods.setdefault(owner, {})[node.name] = node
         self._device_paths, self._device_methods = {}, {}
         self._numerical_path_cache = {}
+        methods = {}
         for identity, (name, cls_name, _) in self.definitions.items():
             cls = getattr(imported[name], cls_name)
-            self._device_paths[identity] = frozenset(
-                path for base in cls.__mro__
-                for path in device_paths.get(base.__module__ + '.' + base.__qualname__, ())
-            )
             # Follow the same method override order as the original owner.
-            self._device_methods[identity] = {
-                method: paths for base in reversed(cls.__mro__)
-                for method, paths in device_methods.get(base.__module__ + '.' + base.__qualname__, {}).items()
-            }
+            inherited = methods[identity] = {}
+            for base in reversed(cls.__mro__):
+                # An opaque/Host override must not inherit the base helper's
+                # proof merely because their method names match.
+                for method in base.__dict__:
+                    inherited.pop(method, None)
+                inherited.update(device_methods.get(base.__module__ + '.' + base.__qualname__, {}))
+        # These summaries survive the scan; the temporary method/parent AST
+        # indices do not. They do not own or construct application resources.
+        reads = _MethodInputPaths(methods)
+        self._method_input_paths = {}
+        for identity, nodes in methods.items():
+            summaries = self._device_methods.setdefault(identity, {})
+            for method, node in nodes.items():
+                parameters = (*node.args.posonlyargs, *node.args.args, *node.args.kwonlyargs)
+                for parameter in parameters:
+                    self._method_input_paths[identity, id(node), parameter.arg] = reads.parameter(
+                        identity, method, parameter.arg)
+                paths = set(reads.parameter(identity, method, parameters[0].arg))
+                if any(isinstance(part, ast.Call) and isinstance(part.func, ast.Name)
+                       and part.func.id == 'super' for part in ast.walk(node)):
+                    paths.add(())
+                summaries[method] = frozenset(paths)
+            self._device_paths[identity] = frozenset(path for paths in summaries.values() for path in paths)
         for identity in self.definitions:
             self._validate(identity, ())
 
@@ -170,8 +241,12 @@ class OwnerGraph:
         schema = {"_arg_" + key: dict(kind="owner_input", owner_type=value) for key, value in inputs.items()}
         schema.update({"_arg_" + key: dict(kind="ndarray", **value) for key, value in fields.items()})
         paths = self._call_input_paths.setdefault(identity, {})
+        parameters = (*node.args.posonlyargs, *node.args.args)
+        receiver_type = inputs.get(parameters[0].arg) if parameters else None
         for key in inputs:
-            paths.setdefault('_arg_' + key, set()).update(_member_paths(node, key))
+            read_paths = self._method_input_paths.get((receiver_type, id(node), key))
+            paths.setdefault('_arg_' + key, set()).update(
+                _member_paths(node, key) if read_paths is None else read_paths)
         if identity in self.definitions:
             if self.definitions[identity][2] != schema:
                 raise ValueError("Call context changed its declared input types")

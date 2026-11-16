@@ -25474,21 +25474,44 @@ class Model:
 '''
 
 
-@pytest.mark.parametrize('escaped', [False, True])
+@pytest.mark.parametrize('call_style', ['direct', 'unresolved', 'method'])
 @test_utils.test(arch=[ti.cpu, ti.cuda], offline_cache=False)
-def test_package_numerical_owner_inputs_keep_used_children_without_host_tree(tmp_path, monkeypatch, escaped):
+def test_package_numerical_owner_inputs_keep_used_children_without_host_tree(tmp_path, monkeypatch, call_style):
     from taichi_forge.aot._package_owner_graph import OwnerGraph
 
     source_text = NUMERICAL_OWNER_CHILDREN_SOURCE
-    if escaped:
+    if call_style == 'unresolved':
         source_text = source_text.replace('value = lighting.sample()', 'value = query(lighting)')
+    elif call_style == 'method':
+        start = source_text.index('@ti.kernel\ndef compose(')
+        end = source_text.index('@ti.data_oriented\nclass Model:', start)
+        source_text = source_text[:start] + source_text[end:]
+        source_text = source_text.replace('    def apply(self, source: Source, gain):\n        compose(self, source, gain)', '''
+    @ti.func
+    def relay(self, source):
+        return self.nested(lighting=source)
+    @ti.func
+    def nested(self, lighting):
+        return lighting.sample()
+    @ti.kernel
+    def compose(self, lighting: ti.template(), gain: ti.f32):
+        for i in self.values:
+            value = self.relay(lighting)
+            if ti.static(lighting.fixed_gi is not None):
+                value += lighting.fixed_gi.values[0]
+            self.values[i] = value * gain
+    def apply(self, source: Source, gain):
+        self.compose(source, gain)''')
+        source_text = source_text.replace("builder.dispatch(compose, gain, template_args={'output': self, 'lighting': source})",
+                                          "builder.dispatch(self.compose, gain, template_args={'lighting': source})")
     package = _source_package(tmp_path, monkeypatch, source_text)
     construct = OwnerGraph.construct
     borrowed = []
 
     def observed(self, identity, **kwargs):
-        if kwargs.get('resource_only') and kwargs.get('numerical_paths') is not None:
-            if not escaped:
+        if (kwargs.get('resource_only') and kwargs.get('numerical_paths') is not None
+                and kwargs.get('path', ())[0].startswith('_arg_')):
+            if call_style != 'unresolved':
                 assert not identity.endswith('.Unused'), 'numerical input constructed its unrelated Host subtree'
                 assert kwargs['path'][-1] != 'producer', 'query constructed its producer-only input'
             borrowed.append((identity, kwargs.get('path')))
@@ -25499,7 +25522,7 @@ def test_package_numerical_owner_inputs_keep_used_children_without_host_tree(tmp
     assert package.model.constructors == 0
     assert any(name.endswith('.ScaledLeaf') for name, _ in borrowed)
     assert any(path[-1] == 'fixed_gi' for _, path in borrowed)
-    if escaped:
+    if call_style == 'unresolved':
         assert any(name.endswith('.Unused') for name, _ in borrowed)
         assert any(path[-1] == 'producer' for _, path in borrowed)
     output = package.Model(7)
