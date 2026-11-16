@@ -24551,6 +24551,70 @@ def test_package_independent_owner_inputs_keep_static_selection(tmp_path, monkey
         np.testing.assert_array_equal(a.values.to_numpy(), np.full(11, 14))
 
 
+@test_utils.test(arch=[ti.cpu, ti.cuda], offline_cache=False)
+def test_package_host_forwarder_receives_types_from_actual_call_sites(tmp_path, monkeypatch):
+    source = INDEPENDENT_OWNER_INPUTS_SOURCE.replace("source: 'Model'", 'source')
+    source += '''
+
+@ti.data_oriented
+class Driver:
+    def __init__(self, n: int, m: int):
+        scope = ti.experimental.ResourceScope(self)
+        scope.output = Model(n)
+        scope.input = Model(m)
+    def run(self, gain):
+        self.output.update(self.input, gain)
+        self.output.update_method(self.input, gain)
+    def graph(self):
+        return self.output.graph(self.input)
+'''
+    package = _source_package(tmp_path, monkeypatch, source)
+    manifest = ti.aot.export_package(package, tmp_path / 'sdk')
+    with Runtime(manifest['target']) as runtime, load_package(runtime, tmp_path / 'sdk') as code:
+        driver = code.host.model.Driver(11, 3)
+        driver.input.values.from_numpy(np.full(3, 5, dtype=np.float32))
+        driver.run(2)
+        np.testing.assert_array_equal(driver.output.values.to_numpy(), np.full(11, 25))
+        with driver.graph().bind(dict(gain=3)) as call:
+            driver.input.values.from_numpy(np.full(3, 7, dtype=np.float32))
+            call.run()
+            np.testing.assert_array_equal(driver.output.values.to_numpy(), np.full(11, 28))
+
+
+@pytest.mark.parametrize('unproven', ['another_site', 'another_receiver', 'rebound'])
+@test_utils.test(arch=ti.cpu, offline_cache=False)
+def test_package_host_forwarder_requires_each_concrete_source(tmp_path, monkeypatch, unproven):
+    source = INDEPENDENT_OWNER_INPUTS_SOURCE.replace("source: 'Model'", 'source')
+    source += '''
+
+@ti.data_oriented
+class Driver:
+    def __init__(self, n: int):
+        scope = ti.experimental.ResourceScope(self)
+        scope.output = Model(n)
+        scope.input = Model(n)
+    def run(self, gain):
+        self.output.update(self.input, gain)
+        self.output.update_method(self.input, gain)
+    def graph(self):
+        return self.output.graph(self.input)
+'''
+    if unproven == 'another_site':
+        source += '''
+    def unknown(self, source, gain):
+        combine(self.output, source, source.values, gain)
+'''
+    elif unproven == 'another_receiver':
+        source += '\nclass UncalledModel(Model):\n    pass\n'
+    else:
+        source = source.replace('combine(self, source, source.values, gain)',
+                                'source = object()\n        combine(self, source, source.values, gain)')
+    package = _source_package(tmp_path, monkeypatch, source)
+    with pytest.raises(ti.aot.PackageExportError, match='unproven template input'):
+        ti.aot.export_package(package, tmp_path / 'sdk')
+    assert not (tmp_path / 'sdk').exists()
+
+
 @pytest.mark.parametrize('vector', [False, True])
 @test_utils.test(arch=[ti.cpu, ti.cuda], offline_cache=False)
 def test_package_independent_field_template_uses_live_shape_and_storage(tmp_path, monkeypatch, vector):

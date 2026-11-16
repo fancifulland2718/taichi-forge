@@ -119,6 +119,22 @@ class _Owner:
 
 
 @dataclass(frozen=True)
+class _UnboundInput:
+    """An open Host parameter, not evidence for any numerical input type."""
+    source: tuple
+
+
+def _has_unbound_input(value):
+    if isinstance(value, _UnboundInput):
+        return True
+    if isinstance(value, (_Mapping, _Record)):
+        return any(_has_unbound_input(item) for _, item in value.items)
+    if isinstance(value, _Choice):
+        return any(_has_unbound_input(item) for item in value.alternatives)
+    return isinstance(value, tuple) and any(_has_unbound_input(item) for item in value)
+
+
+@dataclass(frozen=True)
 class _Resource:
     owner: _Owner
     path: tuple
@@ -529,6 +545,9 @@ def discover(sources, imported, *, preparation_receivers=None, resource_inventor
                                     # A public input is independent even when it
                                     # has the same declared type as self.
                                     inputs[parameter.arg] = _Owner(kind, identity + ":" + parameter.arg)
+                        if preparation_receivers is None:
+                            for parameter in parameters[1:]:
+                                inputs.setdefault(parameter, _UnboundInput((identity, name, parameter)))
                         pending.append((function, inputs, (function,), None))
 
     inventory = set()
@@ -544,6 +563,8 @@ def discover(sources, imported, *, preparation_receivers=None, resource_inventor
         pending.append((function, dict(inputs), (function,), None))
 
     visited, domains, covered, failures = set(), {}, set(), []
+    deferred_inputs = {}
+    complete_inputs = {}
     invalid = set()
     return_cache = {}
     binding_domains = {}
@@ -615,6 +636,8 @@ def discover(sources, imported, *, preparation_receivers=None, resource_inventor
         return None
 
     def attribute(receiver, name):
+        if isinstance(receiver, _UnboundInput):
+            return receiver
         if isinstance(receiver, _CallableMetadata):
             return receiver
         if isinstance(receiver, _ScopeReference):
@@ -1433,6 +1456,14 @@ def discover(sources, imported, *, preparation_receivers=None, resource_inventor
                         pending.append((callee, inputs, (*chain, callee), id(call)))
                         return
                     origin, definition, parameters = kernels[callee]
+                    missing = [key for key in parameters if _has_unbound_input(inputs.get(key))]
+                    if missing:
+                        known = tuple((key, inputs[key].identity) for key in parameters
+                                      if isinstance(inputs.get(key), _Owner))
+                        deferred_inputs[(callee, id(call), known)] = (
+                            f"{module}:{call.lineno}: free Kernel {origin}.{definition['name']} "
+                            f"has an unproven template input: {', '.join(missing)}")
+                        return
                     receivers = [key for key in parameters if isinstance(inputs.get(key), _Owner)]
                     if not receivers:
                         failures.append(
@@ -1480,6 +1511,8 @@ def discover(sources, imported, *, preparation_receivers=None, resource_inventor
                         return
                     domains.setdefault(callee, set()).add(
                         (owner.identity, receiver, tuple(values), tuple(resources), owner_inputs, tuple(field_inputs)))
+                    complete_inputs.setdefault((callee, id(call)), set()).add(
+                        tuple((key, inputs[key].identity) for key in receivers))
                     covered.add(id(call))
 
                 def forward_call(callee, receiver, call, selected_values=None):
@@ -1672,6 +1705,10 @@ def discover(sources, imported, *, preparation_receivers=None, resource_inventor
         # borrows instead infer one allocation contract below and use the existing
         # binding boundary for caller-provided values; unknown calls are not proof
         # of that contract, nor do they require a second implementation.
+        for (callee, call_site, known), message in deferred_inputs.items():
+            if not any(set(known) <= set(context) for context in complete_inputs.get((callee, call_site), ())):
+                failures.append(message)
+                invalid.add(callee)
         for function, (module, node) in functions.items():
             for call in ast.walk(node):
                 if isinstance(call, ast.Call) and id(call) not in covered:

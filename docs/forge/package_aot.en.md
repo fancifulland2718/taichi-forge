@@ -52,6 +52,14 @@ call. Conditional types, model-sized elements, sparse trees and arbitrary unknow
 Field sources remain outside this addition. Local CPU/CUDA evidence does not
 qualify a complete renderer.
 
+An unannotated Host forwarding parameter may obtain its type from actual calls
+in the exported definitions. Initial inspection with only `self` known defers
+that unresolved input until source traversal finishes. Every Kernel call site
+still needs a complete context for each known concrete receiver; a valid call
+elsewhere does not qualify another site or an uncalled subclass. Rebinding a
+parameter to an opaque value still rejects. This producer-only analysis adds no
+runtime inference, model execution or consumer checks.
+
 For normal Component capture, a read-only record view does not become another
 ownership path to its provider. A typed view of a Dense Field already owned by the
 same component reuses that allocation's layout and initialization path; the declared
