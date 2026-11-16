@@ -33,6 +33,22 @@ _ids = itertools.count()
 _DTYPES = ("f32", "f64", "i8", "i16", "i32", "i64", "u8", "u16", "u32", "u64")
 
 
+def _discard_construction_calls(package, owner, cache):
+    # Initialization may already have prepared a numerical call. Retire its
+    # bindings before the failed construction releases their argument storage.
+    for call in cache.values():
+        call.close()
+        for workspace in call.workspaces:
+            workspace.close()
+    cache.clear()
+    if getattr(owner, "_forge_package_calls", None) is cache:
+        del owner._forge_package_calls
+    for index, registered in enumerate(package._call_caches):
+        if registered is cache:
+            del package._call_caches[index]
+            break
+
+
 @dataclass(frozen=True)
 class _Backend:
     name: str
@@ -411,7 +427,7 @@ class _ModuleBinding:
         construction = _construction.get()
         if construction is None or construction[0] is not self.package:
             raise ValueError("Field allocation requires its managed constructor")
-        _, allocated, owner = construction
+        _, allocated, owner, _ = construction
         owner_key = self.owner_contract(owner, owner_key)
         for alias, value, expression in dimension_aliases:
             actual = self.extent(value.expression, owner) if isinstance(value, Extent) else operator.index(value)
@@ -885,10 +901,12 @@ class _ModuleBinding:
         saved = {name: getattr(owner, name, missing) for name in names}
         previous = _construction.get()
         allocated = []
-        token = _construction.set((self.package, allocated, owner))
+        rollback = ExitStack()
+        token = _construction.set((self.package, allocated, owner, rollback))
         try:
             yield
         except BaseException:
+            rollback.close()
             for value in reversed(allocated):
                 value.close()
                 self.package._arrays.remove(value)
@@ -901,6 +919,9 @@ class _ModuleBinding:
         else:
             if previous is not None and previous[0] is self.package:
                 previous[1].extend(allocated)
+                previous[3].callback(rollback.pop_all().close)
+            else:
+                rollback.pop_all()
         finally:
             _construction.reset(token)
 
@@ -971,13 +992,15 @@ class _ModuleBinding:
         values = {attribute: getattr(owner, attribute, missing) for attribute in members}
         previous = _construction.get()
         allocated = []
-        token = _construction.set((self.package, allocated, owner))
+        rollback = ExitStack()
+        token = _construction.set((self.package, allocated, owner, rollback))
         maps = (owner._forge_package_field_groups, owner._forge_package_layouts)
         saved = [{key: mapping.pop(key, missing) for key in keys} for mapping in maps]
         selections = {attribute: owner._forge_package_member_layouts.pop(attribute, missing) for attribute in members}
         try:
             yield
         except BaseException:
+            rollback.close()
             for value in reversed(allocated):
                 value.close()
                 self.package._arrays.remove(value)
@@ -1005,6 +1028,9 @@ class _ModuleBinding:
                         owner.__dict__.pop(attribute, None)
             if previous is not None and previous[0] is self.package:
                 previous[1].extend(allocated)
+                previous[3].callback(rollback.pop_all().close)
+            else:
+                rollback.pop_all()
         finally:
             _construction.reset(token)
 
@@ -1372,7 +1398,8 @@ def managed_class(package, cls):
             if item.get("input_presence"):
                 setattr(self, name, False)
         allocated = []
-        token = _construction.set((package, allocated, self))
+        rollback = ExitStack()
+        token = _construction.set((package, allocated, self, rollback))
         try:
             original(self, *args, **kwargs)
             from ._package_values import check_owner_bindings, selected_owner_declaration
@@ -1391,6 +1418,7 @@ def managed_class(package, cls):
                 if item["kind"] == "host_owner_sequence":
                     _ResourceScope(self).owner_sequence(name, getattr(self, name))
         except BaseException:
+            rollback.close()
             for value in reversed(allocated):
                 value.close()
                 package._arrays.remove(value)
@@ -1401,6 +1429,9 @@ def managed_class(package, cls):
             # A successful child is part of the enclosing constructor transaction.
             # The parent must also release these resources if its construction fails.
             construction[1].extend(allocated)
+            construction[3].callback(rollback.pop_all().close)
+        else:
+            rollback.pop_all()
 
     cls.__init__ = initialize
     cls._forge_package_type = key
@@ -1596,6 +1627,9 @@ class entry:
         if cache is None:
             cache = cache_owner._forge_package_calls = {}
             package._call_caches.append(cache)
+            construction = _construction.get()
+            if construction is not None and construction[0] is package:
+                construction[3].callback(_discard_construction_calls, package, cache_owner, cache)
         previous = cache.get(self)
         if previous is not None:
             if previous.matches(owner, values):

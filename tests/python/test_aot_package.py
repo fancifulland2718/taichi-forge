@@ -18748,9 +18748,34 @@ class Model:
             def __init__(self, n: int, gain: float):
                 super().__init__(n, gain)
                 raise ValueError('after base allocation')
+
+        class GraphFails(Model):
+            def __init__(self, n: int, gain: float):
+                super().__init__(n, gain)
+                builder = ti.graph.GraphBuilder()
+                amount = ti.graph.Arg(ti.graph.ArgKind.SCALAR, 'amount', ti.f32)
+                builder.dispatch(self.step, amount)
+                self.initializer = builder.compile()
+                self.initializer.run({'amount': 5.0})
+                raise ValueError('after graph initialization')
+
+        class ChildFails:
+            def __init__(self, n: int, gain: float):
+                scope = ti.experimental.ResourceScope(self)
+                scope.child = Model(n, gain)
+                raise ValueError('after child initialization')
         """).replace("@ti.func", "@ti." + helper_kind),
         encoding="utf8",
     )
+    if storage == "ndarray":
+        derived.write_text(derived.read_text(encoding="utf8").replace(
+            "builder.dispatch(self.step, amount)",
+            "values = ti.graph.Arg(ti.graph.ArgKind.NDARRAY, 'values', ti.f32, ndim=1)\n"
+            "        builder.dispatch(self.step, values, amount)"
+        ).replace(
+            "self.initializer.run({'amount': 5.0})",
+            "self.initializer.run({'values': self.values, 'amount': 5.0})"
+        ), encoding="utf8")
     monkeypatch.delitem(sys.modules, "definition_fixture.derived", raising=False)
     importlib.invalidate_caches()
     assert "definition_fixture.derived" not in sys.modules
@@ -18805,13 +18830,28 @@ class Model:
             np.testing.assert_array_equal(read(a), np.arange(7, dtype=np.float32) * 2 + 14)
             np.testing.assert_array_equal(read(b), np.arange(19, dtype=np.float32) * -3 + 1)
             registered = set(runtime._resources)
-            try:
-                derived.Fails(3, 2.0)
-            except ValueError as error:
-                assert str(error) == 'after base allocation'
+            caches, arrays = len(code._call_caches), len(code._arrays)
+            for constructor, message in (
+                (derived.Fails, 'after base allocation'),
+                (derived.GraphFails, 'after graph initialization'),
+                (derived.ChildFails, 'after child initialization'),
+            ):
+                for _ in range(2):
+                    try:
+                        constructor(3, 2.0)
+                    except ValueError as error:
+                        assert str(error) == message
+                    else:
+                        raise AssertionError('Original constructor failure disappeared')
+                    assert runtime._resources == registered
+                    assert len(code._call_caches) == caches
+                    assert len(code._arrays) == arrays
+            # Rollback must not retire a live sibling's binding or shared code.
+            if sys.argv[3] == 'field':
+                b.step(1.0)
             else:
-                raise AssertionError('Original constructor failure disappeared')
-            assert runtime._resources == registered
+                b.step(b.values, 1.0)
+            np.testing.assert_array_equal(read(b), np.arange(19, dtype=np.float32) * -3 + 1)
         print('INHERITANCE_SOURCE_FREE_OK')
     """),
         encoding="utf8",

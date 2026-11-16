@@ -493,6 +493,14 @@ class Graph:
         # A cached call must not create Graph -> call -> Graph ownership cycles.
         # Native owners already retain the module and every argument resource.
         prepared._forge_package_graph = weakref.ref(self)
+        # A constructor can initialize through a Graph, including an explicit
+        # binding. Its new invocation belongs to the same failure rollback as
+        # ordinary calls; successful construction transfers ownership normally.
+        from ._package import _construction
+
+        construction = _construction.get()
+        if construction is not None and construction[0] is self.package:
+            construction[3].callback(prepared.close)
         return prepared
 
     def _specialized_plan(self, plan):
