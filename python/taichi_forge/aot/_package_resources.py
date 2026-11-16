@@ -1174,14 +1174,15 @@ def scope_declarations(
 
     typed_owner_parameters = set()
     typed_owner_types = {}
+    from ._package_input_families import owner_annotation_types
+
     for parameter in parameters:
-        annotation = parameter.annotation
-        while isinstance(annotation, ast.Constant) and isinstance(annotation.value, str):
-            annotation = ast.parse(annotation.value, mode="eval").body
-        declared = _source_value(annotation, namespace)
-        if inspect.isclass(declared) and declared.__module__ != "builtins":
+        choices = owner_annotation_types(parameter.annotation, namespace)
+        if choices:
             typed_owner_parameters.add(parameter.arg)
-            typed_owner_types[parameter.arg] = declared.__module__ + "." + declared.__qualname__
+            if len(choices) == 1:
+                declared = choices[0]
+                typed_owner_types[parameter.arg] = declared.__module__ + "." + declared.__qualname__
     defaults = (
         dict(
             zip(
@@ -1839,6 +1840,9 @@ def scope_declarations(
             from ._package_inputs import default_owner_call
 
             parameter = call.args[1].id if len(call.args) == 2 and isinstance(call.args[1], ast.Name) else None
+            if (getattr(constructor, "_package_preparation_method", False)
+                    and parameter in typed_owner_parameters and parameter not in typed_owner_types):
+                fail(module, call, "Prepared owner references require one declared source type")
             reference = call.args[1] if len(call.args) == 2 else None
             reference_path = []
             while isinstance(reference, ast.Attribute):

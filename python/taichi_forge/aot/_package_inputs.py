@@ -105,7 +105,9 @@ def default_owner_call(constructor, parameter, before):
 
 def resolve_inputs(sources, imported, *, partial=False):
     from ._package_factories import _source_value
-    from ._package_input_families import source_class, split_constructor_inputs
+    from ._package_input_families import (
+        owner_annotation_types, source_class, split_constructor_inputs, split_declared_owner_inputs,
+    )
     from ._package_owner_sequences import constructor_items
 
     owners = {
@@ -129,6 +131,7 @@ def resolve_inputs(sources, imported, *, partial=False):
         return
     classes = {cls: name for name, (_, cls) in owners.items()}
     annotated = set()
+    declared_domains = {}
     for key, item in inputs.items():
         constructor = owners[key[0]][1].__init__
         parameter = inspect.signature(constructor).parameters.get(item["input_parameter"])
@@ -140,23 +143,24 @@ def resolve_inputs(sources, imported, *, partial=False):
             if item.get("optional_capable") and parameter.default is None:
                 item["optional_input"] = True
             continue
-        annotation = parameter.annotation
-        if isinstance(annotation, str):
-            expression = ast.parse(annotation, mode="eval").body
-            # Future annotations may retain another pair of forward-reference
-            # quotes. Resolve only names/module attributes; never eval Python.
-            while isinstance(expression, ast.Constant) and isinstance(expression.value, str):
-                expression = ast.parse(expression.value, mode="eval").body
-            annotation = _source_value(expression, constructor.__globals__)
-        if inspect.isclass(annotation) and annotation in classes:
-            item["owner_type"] = classes[annotation]
+        choices = owner_annotation_types(parameter.annotation, constructor.__globals__)
+        if choices is None or choices and len(choices) > 1 and any(choice not in classes for choice in choices):
+            raise ValueError('Union owner inputs require declared package owner types: ' + key[0])
+        if choices and all(choice in classes for choice in choices):
+            identities = tuple(classes[choice] for choice in choices)
+            if len(identities) == 1:
+                item["owner_type"] = identities[0]
+            elif item.get("owner_type") not in identities:
+                declared_domains[key] = identities
             annotated.add(key)
         fallback = item.get("default_constructor_call")
         if fallback is not None:
+            if key in declared_domains:
+                raise ValueError("Union owner inputs require an explicit instance, not default construction: " + key[0])
             default_type = _source_value(fallback.func, constructor.__globals__)
             if parameter.default is not None or not inspect.isclass(default_type) or default_type not in classes:
                 raise ValueError("Default owner input requires None and a declared owner constructor: " + key[0])
-            if key in annotated and annotation is not default_type:
+            if key in annotated and default_type not in choices:
                 raise ValueError("Default owner input contradicts its declared source type: " + key[0])
             item["owner_type"] = classes[default_type]
             annotated.add(key)
@@ -475,8 +479,12 @@ def resolve_inputs(sources, imported, *, partial=False):
                 if absent in observed_all and item.get("optional_capable") and not item.get("optional_input"):
                     item["optional_input"] = True
                     changed = True
-                if (owner, name) in annotated and observed - {origin(item)}:
+                domain = declared_domains.get((owner, name))
+                accepted = {(kind, ()) for kind in domain} if domain else {origin(item)}
+                if (owner, name) in annotated and observed - accepted:
                     raise ValueError(f"Owner input {owner}.{name} contradicts its declared source type")
+                if domain:
+                    continue
                 if len(observed) > 1:
                     if any(site.get('inherited_input_forward') for _, _, site in calls.get(owner, ())):
                         raise ValueError('Inherited constructor inputs require one proven source type: ' + owner)
@@ -505,6 +513,12 @@ def resolve_inputs(sources, imported, *, partial=False):
                     changed = True
             if not changed:
                 break
+        for owner in dict.fromkeys(identity for identity, _ in declared_domains):
+            domains = {name: choices for (identity, name), choices in declared_domains.items() if identity == owner}
+            if split_declared_owner_inputs(sources, owner, inputs, domains, calls.get(owner, ()), input_types):
+                return resolve_inputs(sources, imported, partial=partial)
+            if not partial:
+                raise ValueError('Union owner inputs require resolved declared caller types: ' + owner)
         # Preparation functions may declare additional child constructors. Their
         # receiver discovery needs the input facts already provable from ordinary
         # construction, but admission must wait until those declarations are added.

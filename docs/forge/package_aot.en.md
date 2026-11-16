@@ -1364,6 +1364,21 @@ one consistent source type; extra unscoped calls, unknown or conflicting sources
 reject instead of selecting one successful path. Host wrapping and different
 instances of that type reuse the same numerical entry.
 
+Constructors may also declare a finite union of owner types, such as
+`source: First | Second`, including its string form, and bind it through
+`owner_reference` or `scope.source = source`. Every member must be a declared
+package owner. Export retains every annotated type without constructor-call
+samples or model execution. This reuses existing input-family contracts and
+retains one Host class. Instance types select the cold admission contract;
+numerical code is still shared by actual dependencies. Focused CPU/CUDA checks
+cover JIT agreement, new sizes, live data, wrong-type rejection and source-free
+subprocess consumption. A CPU check also verifies that four two-input type
+contracts retain two input-dependent entries and one common entry. This slice
+requires explicit instances; union `None`, default owner factories and union
+preparation rebinding are not qualified. Existing single-type optional ports
+retain the mechanism below. Unproved union members and contradictory declared
+calls reject before export.
+
 Version 85 permits preparation methods to bind `owner_reference` from an
 explicitly class-annotated, unreassigned parameter. An optional port starts with
 `scope.owner_reference('source', None, optional=True)` in the constructor, binds
