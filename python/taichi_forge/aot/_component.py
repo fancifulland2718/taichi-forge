@@ -939,6 +939,24 @@ class _DenseLayoutValidation:
         self.component, self.owner = component, owner
         self.groups = {}
         self.extents = {}
+        self.static_values = {}
+
+    def matches_static(self, code):
+        """Discard different algorithms before their complete ABI/layout check.
+
+        Only a rejection filter: a surviving candidate still passes every
+        dependency and binding check. Values live for this synchronous lookup,
+        never across lowering, Graph callbacks or another owner's invocation.
+        """
+        for name, expected in code.static.items():
+            if name not in self.static_values:
+                declaration = self.component.declarations.get(name)
+                if not isinstance(declaration, StaticValue) or not self.component.available(self.owner, name):
+                    return False
+                self.static_values[name] = _static_value(self.component.read(self.owner, name))
+            if self.static_values[name] != expected:
+                return False
+        return True
 
     def dense(self, group):
         if group not in self.groups:
@@ -1767,6 +1785,7 @@ class Component:
                 if (
                     code.call_signature == _used_template_signature(signature, code.static_templates)
                     and all(resource_templates.get(slot) == name for slot, name in code.resource_templates.items())
+                    and layouts.matches_static(code)
                 ):
                     if code.matches(self, owner, layouts=layouts):
                         code.validate_bindings(self, owner)

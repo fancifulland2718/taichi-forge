@@ -200,6 +200,65 @@ def test_candidate_static_rejection_precedes_storage_validation(monkeypatch):
         code.dependency_mismatch(environment, owner)
 
 
+@test_utils.test(arch=ti.cpu, offline_cache=False)
+def test_candidate_lookup_filters_static_choices_but_rechecks_bindings(monkeypatch):
+    from taichi_forge.aot import _component
+
+    owner, environment = _ConfiguredModel(7), _configured()
+    scaled = environment.compile(owner.evaluate)
+    owner.scale = False
+    plain = environment.compile(owner.evaluate)
+    checks = []
+    original = _component._ComponentCode.dependency_mismatch
+
+    def checked(code, *args, **kwargs):
+        checks.append(code)
+        return original(code, *args, **kwargs)
+
+    monkeypatch.setattr(_component._ComponentCode, "dependency_mismatch", checked)
+    assert environment.compile(owner.evaluate) is plain
+    assert checks == [plain]
+    checks.clear()
+    owner.scale = True
+    assert environment.compile(owner.evaluate) is scaled
+    assert checks == [scaled]
+    # A later lookup must reread configuration and validate the selected
+    # candidate's real storage. The rejection filter grants no admission.
+    owner.active = owner.capacity + 1
+    with pytest.raises(ti.TaichiCompilationError, match="capacity|extent|active"):
+        environment.compile(owner.evaluate)
+
+
+@test_utils.test(arch=ti.cpu, offline_cache=False)
+def test_candidate_lookup_keeps_absent_nested_static_paths_unread():
+    from types import SimpleNamespace
+    from taichi_forge.aot._component import Array, Record, StaticValue
+
+    @ti.data_oriented
+    class Model:
+        @ti.kernel
+        def evaluate(self):
+            value = 3
+            if ti.static(self.options is not None):
+                if ti.static(self.options.scale):
+                    value = 7
+            self.out[0] = value
+
+    owner = Model()
+    owner.out = ti.ndarray(ti.i32, 1)
+    owner.options = SimpleNamespace(scale=True)
+    environment = Component(options=Record(optional=True, scale=StaticValue()), out=Array(ti.i32, 1))
+    present = environment.compile(owner.evaluate)
+    owner.options = None
+    absent = environment.compile(owner.evaluate)
+    assert absent is not present
+    for options, expected, code in ((SimpleNamespace(scale=True), 7, present), (None, 3, absent)):
+        owner.options = options
+        assert environment.compile(owner.evaluate) is code
+        code.run(environment, owner)
+        assert owner.out[0] == expected
+
+
 @ti.data_oriented
 class _VariantModel(_ConfiguredModel):
     def record_options(self, builder, *, include_capacity=False):
