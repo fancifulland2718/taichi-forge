@@ -1261,11 +1261,12 @@ def discover(sources, imported, *, preparation_receivers=None, resource_inventor
                                     results = [evaluate(part.value) for part in returned_nodes if isinstance(part, ast.Return)]
                                 if results and all(item == results[0] for item in results):
                                     returned = results[0]
-                                elif (any(isinstance(item, _Record) for item in results)
-                                      and all(isinstance(item, _Record)
-                                              or isinstance(item, _Literal) and item.value is None for item in results)):
-                                    # An optional frozen binding retains each member's
-                                    # allocation source. Presence stays a Host choice;
+                                elif (any(isinstance(item, (_Record, _Owner)) for item in results)
+                                      and all(isinstance(item, (_Record, _Owner))
+                                              or isinstance(item, _Literal) and item.value is None for item in results)
+                                      and len({item for item in results if isinstance(item, (_Record, _Owner))}) == 1):
+                                    # Declared owner and frozen record returns retain
+                                    # their sources. Presence stays a Host choice;
                                     # distinct source contracts are still checked below.
                                     returned = _Choice(('record_return', return_key), tuple(dict.fromkeys(results)))
                                 else:

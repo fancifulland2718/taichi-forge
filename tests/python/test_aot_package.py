@@ -24644,6 +24644,53 @@ class Model:
 
 
 @test_utils.test(arch=[ti.cpu, ti.cuda], offline_cache=False)
+def test_package_host_optional_owner_return_preserves_input_presence(tmp_path, monkeypatch):
+    source = '''
+import taichi_forge as ti
+@ti.kernel
+def publish(output: ti.template(), source: ti.template()):
+    for i in output.values:
+        if ti.static(source is not None):
+            output.values[i] = source.values[i % source.n] + 1
+        else:
+            output.values[i] = 3
+class Model:
+    def __init__(self, n: int):
+        self.n = n
+        scope = ti.experimental.ResourceScope(self)
+        scope.values = scope.field(ti.f32, shape=scope.dim('n'))
+class Driver:
+    def __init__(self, n: int, m: int):
+        scope = ti.experimental.ResourceScope(self)
+        scope.output = Model(n)
+        scope.input = Model(m)
+    def select(self, enabled):
+        if enabled:
+            return self.input
+        return None
+    def run(self, enabled):
+        publish(self.output, self.select(enabled))
+    def graph(self, enabled):
+        builder = ti.graph.GraphBuilder()
+        builder.dispatch(publish, template_args=dict(output=self.output, source=self.select(enabled)))
+        return builder.compile()
+'''
+    package = _source_package(tmp_path, monkeypatch, source)
+    manifest = ti.aot.export_package(package, tmp_path / 'sdk')
+    with Runtime(manifest['target']) as runtime, load_package(runtime, tmp_path / 'sdk') as code:
+        driver = code.host.model.Driver(11, 3)
+        driver.input.values.from_numpy(np.full(3, 5, dtype=np.float32))
+        driver.run(True)
+        np.testing.assert_array_equal(driver.output.values.to_numpy(), np.full(11, 6))
+        driver.run(False)
+        np.testing.assert_array_equal(driver.output.values.to_numpy(), np.full(11, 3))
+        with driver.graph(True).bind({}) as call:
+            driver.input.values.from_numpy(np.full(3, 9, dtype=np.float32))
+            call.run()
+            np.testing.assert_array_equal(driver.output.values.to_numpy(), np.full(11, 10))
+
+
+@test_utils.test(arch=[ti.cpu, ti.cuda], offline_cache=False)
 def test_package_finite_host_field_sequence_preserves_order_and_live_data(tmp_path, monkeypatch):
     package = _source_package(tmp_path, monkeypatch, FINITE_FIELD_SEQUENCE_SOURCE)
     manifest = ti.aot.export_package(package, tmp_path / 'sdk')

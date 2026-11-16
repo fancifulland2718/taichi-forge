@@ -66,6 +66,11 @@ existing source-sequence proof, preserving paired inputs and original call-site
 coverage. Host execution order remains unchanged; mutable, rebound and unknown
 iteration sources do not establish an input ABI.
 
+An ordinary helper can return the same declared owner or `None`, preserving both
+presence cases for direct and Graph calls. Different record member mappings are
+not merged into this optional-input proof; unknown and implicit return paths still
+reject. The consumer selects the applicable existing contract from its actual input.
+
 For normal Component capture, a read-only record view does not become another
 ownership path to its provider. A typed view of a Dense Field already owned by the
 same component reuses that allocation's layout and initialization path; the declared
