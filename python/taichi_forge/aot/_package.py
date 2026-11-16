@@ -1887,7 +1887,8 @@ def _export_package(package, output, *, arch, caps, source_root, compilation, ar
                 if call["owner_inputs"]:
                     call_owner = "__call_" + hashlib.sha256(
                         json.dumps([call["owner_inputs"], input_fields], sort_keys=True).encode()).hexdigest()
-                    owner_graph.register_call_context(name + "." + call_owner, call["owner_inputs"], input_fields)
+                    owner_graph.register_call_context(name + "." + call_owner, call["owner_inputs"], input_fields,
+                                                      call["node"])
                     manifest["owners"][name + "." + call_owner] = {
                         **{"_arg_" + key: dict(kind="owner_input", owner_type=value)
                            for key, value in call["owner_inputs"].items()},

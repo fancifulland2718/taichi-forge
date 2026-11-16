@@ -1,7 +1,23 @@
 """Resolve declared construction types without executing application constructors."""
 
+import ast
 import copy
 from types import MappingProxyType, SimpleNamespace
+
+
+def _member_paths(node, receiver):
+    """Read explicit device member paths, without traversing Host construction."""
+    paths = set()
+    for part in ast.walk(node):
+        if not isinstance(part, ast.Attribute):
+            continue
+        path = []
+        while isinstance(part, ast.Attribute):
+            path.append(part.attr)
+            part = part.value
+        if isinstance(part, ast.Name) and part.id == receiver:
+            paths.add(tuple(reversed(path)))
+    return paths
 
 
 def owner_bindings(environment, schema, used):
@@ -42,12 +58,30 @@ class OwnerGraph:
         self._allocation_schemas = {}
         self._field_witnesses = {}
         self._call_contexts = set()
+        self._call_input_paths = {}
         self._input_field_types = {}
         self.definitions = {
             name + "." + owner: (name, source_class(tree, owner), copy.deepcopy(schema))
             for name, _, _, _, tree, _, schemas, _ in sources
             for owner, schema in schemas.items()
         }
+        device_paths = {}
+        for name, _, _, _, tree, _, _, definitions in sources:
+            for definition in definitions:
+                if definition['owner'] is None or definition.get('error_interface'):
+                    continue
+                node = definition['node']
+                parameters = (*node.args.posonlyargs, *node.args.args)
+                if parameters:
+                    owner = name + '.' + source_class(tree, definition['owner'])
+                    device_paths.setdefault(owner, set()).update(_member_paths(node, parameters[0].arg))
+        self._device_paths = {}
+        for identity, (name, cls_name, _) in self.definitions.items():
+            cls = getattr(imported[name], cls_name)
+            self._device_paths[identity] = frozenset(
+                path for base in cls.__mro__
+                for path in device_paths.get(base.__module__ + '.' + base.__qualname__, ())
+            )
         for identity in self.definitions:
             self._validate(identity, ())
 
@@ -72,10 +106,13 @@ class OwnerGraph:
             return result
         raise ValueError("Independent Field template has no declared field path")
 
-    def register_call_context(self, identity, inputs, fields):
+    def register_call_context(self, identity, inputs, fields, node):
         """Compose declared input views without an application owner or constructor."""
         schema = {"_arg_" + key: dict(kind="owner_input", owner_type=value) for key, value in inputs.items()}
         schema.update({"_arg_" + key: dict(kind="ndarray", **value) for key, value in fields.items()})
+        paths = self._call_input_paths.setdefault(identity, {})
+        for key in inputs:
+            paths.setdefault('_arg_' + key, set()).update(_member_paths(node, key))
         if identity in self.definitions:
             if self.definitions[identity][2] != schema:
                 raise ValueError("Call context changed its declared input types")
@@ -127,7 +164,7 @@ class OwnerGraph:
                     self._validate(choice["owner_type"], (*ancestors, identity))
 
     def construct(self, identity, *, resource_only=False, references=(), choices=None, path=(), resource_paths=None,
-                  contract_only=False):
+                  contract_only=False, numerical_paths=None):
         import taichi_forge as ti
         from taichi_forge.lang.matrix import MatrixType
         from taichi_forge_runtime._static_values import read_static_key
@@ -151,6 +188,8 @@ class OwnerGraph:
         name, class_name, original = self.definitions[identity]
         schema = original
         source_children = {}
+        if numerical_paths is not None:
+            numerical_paths = frozenset(numerical_paths) | self._device_paths.get(identity, frozenset())
         if contract_only and any(item["kind"] in ("owner", "owner_input") for item in original.values()):
             from ._package_resource_slice import AllocationSchema
 
@@ -179,10 +218,16 @@ class OwnerGraph:
                 )
             references = (*references, token)
             if resource_paths is None:
-                # A complete input view borrows this allocation scope, not its
-                # owned solver graph. Filter before copying or cache lookup so
-                # complete views can reuse the same build-only witness too.
-                schema = {key: item for key, item in schema.items() if item["kind"] != "owner"}
+                # A storage borrow still omits its provider's owned graph.
+                # A numerical object input also needs children explicitly read
+                # by its Kernel or device methods. Keep those declared namespaces
+                # before copying, without restoring unrelated Host-owned children.
+                schema = {
+                    key: item for key, item in schema.items()
+                    if item['kind'] != 'owner' or numerical_paths is not None and any(
+                        member[:len(item.get('path', (key,)))] == tuple(item.get('path', (key,)))
+                        for member in numerical_paths)
+                }
             if len(references) == 1:
                 # Reuse complete input views and complete allocation groups
                 # selected by field inputs across compatible owner contexts.
@@ -193,6 +238,7 @@ class OwnerGraph:
                 resource_key = (
                     identity,
                     path,
+                    None if numerical_paths is None else tuple(sorted(numerical_paths)),
                     tuple(schema),
                     tuple(sorted((child, tuple(sorted(paths))) for child, paths in source_children.items())),
                     tuple(
@@ -358,6 +404,13 @@ class OwnerGraph:
                                 ]
                             )
                         )
+                child_numerical_paths = None
+                if identity in self._call_contexts:
+                    child_numerical_paths = self._call_input_paths[identity].get(attribute)
+                elif numerical_paths is not None:
+                    prefix = tuple(item.get('path', (attribute,)))
+                    child_numerical_paths = tuple(member[len(prefix):] for member in numerical_paths
+                                                  if member[:len(prefix)] == prefix)
                 value, _, child, expanded = self.construct(
                     item["owner_type"],
                     resource_only=contract_only or resource_only or item["kind"] == "owner_input",
@@ -365,6 +418,7 @@ class OwnerGraph:
                     choices=child_choices,
                     path=(*path, attribute),
                     resource_paths=child_paths,
+                    numerical_paths=child_numerical_paths,
                 )
                 children[attribute] = (child, expanded)
                 child_values[attribute] = value
@@ -404,7 +458,8 @@ class OwnerGraph:
                     continue
                 value = child_values[attribute]
                 declarations[attribute] = (
-                    _ChoiceRecord(item["choice_guards"].items(), optional=bool(item.get("conditions")))
+                    _ChoiceRecord(item["choice_guards"].items(), optional=bool(item.get("conditions")),
+                                  conditions=item.get("conditions", {}).items())
                     if item.get("owner_alternatives")
                     else record
                 )
@@ -559,7 +614,8 @@ def _compose(environment, schema, children):
                 value = _InputRecord(names[value.presence])
             elif isinstance(value, _ChoiceRecord):
                 value = _ChoiceRecord(
-                    tuple((names[n], expected) for n, expected in value.guards), optional=value.optional
+                    tuple((names[n], expected) for n, expected in value.guards), optional=value.optional,
+                    conditions=tuple((names[n], expected) for n, expected in value.conditions),
                 )
             elif isinstance(value, Record):
                 value = Record(optional=value.optional)

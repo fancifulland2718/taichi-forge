@@ -41,6 +41,15 @@ remain stable; field data stays live. Static layout choices and declared fixed
 integer policy remain eligible for ordinary consumer specialization. A separate
 Field template in format 91 must belong to one of the supplied owners.
 
+Numerical object inputs retain declared children explicitly read by the Kernel
+or the object's device methods, including inherited methods. Storage-only borrows
+still omit the provider's owned object graph. Unrelated Host-owned children are
+not reconstructed, and no application constructor is executed. Optional children
+retain their presence conditions separately from implementation-choice guards.
+Focused CPU/CUDA checks cover source-free direct/Graph calls, absent children,
+implementation choices, live fields and independent instances. This is not
+arbitrary dynamic member or helper-receiver inference.
+
 Format 92 also accepts an independent Field template whose fixed scalar/tensor
 element type and rank are proven by a Dense declaration. Only the required
 allocation slice is inspected for its ABI; the call uses the existing ndarray

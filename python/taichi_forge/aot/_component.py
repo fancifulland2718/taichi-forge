@@ -679,9 +679,10 @@ class _ConditionalOwnerRecord(_ConditionalRecord):
 class _ChoiceRecord(Record):
     """A child implementation selected by declared Host construction guards."""
 
-    def __init__(self, guards, *, optional=False):
+    def __init__(self, guards, *, optional=False, conditions=()):
         super().__init__(optional=optional)
         object.__setattr__(self, "guards", tuple(guards))
+        object.__setattr__(self, "conditions", tuple(conditions))
 
 
 class _OwnerSequence(Record):
@@ -2304,7 +2305,8 @@ class _Capture:
         # layout contract. Typed optional inputs above use invocation presence.
         conditional_array = isinstance(declaration, _ConditionalArray) and (ctx is None or ctx.is_in_static_scope())
         layout_array = isinstance(declaration, _LayoutArray) and bool(declaration.conditions)
-        if conditional_array or layout_array or isinstance(
+        conditional_choice = isinstance(declaration, _ChoiceRecord) and bool(declaration.conditions)
+        if conditional_array or layout_array or conditional_choice or isinstance(
             declaration, (_ConditionalDenseField, _ConditionalModelTensorField, _ConditionalRecord)
         ):
             self.resource_conditions[name] = declaration.conditions
@@ -2343,7 +2345,8 @@ class _Capture:
                     self.component._symbolic_dimensions
                     and ctx is not None
                     and not ctx.is_in_static_scope()
-                    and isinstance(declaration, (_ConditionalDenseField, _ConditionalModelTensorField, _ConditionalOwnerRecord))
+                    and isinstance(declaration, (_ConditionalDenseField, _ConditionalModelTensorField,
+                                                 _ConditionalOwnerRecord, _ChoiceRecord))
                 ):
                     self.missing_resource = name
                     raise TaichiCompilationError(f"Numerical entry requires Field or owner self.{'.'.join(path)}")

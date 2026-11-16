@@ -24519,6 +24519,152 @@ class Derived(Model):
 """
 
 
+NUMERICAL_OWNER_CHILDREN_SOURCE = '''
+import taichi_forge as ti
+constructors = 0
+@ti.data_oriented
+class Leaf:
+    def __init__(self, n):
+        self.n = n
+        scope = ti.experimental.ResourceScope(self)
+        scope.values = scope.field(ti.f32, shape=scope.dim('n'))
+    @ti.func
+    def sample(self):
+        return self.values[0]
+@ti.data_oriented
+class ScaledLeaf(Leaf):
+    @ti.func
+    def sample(self):
+        return 2 * self.values[0]
+class Unused:
+    def __init__(self, n):
+        self.n = n
+        scope = ti.experimental.ResourceScope(self)
+        scope.values = scope.field(ti.f32, shape=scope.dim('n'))
+@ti.data_oriented
+class SourceBase:
+    def __init__(self, n, enabled, scaled, indirect):
+        global constructors
+        constructors += 1
+        self.enabled, self.scaled, self.indirect = enabled, scaled, indirect
+        scope = ti.experimental.ResourceScope(self)
+        scope.static('enabled', choices=(False, True))
+        scope.static('scaled', choices=(False, True))
+        scope.static('indirect', choices=(False, True))
+        if self.enabled:
+            if self.scaled:
+                scope.environment = ScaledLeaf(n)
+            else:
+                scope.environment = Leaf(n)
+        else:
+            scope.record('environment', None, optional=True)
+        if self.indirect:
+            scope.fixed_gi = Leaf(n)
+        else:
+            scope.record('fixed_gi', None, optional=True)
+        scope.host_only = Unused(n)
+    @ti.func
+    def sample(self):
+        value = 1.0
+        if ti.static(self.environment is not None):
+            value += self.environment.sample()
+        return value
+@ti.data_oriented
+class Source(SourceBase):
+    pass
+@ti.kernel
+def compose(output: ti.template(), lighting: ti.template(), gain: ti.f32):
+    for i in output.values:
+        value = lighting.sample()
+        if ti.static(lighting.fixed_gi is not None):
+            value += lighting.fixed_gi.values[0]
+        output.values[i] = value * gain
+@ti.data_oriented
+class Model:
+    def __init__(self, n):
+        self.n = n
+        scope = ti.experimental.ResourceScope(self)
+        scope.values = scope.field(ti.f32, shape=scope.dim('n'))
+    def apply(self, source: Source, gain):
+        compose(self, source, gain)
+    def graph(self, source: Source):
+        builder = ti.graph.GraphBuilder()
+        gain = ti.graph.Arg(ti.graph.ArgKind.SCALAR, 'gain', ti.f32)
+        builder.dispatch(compose, gain, template_args={'output': self, 'lighting': source})
+        return builder.compile()
+'''
+
+
+@test_utils.test(arch=[ti.cpu, ti.cuda], offline_cache=False)
+def test_package_numerical_owner_inputs_keep_used_children_without_host_tree(tmp_path, monkeypatch):
+    from taichi_forge.aot._package_owner_graph import OwnerGraph
+
+    package = _source_package(tmp_path, monkeypatch, NUMERICAL_OWNER_CHILDREN_SOURCE)
+    construct = OwnerGraph.construct
+    borrowed = []
+
+    def observed(self, identity, **kwargs):
+        if kwargs.get('resource_only') and kwargs.get('numerical_paths') is not None:
+            assert not identity.endswith('.Unused'), 'numerical input constructed its unrelated Host subtree'
+            borrowed.append((identity, kwargs.get('path')))
+        return construct(self, identity, **kwargs)
+
+    monkeypatch.setattr(OwnerGraph, 'construct', observed)
+    manifest = ti.aot.export_package(package, tmp_path / 'sdk')
+    assert package.model.constructors == 0
+    assert any(name.endswith('.ScaledLeaf') for name, _ in borrowed)
+    assert any(path[-1] == 'fixed_gi' for _, path in borrowed)
+    output = package.Model(7)
+    expected = []
+    for enabled, scaled, indirect in ((False, False, False), (True, False, True), (True, True, True)):
+        source = package.model.Source(3, enabled, scaled, indirect)
+        if enabled:
+            source.environment.values.fill(3)
+        if indirect:
+            source.fixed_gi.values.fill(5)
+        output.apply(source, 2)
+        expected.append(output.values.to_numpy().tolist())
+    probe = tmp_path / 'numerical_children_consume.py'
+    probe.write_text('''
+import importlib.abc, json, sys
+import numpy as np
+from taichi_forge_runtime.aot import Runtime, load_package
+class RejectSource(importlib.abc.MetaPathFinder):
+    def find_spec(self, fullname, path=None, target=None):
+        if fullname.split('.')[0] in ('taichi', 'taichi_forge', 'definition_fixture'):
+            raise ImportError(fullname)
+sys.meta_path.insert(0, RejectSource())
+expected = json.loads(sys.argv[3])
+with Runtime(sys.argv[2]) as runtime, load_package(runtime, sys.argv[1]) as code:
+    output = code.host.Model(7)
+    for index, (enabled, scaled, indirect) in enumerate(((False, False, False), (True, False, True), (True, True, True))):
+        source = code.host.model.Source(3, enabled, scaled, indirect)
+        if enabled:
+            source.environment.values.from_numpy(np.full(3, 3, dtype=np.float32))
+        if indirect:
+            source.fixed_gi.values.from_numpy(np.full(3, 5, dtype=np.float32))
+        output.apply(source, 2)
+        np.testing.assert_array_equal(output.values.to_numpy(), expected[index])
+    with output.graph(source).bind(dict(gain=3)) as call:
+        source.environment.values.from_numpy(np.full(3, 7, dtype=np.float32))
+        source.fixed_gi.values.from_numpy(np.full(3, 11, dtype=np.float32))
+        other = code.host.Model(11)
+        other.apply(source, 4)
+        call.run()
+        np.testing.assert_array_equal(output.values.to_numpy(), np.full(7, 78))
+        np.testing.assert_array_equal(other.values.to_numpy(), np.full(11, 104))
+print('NUMERICAL_CHILDREN_SOURCE_FREE_OK')
+''', encoding='utf8')
+    result = subprocess.run(
+        [sys.executable, '-B', str(probe), str(tmp_path / 'sdk'), manifest['target'], json.dumps(expected)], cwd=tmp_path,
+        env=dict(os.environ, PYTHONPATH=str(Path(__file__).parents[2] / 'packaging/runtime/src'),
+                 TAICHI_NATIVE_RUNTIME_DIR=str(Path(utils._loaded_native_runtime_path).parent),
+                 TAICHI_RUNTIME_DIR=utils._runtime_bitcode_dir()),
+        capture_output=True, text=True, timeout=90)
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert 'NUMERICAL_CHILDREN_SOURCE_FREE_OK' in result.stdout
+
+
 DECLARED_KERNEL_INPUTS_SOURCE = '''
 from typing import overload
 import taichi_forge as ti
