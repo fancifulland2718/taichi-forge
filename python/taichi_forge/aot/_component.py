@@ -780,6 +780,47 @@ def _used_template_signature(signature, used):
     return (tuple((index, *project(fact, (index,))) for index, *fact in signature[0]), signature[1])
 
 
+class _ComponentCandidateIndex:
+    """Build-owned rejection index over immutable capture facts.
+
+    Different branches can read different static/template slots. Index each
+    dependency shape separately, then preserve the original candidate order.
+    A hit still goes through the ordinary definition, resource and layout checks.
+    """
+
+    def __init__(self):
+        self.groups = {}
+        self.size = 0
+
+    def add(self, code):
+        # Capture order keeps the predicate before members read only by its
+        # selected branch. A lookup must not inspect an absent branch's values.
+        names = tuple(code.static)
+        resources = tuple(sorted(code.resource_templates))
+        shape = code.static_templates, names, resources
+        key = code.call_signature, tuple(code.resource_templates[name] for name in resources)
+        choices = self.groups.setdefault(shape, {}).setdefault(key, {})
+        for name in names:
+            choices = choices.setdefault(code.static[name], {})
+        choices.setdefault(None, []).append((self.size, code))
+        self.size += 1
+
+    def find(self, signature, resource_templates, layouts):
+        matches, signatures = [], {}
+        for (used, names, resources), choices in self.groups.items():
+            if used not in signatures:
+                signatures[used] = _used_template_signature(signature, used)
+            key = signatures[used], tuple(resource_templates.get(name) for name in resources)
+            selected = choices.get(key)
+            for name in names:
+                if selected is None:
+                    break
+                selected = selected.get(layouts.static_value(name))
+            if selected is not None:
+                matches.extend(selected.get(None, ()))
+        return (code for _, code in sorted(matches, key=lambda item: item[0]))
+
+
 def _capture_id(path):
     return path[0] if len(path) == 1 else "__record_" + "_".join(f"{len(part)}_{part}" for part in path)
 
@@ -948,15 +989,17 @@ class _DenseLayoutValidation:
         dependency and binding check. Values live for this synchronous lookup,
         never across lowering, Graph callbacks or another owner's invocation.
         """
-        for name, expected in code.static.items():
-            if name not in self.static_values:
-                declaration = self.component.declarations.get(name)
-                if not isinstance(declaration, StaticValue) or not self.component.available(self.owner, name):
-                    return False
-                self.static_values[name] = _static_value(self.component.read(self.owner, name))
-            if self.static_values[name] != expected:
-                return False
-        return True
+        return all(self.static_value(name) == expected for name, expected in code.static.items())
+
+    def static_value(self, name):
+        if name not in self.static_values:
+            declaration = self.component.declarations.get(name)
+            self.static_values[name] = (
+                _static_value(self.component.read(self.owner, name))
+                if isinstance(declaration, StaticValue) and self.component.available(self.owner, name)
+                else None
+            )
+        return self.static_values[name]
 
     def dense(self, group):
         if group not in self.groups:
@@ -1781,7 +1824,11 @@ class Component:
         runtime.materialize(for_aot=True)
         with runtime._kernel_compilation_lock:
             layouts = _DenseLayoutValidation(self, owner)
-            for code in kernel._component_candidates:
+            compilation = getattr(kernel, "_package_compilation", None)
+            index = compilation.candidate_indices[kernel] if compilation is not None else None
+            candidates = (index.find(signature, resource_templates, layouts)
+                          if index is not None else kernel._component_candidates)
+            for code in candidates:
                 if (
                     code.call_signature == _used_template_signature(signature, code.static_templates)
                     and all(resource_templates.get(slot) == name for slot, name in code.resource_templates.items())
@@ -1822,6 +1869,8 @@ class Component:
                 raise
             code = _ComponentCode(kernel, key, context)
             kernel._component_candidates.append(code)
+            if index is not None:
+                index.add(code)
             return code
 
     def _template_argument(self, owner, entry_owner, entry_path, value, slot, argument, resources):

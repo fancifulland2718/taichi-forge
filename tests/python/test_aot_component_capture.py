@@ -12,6 +12,50 @@ from taichi_forge.lang import kernel_impl
 from tests import test_utils
 
 
+def test_package_candidate_index_respects_partial_dependencies_and_order():
+    from types import SimpleNamespace
+    from taichi_forge.aot._component import (
+        _ComponentCandidateIndex, _DenseLayoutValidation, _used_template_signature,
+    )
+
+    signature = (((0, "static", ("int", 7)),), (("value", "i32"),))
+    index = _ComponentCandidateIndex()
+
+    def candidate(static, *, used=frozenset({(0,)}), resource="input", abi=signature):
+        code = SimpleNamespace(static=static, static_templates=used,
+                               resource_templates={(1,): resource},
+                               call_signature=_used_template_signature(abi, used))
+        index.add(code)
+        return code
+
+    # A branch which never reads mode or the explicit static argument remains
+    # reusable across both. Indexing all declared facts would incorrectly miss it.
+    general = candidate({"enabled": ("bool", False)}, used=frozenset())
+    choices = [candidate({"enabled": ("bool", True), "mode": ("int", i)}) for i in range(256)]
+    other_resource = candidate({"mode": ("int", 137)}, resource="other")
+    other_abi = candidate({"mode": ("int", 137)}, abi=(signature[0], (("value", "f32"),)))
+    late = candidate({"enabled": ("bool", True)}, used=frozenset())
+    owner = SimpleNamespace(enabled=True, mode=137)
+    environment = Component(enabled=StaticValue(), mode=StaticValue())
+
+    def find(abi=signature, resource="input"):
+        layouts = _DenseLayoutValidation(environment, owner)
+        result = list(index.find(abi, {(1,): resource}, layouts))
+        assert set(layouts.static_values) <= {"enabled", "mode"}
+        return result
+
+    assert find() == [choices[137], late]  # retain original insertion order
+    assert find(resource="other") == [other_resource]
+    assert find(abi=(signature[0], (("value", "f32"),))) == [other_abi]
+    owner.enabled = False
+    assert find(abi=(((0, "static", ("int", 99)),), signature[1])) == [general]
+    del owner.mode  # absent branch member must not be read through another candidate
+    assert find() == [general]
+    owner.enabled = True
+    with pytest.raises(AttributeError, match="mode"):
+        find()  # a reached missing declaration still fails
+
+
 @ti.data_oriented
 class _Model:
     def __init__(self, n, gravity=(1, 2, 3), scale=True):

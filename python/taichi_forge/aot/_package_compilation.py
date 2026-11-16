@@ -29,6 +29,7 @@ class PackageCompilation(FunctionLibrary):
         super().__init__()
         self.module = None
         self.kernels = {}
+        self.candidate_indices = {}
         self.exported = {}
         self.resource_effects = {}
         self.retired_function_definitions = 0
@@ -56,6 +57,7 @@ class PackageCompilation(FunctionLibrary):
 
     def entry(self, entry):
         from taichi_forge.lang.kernel_impl import Kernel, TaichiCallableTemplateMapper
+        from ._component import _ComponentCandidateIndex
 
         source = entry._primal
         if source not in self.kernels:
@@ -70,6 +72,7 @@ class PackageCompilation(FunctionLibrary):
             kernel._package_compilation = self
             kernel.runtime.kernels.add(kernel)
             self.kernels[source] = kernel
+            self.candidate_indices[kernel] = _ComponentCandidateIndex()
         return SimpleNamespace(_primal=self.kernels[source], _kernel_owner=getattr(entry, "_kernel_owner", None))
 
     def library_function(self, source, args, *, dependencies=None):
@@ -201,6 +204,7 @@ class PackageCompilation(FunctionLibrary):
 
         if self._released:
             return
+        self.candidate_indices.clear()
         # Also release incomplete definitions after a failed build. This never
         # clears user caches or touches submitted executable handles.
         for kernel in self.kernels.values():
