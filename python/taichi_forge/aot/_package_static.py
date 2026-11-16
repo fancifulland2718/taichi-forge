@@ -25,6 +25,7 @@ class StaticPreparation:
         self._numeric_locals = {}
         self._value_uses = {}
         self._ambiguous_names = set()
+        self._ambiguous_method_names = set()
         self._task_context_cache = {}
         self._task_context_methods = set()
         functions = []
@@ -45,12 +46,15 @@ class StaticPreparation:
                     self._ambiguous_names.add('getattr')
                 elif isinstance(function, (ast.Name, ast.Attribute)) and isinstance(function.ctx, ast.Store):
                     self._ambiguous_names.add(getattr(function, 'id', getattr(function, 'attr', '')))
+                    if isinstance(function, ast.Attribute):
+                        self._ambiguous_method_names.add(function.attr)
                 if not isinstance(function, ast.FunctionDef):
                     continue
                 if not any(
                     kind(d) in ("kernel", "func", "real_func", "pyfunc") for d in function.decorator_list
                 ):
                     self._ambiguous_names.add(function.name)
+                    self._ambiguous_method_names.add(function.name)
                     continue
                 names, ancestor = [function.name], function
                 while (ancestor := tree_parents.get(id(ancestor))) is not None:
@@ -385,6 +389,7 @@ class StaticPreparation:
         while function is not None and not isinstance(function, ast.FunctionDef):
             function = parents.get(id(function))
         reads = self._local_values.get(id(function), ({}, {}, {}))[0]
+        numeric = self._numeric_locals.get(id(function), {})
         for part in ast.walk(node):
             if isinstance(part, ast.Call) and not part.keywords:
                 # Fixed-shape vector/matrix construction creates a numerical
@@ -395,8 +400,9 @@ class StaticPreparation:
                 assignment = parents.get(id(part))
                 local_value = not isinstance(assignment, ast.Assign) or (
                     all(isinstance(target, ast.Name) for target in assignment.targets)
-                    and all(id(read) in branch_nodes for target in assignment.targets
-                            for read in reads.get(target.id, ())))
+                    and all(numeric.get(target.id, assignment.lineno) < assignment.lineno
+                            or all(id(read) in branch_nodes for read in reads.get(target.id, ()))
+                            for target in assignment.targets))
                 literal = len(part.args) == 1 and isinstance(part.args[0], (ast.List, ast.Tuple))
                 if local_value and literal and tensor_kind in ('Vector', 'Matrix'):
                     elements = part.args[0].elts
@@ -485,7 +491,31 @@ class StaticPreparation:
 
     def _argument_use(self, call, child, parents, kind, threaded, visiting):
         name = helper_call_name(call)
-        targets = self._names.get(name, ()) if name not in self._ambiguous_names else ()
+        if isinstance(call.func, ast.Attribute):
+            # A template receiver can be a declared owner parameter or one of
+            # its children. Follow the same closed set of decorated methods as
+            # self.method(), without treating module functions or local Python
+            # aliases as methods (their positional ABI is different).
+            name = None
+            receiver = call.func.value
+            while isinstance(receiver, ast.Attribute):
+                receiver = receiver.value
+            caller = call
+            while caller is not None and not isinstance(caller, ast.FunctionDef):
+                caller = parents.get(id(caller))
+            parameters = (*caller.args.posonlyargs, *caller.args.args, *caller.args.kwonlyargs) if caller else ()
+            candidates = self._names.get(call.func.attr, ())
+            if (isinstance(receiver, ast.Name)
+                    and receiver.id in {argument.arg for argument in parameters}
+                    and receiver.id not in self._local_values[id(caller)][1]
+                    and candidates and candidates <= self._task_context_methods
+                    and call.func.attr not in self._ambiguous_method_names):
+                name = call.func.attr
+            # A local named 'value' cannot shadow owner.value(). Attribute
+            # rebinding and unresolved Host methods still invalidate lookup.
+            targets = self._names.get(name, ())
+        else:
+            targets = self._names.get(name, ()) if name not in self._ambiguous_names else ()
         if not targets or any(isinstance(arg, ast.Starred) for arg in call.args):
             return {'unresolved_argument_use'}
         keyword = child.arg if isinstance(child, ast.keyword) else None

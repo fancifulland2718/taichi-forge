@@ -1539,7 +1539,8 @@ class Model:
 
 
 @test_utils.test(arch=ti.cuda, offline_cache=False)
-def test_package_library_prepares_scalar_conditions_inside_optional_children(tmp_path, monkeypatch):
+@pytest.mark.parametrize('call_style', ('member', 'child_argument', 'receiver_parameter'))
+def test_package_library_prepares_scalar_conditions_inside_optional_children(tmp_path, monkeypatch, call_style):
     source = '''import taichi_forge as ti
 @ti.data_oriented
 class Child:
@@ -1574,6 +1575,17 @@ class Model:
         builder.dispatch(self.step)
         return builder.compile()
 '''
+    if call_style != 'member':
+        source = source.replace('def value(self, i):', 'def value(self, i, boost: ti.template()):')
+        source = source.replace('ti.static(self.boost)', 'ti.static(boost)')
+        source = source.replace('self.child.value(i)', 'self.child.value(i, self.child.boost)')
+    if call_style == 'receiver_parameter':
+        source = source.replace('    @ti.kernel\n    def step(self):', '''    @ti.func
+    def forward(self, other: ti.template(), i):
+        return other.value(i, self.child.boost)
+    @ti.kernel
+    def step(self):''')
+        source = source.replace('value = self.child.value(i, self.child.boost)', 'value = self.forward(self.child, i)')
     package = _source_package(tmp_path, monkeypatch, source)
     manifest = ti.aot.export_package(package, tmp_path / 'sdk', artifact_format='bc-library')
     entries = [v for v in manifest['entries'].values() if v['definition'].endswith('.Model.step')]
@@ -1620,6 +1632,39 @@ class Model:
         text=True, capture_output=True, timeout=120)
     assert result.returncode == 0, result.stdout + result.stderr
     assert 'CONDITIONAL_SCALAR_SOURCE_FREE_OK' in result.stdout
+
+
+@pytest.mark.parametrize('setup,receiver,helper', [
+    ('other = self.child', 'other', ''),
+    ('other = self.child', 'other.child', ''),
+    ('', 'foreign', ''),
+    ('', 'other', 'class Host:\n    def value(self, i, boost):\n        return i'),
+    ('', 'other', '@ti.func\ndef value(i, boost):\n    return i'),
+    ('other.value = self.callback', 'other', ''),
+])
+def test_package_prepare_method_arguments_keep_unproven_receivers(setup, receiver, helper):
+    from taichi_forge.aot._package_static import StaticPreparation
+    from taichi_forge.tools._compiled_host import decorator_resolver
+
+    source = '''import taichi_forge as ti
+@ti.data_oriented
+class Child:
+    @ti.func
+    def value(self, i, boost: ti.template()):
+        result = i
+        if ti.static(boost):
+            result += 7
+        return result
+HELPER
+@ti.kernel
+def step(self, other: ti.template()):
+    SETUP
+    for i in range(3):
+        self.out[i] = RECEIVER.value(i, self.flag)
+'''.replace('HELPER', helper).replace('SETUP', setup or 'pass').replace('RECEIVER', receiver)
+    tree = ast.parse(source)
+    proof = StaticPreparation([('model', None, None, source, tree, decorator_resolver(tree), None, None)])
+    assert proof.entry_uses('model.step')['flag'] != {'prepare_condition'}
 
 
 @test_utils.test(arch=ti.cuda, offline_cache=False)
@@ -1975,7 +2020,8 @@ class Model:
 @test_utils.test(arch=ti.cuda, offline_cache=False)
 @pytest.mark.parametrize('expression', ('ti.Vector([i, 2])', 'ti.Matrix([[i, 2], [0, 0]])',
                                       'ti.Vector.zero(ti.i32, 2)', 'ti.Matrix.zero(ti.i32, 2, 2)'))
-def test_package_library_prepares_branch_local_tensor_values(tmp_path, monkeypatch, expression):
+@pytest.mark.parametrize('materialized', (False, True))
+def test_package_library_prepares_branch_local_tensor_values(tmp_path, monkeypatch, expression, materialized):
     source = '''import taichi_forge as ti
 @ti.data_oriented
 class Model:
@@ -1993,6 +2039,19 @@ class Model:
                 total += point.sum() + 3
             self.out[i] = total
 '''.replace('EXPRESSION', expression)
+    if materialized:
+        initial = 'ti.Matrix.zero(ti.i32, 2, 2)' if 'Matrix' in expression else 'ti.Vector.zero(ti.i32, 2)'
+        source = source[:source.index('    @ti.kernel')] + f'''    @ti.func
+    def element(self, i):
+        point = {initial}
+        if ti.static(self.enabled):
+            point = {expression}
+        return point.sum()
+    @ti.kernel
+    def step(self):
+        for i in range(self.n):
+            self.out[i] = self.element(i)
+'''
     package = _source_package(tmp_path, monkeypatch, source)
     manifest = ti.aot.export_package(package, tmp_path / 'sdk', artifact_format='bc-library')
     entry, = (e for e in manifest['entries'].values() if e['definition'].endswith('.Model.step'))
