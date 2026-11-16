@@ -157,13 +157,24 @@ TEST(LLVMAotFinalization, SpecializesHelpersBeforeArchivingDynamicEntries) {
     target triple = "nvptx64-nvidia-cuda"
     declare void @unselected_effect()
     define internal i32 @helper(ptr %frame) alwaysinline "taichi.aot.real_function" {
+      %temporary = alloca i32
       %mode = load i32, ptr %frame
       %data = getelementptr i32, ptr %frame, i32 1
       %value = load i32, ptr %data
       %condition = icmp eq i32 %mode, 0
       br i1 %condition, label %chosen, label %other
     chosen:
-      %result = add i32 %value, 7
+      store i32 %value, ptr %temporary
+      br label %loop
+    loop:
+      %iteration = phi i32 [ 0, %chosen ], [ %next, %loop ]
+      %previous = load i32, ptr %temporary
+      %result = add i32 %previous, 1
+      store i32 %result, ptr %temporary
+      %next = add i32 %iteration, 1
+      %more = icmp ult i32 %next, 7
+      br i1 %more, label %loop, label %done
+    done:
       ret i32 %result
     other:
       call void @unselected_effect()
@@ -179,6 +190,12 @@ TEST(LLVMAotFinalization, SpecializesHelpersBeforeArchivingDynamicEntries) {
       store volatile i32 %result, ptr %output
       ret i32 %result
     }
+    define i32 @debug_entry(i32 %value) noinline optnone {
+      %slot = alloca i32
+      store i32 %value, ptr %slot
+      %result = load i32, ptr %slot
+      ret i32 %result
+    }
   )", error, context);
   ASSERT_NE(source, nullptr);
   LLVM::AotIRFinalizer finalizer;
@@ -189,13 +206,14 @@ TEST(LLVMAotFinalization, SpecializesHelpersBeforeArchivingDynamicEntries) {
     encode_llvm_module(module, output, LLVMModuleEncoding::bitcode);
     return bytes;
   };
+  const auto original = snapshot(*source);
   finalizer.export_units(*enabled, true, false);
   const auto sealed = snapshot(*enabled);
   finalizer.export_units(*enabled, true, true);
   EXPECT_EQ(sealed, snapshot(*enabled));
   finalizer.finalize_root(enabled, true);
   EXPECT_FALSE(llvm::verifyModule(*enabled));
-  EXPECT_NE(enabled->getNamedMetadata("taichi.aot.helper_specialization.v1"), nullptr);
+  EXPECT_NE(enabled->getNamedMetadata("taichi.aot.helper_specialization.v2"), nullptr);
   int reads = 0, writes = 0, calls = 0;
   for (auto &block : *enabled->getFunction("entry")) {
     for (auto &instruction : block) {
@@ -210,11 +228,14 @@ TEST(LLVMAotFinalization, SpecializesHelpersBeforeArchivingDynamicEntries) {
   EXPECT_EQ(reads, 1);
   EXPECT_EQ(writes, 1);
   EXPECT_EQ(calls, 0);  // Known helper mode folded; scene data is still live.
+  EXPECT_TRUE(llvm::isa<llvm::AllocaInst>(
+      enabled->getFunction("debug_entry")->front().front()));
+  EXPECT_EQ(original, snapshot(*source));
   EXPECT_FALSE(source->getFunction("helper")->isDeclaration());
   auto disabled = llvm::CloneModule(*source);
   finalizer.export_units(*disabled, false, false);
   finalizer.finalize_root(disabled, false);
-  EXPECT_EQ(disabled->getNamedMetadata("taichi.aot.helper_specialization.v1"), nullptr);
+  EXPECT_EQ(disabled->getNamedMetadata("taichi.aot.helper_specialization.v2"), nullptr);
   ASSERT_NE(disabled->getNamedMetadata(LLVM::kCodeUnits), nullptr);
   EXPECT_EQ(disabled->getNamedMetadata(LLVM::kCodeUnits)->getNumOperands(), 1);
 }

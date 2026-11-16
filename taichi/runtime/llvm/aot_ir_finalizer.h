@@ -154,7 +154,7 @@ class AotIRFinalizer {
   // Streaming seal and ordinary dump share this stage. The marker prevents a
   // sealed root from paying for it again at archive time.
   static void specialize_helpers(llvm::Module &module) {
-    constexpr auto marker = "taichi.aot.helper_specialization.v1";
+    constexpr auto marker = "taichi.aot.helper_specialization.v2";
     if (module.getNamedMetadata(marker))
       return;
     const bool needed =
@@ -178,23 +178,36 @@ class AotIRFinalizer {
       passes.registerFunctionAnalyses(fam);
       passes.registerLoopAnalyses(lam);
       passes.crossRegisterProxies(lam, fam, cgam, mam);
-      llvm::ModulePassManager pipeline;
-      pipeline.addPass(llvm::AlwaysInlinerPass());
-      // Most frontend temporaries are plain scalar allocas. Promote those
-      // cheaply before SROA analyzes the remaining private aggregate buffers.
-      pipeline.addPass(
-          llvm::createModuleToFunctionPassAdaptor(llvm::PromotePass()));
+      // This manually assembled pipeline has no optnone instrumentation.
+      // Honor per-function optimization requests explicitly, as clean() does.
+      const auto run_functions = [&](llvm::FunctionPassManager &pipeline) {
+        for (auto &function : module)
+          if (!function.isDeclaration() && !function.hasOptNone())
+            pipeline.run(function, fam);
+      };
+      // Promote each generic body's scalar temporaries before the inliner
+      // replicates them into every call site. Promoting only after inlining
+      // makes SSA construction operate on the much larger combined CFG.
+      // Escaping/private argument buffers remain for post-inline SROA.
+      llvm::FunctionPassManager preparation;
+      preparation.addPass(llvm::PromotePass());
+      run_functions(preparation);
+      llvm::ModulePassManager inline_pipeline;
+      inline_pipeline.addPass(llvm::AlwaysInlinerPass());
+      inline_pipeline.run(module, mam);
+      // Inlining can expose new promotable slots; clean those before SROA.
+      llvm::FunctionPassManager cleanup;
+      cleanup.addPass(llvm::PromotePass());
       // The generic helper ABI uses a private argument buffer. After inlining,
       // scalarize that local storage so the ordinary final cleanup can fold
       // fixed helper arguments while leaving dynamic entry loads intact.
-      pipeline.addPass(llvm::createModuleToFunctionPassAdaptor(
-          llvm::SROAPass(llvm::SROAOptions::ModifyCFG)));
-      pipeline.addPass(llvm::GlobalDCEPass());
-      pipeline.run(module, mam);
+      cleanup.addPass(llvm::SROAPass(llvm::SROAOptions::ModifyCFG));
+      run_functions(cleanup);
+      llvm::GlobalDCEPass().run(module, mam);
     }
     module.getOrInsertNamedMetadata(marker)->addOperand(llvm::MDNode::get(
         module.getContext(),
-        {llvm::MDString::get(module.getContext(), "backend-inline-sroa-v1"),
+        {llvm::MDString::get(module.getContext(), "promote-inline-promote-sroa-v2"),
          llvm::MDString::get(module.getContext(), LLVM_VERSION_STRING)}));
   }
 
@@ -213,7 +226,7 @@ class AotIRFinalizer {
   }
   static std::string input_key(const std::string &bytes, bool optimize) {
     return aot_artifact_sha256(
-        std::string(optimize ? "aot-local-v1:" : "aot-unchanged:") +
+        std::string(optimize ? "aot-local-v2:" : "aot-unchanged:") +
         LLVM_VERSION_STRING + ":" + bytes);
   }
   static std::set<std::string> referenced_symbols(const llvm::Module &module) {
