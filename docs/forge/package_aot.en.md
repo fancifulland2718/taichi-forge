@@ -315,6 +315,17 @@ root fails the preflight/export. `module_roots` records explicit selections;
 Unselected, unreachable modules under `source_root` are not automatically included:
 the build must still account for the engine's public roots and declarations.
 
+An explicit Kernel `ti.static` condition comparing `ti.cfg.arch` or
+`ti.lang.impl.current_cfg().arch` with a backend is selected before signature
+discovery. A selected branch that is solely a literal call to an ordinary
+`typing.NoReturn` helper retains the existing raising Host interface, without
+compiling unavailable numerical code or evaluating its device type annotations.
+The interface remains in `error_interfaces`; it is not silently omitted. Supported
+branches compile the original Kernel, whose JIT path uses the same static guard.
+Runtime conditions, mutable owner aliases and unknown tests cannot establish
+backend exclusion. This does not infer availability from compilation failures
+or make unsupported argument types available on another backend.
+
 Version 66 supports an unconditional constructor assignment
 `scope = ResourceScope(parent).child('child', self)`, including proven forwarding
 factories. The parent must be an unchanged constructor parameter and the name a

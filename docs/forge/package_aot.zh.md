@@ -221,6 +221,14 @@ ti.aot.export_package(roots, "dist/engine_cuda", arch="cuda", source_root="path/
 及其加载成本不由这个接口自动解决。
 
 多根包沿用现有 `application_modules` 消费边界，不需要另一个 Runtime Linker。
+
+Kernel 中显式 `ti.static` 后端条件（直接比较 `ti.cfg.arch` 或
+`ti.lang.impl.current_cfg().arch` 与后端）在签名发现前选择。如果选中分支仅为一次
+字面量参数调用，且普通 helper 明确标注 `typing.NoReturn`，则复用原抛错 Host 接口，
+不编译该目标不可用的数值体，也不求值其设备类型注解。接口仍列入 `error_interfaces`，
+不会静默消失；支持分支编译原 Kernel，普通 JIT 使用同一个静态条件。运行时条件、
+可变 owner 别名和未知条件不能证明后端排除，不以编译失败推断支持域，也不扩大其他
+后端的参数类型资格。
 正常混合 import 可从不同原命名空间取得对象并共享同一加载包；独立消费时
 `library.host` 是第一个根，其他根可用 `library.module("renderer_api")` 访问。
 源根选择只决定定义覆盖，不能替代实际编译、数值消费及实例隔离检查。

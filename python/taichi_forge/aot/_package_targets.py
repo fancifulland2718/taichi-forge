@@ -1,4 +1,4 @@
-"""Select only constructor branches proved by the package's chosen backend."""
+"""Select explicit construction and static Kernel branches for one backend."""
 
 import ast
 import copy
@@ -42,15 +42,17 @@ def select_target_branches(tree, kind, target, module, fail):
             return "self." + node.attr
         return None
 
-    for cls in tree.body:
-        if not isinstance(cls, ast.ClassDef):
-            continue
-        for function in cls.body:
-            if not isinstance(function, ast.FunctionDef) or not (
+    for scope in tree.body:
+        members = scope.body if isinstance(scope, ast.ClassDef) else (scope,)
+        for function in members:
+            if not isinstance(function, ast.FunctionDef):
+                continue
+            numerical = [kind(d) for d in function.decorator_list] == ["kernel"]
+            if not numerical and not (isinstance(scope, ast.ClassDef) and (
                 function.name == "__init__"
                 or getattr(function, "_package_construction_method", False)
                 or getattr(function, "_package_preparation_method", False)
-            ):
+            )):
                 continue
             writes = {}
             locals_ = {n.arg for n in ast.walk(function.args) if isinstance(n, ast.arg)}
@@ -73,7 +75,7 @@ def select_target_branches(tree, kind, target, module, fail):
                 constant = backend_constant(node, kind)
                 if constant is not None:
                     return constant
-                if backend_query(node, kind) or key(node) in aliases:
+                if backend_query(node, kind) or (not numerical and key(node) in aliases):
                     return target
                 return None
 
@@ -113,7 +115,15 @@ def select_target_branches(tree, kind, target, module, fail):
                             name = key(targets[0])
                             if name is not None and writes.get(name) == 1:
                                 aliases.add(name)
-                    selected = condition(node.test) if isinstance(node, ast.If) else None
+                    test = node.test if isinstance(node, ast.If) else None
+                    if numerical:
+                        # Numerical admission follows an explicit compile-time
+                        # target guard. Ordinary runtime conditions and owner
+                        # aliases cannot establish backend availability.
+                        test = (test.args[0] if isinstance(test, ast.Call)
+                                and qualified_kind(test, kind) == "static"
+                                and len(test.args) == 1 and not test.keywords else None)
+                    selected = condition(test) if test is not None else None
                     if selected is None:
                         # Resource contexts and model conditions do not hide
                         # backend-only decisions. Arm-local aliases must not
@@ -130,7 +140,15 @@ def select_target_branches(tree, kind, target, module, fail):
                         output.append(node)
                         continue
                     location = f"{module}:{node.lineno}"
-                    selections.append(dict(owner=cls.name, line=node.lineno, taken=selected))
+                    selections.append(dict(owner=scope.name if isinstance(scope, ast.ClassDef) else None,
+                                           line=node.lineno, taken=selected))
+                    if numerical:
+                        # The original Kernel keeps the same ti.static guard
+                        # for JIT compilation. The selected syntax lets normal
+                        # declaration analysis recognize a terminal NoReturn
+                        # interface before trying to infer its numerical ABI.
+                        output.extend(statements(node.body if selected else node.orelse))
+                        continue
                     # Keep the original test as a consumption-time guard. A Host
                     # call/property may have changed an owner alias after the
                     # assignment; choosing that different layout is not legal.

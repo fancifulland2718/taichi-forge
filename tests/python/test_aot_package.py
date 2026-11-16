@@ -18054,6 +18054,104 @@ def test_package_rejects_numerical_mixin_without_concrete_receiver(tmp_path, mon
     assert not (tmp_path / "sdk").exists()
 
 
+TARGET_ERROR_SOURCE = '''
+import taichi_forge as ti
+from typing import NoReturn
+calls = 0
+def unsupported(message: str) -> NoReturn:
+    global calls
+    calls += 1
+    raise NotImplementedError(message)
+
+@ti.data_oriented
+class Model:
+    @ti.kernel
+    def cuda_only(self, out: ti.types.ndarray(ti.i32, 1), offset: ti.i32):
+        if ti.static(ti.lang.impl.current_cfg().arch == ti.cuda):
+            for i in out:
+                out[i] = i + offset
+        else:
+            unsupported('requires CUDA')
+
+@ti.kernel
+def image_only(image: ti.types.rw_texture(2, fmt=ti.Format.rgba32f), owner: ti.template()):
+    if ti.static(ti.cfg.arch == ti.vulkan):
+        image.store(ti.Vector([0, 0]), ti.Vector([1.0, 2.0, 3.0, 4.0]))
+    else:
+        unsupported('requires Vulkan storage images')
+
+@ti.kernel
+def value(x: ti.i32) -> ti.i32:
+    return x + 3
+'''
+
+
+@test_utils.test(arch=[ti.cpu, ti.cuda], offline_cache=False)
+def test_package_static_target_guards_preserve_unavailable_interfaces(tmp_path, monkeypatch):
+    package = _source_package(tmp_path, monkeypatch, TARGET_ERROR_SOURCE)
+    original = sys.modules['definition_fixture.model']
+    manifest = ti.aot.export_package(original, tmp_path/'sdk')
+    arch = ti.cfg.arch.name
+    assert original.calls == 0
+    assert 'definition_fixture.model.image_only' in manifest['error_interfaces']
+    assert ('definition_fixture.model.Model.cuda_only' in manifest['error_interfaces']) is (arch != 'cuda')
+    assert len(manifest['entries']) == (2 if arch == 'cuda' else 1)
+    if arch == 'cuda':
+        out = ti.ndarray(ti.i32, 7)
+        original.Model().cuda_only(out, 4)
+        np.testing.assert_array_equal(out.to_numpy(), np.arange(7) + 4)
+    probe = tmp_path/'consume_target_errors.py'
+    probe.write_text(textwrap.dedent('''
+        import importlib.abc, sys
+        import numpy as np
+        class NoSource(importlib.abc.MetaPathFinder):
+            def find_spec(self, fullname, path=None, target=None):
+                if fullname.split('.')[0] in ('taichi', 'taichi_forge', 'definition_fixture'):
+                    raise AssertionError(fullname)
+        sys.meta_path.insert(0, NoSource())
+        from taichi_forge_runtime.aot import Runtime, load_package
+        with Runtime(sys.argv[2]) as runtime, load_package(runtime, sys.argv[1]) as code:
+            assert code.host.value(8) == 11
+            try:
+                code.host.image_only(None, object())
+            except NotImplementedError as error:
+                assert 'requires Vulkan' in str(error)
+            else:
+                raise AssertionError('unsupported interface silently succeeded')
+            if sys.argv[2] == 'cuda':
+                out = runtime.ndarray('i32', (7,))
+                for offset in (4, -3):
+                    code.host.Model().cuda_only(out, offset)
+                    np.testing.assert_array_equal(out.to_numpy(), np.arange(7) + offset)
+            else:
+                try:
+                    code.host.Model().cuda_only(None, 4)
+                except NotImplementedError as error:
+                    assert 'requires CUDA' in str(error)
+                else:
+                    raise AssertionError('unsupported method silently succeeded')
+        print('TARGET_ERRORS_SOURCE_FREE_OK')
+    '''), encoding='utf8')
+    env = dict(os.environ, PYTHONDONTWRITEBYTECODE='1',
+        PYTHONPATH=str(Path(__file__).resolve().parents[2]/'packaging/runtime/src'),
+        TAICHI_NATIVE_RUNTIME_DIR=str(Path(utils._loaded_native_runtime_path).parent),
+        TAICHI_RUNTIME_DIR=utils._runtime_bitcode_dir())
+    result = subprocess.run([sys.executable, '-B', str(probe), str(tmp_path/'sdk'), arch],
+                            cwd=tmp_path, env=env, capture_output=True, text=True, timeout=90)
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert 'TARGET_ERRORS_SOURCE_FREE_OK' in result.stdout
+
+
+@test_utils.test(arch=ti.cpu, offline_cache=False)
+@pytest.mark.parametrize('guard', ('ti.cfg.arch == ti.vulkan', 'ti.static(owner.enabled)'))
+def test_package_unknown_target_conditions_do_not_hide_numerical_signatures(tmp_path, monkeypatch, guard):
+    source = TARGET_ERROR_SOURCE.replace('ti.static(ti.cfg.arch == ti.vulkan)', guard)
+    package = _source_package(tmp_path, monkeypatch, source)
+    with pytest.raises(ti.aot.PackageExportError, match='requires an explicit value or ndarray type'):
+        ti.aot.export_package(sys.modules['definition_fixture.model'], tmp_path/'sdk')
+    assert not (tmp_path/'sdk').exists()
+
+
 @test_utils.test(arch=ti.cpu, offline_cache=False)
 def test_package_preserves_nonreturning_interfaces_without_numerical_payload(tmp_path, monkeypatch):
     source = """

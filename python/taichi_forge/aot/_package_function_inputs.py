@@ -456,6 +456,8 @@ def discover(sources, imported, *, preparation_receivers=None, resource_inventor
                                 functions[descriptor.func] = (module, method)
                                 cached_sources.add(descriptor.func)
         for definition in definitions:
+            if definition.get("error_interface"):
+                continue
             if definition["kind"] != "kernel" and resource_inventory is None:
                 continue
             if definition["owner"] is None:

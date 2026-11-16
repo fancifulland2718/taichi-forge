@@ -59,6 +59,12 @@ def is_error_interface(node, namespace):
 def project_error_interface(node, definition):
     """Preserve the error helper, but fail if its declared NoReturn contract lies."""
     node.decorator_list = []
+    # The interface always raises before using its arguments. Keep Python call
+    # binding, without evaluating numerical type constructors on an unsupported
+    # target or requiring the private frontend just to import the Host stub.
+    for argument in (*node.args.posonlyargs, *node.args.args, *node.args.kwonlyargs):
+        argument.annotation = None
+    node.returns = None
     node.body.append(
         ast.Raise(
             ast.Call(
