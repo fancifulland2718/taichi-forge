@@ -6347,6 +6347,31 @@ class Model:
             assert group.common() == 7
 
 
+@test_utils.test(arch=ti.cuda, offline_cache=False)
+def test_package_bitcode_library_keeps_host_sequences_out_of_query_projection(tmp_path, monkeypatch):
+    source = TYPED_FIELD_INPUT_SOURCE.replace(
+        "scope.first = Checkpoint(self.storage.scalar)\n        scope.second = Checkpoint(self.storage.record)",
+        "self.groups = (Checkpoint(self.storage.scalar), Checkpoint(self.storage.record))\n"
+        "        scope.owner_sequence('groups', self.groups)\n"
+        "        self.first, self.second = self.groups",
+    ) + '''
+    @ti.kernel
+    def answer(self) -> ti.i32:
+        return 42
+'''
+    package = _source_package(tmp_path, monkeypatch, source)
+    manifest = ti.aot.export_package(package, tmp_path / 'sdk', artifact_format='bc-library')
+    with Runtime(manifest['target']) as runtime, load_package(runtime, tmp_path / 'sdk') as code:
+        owner = code.host.Model(7, 3)
+        assert owner.answer() == package.Model(7, 3).answer() == 42
+        expected = np.arange(7, dtype=np.float32)
+        owner.storage.scalar.from_numpy(expected)
+        owner.graph().run({})
+        owner.storage.scalar.from_numpy(expected * 0)
+        owner.first.restore()
+        np.testing.assert_array_equal(owner.storage.scalar.to_numpy(), expected)
+
+
 @pytest.mark.parametrize(
     "change, diagnostic",
     [

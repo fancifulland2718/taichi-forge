@@ -285,8 +285,10 @@ def project_query_groups(environment, schema, uses):
     declarations = dict(environment.declarations)
     inputs = [tuple(item.get("path", (key,))) for key, item in schema.items() if item["kind"] == "owner_input"]
     for flag, predicate in list(schema.items()):
+        if predicate["kind"] != "static":
+            continue  # Host sequences have no numerical capture path.
         path = environment._paths[flag]
-        if (predicate["kind"] != "static" or predicate.get("dynamic_storage_condition")
+        if (predicate.get("dynamic_storage_condition")
                 or not any(path[:len(prefix)] == prefix for prefix in inputs)
                 or {tuple(v) for v in predicate["choices"]} != {("bool", False), ("bool", True)}
                 or uses.get(path[-1], {"prepare_condition"}) != {"prepare_condition"}):
