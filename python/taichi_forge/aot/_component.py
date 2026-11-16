@@ -265,7 +265,14 @@ class _InputPresence(RuntimeValue):
 
 
 @dataclass(frozen=True)
-class _OptionalArray(Array):
+class _LayoutArray(Array):
+    """Array whose element type or rank depends on static layout facts."""
+
+    conditions: tuple = ()
+
+
+@dataclass(frozen=True)
+class _OptionalArray(_LayoutArray):
     presence: str = ""
 
     @property
@@ -2254,7 +2261,8 @@ class _Capture:
         # Allocation-conditioned declarations retain their existing static
         # layout contract. Typed optional inputs above use invocation presence.
         conditional_array = isinstance(declaration, _ConditionalArray) and (ctx is None or ctx.is_in_static_scope())
-        if conditional_array or isinstance(
+        layout_array = isinstance(declaration, _LayoutArray) and bool(declaration.conditions)
+        if conditional_array or layout_array or isinstance(
             declaration, (_ConditionalDenseField, _ConditionalModelTensorField, _ConditionalRecord)
         ):
             self.resource_conditions[name] = declaration.conditions

@@ -636,6 +636,14 @@ class _ModuleBinding:
                 raise ValueError("Typed external resource requires its managed package scope")
             owner_key = self.owner_contract(scope._root, owner_key)
             contract = self.package.manifest["owners"][owner_key].get(scope._identity(name), {})
+            if contract.get("dtype_policy"):
+                policy = contract["dtype_policy"]
+                guard = self.package.manifest["owners"][owner_key][policy["condition"]]
+                selected = path_value(scope._root, guard.get("path", (policy["condition"],)))
+                if type(selected) is not bool:
+                    raise ValueError("External dtype selection requires a boolean configuration")
+                contract = {**contract, "element": {
+                    **contract["element"], "dtype": policy["if_true" if selected else "if_false"]}}
             if contract.get("shape_policy"):
                 policy = contract["shape_policy"]
                 guard = self.package.manifest["owners"][owner_key][policy["condition"]]
@@ -1881,6 +1889,7 @@ class LoadedPackage:
                 86,
                 87,
                 88,
+                89,
             )
             or self.manifest.get("kind") != "forge_definition_package_prototype"
         ):
@@ -1895,6 +1904,11 @@ class LoadedPackage:
             for schema in self.manifest.get("owners", {}).values() for member in schema.values()
         ):
             raise ValueError("External shape selection requires definition package version 88")
+        if self.manifest["version"] < 89 and any(
+            member.get("external") and member.get("dtype_policy")
+            for owner in self.manifest["owners"].values() for member in owner.values()
+        ):
+            raise ValueError("External dtype selection requires definition package version 89")
         requirements = self.manifest.get("runtime_requirements", [])
         if not isinstance(requirements, list) or any(item != "fault_snapshot" for item in requirements):
             raise ValueError("Unsupported package runtime requirement")

@@ -12567,6 +12567,130 @@ class Other(Ports):
             view.close()
 
 
+EXTERNAL_DTYPE_CHOICE_SOURCE = '''
+import taichi_forge as ti
+@ti.data_oriented
+class Model:
+    def __init__(self, n: int, integer: bool, batched: bool):
+        self.n, self.integer, self.batched = n, integer, batched
+        scope = ti.experimental.ResourceScope(self)
+        scope.static('integer', choices=(False, True))
+        scope.static('batched', choices=(False, True))
+        scope.out = scope.field(ti.f32, shape=scope.dim('n'))
+    def prepare(self, values):
+        scope = ti.experimental.ResourceScope(self)
+        shape = (2, scope.dim('n')) if self.batched else (scope.dim('n'),)
+        element = ti.f32 if not self.integer else ti.i32
+        scope.borrow('values', values, external=True, dtype=element, shape=shape)
+    @ti.kernel
+    def update(self, gain: ti.f32):
+        for i in range(self.n):
+            if ti.static(self.batched):
+                self.out[i] = gain * self.values[1, i]
+            else:
+                self.out[i] = gain * self.values[i]
+'''
+
+
+@pytest.mark.parametrize('optional', [False, True])
+@test_utils.test(arch=[ti.cpu, ti.cuda], offline_cache=False)
+def test_package_external_dtype_choice_preserves_layout_and_live_data(tmp_path, monkeypatch, optional):
+    source = EXTERNAL_DTYPE_CHOICE_SOURCE
+    if optional:
+        source = source.replace('dtype=element, shape=shape)', 'dtype=element, shape=shape, optional=True)')
+    package = _source_package(tmp_path, monkeypatch, source)
+    options = {'artifact_format': 'bc-library'} if ti.cfg.arch == ti.cuda else {}
+    manifest = ti.aot.export_package(package, tmp_path / 'sdk', **options)
+    assert manifest['version'] == 89
+    with Runtime(manifest['target']) as runtime, load_package(runtime, tmp_path / 'sdk') as code:
+        owners = []
+        for n, integer, batched in ((5, False, False), (7, True, False), (9, False, True), (11, True, True)):
+            shape = (2, n) if batched else (n,)
+            data = np.arange(np.prod(shape), dtype=np.int32 if integer else np.float32).reshape(shape)
+            jit_values = ti.field(ti.i32 if integer else ti.f32, shape=shape)
+            jit_values.from_numpy(data)
+            normal = package.model.Model(n, integer, batched)
+            normal.prepare(jit_values)
+            normal.update(2)
+            expected = normal.out.to_numpy()
+            owner = code.host.Model(n, integer, batched)
+            values = runtime.ndarray('i32' if integer else 'f32', shape)
+            values.from_numpy(data)
+            owner.prepare(values)
+            owner.update(2)
+            np.testing.assert_array_equal(owner.out.to_numpy(), expected)
+            wrong = runtime.ndarray('f32' if integer else 'i32', shape)
+            try:
+                with pytest.raises(ValueError, match='dtype|element'):
+                    owner.prepare(wrong)
+            finally:
+                wrong.close()
+            assert owner.values is values
+            if optional:
+                owner.prepare(None)
+                with pytest.raises(ValueError, match='presence'):
+                    owner.update(2)
+                owner.prepare(values)
+            values.from_numpy(data + 3)
+            owner.update(2)
+            np.testing.assert_array_equal(owner.out.to_numpy(), expected + 6)
+            owners.append((owner, expected + 6))
+        for owner, expected in owners:
+            np.testing.assert_array_equal(owner.out.to_numpy(), expected)
+    probe = tmp_path / 'consume_external_dtypes.py'
+    probe.write_text(textwrap.dedent('''
+        import importlib.abc, sys
+        import numpy as np
+        class Block(importlib.abc.MetaPathFinder):
+            def find_spec(self, fullname, path=None, target=None):
+                if fullname.split('.')[0] in ('taichi', 'taichi_forge', 'definition_fixture'):
+                    raise AssertionError(fullname)
+        sys.meta_path.insert(0, Block())
+        from taichi_forge_runtime.aot import Runtime, load_package
+        with Runtime(sys.argv[2]) as runtime, load_package(runtime, sys.argv[1]) as code:
+            for integer in (False, True):
+                owner = code.host.Model(13, integer, True)
+                values = runtime.ndarray('i32' if integer else 'f32', (2, 13))
+                data = np.arange(26, dtype=np.int32 if integer else np.float32).reshape(2, 13)
+                values.from_numpy(data)
+                owner.prepare(values)
+                owner.update(3)
+                np.testing.assert_array_equal(owner.out.to_numpy(), data[1] * 3)
+        print('EXTERNAL_DTYPES_SOURCE_FREE_OK')
+    '''), encoding='utf8')
+    env = dict(os.environ, PYTHONDONTWRITEBYTECODE='1',
+        PYTHONPATH=str(Path(__file__).resolve().parents[2]/'packaging/runtime/src'),
+        TAICHI_NATIVE_RUNTIME_DIR=str(Path(utils._loaded_native_runtime_path).parent),
+        TAICHI_RUNTIME_DIR=utils._runtime_bitcode_dir())
+    result = subprocess.run([sys.executable, '-B', str(probe), str(tmp_path/'sdk'), ti.cfg.arch.name],
+                            cwd=tmp_path, env=env, capture_output=True, text=True, timeout=90)
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert 'EXTERNAL_DTYPES_SOURCE_FREE_OK' in result.stdout
+    manifest_path = tmp_path / 'sdk' / 'package.json'
+    stored = json.loads(manifest_path.read_text())
+    stored['version'] = 88
+    manifest_path.write_text(json.dumps(stored))
+    with Runtime(manifest['target']) as runtime:
+        with pytest.raises(ValueError, match='External dtype selection.*89'):
+            load_package(runtime, tmp_path / 'sdk')
+
+
+@pytest.mark.parametrize('change', ['kernel_only', 'model_condition', 'vector_branch'])
+@test_utils.test(arch=ti.cpu, offline_cache=False)
+def test_package_external_dtype_rejects_unproved_choice(tmp_path, monkeypatch, change):
+    source = EXTERNAL_DTYPE_CHOICE_SOURCE
+    if change == 'kernel_only':
+        source = source.replace("scope.static('integer', choices=(False, True))",
+                                "scope.static('integer', choices=(False, True), kernel_only=True)")
+    elif change == 'model_condition':
+        source = source.replace('if not self.integer else', 'if self.n > 4 else')
+    else:
+        source = source.replace('else ti.i32', 'else ti.types.vector(3, ti.i32)')
+    package = _source_package(tmp_path, monkeypatch, source)
+    with pytest.raises(ValueError, match='Field dtype (selection|choices)'):
+        ti.aot.export_package(package, tmp_path / 'sdk')
+
+
 @test_utils.test(arch=[ti.cpu, ti.cuda], offline_cache=False)
 def test_package_external_shape_choice_preserves_rank_and_live_data(tmp_path, monkeypatch):
     source = '''

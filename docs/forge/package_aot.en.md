@@ -19,6 +19,16 @@ rejects a faulted runtime. A package declaring this requirement rejects a native
 runtime without the query before loading its Host modules. This does not project
 full `ti.runtime.stats()` or enable telemetry during export or execution.
 
+Format 89 extends typed external borrows to scalar element-type choices such as
+`dtype=ti.i32 if self.categorical else ti.f32`. The condition must be an
+unconditional boolean static declaration, not `kernel_only`. The selected type
+participates in code selection and binding validation even when the kernel does
+not read the condition directly. Required and optional ports can combine this
+with the existing rank/shape choice. CPU/CUDA checks cover source-free consumption,
+JIT agreement, live updates, multiple instances and wrong-type rejection. Array
+contents do not become compile-time values; arbitrary type expressions and tensor
+type alternatives remain outside this scalar policy.
+
 Format 88 lets a typed external borrow select its shape and rank using one
 declared boolean layout choice, as for an owned Field. For example,
 `shape=(rows, columns) if self.batched else (columns,)` is resolved before

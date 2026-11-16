@@ -104,6 +104,7 @@ class OwnerGraph:
             StaticValue,
             _ChoiceRecord,
             _ConditionalArray,
+            _LayoutArray,
             _ConditionalOwnerRecord,
             _InputPresence,
             _OptionalArray,
@@ -391,9 +392,13 @@ class OwnerGraph:
                 if item.get("external") and item["element"]["kind"] not in ("scalar", "tensor"):
                     raise ValueError("Typed external borrow requires scalar/vector/matrix elements")
                 conditions = {**item.get("conditions", {}), **item.get("dtype_guards", {})}
+                layout_conditions = {**item.get("dtype_guards", {}), **item.get("shape_guards", {})}
                 declarations[attribute] = (
-                    _OptionalArray(dtype, item["ndim"], presence=item["input_presence_attribute"])
+                    _OptionalArray(dtype, item["ndim"], presence=item["input_presence_attribute"],
+                                   conditions=tuple(layout_conditions.items()))
                     if item.get("external") and item.get("optional_input")
+                    else _LayoutArray(dtype, item["ndim"], conditions=tuple(layout_conditions.items()))
+                    if item.get("external") and layout_conditions
                     else (
                         _ConditionalArray(dtype, item["ndim"], conditions=tuple(conditions.items()))
                         if conditions
