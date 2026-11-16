@@ -467,6 +467,21 @@ def _analyze(module, source, namespace, target, *, defer_owners=False):
     return ast.fix_missing_locations(tree), kind, owners, definitions
 
 
+class _ProjectedHost:
+    """Projected syntax with compiler-only entry relocations, never a second pass."""
+
+    def __init__(self, tree, entries):
+        self.tree, self.entries = tree, entries
+
+    def bind(self, entries):
+        for name, nodes in self.entries.items():
+            for node in nodes:
+                node.value = entries[name]["symbol"]
+        source = ast.unparse(self.tree) + "\n"
+        self.tree = self.entries = None
+        return source
+
+
 def _host_projection(
     module,
     tree,
@@ -484,6 +499,14 @@ def _host_projection(
     host_contexts=None,
     construction_schema=None,
 ):
+    deferred_entries = {} if entries is None else None
+
+    def entry_symbol(name):
+        node = ast.Constant(entries[name]["symbol"] if entries is not None else "")
+        if deferred_entries is not None:
+            deferred_entries.setdefault(name, []).append(node)
+        return node
+
     input_families = getattr(tree, "_package_input_families", {})
     context_schemas = owners
     owners = dict(owners)
@@ -911,11 +934,8 @@ def _host_projection(
                                         ast.Load(),
                                     ),
                                     [
-                                        ast.Constant(
-                                            definition["function_identity"]
-                                            if input_method
-                                            else entries[definition["name"]]["symbol"]
-                                        )
+                                        ast.Constant(definition["function_identity"])
+                                        if input_method else entry_symbol(definition["name"])
                                     ],
                                     [],
                                 ),
@@ -1075,13 +1095,24 @@ def _host_projection(
                 return ast.copy_location(ast.Assign([ast.Name(node.name, ast.Store())], descriptor), node)
             descriptor = ast.Call(
                 ast.Attribute(ast.Name(_PREFIX + "runtime", ast.Load()), "entry", ast.Load()),
-                [ast.Constant(entries[definition["name"]]["symbol"])],
+                [entry_symbol(definition["name"])],
                 [],
             )
             return ast.copy_location(ast.Assign([ast.Name(node.name, ast.Store())], descriptor), node)
 
         def visit_Attribute(self, node):
             role = qualified_kind(node, kind)
+            if isinstance(node.ctx, ast.Load) and role == "runtime.stats" and self.host_functions:
+                # Program-wide diagnostic counters have no standalone C-API
+                # snapshot yet. Preserve the optional Host method and report
+                # that exact producer-only operation; calling it must fail
+                # explicitly, without importing a frontend or inventing data.
+                self.minimum_version = max(self.minimum_version, 9)
+                self.producer_only.append(dict(module=module, operation=role, line=node.lineno,
+                                               function=self.host_functions[-1]))
+                return ast.copy_location(ast.Call(
+                    ast.Attribute(ast.Name(_PREFIX + "runtime", ast.Load()), "producer_type", ast.Load()),
+                    [ast.Constant("ti." + role)], []), node)
             if isinstance(node.ctx, ast.Load) and role == "runtime.fault_snapshot":
                 self.minimum_version = max(self.minimum_version, 87)
                 self.runtime_requirements.add("fault_snapshot")
@@ -1448,6 +1479,11 @@ def _host_projection(
         host_tree = ast.Module(body=tree.body, type_ignores=tree.type_ignores)
         host_tree = copy.deepcopy(host_tree, memo)
         memo.clear()
+        if getattr(builder, "_arch", None) is not None:
+            # Select ordinary Host backend branches only after discovering
+            # typed numerical call tuples. Changing that discovery syntax can
+            # lose receiver provenance for Host-selected Kernel references.
+            select_target_branches(host_tree, kind, builder._arch.name, module, _fail, include_host=True)
         projected = projector.visit(host_tree)
         factory_definitions = {fact["definition"] for fact in tree._package_factory_declarations}
         loaded_names = {n.id for n in ast.walk(projected) if isinstance(n, ast.Name) and isinstance(n.ctx, ast.Load)}
@@ -1480,7 +1516,9 @@ def _host_projection(
         ).body
         ast.fix_missing_locations(projected)
         compile(projected, f"<projected-host:{module}>", "exec")
-        return (ast.unparse(projected) + "\n", projector.minimum_version,
+        source = (_ProjectedHost(projected, deferred_entries) if deferred_entries is not None
+                  else ast.unparse(projected) + "\n")
+        return (source, projector.minimum_version,
                 projector.producer_only, sorted(projector.runtime_requirements))
     finally:
         # Local transformer classes form cycles (including their MRO). Their
@@ -1489,7 +1527,7 @@ def _host_projection(
         # Only drop our references; caller-owned schemas and resources stay intact.
         tree = definitions = definitions_at = numerical = None
         owners = context_schemas = binding_schemas = input_families = None
-        namespace = builder = host_contexts = construction_schema = None
+        namespace = builder = host_contexts = construction_schema = entries = deferred_entries = None
 
 
 def _preflight_package(package, *, arch=None, source_root=None):
@@ -1844,6 +1882,25 @@ def _export_package(package, output, *, arch, caps, source_root, compilation, ar
         for definition in definitions
         if definition["kind"] in ("func", "real_func") and not definition.get("error_interface")
     }
+    # Project retained Host code once, before spending time on numerical
+    # compilation. Only final entry symbols depend on compiled identities.
+    # Projection reads declaration schemas; it must not create layout witnesses
+    # or retain all numerical owners merely to prepare the Host half of a package.
+    host_projections, host_failures = {}, []
+    for name, _, _, _, tree, kind, schemas, definitions in sources:
+        imported = imported_modules[name]
+        try:
+            host_projections[name] = _host_projection(
+                name, tree, kind, schemas, definitions, None, package.__name__, device_functions,
+                hasattr(imported, "__path__"), vars(imported), module, application_modules,
+                frozenset(manifest["error_interfaces"]), host_contexts,
+                lambda identity: owner_graph.definitions[identity][2],
+            )
+        except PackageExportError as error:
+            host_failures.append(str(error))
+    if host_failures:
+        raise PackageExportError("Package Host projection failed before numerical compilation:\n"
+                                 + "\n".join(host_failures))
     shared_entries, pyfunc_kernels, closure_kernels = {}, {}, {}
     for source_index, (name, source_path, relative, text, tree, kind, schemas, definitions) in enumerate(sources):
         imported = imported_modules[name]
@@ -2815,23 +2872,8 @@ def _export_package(package, output, *, arch, caps, source_root, compilation, ar
             contract = manifest["entry_families"].get(first) or manifest["entries"][code_symbol]
             manifest["entry_families"][symbol] = dict(arguments=contract["arguments"], owner_inputs=methods)
             entries[definition["name"]] = dict(symbol=symbol)
-        host_source, minimum_version, producer_only, runtime_requirements = _host_projection(
-            name,
-            tree,
-            kind,
-            schemas,
-            definitions,
-            entries,
-            package.__name__,
-            device_functions,
-            hasattr(imported, "__path__"),
-            vars(imported),
-            module,
-            application_modules,
-            frozenset(manifest["error_interfaces"]),
-            host_contexts,
-            owner_graph.schema,
-        )
+        projected, minimum_version, producer_only, runtime_requirements = host_projections.pop(name)
+        host_source = projected.bind(entries)
         payloads["host/" + relative.as_posix()] = host_source.encode("utf8")
         manifest["version"] = max(manifest["version"], minimum_version)
         manifest["producer_only"].extend(producer_only)

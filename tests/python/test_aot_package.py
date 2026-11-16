@@ -7633,7 +7633,8 @@ def test_package_dimension_relations_release_environment_without_gc(failure):
 
 
 @pytest.mark.parametrize("failure", [False, True])
-def test_package_host_projection_releases_build_references_without_gc(failure):
+@pytest.mark.parametrize("deferred", [False, True])
+def test_package_host_projection_releases_build_references_without_gc(failure, deferred):
     import gc
     import weakref
     from taichi_forge.aot._package import PackageExportError, _host_projection
@@ -7650,24 +7651,30 @@ def test_package_host_projection_releases_build_references_without_gc(failure):
         tree._package_factory_declarations = []
         namespace, builder, owner = Namespace(ti=ti), Token(), Token()
         references = [weakref.ref(value) for value in (tree, namespace, builder, owner)]
+        text = None
         try:
-            text, _, _ = _host_projection(
-                "sample", tree, decorator_resolver(tree), {}, [], {}, "sample", set(), False,
+            text, _, _, _ = _host_projection(
+                "sample", tree, decorator_resolver(tree), {}, [], None if deferred else {}, "sample", set(), False,
                 namespace, builder, construction_schema=lambda identity, retained=owner: {},
             )
         except PackageExportError:
             assert failure
         else:
             assert not failure
-            assert "answer = 42" in text
+            if not deferred:
+                assert "answer = 42" in text
         # The producer must only release its own references, including on error.
         assert namespace["ti"] is ti and len(tree.body) == 2
-        return references
+        return references, text
 
     automatic = gc.isenabled()
     gc.disable()
     try:
-        assert all(reference() is None for reference in project())
+        references, projected = project()
+        assert all(reference() is None for reference in references)
+        if deferred and not failure:
+            assert "answer = 42" in projected.bind({})
+            assert projected.tree is None and projected.entries is None
     finally:
         if automatic:
             gc.enable()
@@ -7695,7 +7702,7 @@ def factory(bias):
     definition = dict(name="factory.numerical", node=node, kind=kind, owner=None)
     if kind == "closure":
         definition.update(closure_definition=True, closure_names=["bias"])
-    text, _, _ = _host_projection(
+    text, _, _, _ = _host_projection(
         "sample", tree, decorator_resolver(tree), {}, [definition],
         {definition["name"]: {"symbol": "entry_symbol"}}, "sample", set(), False, {}, None,
     )
@@ -24710,7 +24717,7 @@ def test_package_does_not_compile_other_backend_resources_or_select_model_branch
     module.write_text(source.replace("if self.arch == ti.cuda:", "if n > 4:"), encoding="utf8")
     monkeypatch.delitem(sys.modules, "definition_fixture.model")
     importlib.import_module("definition_fixture.model")
-    with pytest.raises(ti.aot.PackageExportError, match="unconditional supported resource declaration"):
+    with pytest.raises(ti.aot.PackageExportError, match="unconditional declared boolean owner static"):
         ti.aot.export_package(package, tmp_path / "model_branch")
     assert not (tmp_path / "model_branch").exists()
 
@@ -27301,3 +27308,72 @@ def test_package_input_syntax_reuse_keeps_contexts_and_passes_separate(tmp_path,
     assert sum(node is helper for node in built) == 1
     assert package.model.constructors == 0
     assert ti.lang.impl.get_runtime().get_num_compiled_functions() == 0
+
+
+@test_utils.test(arch=ti.cpu, offline_cache=False)
+def test_package_projects_all_host_modules_before_compilation(tmp_path, monkeypatch):
+    from taichi_forge.aot._package_compilation import PackageCompilation
+
+    package = _source_package(tmp_path, monkeypatch, '''
+import taichi_forge as ti
+@ti.kernel
+def value(x: ti.i32) -> ti.i32:
+    return x + 2
+def unavailable():
+    return ti.unknown_projection()
+''', initializer='from .model import value\nimport taichi_forge as ti\ndef unavailable():\n    return ti.another_unknown()\n')
+
+    def forbidden(*args, **kwargs):
+        raise AssertionError('Host failure must precede numerical compilation')
+
+    monkeypatch.setattr(PackageCompilation, 'compile', forbidden)
+    with pytest.raises(ti.aot.PackageExportError, match='before numerical compilation') as failure:
+        ti.aot.export_package(package, tmp_path / 'sdk')
+    assert 'unknown_projection' in str(failure.value)
+    assert 'another_unknown' in str(failure.value)
+    assert ti.lang.impl.get_runtime().get_num_compiled_functions() == 0
+    assert not (tmp_path / 'sdk').exists()
+
+
+@test_utils.test(arch=[ti.cpu, ti.cuda], offline_cache=False)
+def test_package_projects_host_once_and_binds_late_entries(tmp_path, monkeypatch):
+    from collections import Counter
+    from taichi_forge.aot import _package
+
+    package = _source_package(tmp_path, monkeypatch, '''
+import taichi_forge as ti
+@ti.kernel
+def value(x: ti.i32) -> ti.i32:
+    return x + 2
+class NativeOnly:
+    def resize(self):
+        try:
+            if ti.lang.impl.current_cfg().arch == ti.vulkan:
+                return ti.hardware.graphics
+            else:
+                raise NotImplementedError('Vulkan only')
+        finally:
+            self.visited = True
+def diagnostics():
+    return ti.runtime.stats()
+''', initializer='from .model import value, NativeOnly, diagnostics\n')
+    calls = Counter()
+    project = _package._host_projection
+
+    def observed(name, *args, **kwargs):
+        calls[name] += 1
+        return project(name, *args, **kwargs)
+
+    monkeypatch.setattr(_package, '_host_projection', observed)
+    manifest = ti.aot.export_package(package, tmp_path / 'sdk')
+    assert set(calls.values()) == {1}
+    assert set(calls) == set(manifest['sources'])
+    assert any(item['operation'] == 'runtime.stats' for item in manifest['producer_only'])
+    with Runtime(manifest['target']) as runtime, load_package(runtime, tmp_path / 'sdk') as code:
+        assert code.host.value(17) == 19
+        native = code.host.NativeOnly()
+        with pytest.raises(NotImplementedError, match='Vulkan only'):
+            native.resize()
+        assert native.visited is True
+        with pytest.raises(RuntimeError, match='ti.runtime.stats.*producer-only'):
+            code.host.diagnostics()

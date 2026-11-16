@@ -32,7 +32,7 @@ def backend_query(node, kind):
     )
 
 
-def select_target_branches(tree, kind, target, module, fail):
+def select_target_branches(tree, kind, target, module, fail, *, include_host=False):
     selections = []
 
     def key(node):
@@ -47,8 +47,14 @@ def select_target_branches(tree, kind, target, module, fail):
         for function in members:
             if not isinstance(function, ast.FunctionDef):
                 continue
-            numerical = [kind(d) for d in function.decorator_list] == ["kernel"]
-            if not numerical and not (isinstance(scope, ast.ClassDef) and (
+            decorators = [kind(d) for d in function.decorator_list]
+            numerical = decorators == ["kernel"]
+            # Ordinary Host helpers can own backend-only resources too (e.g.
+            # resize and cold native-pipeline construction). Device functions
+            # still follow the numerical compiler's own specialization rules.
+            if not numerical and any(role in ("func", "real_func", "pyfunc") for role in decorators):
+                continue
+            if not numerical and not include_host and not (isinstance(scope, ast.ClassDef) and (
                 function.name == "__init__"
                 or getattr(function, "_package_construction_method", False)
                 or getattr(function, "_package_preparation_method", False)
@@ -137,6 +143,16 @@ def select_target_branches(tree, kind, target, module, fail):
                                 node.orelse = statements(node.orelse)
                                 aliases.clear()
                                 aliases.update(outer_aliases)
+                        elif isinstance(node, ast.Try):
+                            outer_aliases = set(aliases)
+                            for owner, attribute in [(node, "body"), (node, "orelse"),
+                                                     (node, "finalbody"),
+                                                     *((handler, "body") for handler in node.handlers)]:
+                                aliases.clear()
+                                aliases.update(outer_aliases)
+                                setattr(owner, attribute, statements(getattr(owner, attribute)))
+                            aliases.clear()
+                            aliases.update(outer_aliases)
                         output.append(node)
                         continue
                     location = f"{module}:{node.lineno}"
