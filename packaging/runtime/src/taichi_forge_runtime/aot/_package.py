@@ -1716,9 +1716,11 @@ class entry:
     def _check_layout(self, owner):
         if owner is None:
             return
-        from ._package_values import owner_type
+        from ._package_values import capture_is_absent, owner_type
 
         for item in self.contract["captures"]:
+            if capture_is_absent(owner, item):
+                continue
             allocated_owner = path_value(owner, item.get("layout_owner_path", ()))
             schema = self.package.manifest["owners"].get(owner_type(allocated_owner), {})
             for name, value in allocated_owner._forge_package_member_layouts.get(
@@ -1898,6 +1900,7 @@ class LoadedPackage:
                 90,
                 91,
                 92,
+                93,
             )
             or self.manifest.get("kind") != "forge_definition_package_prototype"
         ):
@@ -1907,6 +1910,11 @@ class LoadedPackage:
             raise ValueError("Application source package is missing its import boundary")
         if self.manifest["target"] != runtime.arch:
             raise ValueError("Package target differs from Runtime")
+        if self.manifest["version"] < 93 and any(
+            item["kind"] == "owner" and item.get("dynamic_input_record")
+            for schema in self.manifest.get("owners", {}).values() for item in schema.values()
+        ):
+            raise ValueError("Optional owned records require definition package version 93")
         if self.manifest["version"] < 88 and any(
             member.get("external") and member.get("shape_policy")
             for schema in self.manifest.get("owners", {}).values() for member in schema.values()

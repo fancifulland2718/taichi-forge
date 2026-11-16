@@ -27,6 +27,7 @@ def owner_bindings(environment, schema, used):
         key: dict(
             path=item.get("path", [key]),
             owner_type=item["owner_type"],
+            **({"optional": True} if item.get("dynamic_input_record") else {}),
             **({"reference_path": item["reference_path"]} if "reference_path" in item else {}),
         )
         for key, item in schema.items()
@@ -537,8 +538,9 @@ class OwnerGraph:
 
         project_borrows(owner, environment, expanded)
         project_field_likes(environment, expanded)
-        from ._package_optional import project_struct_member_inputs
+        from ._package_optional import project_owned_records, project_struct_member_inputs
 
+        project_owned_records(environment, expanded)
         project_struct_member_inputs(environment, expanded)
         result = owner, schema, environment, expanded
         if resource_key is not None:

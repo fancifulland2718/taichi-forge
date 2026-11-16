@@ -41,6 +41,136 @@ class Model:
 
 
 @test_utils.test(arch=[ti.cpu, ti.cuda], offline_cache=False)
+def test_package_optional_owned_numeric_records_share_code(tmp_path, monkeypatch):
+    source = '''
+import taichi_forge as ti
+@ti.data_oriented
+class State:
+    def __init__(self, n: int, scale: float):
+        self.n, self.scale = n, scale
+        fields = ti.FieldsBuilder()
+        scope = ti.experimental.ResourceScope(self, builder=fields)
+        scope.value('scale', ti.f32)
+        self.offset = ti.Vector([1.0, 2.0])
+        scope.value('offset', ti.types.vector(2, ti.f32))
+        scope.values = scope.field(ti.f32, shape=scope.dim('n'), initialization='zero')
+        self._tree = fields.finalize()
+    @ti.func
+    def sample(self, index) -> ti.f32:
+        self.values[index % self.n] += self.scale
+        return self.values[index % self.n] + self.offset[0]
+@ti.data_oriented
+class Model:
+    def __init__(self, n: int, first: bool, second: bool):
+        self.n, self.first, self.second = n, first, second
+        scope = ti.experimental.ResourceScope(self)
+        scope.static('first', choices=(False, True))
+        scope.static('second', choices=(False, True))
+        scope.out = scope.field(ti.f32, shape=scope.dim('n'), initialization='zero')
+        if self.first:
+            scope.primary = State(n + 1, 3.0)
+        else:
+            scope.record('primary', None, optional=True)
+        if self.second:
+            scope.secondary = State(n + 2, 7.0)
+        else:
+            scope.record('secondary', None, optional=True)
+    @ti.kernel
+    def step(self):
+        for i in range(self.n):
+            value = 2.0
+            if ti.static(self.first):
+                value += self.primary.sample(i)
+            if ti.static(self.secondary is not None):
+                value += self.secondary.sample(i)
+            self.out[i] = value
+    @ti.kernel
+    def required(self) -> ti.f32:
+        return self.primary.scale
+    def graph(self):
+        builder = ti.graph.GraphBuilder()
+        builder.dispatch(self.step)
+        return builder.compile()
+'''
+    package = _source_package(tmp_path, monkeypatch, source)
+    output = tmp_path / 'sdk'
+    artifact_format = 'bc-library' if ti.cfg.arch == ti.cuda else 'bc'
+    manifest = ti.aot.export_package(package, output, artifact_format=artifact_format)
+    entries = [v for v in manifest['entries'].values() if v['definition'].endswith('Model.step')]
+    assert len(entries) == 1
+    assert manifest['version'] == 93
+    if artifact_format == 'bc-library':
+        with zipfile.ZipFile(output / 'code.tcm') as archive:
+            # The optional owner must work through a retained typed helper,
+            # including its writes, rather than only after frontend inlining.
+            assert any(name.startswith('code_units/') for name in archive.namelist())
+    with Runtime(manifest['target']) as runtime, load_package(runtime, output) as code:
+        instances = []
+        for n, first, second in ((3, False, False), (5, True, False), (7, False, True), (4, True, True)):
+            normal, loaded = package.Model(n, first, second), code.host.Model(n, first, second)
+            instances.append(loaded)
+            for _ in range(3):
+                normal.step()
+                loaded.step()
+                np.testing.assert_array_equal(loaded.out.to_numpy(), normal.out.to_numpy())
+            if artifact_format == 'bc-library':
+                ready = next(iter(loaded._forge_package_calls.values()))
+                assert ready.prepared is not None and ready.specialize
+            graph = loaded.graph()
+            graph.run({})
+            normal.step()
+            np.testing.assert_array_equal(loaded.out.to_numpy(), normal.out.to_numpy())
+            assert (loaded.primary is not None) is first
+            assert (loaded.secondary is not None) is second
+            if not first:
+                with pytest.raises(ValueError, match='presence'):
+                    loaded.required()
+            else:
+                assert loaded.required() == normal.required() == 3.0
+                expected = loaded.out.to_numpy() + 8.0 + 3.0 + (7.0 if second else 0.0)
+                loaded.primary.offset = np.array([9.0, 2.0], dtype=np.float32)
+                loaded.step()
+                np.testing.assert_array_equal(loaded.out.to_numpy(), expected)
+        bad = instances[-1]
+        saved = bad.primary
+        bad.primary = instances[0]
+        try:
+            with pytest.raises(ValueError, match='child owner'):
+                bad.step()
+        finally:
+            bad.primary = saved
+    probe = tmp_path / 'consume_owned.py'
+    probe.write_text(textwrap.dedent('''
+        import importlib.abc, sys
+        class NoSource(importlib.abc.MetaPathFinder):
+            def find_spec(self, fullname, path=None, target=None):
+                if fullname.split('.')[0] in ('taichi', 'taichi_forge', 'definition_fixture'):
+                    raise AssertionError(fullname)
+        sys.meta_path.insert(0, NoSource())
+        from taichi_forge_runtime.aot import Runtime, load_package
+        with Runtime(sys.argv[2]) as runtime, load_package(runtime, sys.argv[1]) as code:
+            for first, second in ((False, False), (True, False), (False, True), (True, True)):
+                model = code.host.Model(6, first, second)
+                model.step()
+                model.graph().run({})
+                expected = 2 + (7 if first else 0) + (15 if second else 0)
+                assert (model.out.to_numpy() == expected).all()
+        print('OWNED_RECORD_SOURCE_FREE_OK')
+    '''), encoding='utf8')
+    env = dict(os.environ, PYTHONDONTWRITEBYTECODE='1',
+        PYTHONPATH=str(Path(__file__).resolve().parents[2] / 'packaging/runtime/src'),
+        TAICHI_NATIVE_RUNTIME_DIR=str(Path(utils._loaded_native_runtime_path).parent),
+        TAICHI_RUNTIME_DIR=utils._runtime_bitcode_dir())
+    result = subprocess.run([sys.executable, '-B', str(probe), str(output), manifest['target']],
+                            cwd=tmp_path, env=env, capture_output=True, text=True, timeout=90)
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert 'OWNED_RECORD_SOURCE_FREE_OK' in result.stdout
+    (output / 'package.json').write_text(json.dumps({**manifest, 'version': 92}), encoding='utf8')
+    with Runtime(manifest['target']) as runtime, pytest.raises(ValueError, match='version 93'):
+        load_package(runtime, output)
+
+
+@test_utils.test(arch=[ti.cpu, ti.cuda], offline_cache=False)
 def test_package_fault_query_preserves_teardown_without_frontend(tmp_path, monkeypatch):
     from dataclasses import asdict
     source = '''

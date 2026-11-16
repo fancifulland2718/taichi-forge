@@ -152,6 +152,66 @@ def project_boolean_groups(schema, declarations):
                 item["input_conditions"] = names
 
 
+def project_owned_records(environment, schema):
+    """Project a complete optional child's numeric state through existing ports.
+
+    A typed child with no implementation/layout alternatives is a nullable
+    namespace, not another numerical algorithm. Keep its Host construction and
+    native layouts; use the existing record-presence and Dense argument ABI.
+    """
+    from taichi_forge.types import primitive_types
+    from ._component import DenseField, _ConditionalDenseField, _InputPresence, _InputRecord
+    from taichi_forge_runtime._dimensions import extent_dependencies
+
+    declarations = dict(environment.declarations)
+    for name, record in schema.items():
+        conditions = record.get("conditions", {})
+        if (record["kind"] != "owner" or record.get("owner_alternatives")
+                or record.get("dynamic_input_record") or len(conditions) != 1):
+            continue
+        flag, expected = next(iter(conditions.items()))
+        predicate = schema[flag]
+        if (expected is not True or predicate["kind"] != "static" or predicate.get("conditions")
+                or {tuple(v) for v in predicate["choices"]} != {("bool", False), ("bool", True)}):
+            continue
+        path = tuple(record.get("path", (name,)))
+        members = {key: item for key, item in schema.items()
+                   if len(item.get("path", (key,))) > len(path)
+                   and tuple(item.get("path", (key,)))[:len(path)] == path}
+        if not members or any(item["kind"] not in ("dimension", "value", "dense_field")
+                              or item.get("conditions") != conditions for item in members.values()):
+            continue
+        storage = {key: item for key, item in members.items() if item["kind"] == "dense_field"}
+        groups = {declarations[key].group for key in storage if isinstance(declarations[key], DenseField)}
+        axes = {key for key, item in members.items() if item["kind"] == "dimension"}
+        if (not storage or any(item.get("struct_field") or item["element"].get("model_tensor")
+                               or not item.get("group_builder") for item in storage.values())
+                or any(isinstance(value, DenseField) and value.group in groups and key not in storage
+                       for key, value in declarations.items())
+                or any(flag in item.get("conditions", {}) and key not in members and key != name
+                       for key, item in schema.items())
+                or any(flag in item.get(guards, {}) for item in schema.values()
+                       for guards in ("choice_guards", "shape_guards", "dtype_guards", "source_guards"))
+                or any(key not in members and (
+                    axes.intersection(item.get("shape", ()))
+                    or axes.intersection(extent_dependencies(item["expression"]) if item.get("expression") else ())
+                    or tuple(item.get("source_path", ()))[:len(path)] == path)
+                       for key, item in schema.items())):
+            continue
+        record.update(dynamic_input_record=True, input_presence_attribute=flag)
+        predicate.update(dynamic_storage_condition=True, input_presence_attribute=flag)
+        declarations[name] = _InputRecord(flag)
+        declarations[flag] = _InputPresence(primitive_types.i32)
+        for key, item in members.items():
+            item["input_record"] = name
+            if key in storage:
+                value = declarations[key]
+                declarations[key] = _ConditionalDenseField(value.dtype, value.shape, value.group,
+                                                           ((flag, True),))
+                item["dynamic_input_storage"] = True
+    environment._set_declarations(declarations)
+
+
 def project_struct_member_inputs(environment, schema):
     """Use existing Dense member descriptors for a whole optional StructField.
 

@@ -84,6 +84,7 @@ def check_admission(owner, contract):
             records[name] = value if record.get("boolean") else value is not None
             if not records[name] and required(record["required_when"]):
                 raise ValueError("Optional record presence is required by the selected execution branch")
+        check_owner_bindings(owner, admission.get("owner_bindings", {}).values())
         for resource in admission.get("external_resources", {}).values():
             if resource.get("input_record") and not records[resource["input_record"]]:
                 continue
@@ -106,7 +107,6 @@ def check_admission(owner, contract):
             if getattr(value, "_forge_package_field_source", None) != source:
                 raise ValueError("Conditional workspace no longer refers to its owned Field")
             check_external_resource(owner, resource, value)
-        check_owner_bindings(owner, admission.get("owner_bindings", {}).values())
         for binding in admission.get("source_bindings", {}).values():
             for predicate in binding.get("presence", ()):
                 actual = path_value(owner, predicate["path"])
@@ -160,6 +160,8 @@ def check_constant(owner, path, value):
 def check_owner_bindings(owner, bindings):
     for binding in bindings:
         child = path_value(owner, binding["path"])
+        if child is None and binding.get("optional"):
+            continue
         if "reference_path" in binding and child is not path_value(owner, binding["reference_path"]):
             raise ValueError("Owner reference no longer refers to its declared source")
         if (
@@ -169,18 +171,25 @@ def check_owner_bindings(owner, bindings):
             raise ValueError("Declared child owner differs from its package definition")
 
 
-def capture_value(owner, spec):
-    root = owner
-    if (
+def capture_is_absent(owner, spec):
+    return bool(
         spec.get("nullable_record") and path_value(owner, spec["nullable_record"]) is None
         or spec.get("nullable_boolean") and not path_value(owner, spec["nullable_boolean"])
         or any(not path_value(owner, predicate["path"]) for predicate in spec.get("nullable_booleans", ()))
-    ):
+    )
+
+
+def capture_value(owner, spec):
+    root = owner
+    if capture_is_absent(owner, spec):
         if "optional_array" in spec:
             return root._forge_package_owner._empty_input(spec["optional_array"])
         # The record access is unreachable according to admission. This scalar
         # only completes the immutable ABI snapshot; it is not a model value.
-        return 0
+        value = 0
+        for axis in reversed(spec.get("element_shape", ())):
+            value = (value,) * axis
+        return value
     relations = spec.get("dimension_relations")
     if relations:
 

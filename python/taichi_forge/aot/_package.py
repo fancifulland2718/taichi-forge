@@ -2063,6 +2063,8 @@ def _export_package(package, output, *, arch, caps, source_root, compilation, ar
                 manifest["version"] = max(77, manifest["version"])
             if any(item.get("dynamic_storage_condition") for item in schema.values()):
                 manifest["version"] = max(78, manifest["version"])
+            if any(item["kind"] == "owner" and item.get("dynamic_input_record") for item in schema.values()):
+                manifest["version"] = max(93, manifest["version"])
             if any(item.get("input_conditions") for item in schema.values()):
                 manifest["version"] = max(79, manifest["version"])
             if any(item.get("external") and item.get("shape_policy") for item in schema.values()):
@@ -2387,7 +2389,8 @@ def _export_package(package, output, *, arch, caps, source_root, compilation, ar
                 condition_values = {**code.static, **{key: static_key(value) for key, value in code.objects.items()}}
                 for attribute in set(code.dynamic) | code.static.keys():
                     resource = capture_schema.get(attribute, {})
-                    if (resource.get("external") or resource.get("dynamic_input_storage")) and attribute in code.dynamic:
+                    if (resource.get("external") or resource.get("dynamic_input_storage")
+                            or resource.get("input_record")) and attribute in code.dynamic:
                         continue
                     if any(condition_values.get(key) != static_key(value)
                            for key, value in resource.get("conditions", {}).items()):
