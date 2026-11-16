@@ -7058,6 +7058,43 @@ def test_package_write_inventory_rejects_unproven_record_recipes(tmp_path, monke
 
 
 @test_utils.test(arch=ti.cpu, offline_cache=False)
+def test_package_owner_input_keeps_allocation_dimensions_without_device_reads(tmp_path, monkeypatch):
+    source = '''import taichi_forge as ti
+@ti.data_oriented
+class Source:
+    def __init__(self, n):
+        self.n = n
+        scope = ti.experimental.ResourceScope(self)
+        scope.dim('n')
+@ti.data_oriented
+class Query:
+    def __init__(self, source: Source):
+        scope = ti.experimental.ResourceScope(self)
+        scope.owner_reference('source', source)
+        scope.work = scope.field(ti.i32, shape=scope.owner_dim('source', 'n'))
+    @ti.kernel
+    def run(self, value: ti.i32):
+        for i in self.work:
+            self.work[i] = i + value
+@ti.data_oriented
+class Model:
+    def __init__(self, n):
+        scope = ti.experimental.ResourceScope(self)
+        scope.source = Source(n)
+        scope.query = Query(self.source)
+'''
+    package = _source_package(tmp_path, monkeypatch, source)
+    manifest = ti.aot.export_package(package, tmp_path / 'sdk')
+    with Runtime(manifest['target']) as runtime, load_package(runtime, tmp_path / 'sdk') as code:
+        for n in (7, 19):
+            original, loaded = package.Model(n), code.host.Model(n)
+            original.query.run(5)
+            loaded.query.run(5)
+            assert loaded.query.source is loaded.source
+            np.testing.assert_array_equal(loaded.query.work.to_numpy(), original.query.work.to_numpy())
+
+
+@test_utils.test(arch=ti.cpu, offline_cache=False)
 @pytest.mark.parametrize('escaped', [False, True])
 def test_package_write_inventory_public_callable_signature(tmp_path, monkeypatch, escaped):
     source = 'import inspect\n' + CYCLIC_WRITE_INVENTORY_SOURCE.replace(
@@ -12273,6 +12310,54 @@ def test_package_multiple_roots_share_code_and_normal_hybrid_imports(tmp_path, m
             np.testing.assert_array_equal(b.values.to_numpy(), np.arange(23) - bias)
         session = ti.lang.impl.get_runtime()._package_execution_session
         assert len(session.loaded_packages) == 1
+    finally:
+        ti.reset()
+
+
+@test_utils.test(arch=ti.cpu, offline_cache=False)
+def test_package_hybrid_public_lazy_exports_allow_caller_siblings(tmp_path, monkeypatch):
+    initializer = '''from importlib import import_module
+_EXPORTS = {'value': ('.model', 'value'), 'caller': ('.caller', 'call')}
+def __getattr__(name):
+    if name not in _EXPORTS:
+        raise AttributeError(name)
+    target, attribute = _EXPORTS[name]
+    return getattr(import_module(target, __name__), attribute)
+'''
+    source_root = tmp_path / 'source'
+    source_root.mkdir()
+    package = _source_package(source_root, monkeypatch, '''import taichi_forge as ti
+@ti.kernel
+def value(x: ti.i32) -> ti.i32:
+    return x * 3
+''', initializer=initializer)
+    parent = Path(package.__file__).parent
+    (parent / 'caller.py').write_text(
+        'from .model import value\ndef call(x):\n    return value(x) + 1\n', encoding='utf8')
+    core = importlib.import_module('definition_fixture.model')
+    manifest = ti.aot.export_package(core, tmp_path / 'sdk', source_root=source_root)
+    assert 'definition_fixture.caller' not in manifest['application_modules']
+    with Runtime(manifest['target']) as runtime, load_package(runtime, tmp_path / 'sdk') as code:
+        root = code.module('definition_fixture')
+        # The standalone/private namespace must not borrow caller-side source.
+        with pytest.raises(ImportError):
+            root.caller
+    ti.reset()
+    for name in tuple(sys.modules):
+        if name == 'definition_fixture' or name.startswith('definition_fixture.'):
+            monkeypatch.delitem(sys.modules, name, raising=False)
+    ti.init(arch=ti.cpu, execution_mode='hybrid', offline_cache=False,
+            aot_package_paths=[tmp_path / 'sdk'])
+    try:
+        public = importlib.import_module('definition_fixture')
+        assert public.value(5) == 15
+        assert public.caller(7) == 22
+        loaded = public.value.package
+        session = ti.lang.impl.get_runtime()._package_execution_session
+        assert tuple(session._packages.values()) == (loaded,)
+        assert importlib.import_module('definition_fixture.caller').value is public.value
+        with pytest.raises(ImportError):
+            loaded.module('definition_fixture').caller
     finally:
         ti.reset()
 

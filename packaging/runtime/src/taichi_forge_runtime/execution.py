@@ -5,6 +5,7 @@ import providers, replace existing modules, compile source, or select sample mod
 """
 
 from contextlib import ExitStack
+from contextvars import ContextVar
 import importlib
 import importlib.abc
 import importlib.machinery
@@ -20,6 +21,7 @@ from types import ModuleType
 
 _import_lock = threading.RLock()
 _import_session = None
+_hybrid_public_import = ContextVar("forge_hybrid_public_import", default=False)
 
 
 class _PackageImports(importlib.abc.MetaPathFinder, importlib.abc.Loader):
@@ -69,7 +71,15 @@ class _PackageImports(importlib.abc.MetaPathFinder, importlib.abc.Loader):
                 if key in aliases:
                     value = importlib.import_module(aliases[key])
                 elif original_getattr is not None:
-                    value = original_getattr(key)
+                    # A public package's lazy exports can name caller-side
+                    # siblings outside the numerical package. Keep this scope
+                    # confined to public hybrid lookup; private/standalone
+                    # projected calls still require their exported closure.
+                    token = _hybrid_public_import.set(self.session.mode == "hybrid")
+                    try:
+                        value = original_getattr(key)
+                    finally:
+                        _hybrid_public_import.reset(token)
                     public_name = self.session._public_module_name(value)
                     if public_name is None:
                         return value

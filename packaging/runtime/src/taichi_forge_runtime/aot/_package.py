@@ -398,9 +398,17 @@ class _ModuleBinding:
     def dynamic_import(self, name, package=None):
         self.package._check()
         resolved = importlib.util.resolve_name(name, package) if name.startswith(".") else name
+        modules = self.package.manifest.get("application_modules")
+        prefix = self.package._name + "."
+        public = resolved[len(prefix):] if resolved.startswith(prefix) else resolved
+        if (modules is not None and public not in modules
+                and public.split(".")[0] in self.package.manifest["dependencies"]["local_roots"]):
+            from ..execution import _hybrid_public_import
+
+            if _hybrid_public_import.get():
+                return importlib.import_module(public)
         if resolved == self.package._name or resolved.startswith(self.package._name + "."):
             return importlib.import_module(resolved)
-        modules = self.package.manifest.get("application_modules")
         if modules is not None:
             if resolved in modules:
                 return self.import_module(resolved)

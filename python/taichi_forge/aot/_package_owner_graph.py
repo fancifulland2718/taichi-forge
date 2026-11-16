@@ -475,12 +475,13 @@ class OwnerGraph:
             query_slice = self._allocation_schemas[identity].select_query(numerical_paths, resource_paths or ())
         if query_slice is not None:
             schema, source_children = query_slice
-        elif (contract_only or resource_only and numerical_paths is not None) and any(
-                item["kind"] in ("owner", "owner_input") for item in original.values()):
+        elif any(item["kind"] in ("owner", "owner_input") for item in original.values()):
             from ._package_resource_slice import AllocationSchema
 
-            # Host layout extraction needs local declarations and the resources
-            # they actually reference, not every owned child's numerical state.
+            # Every local layout, including a numerical owner's workspace,
+            # needs its declared source dimensions and borrowed allocations.
+            # Merge those dependencies with device reads before slicing input
+            # owners; a dimension used only for allocation is still required.
             paths = [tuple(item.get("path", (key,))) for key, item in original.items()
                      if item["kind"] not in ("owner", "owner_input", "host_owner_sequence")]
             if identity not in self._allocation_schemas:
