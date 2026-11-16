@@ -5347,6 +5347,51 @@ def test_package_owner_union_checks_declared_constructor_calls(tmp_path, monkeyp
         np.testing.assert_array_equal(model.second.output.to_numpy(), -10.0)
 
 
+@test_utils.test(arch=[ti.cpu, ti.cuda], offline_cache=False)
+def test_package_optional_owner_union_constructs_absent_without_extra_context(tmp_path, monkeypatch):
+    source = TYPED_OWNER_INPUT_SOURCE.split('@ti.data_oriented\nclass Model:')[0]
+    source = source.replace('def __init__(self, source):',
+        'def __init__(self, n: int, source: ScalarStorage | VectorStorage = None):')
+    source = source.replace("        scope.owner_reference('source', source)\n"
+                            "        self.n = source.n\n"
+                            "        scope.derived_dim('n', scope.owner_dim('source', 'n'))",
+        "        self.n = n\n"
+        "        self.has_source = source is not None\n"
+        "        scope.static('has_source', choices=(False, True))\n"
+        "        if self.has_source:\n"
+        "            scope.owner_reference('source', source)\n"
+        "        else:\n"
+        "            scope.record('source', None, optional=True)")
+    source = source.replace('            self.output[i] = gain * self.source.read(i)',
+        '            self.output[i] = gain\n'
+        '            if ti.static(self.has_source):\n'
+        '                self.output[i] += self.source.read(i)')
+    package = _source_package(tmp_path, monkeypatch, source,
+        initializer='from .model import Reader as Model, ScalarStorage, VectorStorage\n')
+    expected = []
+    for storage in (None, package.ScalarStorage(5), package.VectorStorage(5)):
+        original = package.Model(5, storage)
+        original.step(2.0)
+        expected.append(original.output.to_numpy())
+    manifest = ti.aot.export_package(package, tmp_path / 'sdk')
+    assert len(manifest['input_families']['definition_fixture.model.Reader']) == 2
+    with Runtime(manifest['target']) as runtime, load_package(runtime, tmp_path / 'sdk') as code:
+        models = [code.host.Model(5), code.host.Model(5, code.host.ScalarStorage(5)),
+                  code.host.Model(5, code.host.VectorStorage(5))]
+        for model, reference in zip(models, expected):
+            model.step(2.0)
+            np.testing.assert_array_equal(model.output.to_numpy(), reference)
+        models[0].step(-7.0)
+        np.testing.assert_array_equal(models[0].output.to_numpy(), -7.0)
+        np.testing.assert_array_equal(models[1].output.to_numpy(), expected[1])
+        for wrong in (models[0], models[1].source.values, object()):
+            with pytest.raises(ValueError, match='unique declared'):
+                code.host.Model(5, wrong)
+        with load_package(runtime, tmp_path / 'sdk') as other:
+            with pytest.raises(ValueError, match='unique declared'):
+                code.host.Model(5, other.host.ScalarStorage(5))
+
+
 @test_utils.test(arch=ti.cpu, offline_cache=False)
 def test_package_owner_unions_share_code_for_unused_peer_types(tmp_path, monkeypatch):
     source = TYPED_OWNER_INPUT_SOURCE.split('@ti.data_oriented\nclass Model:')[0]

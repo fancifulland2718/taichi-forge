@@ -1334,6 +1334,16 @@ def managed_class(package, cls):
         if item.get("presence_owner") == parameter_key
     }
     signature = inspect.signature(original) if parameters or family else None
+    optional_inputs = {
+        candidate["owner"]: {
+            item["input_parameter"]
+            for item in package.manifest["owners"][candidate["owner"]].values()
+            if item.get("kind") == "owner_input"
+            and item.get("optional_presence")
+            and "input_parameter" in item
+        }
+        for candidate in family or ()
+    }
 
     @functools.wraps(original)
     def initialize(self, *args, **kwargs):
@@ -1348,6 +1358,8 @@ def managed_class(package, cls):
             for candidate in family:
                 for parameter, expected in candidate["inputs"].items():
                     actual = bound.arguments[parameter]
+                    if actual is None and parameter in optional_inputs[candidate["owner"]]:
+                        continue
                     source = (
                         getattr(actual, "_forge_package_field_source", None)
                         if expected["kind"] == "borrowed_field"
@@ -1361,10 +1373,24 @@ def managed_class(package, cls):
                     ):
                         break
                 else:
-                    matches.append(candidate["owner"])
-            if len(matches) != 1:
+                    matches.append(candidate)
+            # An absent optional union input has no concrete source type. Each
+            # matching context already contains its declared absent branch, so
+            # select one without creating another context or compiling code.
+            # All remaining (present) input bindings must still be identical.
+            present_inputs = [
+                {name: value for name, value in candidate["inputs"].items()
+                 if bound.arguments[name] is not None}
+                for candidate in matches
+            ]
+            ambiguous_present_inputs = len(matches) > 1 and (
+                not any(bound.arguments[name] is None for name in matches[0]["inputs"])
+                or any(candidate["inputs"].keys() != matches[0]["inputs"].keys() for candidate in matches[1:])
+                or any(item != present_inputs[0] for item in present_inputs[1:])
+            )
+            if not matches or ambiguous_present_inputs:
                 raise ValueError("Constructor inputs have no unique declared resource contract")
-            selected_key = matches[0]
+            selected_key = matches[0]["owner"]
             self._forge_package_contract = selected_key
         if parameters:
             bound = signature.bind(self, *args, **kwargs)
