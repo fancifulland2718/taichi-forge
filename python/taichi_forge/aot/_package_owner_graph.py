@@ -6,10 +6,11 @@ import copy
 from types import MappingProxyType, ModuleType, SimpleNamespace
 
 
-def _member_paths(node, receiver, forwarded=None, method_reads=None, nodes=None):
+def _member_paths(node, receiver, forwarded=None, method_reads=None, nodes=None, aliases=None, alias_values=()):
     """Read explicit device member paths, without traversing Host construction."""
     paths, presence = set(), set()
     nodes = tuple(ast.walk(node)) if nodes is None else nodes
+    origins = {receiver: (), **(aliases or {})}
     parents = ({id(child): part for part in nodes for child in ast.iter_child_nodes(part)}
                if forwarded is not None else {})
     attributes = {id(part.value) for part in nodes if isinstance(part, ast.Attribute)}
@@ -20,15 +21,19 @@ def _member_paths(node, receiver, forwarded=None, method_reads=None, nodes=None)
         and isinstance(part.comparators[0], ast.Constant) and part.comparators[0].value is None
     }
     for part in nodes:
-        if isinstance(part, ast.Name) and part.id == receiver and id(part) not in attributes:
+        if id(part) in alias_values:
+            continue
+        if (isinstance(part, ast.Name) and part.id in origins and isinstance(part.ctx, ast.Load)
+                and id(part) not in attributes):
+            prefix = origins[part.id]
             if forwarded is not None:
                 resolved = forwarded(part, parents)
                 if resolved is not None:
-                    paths.update(resolved)
+                    paths.update((*prefix, *member) for member in resolved)
                     continue
             # An owner passed to an unresolved helper/alias can expose any of
             # its methods. Keep the existing complete device view in that case.
-            paths.add(())
+            paths.add(prefix)
         if not isinstance(part, ast.Attribute) or id(part) in attributes:
             continue
         if method_reads is not None:
@@ -41,8 +46,8 @@ def _member_paths(node, receiver, forwarded=None, method_reads=None, nodes=None)
         while isinstance(part, ast.Attribute):
             path.append(part.attr)
             part = part.value
-        if isinstance(part, ast.Name) and part.id == receiver:
-            prefix = tuple(reversed(path))
+        if isinstance(part, ast.Name) and part.id in origins:
+            prefix = (*origins[part.id], *reversed(path))
             if forwarded is not None and not presence_only:
                 resolved = forwarded(value, parents)
                 if resolved is not None:
@@ -87,6 +92,29 @@ class _MethodInputPaths:
         local_names.update(rebound)
         for name in rebound:
             values.pop(name, None)
+        # A single unconditional local binding preserves the source path.
+        # Resolve only straight-line aliases before their first use; branches,
+        # reassignment and opaque expressions retain the complete source view.
+        aliases, alias_values, seen = {}, set(), set()
+        writes = {}
+        for part in ast.walk(node):
+            if isinstance(part, ast.Name) and isinstance(part.ctx, (ast.Store, ast.Del)):
+                writes[part.id] = writes.get(part.id, 0) + 1
+        for statement in node.body:
+            if (isinstance(statement, ast.Assign) and len(statement.targets) == 1
+                    and isinstance(statement.targets[0], ast.Name)):
+                target = statement.targets[0].id
+                suffix, base = [], statement.value
+                while isinstance(base, ast.Attribute):
+                    suffix.insert(0, base.attr)
+                    base = base.value
+                origin = ({parameter: (), **aliases}.get(base.id)
+                          if isinstance(base, ast.Name) else None)
+                if (origin is not None and writes.get(target) == 1 and target not in seen
+                        and target not in {arg.arg for arg in (*parameters, *node.args.kwonlyargs)}):
+                    aliases[target] = (*origin, *suffix)
+                    alias_values.add(id(statement.value))
+            seen.update(part.id for part in ast.walk(statement) if isinstance(part, ast.Name))
         module = self.modules.get(id(node))
         namespace = vars(module) if module is not None else {}
         # Rebound receivers and nested lexical scopes do not prove the callee.
@@ -94,6 +122,9 @@ class _MethodInputPaths:
             isinstance(part, ast.Name) and part.id in (receiver, parameter) and isinstance(part.ctx, ast.Store)
             or isinstance(part, (ast.FunctionDef, ast.Lambda)) and part is not node
             for part in ast.walk(node))
+        if not known_receiver:
+            aliases.clear()
+            alias_values.clear()
 
         def literal(part):
             if isinstance(part, ast.Constant) and isinstance(part.value, (str, int, float, bool, type(None))):
@@ -161,7 +192,9 @@ class _MethodInputPaths:
                     or any(arg.arg is None for arg in call.keywords)):
                 return None
             if (is_method and isinstance(call.func, ast.Attribute)
-                    and isinstance(call.func.value, ast.Name) and call.func.value.id == receiver
+                    and isinstance(call.func.value, ast.Name)
+                    and (call.func.value.id == receiver or parameter == receiver
+                         and aliases.get(call.func.value.id) == ())
                     and call.func.attr in self.methods[owner]):
                 callee, bound = self.methods[owner][call.func.attr], True
                 if any(getattr(decorator, 'id', getattr(decorator, 'attr', '')) in ('staticmethod', 'classmethod')
@@ -213,7 +246,8 @@ class _MethodInputPaths:
         def method_reads(part, parents):
             call = parents.get(id(part))
             if (parameter != receiver or not isinstance(call, ast.Call) or call.func is not part
-                    or not isinstance(part.value, ast.Name) or part.value.id != receiver):
+                    or not isinstance(part.value, ast.Name)
+                    or not (part.value.id == receiver or aliases.get(part.value.id) == ())):
                 return None
             resolved = declared_call(call)
             if resolved is None:
@@ -224,7 +258,8 @@ class _MethodInputPaths:
             callee_receiver = (*callee.args.posonlyargs, *callee.args.args)[0].arg
             return self._parameter(owner, callee, callee_receiver, visiting | {recursion_key}, constants, True)
 
-        result = frozenset(_member_paths(node, parameter, forwarded, method_reads, active_nodes()))
+        result = frozenset(_member_paths(node, parameter, forwarded, method_reads, active_nodes(),
+                                         aliases, alias_values))
         if parameter in rebound or any(
                 isinstance(part, ast.Call) and isinstance(part.func, ast.Name) and part.func.id == 'super'
                 for part in ast.walk(node)):

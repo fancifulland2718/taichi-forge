@@ -7181,12 +7181,17 @@ class Query:
         scope = ti.experimental.ResourceScope(self)
         scope.owner_reference('source', source)
         scope.work = scope.field(ti.i32, shape=scope.owner_dim('source', 'n'), initialization='zero')
+    @ti.func
+    def sample(self, index):
+        source = self.source
+        return source.values[index]
 @ti.data_oriented
 class Source:
     def __init__(self, n):
         self.n = n
         scope = ti.experimental.ResourceScope(self)
         scope.dim('n')
+        scope.values = scope.field(ti.i32, shape=scope.dim('n'), initialization='zero')
         scope.query = Query(self)
 @ti.data_oriented
 class Model:
@@ -7197,7 +7202,7 @@ class Model:
     @ti.func
     def write(self, query, value):
         for i in query.work:
-            query.work[i] = i + value
+            query.work[i] = query.sample(i) + value
     @ti.kernel
     def run(self, value: ti.i32):
         self.write(query=self.query, value=value)
@@ -7208,6 +7213,8 @@ class Model:
         for n in (7, 19):
             original, loaded = package.Model(n), code.host.Model(n)
             for value in (5, 11):
+                original.source.values.from_numpy(np.arange(n, dtype=np.int32) * value)
+                loaded.source.values.from_numpy(np.arange(n, dtype=np.int32) * value)
                 original.run(value)
                 loaded.run(value)
                 assert loaded.query is loaded.source.query
@@ -28879,6 +28886,29 @@ def child(self):
 
 def unknown_child(self):
     return external(self.inputs.query)
+
+def child_alias(self):
+    child = self.inputs.query
+    again = child
+    return self.forward(value=again)
+
+def receiver_alias(self):
+    owner = self
+    return owner.forward(value=owner.inputs.query)
+
+def changed_alias(self):
+    child = self.inputs.query
+    child = replacement
+    return self.forward(value=child)
+
+def conditional_alias(self, flag):
+    if flag:
+        child = self.inputs.query
+    return self.forward(value=child)
+
+def unknown_alias(self):
+    child = self.inputs.query
+    return external(child)
 ''').body}
     nodes = [*methods.values(), helper, other_helper]
     reader = _MethodInputPaths(
@@ -28892,6 +28922,10 @@ def unknown_child(self):
     assert reader.parameter('Owner', 'child', 'self') == {
         ('inputs', 'query', 'depth'), ('material', 'has_base_texture'), ('material', 'base_values')}
     assert reader.parameter('Owner', 'unknown_child', 'self') == {('inputs', 'query')}
+    for method in ('child_alias', 'receiver_alias'):
+        assert reader.parameter('Owner', method, 'self') == {('inputs', 'query', 'depth')}
+    for method in ('changed_alias', 'conditional_alias', 'unknown_alias'):
+        assert ('inputs', 'query') in reader.parameter('Owner', method, 'self')
     assert reader.parameter('Owner', 'footprint', 'provider') == {
         ('mipmaps',), ('base_mips',), ('has_base_texture',), ('base_values',)}
     assert reader.parameter('Owner', 'boolean', 'self', literals=(('flag', True),)) == {('boolean_value',)}
