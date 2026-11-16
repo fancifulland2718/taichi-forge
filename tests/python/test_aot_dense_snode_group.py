@@ -172,6 +172,91 @@ def _compiled_nodes(root):
     return nodes
 
 
+@test_utils.test(arch=[ti.cpu, ti.cuda], offline_cache=False)
+def test_indexed_host_transfers_preserve_dense_neighbors_and_bounds():
+    builder = ti.FieldsBuilder()
+    block = builder.dense(ti.ij, (3, 2))
+    scalar = ti.field(ti.i32)
+    vector = ti.Vector.field(3, ti.f32)
+    neighbor = ti.field(ti.i32)
+    block.place(scalar, vector, neighbor)
+    schema = core.DenseSNodeSchema.capture(builder.ptr, [])
+    producer = builder.finalize()
+    scalar.fill(10)
+    vector.fill(17)
+    neighbor.fill(23)
+    scalar[1, 0] = -4
+    vector[2, 1] = [3, 7, 11]
+    expected_scalar, expected_vector = scalar.to_numpy(), vector.to_numpy()
+    with Runtime(ti.cfg.arch.name) as runtime:
+        group = runtime.dense_snode_group(schema.to_json(), {})
+        a = group.member([[0, 0]], "i32")
+        b = group.member([[0, i] for i in range(1, 4)], "f32", element_shape=(3,))
+        c = group.member([[0, 4]], "i32")
+        a.fill(10)
+        b.fill(17)
+        c.fill(23)
+        resources = len(runtime._resources)
+        a[1, 0] = -4
+        b[2, 1] = [3, 7, 11]
+        assert a[1, 0] == -4
+        np.testing.assert_array_equal(a.to_numpy(), expected_scalar)
+        np.testing.assert_array_equal(b.to_numpy(), expected_vector)
+        np.testing.assert_array_equal(c.to_numpy(), neighbor.to_numpy())
+        assert len(runtime._resources) == resources
+        for key in ((-1, 0), (3, 0), (1,), (0, 2)):
+            with pytest.raises(IndexError):
+                a[key] = 8
+        with pytest.raises(ValueError, match="element shape"):
+            b[0, 0] = [1, 2]
+        with pytest.raises(TypeError, match="component writeback"):
+            b[0, 0]
+        descriptor = a._descriptor(runtime)
+        index = abi.Shape(2, (abi.UInt * 16)(3, 0))
+        value = C.c_int32(99)
+        with pytest.raises(AotError, match="out of bounds"):
+            runtime._api.call(runtime._api.ti_copy_ndarray_element_from_host_ext,
+                runtime._handle, C.byref(descriptor), C.byref(index), C.byref(value), 4)
+        index.dims[0] = 0
+        descriptor.shape.dims[0] = 2
+        with pytest.raises(AotError, match="differs"):
+            runtime._api.call(runtime._api.ti_copy_ndarray_element_from_host_ext,
+                runtime._handle, C.byref(descriptor), C.byref(index), C.byref(value), 4)
+        packed = runtime.ndarray("i32", (3, 2))
+        try:
+            packed.fill(10)
+            packed[1, 0] = -4
+            np.testing.assert_array_equal(packed.to_numpy(), expected_scalar)
+        finally:
+            packed.close()
+        group.close()
+        with pytest.raises(AotError, match="retired"):
+            a[0, 0] = 1
+        for field in (a, b, c):
+            field.close()
+    producer.destroy()
+
+
+@test_utils.test(arch=[ti.cpu, ti.cuda], offline_cache=False)
+def test_indexed_host_tensor_transfer_uses_soa_and_permuted_axes():
+    from tests.python.test_dense_snode_schema import _soa_tensor_group
+
+    schema, members, producer, _, _, tensors = _soa_tensor_group(3, 3)
+    selectors = tuple(dict.fromkeys(members[node.id] for node in tensors[0][0]))
+    with Runtime(ti.cfg.arch.name) as runtime, runtime.dense_snode_group(schema.to_json(), {"N": 3, "D": 3}) as group:
+        tensor = group.schema_member(selectors, "f32", element_shape=(3,))
+        scalar = group.schema_member(selectors, "f32", element_shape=(3,), scalar_axes=True)
+        original = np.arange(27, dtype=np.float32).reshape(3, 3, 3)
+        scalar.from_numpy(original)
+        tensor[1, 2] = [-2, -3, -5]
+        original[1, 2] = [-2, -3, -5]
+        np.testing.assert_array_equal(scalar.to_numpy(), original)
+        assert scalar[1, 2, 1] == -3
+        tensor.close()
+        scalar.close()
+    producer.destroy()
+
+
 @test_utils.test(arch=[ti.cpu, ti.cuda, ti.vulkan], offline_cache=False)
 def test_parameterized_tensor_group_matches_native_jit_and_isolates_instances():
     schema, producer, _, _, _ = _tensor_group(3, 7)

@@ -1211,6 +1211,17 @@ TI_DLL_EXPORT void TI_API_CALL ti_copy_ndarray_from_host_ext(
 TI_DLL_EXPORT void TI_API_CALL ti_copy_ndarray_to_host_ext(
     TiRuntime runtime, void *target, const TiNdArray *array, uint64_t size);
 
+// Transfer one complete scalar/tensor element at an in-bounds logical index.
+// Registered layout and ownership remain authoritative. No neighboring element
+// is read or written; size must equal the element byte size. Both calls wait for
+// preceding work, like the full-array Host transfers above.
+TI_DLL_EXPORT void TI_API_CALL ti_copy_ndarray_element_from_host_ext(
+    TiRuntime runtime, const TiNdArray *array, const TiNdShape *index,
+    const void *source, uint64_t size);
+TI_DLL_EXPORT void TI_API_CALL ti_copy_ndarray_element_to_host_ext(
+    TiRuntime runtime, void *target, const TiNdArray *array,
+    const TiNdShape *index, uint64_t size);
+
 // Function `ti_free_memory` (1.4.0)
 //
 // Frees a memory allocation.

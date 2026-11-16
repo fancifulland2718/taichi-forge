@@ -1052,7 +1052,83 @@ void transfer_ndarray(Runtime &runtime, const TiNdArray &array, void *host,
   }
   throw MemoryBindingError("Strided ndarray transfers require CPU/CUDA/Vulkan");
 }
+void transfer_ndarray_element(Runtime &runtime, const TiNdArray &array,
+                              const TiNdShape &index, void *host,
+                              uint64_t size, bool upload) {
+  using namespace taichi::lang;
+  std::lock_guard<std::recursive_mutex> lock(runtime.submission_mutex());
+  capi::validated_ndarray_bytes(runtime, array);
+  const auto logical = capi::ndarray_storage_layout(array);
+  if (size != logical.element_bytes || !host)
+    throw MemoryBindingError("Host element transfer requires exactly one element");
+  if (index.dim_count != array.shape.dim_count)
+    throw MemoryBindingError("Host element index rank differs from the array");
+  const auto memory = runtime.get_memory(array.memory);
+  uint64_t offset = 0;
+  uint64_t stride = logical.element_bytes;
+  for (uint32_t axis = array.shape.dim_count; axis-- > 0;) {
+    if (index.dims[axis] >= array.shape.dims[axis])
+      throw MemoryBindingError("Host element index is out of bounds");
+    offset += index.dims[axis] * (memory.dense_layout
+        ? memory.dense_layout->index_strides_bytes[axis] : stride);
+    stride *= array.shape.dims[axis];
+  }
+  const auto *layout = memory.dense_layout.get();
+  // Validation above proves the full affine mapping stays within the retained
+  // storage window. A tensor may have strided lanes (e.g. SOA); copy those lanes
+  // directly instead of reading/modifying the owning record or entire array.
+  const bool contiguous = !layout || storage::analyze_dense_storage_layout(*layout)
+                                         .properties.element_contiguous;
+  const auto width = contiguous ? size : logical.alignment;
+  const auto count = size / width;
+  if (count > std::numeric_limits<int>::max())
+    throw MemoryBindingError("Host element lanes exceed the transfer ABI");
+  std::vector<DevicePtr> pointers;
+  std::vector<size_t> sizes(count, width);
+  std::vector<const void *> sources;
+  std::vector<void *> targets;
+  for (uint64_t lane = 0; lane < count; ++lane) {
+    uint64_t element_offset = 0, remaining = lane;
+    if (!contiguous) {
+      for (uint32_t axis = array.elem_shape.dim_count; axis-- > 0;) {
+        element_offset += (remaining % array.elem_shape.dims[axis]) *
+                          layout->element_strides_bytes[axis];
+        remaining /= array.elem_shape.dims[axis];
+      }
+    }
+    pointers.push_back(memory.allocation.get_ptr(
+        memory.byte_offset + (layout ? layout->byte_offset : 0) + offset + element_offset));
+    sources.push_back(static_cast<char *>(host) + lane * width);
+    targets.push_back(static_cast<char *>(host) + lane * width);
+  }
+  runtime.wait();
+  check_transfer_result(upload
+      ? runtime.get().upload_data(pointers.data(), sources.data(), sizes.data(), int(count))
+      : runtime.get().readback_data(pointers.data(), targets.data(), sizes.data(), int(count)));
+}
 }  // namespace
+
+void ti_copy_ndarray_element_from_host_ext(TiRuntime runtime,
+    const TiNdArray *array, const TiNdShape *index, const void *source, uint64_t size) {
+  TI_CAPI_TRY_CATCH_BEGIN();
+  TI_CAPI_ARGUMENT_NULL(runtime);
+  TI_CAPI_ARGUMENT_NULL(array);
+  TI_CAPI_ARGUMENT_NULL(index);
+  transfer_ndarray_element(*reinterpret_cast<Runtime *>(runtime), *array, *index,
+                           const_cast<void *>(source), size, true);
+  TI_CAPI_TRY_CATCH_END();
+}
+
+void ti_copy_ndarray_element_to_host_ext(TiRuntime runtime, void *target,
+    const TiNdArray *array, const TiNdShape *index, uint64_t size) {
+  TI_CAPI_TRY_CATCH_BEGIN();
+  TI_CAPI_ARGUMENT_NULL(runtime);
+  TI_CAPI_ARGUMENT_NULL(array);
+  TI_CAPI_ARGUMENT_NULL(index);
+  transfer_ndarray_element(*reinterpret_cast<Runtime *>(runtime), *array, *index,
+                           target, size, false);
+  TI_CAPI_TRY_CATCH_END();
+}
 
 void ti_copy_ndarray_from_host_ext(TiRuntime runtime, const TiNdArray *array,
                                    const void *source, uint64_t size) {

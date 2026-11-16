@@ -1010,12 +1010,19 @@ class NdArray:
         return "=" + _dtype(self.dtype)[1]
 
     def __getitem__(self, key):
+        if self.shape:
+            if self.element_shape:
+                raise TypeError("Indexed tensor reads require explicit to_numpy; a copy cannot provide component writeback")
+            return struct.unpack("=" + _dtype(self.dtype)[1], self._transfer_element(key))[0]
         # The native descriptor resolves the member's SNode placement. A scalar
         # transfer is exactly one element, never a readback of the owning group.
         format = self._scalar_field_format(key)
         return struct.unpack(format, self.read())[0]
 
     def __setitem__(self, key, value):
+        if self.shape:
+            self._transfer_element(key, value, upload=True)
+            return
         if key is None and not self.shape and self.element_shape and hasattr(self, "_group_owner"):
             # A zero-dimensional tensor Field contains exactly one tensor. The
             # descriptor-aware transfer preserves interleaved SNode placement;
@@ -1024,6 +1031,43 @@ class NdArray:
             return
         format = self._scalar_field_format(key)
         self.write(struct.pack(format, value))
+
+    def _transfer_element(self, key, value=None, *, upload=False):
+        import numpy as np
+        import operator
+
+        if isinstance(self.dtype, StructLayout):
+            raise TypeError("Struct arrays require their explicit layout transfer interface")
+        keys = key if isinstance(key, tuple) else (key,)
+        if len(keys) != len(self.shape):
+            raise IndexError("Host element index rank differs from the array")
+        indices = tuple(operator.index(item) for item in keys)
+        if any(i < 0 or i >= n for i, n in zip(indices, self.shape)):
+            raise IndexError("Host element index is out of bounds")
+        _, format, width = _dtype(self.dtype)
+        size = width * math.prod(self.element_shape)
+        if upload:
+            data = np.asarray(value, dtype=np.dtype(format))
+            if data.shape != self.element_shape:
+                raise ValueError("Host element shape differs from the native element")
+            buffer = data.tobytes()
+            pointer = C.c_char_p(buffer)
+        else:
+            buffer = C.create_string_buffer(size)
+            pointer = buffer
+        runtime = self._memory._runtime
+        with runtime._lock:
+            descriptor = self._descriptor(runtime)
+            runtime._api.load_ndarray_element_transfers()
+            index = abi.Shape(len(indices), (abi.UInt * 16)(*indices))
+            if upload:
+                runtime._api.call(runtime._api.ti_copy_ndarray_element_from_host_ext,
+                    runtime._handle, C.byref(descriptor), C.byref(index), pointer, size)
+            else:
+                runtime._api.call(runtime._api.ti_copy_ndarray_element_to_host_ext,
+                    runtime._handle, pointer, C.byref(descriptor), C.byref(index), size)
+            runtime._pending.clear()
+        return None if upload else buffer.raw
 
     def close(self):
         self._memory.close()

@@ -714,6 +714,24 @@ class Api:
         self._ndarray_transfers_available = True
         return True
 
+    def load_ndarray_element_transfers(self):
+        if getattr(self, "_ndarray_element_transfers_loaded", False):
+            return
+        declarations = {
+            "ti_copy_ndarray_element_from_host_ext": (
+                [Handle, C.POINTER(NdArray), C.POINTER(Shape), C.c_void_p, C.c_uint64], None),
+            "ti_copy_ndarray_element_to_host_ext": (
+                [Handle, C.c_void_p, C.POINTER(NdArray), C.POINTER(Shape), C.c_uint64], None),
+        }
+        try:
+            functions = {name: getattr(self.library, name) for name in declarations}
+        except AttributeError as error:
+            raise NotImplementedError("The selected runtime has no indexed Host transfer API") from error
+        for name, function in functions.items():
+            function.argtypes, function.restype = declarations[name]
+            setattr(self, name, function)
+        self._ndarray_element_transfers_loaded = True
+
     def load_dense_snode_groups(self):
         if getattr(self, "_dense_snode_groups_loaded", False):
             return
