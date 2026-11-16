@@ -44,12 +44,16 @@ def check_admission(owner, contract):
     admission = contract.get("admission")
     if admission:
         for binding in admission.get("constants", {}).values():
-            check_constant(owner, binding["path"], binding["value"])
+            if presence_active(owner, binding):
+                check_constant(owner, binding["path"], binding["value"])
         for binding in admission.get("input_presence", {}).values():
             if (path_value(owner, binding["path"]) is not None) is not binding["present"]:
                 raise ValueError("Optional Field input presence changed after construction")
         presence = {}
         for name, binding in admission.get("dynamic_input_presence", {}).items():
+            if not presence_active(owner, binding):
+                presence[name] = 0
+                continue
             value = path_value(owner, binding["path"])
             if binding.get("boolean") and type(value) is not bool:
                 raise ValueError("Conditional workspace presence requires a boolean")
@@ -65,7 +69,12 @@ def check_admission(owner, contract):
                 # only when its branch is reached, without inventing a value for
                 # absent records or masking invalid reachable scalar inputs.
                 binding = admission["input_guard_values"][name]
-                presence[name] = operator.index(path_value(owner, binding["path"]))
+                # Nested scalar captures use the existing inactive-zero ABI.
+                # Apply the same declared parent predicates to Host admission;
+                # scalar select may evaluate both operands even when one record
+                # is absent. Reachable values still undergo the ordinary checks.
+                presence[name] = (operator.index(path_value(owner, binding["path"]))
+                                  if not capture_is_absent(owner, binding) else 0)
             return presence[name]
 
         def required(paths):
@@ -80,12 +89,15 @@ def check_admission(owner, contract):
 
         records = {}
         for name, record in admission.get("input_records", {}).items():
-            value = path_value(owner, record["path"])
-            records[name] = value if record.get("boolean") else value is not None
+            active = presence_active(owner, record)
+            value = path_value(owner, record["path"]) if active else None
+            records[name] = bool(value) if record.get("boolean") else value is not None
             if not records[name] and required(record["required_when"]):
                 raise ValueError("Optional record presence is required by the selected execution branch")
         check_owner_bindings(owner, admission.get("owner_bindings", {}).values())
         for resource in admission.get("external_resources", {}).values():
+            if not presence_active(owner, resource):
+                continue
             if resource.get("input_record") and not records[resource["input_record"]]:
                 continue
             value = path_value(owner, resource["path"])
@@ -108,6 +120,8 @@ def check_admission(owner, contract):
                 raise ValueError("Conditional workspace no longer refers to its owned Field")
             check_external_resource(owner, resource, value)
         for binding in admission.get("source_bindings", {}).values():
+            if not presence_active(owner, binding):
+                continue
             for predicate in binding.get("presence", ()):
                 actual = path_value(owner, predicate["path"])
                 if predicate.get("record"):
@@ -122,7 +136,9 @@ def check_admission(owner, contract):
             {
                 key: spec
                 for key, spec in constraints.items()
-                if key not in admission.get("constraint_records", {}) or records[admission["constraint_records"][key]]
+                if (all(records[name] for name in admission['constraint_conditions'][key])
+                    if key in admission.get('constraint_conditions', {}) else
+                    key not in admission.get("constraint_records", {}) or records[admission["constraint_records"][key]])
             },
             lambda name: capture_value(owner, dict(name=name, dimension_relations=dimensions)),
         )
@@ -159,6 +175,8 @@ def check_constant(owner, path, value):
 
 def check_owner_bindings(owner, bindings):
     for binding in bindings:
+        if not presence_active(owner, binding):
+            continue
         child = path_value(owner, binding["path"])
         if child is None and binding.get("optional"):
             continue
@@ -171,11 +189,17 @@ def check_owner_bindings(owner, bindings):
             raise ValueError("Declared child owner differs from its package definition")
 
 
+def presence_active(owner, spec):
+    # Producer order is outer to inner; do not read a flag below an absent
+    # namespace. This runs only when constructing/checking a binding snapshot.
+    return all(path_value(owner, predicate['path']) for predicate in spec.get('presence_conditions', ()))
+
+
 def capture_is_absent(owner, spec):
     return bool(
-        spec.get("nullable_record") and path_value(owner, spec["nullable_record"]) is None
+        any(not path_value(owner, predicate["path"]) for predicate in spec.get("nullable_booleans", ()))
+        or spec.get("nullable_record") and path_value(owner, spec["nullable_record"]) is None
         or spec.get("nullable_boolean") and not path_value(owner, spec["nullable_boolean"])
-        or any(not path_value(owner, predicate["path"]) for predicate in spec.get("nullable_booleans", ()))
     )
 
 

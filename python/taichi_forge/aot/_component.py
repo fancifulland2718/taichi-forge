@@ -2377,13 +2377,13 @@ class _Capture:
                 "declare it as a runtime value, resource or static configuration"
             )
         self.used[name] = declaration.schema
-        if isinstance(declaration, _InputRecord):
-            return _InputRecordReference(path)
         if not _argument_binding:
             for depth in range(1, len(path)):
                 record = _capture_id(path[:depth])
                 if isinstance(self.declarations.get(record), _InputRecord):
                     self.input_requirements.setdefault(record, set()).add(tuple(self.input_guards))
+        if isinstance(declaration, _InputRecord):
+            return _InputRecordReference(path)
         if isinstance(declaration, _OptionalArray):
             if ctx is not None and ctx.is_in_static_scope():
                 return _OptionalArrayReference(path)
@@ -2408,7 +2408,9 @@ class _Capture:
                     ):
                         raise TaichiCompilationError("Dynamic storage requires a whole present-only Dense group")
                     record_path = self.component._paths[condition]
-                    self.attribute(ctx, record_path[-1], prefix=record_path[:-1])
+                    self.attribute(
+                        ctx, record_path[-1], prefix=record_path[:-1], _argument_binding=_argument_binding
+                    )
                     if isinstance(declaration, _ConditionalRecord):
                         # A namespace access is not a buffer read. Its original
                         # Dense members record requirements at their use sites.

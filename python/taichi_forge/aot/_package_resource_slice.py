@@ -31,12 +31,35 @@ class AllocationSchema:
     def select(self, source_paths):
         return _allocation_schema(self, source_paths)
 
+    def select_query(self, numerical_paths, source_paths=()):
+        """Select query declarations; child methods remain numerical dependencies.
+
+        An owner namespace is retained here, but its method names are not Field
+        paths. OwnerGraph follows those methods in the child's own definition.
+        Unknown reads and whole-record escapes keep the existing complete view.
+        """
+        declarations = set()
+        for path in numerical_paths:
+            matches = [(key, path[:length]) for length in range(1, len(path) + 1)
+                       for key in self.paths.get(path[:length], ())]
+            if not matches:
+                return None
+            key, prefix = max(matches, key=lambda match: len(match[1]))
+            if self.schema[key]['kind'] == 'record':
+                return None
+            declarations.add(key)
+            # A flattened local declaration inside a record/owner still needs
+            # the enclosing namespace and its presence/layout conditions.
+            declarations.update(parent for parent, _ in matches
+                                if self.schema[parent]['kind'] in ('owner', 'owner_input', 'record'))
+        return _allocation_schema(self, source_paths, declarations=declarations)
+
 
 def allocation_schema(schema, source_paths):
     return AllocationSchema(schema).select(source_paths)
 
 
-def _allocation_schema(index, source_paths):
+def _allocation_schema(index, source_paths, *, declarations=()):
     schema = index.schema
     selected, pending, children = set(), [], {}
     expanded_groups = set()
@@ -94,6 +117,8 @@ def _allocation_schema(index, source_paths):
 
     for path in source_paths:
         require_path(path)
+    for key in declarations:
+        require(key)
     while pending or reference_paths:
         if reference_paths:
             require_path(reference_paths.pop())
@@ -104,9 +129,15 @@ def _allocation_schema(index, source_paths):
         for length in range(len(path)):
             for parent in index.records.get(path[:length], ()):
                 require(parent)
-        for condition in item.get("conditions", {}):
-            require(condition)
-        for part in ("shape", "expression", "dimension_expressions", "dimensions", "constraints"):
+        for part in ('conditions', 'choice_guards', 'shape_guards', 'dtype_guards', 'source_guards'):
+            for condition in item.get(part, {}):
+                require(condition)
+        for alternative in item.get('owner_alternatives', ()):
+            for condition in alternative.get('conditions', {}):
+                require(condition)
+        if item.get('input_presence_attribute'):
+            require(item['input_presence_attribute'])
+        for part in ("shape", "shape_expressions", "expression", "dimension_expressions", "dimensions", "constraints"):
             expression_dependencies(item.get(part, ()))
         for part in ("source_path", "like_source_path", "reference_path", "owner_dimension"):
             if part == "reference_path" and item["kind"] in ("owner", "owner_input"):

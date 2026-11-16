@@ -324,6 +324,124 @@ def project_query_groups(environment, schema, uses):
     environment._set_declarations(declarations)
 
 
+def ordered_presence_conditions(schema, paths, conditions):
+    """Order declared guard dependencies before any conditional member reads."""
+    pending = sorted(conditions, key=lambda name: (len(paths[name]), paths[name]))
+    ordered, done = [], set()
+    while pending:
+        ready = [name for name in pending if not (set(schema[name].get('conditions', {})) & set(pending))]
+        if not ready:
+            raise ValueError('Nested query presence conditions contain a cycle')
+        ordered.extend(ready)
+        done.update(ready)
+        pending = [name for name in pending if name not in done]
+    return ordered
+
+
+def project_nested_query_records(environment, schema, uses):
+    """Project a joint presence closure, without changing the source layout.
+
+    Every guard in a nested query must qualify together. The invocation keeps
+    the ordered parent predicates so absent parents never expose child data.
+    Real implementation/type/layout alternatives keep their finite domain.
+    """
+    from dataclasses import replace
+    from taichi_forge.types import primitive_types
+    from ._component import (Array, DenseField, Dimension, _ConditionalDenseField, _ConditionalRecord,
+                             _ConditionalDimension, _InputPresence, _InputRecord, _OptionalArray, _OwnerReference)
+
+    paths = environment._paths
+    inputs = [paths[key] for key, item in schema.items() if item['kind'] == 'owner_input']
+    candidates = {key for key, item in schema.items()
+                  if item['kind'] == 'static'
+                  and {tuple(value) for value in item.get('choices', ())} == {('bool', False), ('bool', True)}
+                  and (any(len(paths[key]) > len(prefix) and paths[key][:len(prefix)] == prefix for prefix in inputs)
+                       or any(item['kind'] == 'owner_input' and key in item.get('conditions', {})
+                              for item in schema.values()))
+                  and any(key in member.get('conditions', {}) for member in schema.values())}
+
+    def numeric(key, item):
+        if any(item.get(part) for part in ('owner_alternatives', 'choice_guards', 'shape_guards',
+                                          'dtype_guards', 'source_guards', 'shape_policy', 'dtype_policy',
+                                          'source_policy')):
+            return False
+        kind = item['kind']
+        if kind in ('owner', 'owner_input', 'value', 'dimension', 'constant'):
+            return True
+        if kind == 'record':
+            return not item.get('struct_field') and (not item.get('optional') or item.get('dynamic_input_record'))
+        if kind == 'dense_field':
+            return (not item.get('struct_field') and not item['element'].get('model_tensor')
+                    and isinstance(environment.declarations[key], DenseField))
+        if kind == 'ndarray':
+            return item.get('external', False)
+        return kind == 'static' and (key in candidates or item.get('prepare_static')
+                                     or len(item['choices']) == 1 or paths[key][-1] not in uses)
+
+    while True:
+        accepted = set()
+        for flag in candidates:
+            members = [(key, item) for key, item in schema.items() if flag in item.get('conditions', {})]
+            if (any(not numeric(key, item) or not item.get('conditions', {}).keys() <= candidates
+                    or any(value is not True for value in item.get('conditions', {}).values())
+                    for key, item in members)
+                    or any(flag in item.get(part, {}) for item in schema.values()
+                           for part in ('choice_guards', 'shape_guards', 'dtype_guards', 'source_guards'))):
+                continue
+            accepted.add(flag)
+        if accepted == candidates:
+            break
+        candidates = accepted
+    # Flat records/groups are already handled above. Only this joint extension
+    # needs the consumer's parent-before-child admission contract.
+    if not any(len(set(item.get('conditions', {})) & candidates) > 1 for item in schema.values()):
+        return
+    records = {key: item for key, item in schema.items()
+               if item['kind'] in ('owner', 'owner_input', 'record') and item.get('conditions')
+               and item['conditions'].keys() <= candidates
+               and any(paths[flag][:-1] == paths[key][:-1] for flag in item['conditions'])}
+    declarations = dict(environment.declarations)
+    for flag in candidates:
+        schema[flag] = {**schema[flag], 'dynamic_storage_condition': True,
+                        'input_presence_attribute': flag, 'prepare_static': True, 'nested_query_input': True}
+        declarations[flag] = _InputPresence(primitive_types.i32)
+    for key, original in list(schema.items()):
+        conditions = original.get('conditions', {})
+        if not conditions or not conditions.keys() <= candidates:
+            continue
+        guards = ordered_presence_conditions(schema, paths, conditions)
+        item = schema[key] = {**original, 'input_conditions': guards, 'nested_query_input': True}
+        ancestors = [name for name in records if len(paths[name]) < len(paths[key])
+                     and paths[key][:len(paths[name])] == paths[name]]
+        item['input_record'] = max(ancestors, key=lambda name: len(paths[name])) if ancestors else guards[0]
+        if key in records:
+            flag = next(flag for flag in reversed(guards) if paths[flag][:-1] == paths[key][:-1])
+            item.update(dynamic_input_record=True, input_presence_attribute=flag)
+            declarations[key] = _InputRecord(flag)
+        elif item['kind'] in ('owner', 'owner_input', 'record'):
+            # An unconditional child inherits its parent's guard; it must not
+            # replace that guard's canonical optional namespace or become optional
+            # itself. Preserve aliases and check its actual type when reachable.
+            item.pop('dynamic_input_record', None)
+            item.pop('input_presence_attribute', None)
+            if not isinstance(declarations[key], _OwnerReference):
+                declarations[key] = _ConditionalRecord(tuple((flag, True) for flag in guards))
+        elif isinstance(declarations[key], DenseField):
+            value = declarations[key]
+            declarations[key] = _ConditionalDenseField(value.dtype, value.shape, value.group,
+                                                       tuple((flag, True) for flag in guards))
+            item.update(dynamic_input_storage=True, shape=list(value.shape))
+        elif isinstance(declarations[key], Dimension):
+            value = declarations[key]
+            declarations[key] = _ConditionalDimension(value.kind, value.capacity, value.expression,
+                                                       tuple((flag, True) for flag in guards))
+        elif isinstance(declarations[key], Array):
+            value = declarations[key]
+            declarations[key] = (replace(value, conditions=()) if isinstance(value, _OptionalArray)
+                                 else Array(value.dtype, value.ndim, value.shape, value.resource_id))
+    environment._set_declarations(declarations)
+
+
 def project_struct_member_inputs(environment, schema):
     """Use existing Dense member descriptors for a whole optional StructField.
 

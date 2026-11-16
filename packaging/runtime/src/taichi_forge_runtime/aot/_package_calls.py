@@ -170,8 +170,10 @@ class OwnerGuard:
             if spec["kind"] != "local_tensor_workspace" and not spec.get("dimension_relations"):
                 path(spec.get("path", (spec["name"],)))
             if owner is not None:
-                from ._package_values import owner_type, path_value
+                from ._package_values import capture_is_absent, owner_type, path_value
 
+                if capture_is_absent(owner, spec):
+                    continue
                 prefix = tuple(spec.get("layout_owner_path", ()))
                 allocated = path_value(owner, prefix)
                 if allocated is None:

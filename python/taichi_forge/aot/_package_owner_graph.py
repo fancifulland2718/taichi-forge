@@ -1,23 +1,25 @@
 """Resolve declared construction types without executing application constructors."""
 
 import ast
+import builtins
 import copy
-from types import MappingProxyType, SimpleNamespace
+from types import MappingProxyType, ModuleType, SimpleNamespace
 
 
-def _member_paths(node, receiver, forwarded=None):
+def _member_paths(node, receiver, forwarded=None, method_reads=None, nodes=None):
     """Read explicit device member paths, without traversing Host construction."""
     paths, presence = set(), set()
-    parents = ({id(child): part for part in ast.walk(node) for child in ast.iter_child_nodes(part)}
+    nodes = tuple(ast.walk(node)) if nodes is None else nodes
+    parents = ({id(child): part for part in nodes for child in ast.iter_child_nodes(part)}
                if forwarded is not None else {})
-    attributes = {id(part.value) for part in ast.walk(node) if isinstance(part, ast.Attribute)}
+    attributes = {id(part.value) for part in nodes if isinstance(part, ast.Attribute)}
     presence_reads = {
-        id(part.left) for part in ast.walk(node)
+        id(part.left) for part in nodes
         if isinstance(part, ast.Compare) and len(part.ops) == 1
         and isinstance(part.ops[0], (ast.Is, ast.IsNot))
         and isinstance(part.comparators[0], ast.Constant) and part.comparators[0].value is None
     }
-    for part in ast.walk(node):
+    for part in nodes:
         if isinstance(part, ast.Name) and part.id == receiver and id(part) not in attributes:
             if forwarded is not None:
                 resolved = forwarded(part, parents)
@@ -29,6 +31,11 @@ def _member_paths(node, receiver, forwarded=None):
             paths.add(())
         if not isinstance(part, ast.Attribute) or id(part) in attributes:
             continue
+        if method_reads is not None:
+            resolved = method_reads(part, parents)
+            if resolved is not None:
+                paths.update(resolved)
+                continue
         path, presence_only = [], id(part) in presence_reads
         while isinstance(part, ast.Attribute):
             path.append(part.attr)
@@ -43,53 +50,174 @@ def _member_paths(node, receiver, forwarded=None):
 
 
 class _MethodInputPaths:
-    """Summarize declared self-method forwarding, then discard the syntax index."""
+    """Summarize exact declared helper calls, then discard the syntax index."""
 
-    def __init__(self, methods):
+    def __init__(self, methods, modules=None, functions=None, static_function=None):
         self.methods, self.cache = methods, {}
+        self.modules, self.functions = modules or {}, functions or {}
+        self.static_function = static_function
 
-    def parameter(self, owner, method, parameter, visiting=frozenset()):
-        key = owner, method, parameter
-        if key in visiting:
+    def parameter(self, owner, method, parameter, visiting=frozenset(), literals=()):
+        return self._parameter(owner, self.methods[owner][method], parameter, visiting, literals, True)
+
+    def _parameter(self, owner, node, parameter, visiting, literals, is_method):
+        key = owner, id(node), parameter, tuple((name, type(value), value) for name, value in literals)
+        recursion_key = owner, id(node), parameter
+        if recursion_key in visiting:
             return frozenset(((),))
         if key in self.cache:
             return self.cache[key]
-        node = self.methods[owner][method]
         parameters = (*node.args.posonlyargs, *node.args.args)
-        receiver = parameters[0].arg
+        receiver = parameters[0].arg if is_method else None
+        values, unknown = dict(literals), object()
+        local_names = {arg.arg for arg in (*parameters, *node.args.kwonlyargs)}
+        rebound = {part.id for part in ast.walk(node)
+                   if isinstance(part, ast.Name) and isinstance(part.ctx, ast.Store)}
+        local_names.update(rebound)
+        for name in rebound:
+            values.pop(name, None)
+        module = self.modules.get(id(node))
+        namespace = vars(module) if module is not None else {}
         # Rebound receivers and nested lexical scopes do not prove the callee.
         known_receiver = not any(
-            isinstance(part, ast.Name) and part.id == receiver and isinstance(part.ctx, ast.Store)
+            isinstance(part, ast.Name) and part.id in (receiver, parameter) and isinstance(part.ctx, ast.Store)
             or isinstance(part, (ast.FunctionDef, ast.Lambda)) and part is not node
             for part in ast.walk(node))
 
-        def forwarded(value, parents):
-            parent = parents.get(id(value))
-            keyword = parent.arg if isinstance(parent, ast.keyword) else None
-            call = parents.get(id(parent)) if isinstance(parent, ast.keyword) else parent
-            if (not known_receiver or not isinstance(call, ast.Call)
-                    or not isinstance(call.func, ast.Attribute)
-                    or not isinstance(call.func.value, ast.Name) or call.func.value.id != receiver
-                    or call.func.attr not in self.methods[owner]
-                    or any(isinstance(arg, ast.Starred) for arg in call.args)
+        def literal(part):
+            if isinstance(part, ast.Constant) and isinstance(part.value, (str, int, float, bool, type(None))):
+                return part.value
+            if isinstance(part, ast.Name):
+                return values.get(part.id, unknown)
+            if isinstance(part, ast.BinOp) and isinstance(part.op, ast.Add):
+                left, right = literal(part.left), literal(part.right)
+                if isinstance(left, str) and isinstance(right, str):
+                    return left + right
+            if isinstance(part, ast.Compare) and len(part.ops) == 1:
+                left, right = literal(part.left), literal(part.comparators[0])
+                if (left is not unknown and right is not unknown
+                        and (left is None or left is True or left is False
+                             or right is None or right is True or right is False)):
+                    if isinstance(part.ops[0], ast.Is):
+                        return left is right
+                    if isinstance(part.ops[0], ast.IsNot):
+                        return left is not right
+            if isinstance(part, ast.BoolOp):
+                for value in part.values:
+                    result = literal(value)
+                    if result is unknown:
+                        return unknown
+                    if isinstance(part.op, ast.And) and not result or isinstance(part.op, ast.Or) and result:
+                        return result
+                return result
+            if isinstance(part, ast.UnaryOp) and isinstance(part.op, ast.Not):
+                value = literal(part.operand)
+                return unknown if value is unknown else not value
+            return unknown
+
+        def bound_symbol(symbol):
+            suffix = []
+            while isinstance(symbol, ast.Attribute):
+                suffix.append(symbol.attr)
+                symbol = symbol.value
+            if not isinstance(symbol, ast.Name) or symbol.id in local_names:
+                return None
+            target = namespace.get(symbol.id)
+            for name in reversed(suffix):
+                if not isinstance(target, ModuleType):
+                    return None
+                target = vars(target).get(name)
+            return target
+
+        def active_nodes():
+            pending, result = [node], []
+            while pending:
+                part = pending.pop()
+                result.append(part)
+                if (isinstance(part, ast.If) and isinstance(part.test, ast.Call)
+                        and self.static_function is not None
+                        and bound_symbol(part.test.func) is self.static_function
+                        and len(part.test.args) == 1 and not part.test.keywords):
+                    value = literal(part.test.args[0])
+                    if value is not unknown:
+                        pending.extend(reversed(part.body if value else part.orelse))
+                        continue
+                pending.extend(reversed(tuple(ast.iter_child_nodes(part))))
+            return result
+
+        def declared_call(call):
+            if (not known_receiver or any(isinstance(arg, ast.Starred) for arg in call.args)
                     or any(arg.arg is None for arg in call.keywords)):
                 return None
-            callee = self.methods[owner][call.func.attr]
-            if any(getattr(decorator, 'id', getattr(decorator, 'attr', '')) in ('staticmethod', 'classmethod')
-                   for decorator in (*node.decorator_list, *callee.decorator_list)):
-                return None
-            positional = (*callee.args.posonlyargs, *callee.args.args)[1:]
-            if isinstance(parent, ast.keyword):
-                if keyword not in {arg.arg for arg in (*positional, *callee.args.kwonlyargs)}:
+            if (is_method and isinstance(call.func, ast.Attribute)
+                    and isinstance(call.func.value, ast.Name) and call.func.value.id == receiver
+                    and call.func.attr in self.methods[owner]):
+                callee, bound = self.methods[owner][call.func.attr], True
+                if any(getattr(decorator, 'id', getattr(decorator, 'attr', '')) in ('staticmethod', 'classmethod')
+                       for decorator in (*node.decorator_list, *callee.decorator_list)):
                     return None
-                target = keyword
-            elif value in call.args and call.args.index(value) < len(positional):
-                target = positional[call.args.index(value)].arg
             else:
+                callee, bound = self.functions.get(id(bound_symbol(call.func))), False
+                if callee is None:
+                    return None
+            all_positional = (*callee.args.posonlyargs, *callee.args.args)
+            positional = all_positional[1:] if bound else all_positional
+            if len(call.args) > len(positional):
                 return None
-            return self.parameter(owner, call.func.attr, target, visiting | {key})
+            arguments = {arg.arg: value for arg, value in zip(positional, call.args)}
+            allowed = {arg.arg for arg in (*positional, *callee.args.kwonlyargs)}
+            for arg in call.keywords:
+                if arg.arg not in allowed or arg.arg in arguments:
+                    return None
+                arguments[arg.arg] = arg.value
+            constants = {}
+            for arg, default in zip(all_positional[-len(callee.args.defaults):], callee.args.defaults):
+                if arg.arg not in arguments and isinstance(default, ast.Constant):
+                    constants[arg.arg] = default.value
+            for arg, default in zip(callee.args.kwonlyargs, callee.args.kw_defaults):
+                if arg.arg not in arguments and isinstance(default, ast.Constant):
+                    constants[arg.arg] = default.value
+            constants.update((name, value) for name, expr in arguments.items()
+                             if (value := literal(expr)) is not unknown)
+            return callee, bound, arguments, tuple(sorted(constants.items()))
 
-        result = frozenset(_member_paths(node, parameter, forwarded))
+        def forwarded(value, parents):
+            parent = parents.get(id(value))
+            call = parents.get(id(parent)) if isinstance(parent, ast.keyword) else parent
+            if not known_receiver or not isinstance(call, ast.Call):
+                return None
+            if (isinstance(call.func, ast.Name) and call.func.id == 'getattr'
+                    and 'getattr' not in local_names and namespace.get('getattr', builtins.getattr) is builtins.getattr
+                    and len(call.args) in (2, 3) and value is call.args[0]):
+                member = literal(call.args[1])
+                return {(member,)} if isinstance(member, str) else None
+            resolved = declared_call(call)
+            if resolved is None:
+                return None
+            callee, bound, arguments, constants = resolved
+            target = next((name for name, argument in arguments.items() if argument is value), None)
+            return (self._parameter(owner, callee, target, visiting | {recursion_key}, constants, bound)
+                    if target is not None else None)
+
+        def method_reads(part, parents):
+            call = parents.get(id(part))
+            if (parameter != receiver or not isinstance(call, ast.Call) or call.func is not part
+                    or not isinstance(part.value, ast.Name) or part.value.id != receiver):
+                return None
+            resolved = declared_call(call)
+            if resolved is None:
+                return None
+            callee, bound, _, constants = resolved
+            if not bound:
+                return None
+            callee_receiver = (*callee.args.posonlyargs, *callee.args.args)[0].arg
+            return self._parameter(owner, callee, callee_receiver, visiting | {recursion_key}, constants, True)
+
+        result = frozenset(_member_paths(node, parameter, forwarded, method_reads, active_nodes()))
+        if parameter in rebound or any(
+                isinstance(part, ast.Call) and isinstance(part.func, ast.Name) and part.func.id == 'super'
+                for part in ast.walk(node)):
+            result = result | {()}
         self.cache[key] = result
         return result
 
@@ -124,6 +252,7 @@ def layout_owner(environment, schema, name):
 class OwnerGraph:
     def __init__(self, sources, imported, module, *, field_trees):
         from ._package_input_families import source_class
+        from taichi_forge.lang.impl import static
 
         self.imported, self.module = imported, module
         self.field_trees = field_trees
@@ -140,12 +269,21 @@ class OwnerGraph:
             for name, _, _, _, tree, _, schemas, _ in sources
             for owner, schema in schemas.items()
         }
-        device_methods = {}
+        device_methods, device_functions, node_modules = {}, {}, {}
         for name, _, _, _, tree, _, _, definitions in sources:
             for definition in definitions:
-                if definition['owner'] is None or definition.get('error_interface'):
+                if definition.get('error_interface'):
                     continue
                 node = definition['node']
+                node_modules[id(node)] = imported[name]
+                if definition['owner'] is None:
+                    function = vars(imported[name]).get(node.name)
+                    original = getattr(getattr(function, 'func', None), 'func', None)
+                    if (getattr(function, '_is_taichi_function', False)
+                            and getattr(original, '__module__', None) == name
+                            and getattr(original, '__qualname__', None) == node.name):
+                        device_functions[id(function)] = node
+                    continue
                 parameters = (*node.args.posonlyargs, *node.args.args)
                 if parameters:
                     owner = name + '.' + source_class(tree, definition['owner'])
@@ -165,7 +303,7 @@ class OwnerGraph:
                 inherited.update(device_methods.get(base.__module__ + '.' + base.__qualname__, {}))
         # These summaries survive the scan; the temporary method/parent AST
         # indices do not. They do not own or construct application resources.
-        reads = _MethodInputPaths(methods)
+        reads = _MethodInputPaths(methods, node_modules, device_functions, static)
         self._method_input_paths = {}
         for identity, nodes in methods.items():
             summaries = self._device_methods.setdefault(identity, {})
@@ -322,9 +460,19 @@ class OwnerGraph:
         name, class_name, original = self.definitions[identity]
         schema = original
         source_children = {}
+        whole_query = numerical_paths is not None and () in numerical_paths
         if numerical_paths is not None:
             numerical_paths = self._numerical_paths(identity, numerical_paths)
-        if (contract_only or resource_only and numerical_paths is not None) and any(
+        query_slice = None
+        if resource_only and numerical_paths is not None and not contract_only and not whole_query:
+            from ._package_resource_slice import AllocationSchema
+
+            if identity not in self._allocation_schemas:
+                self._allocation_schemas[identity] = AllocationSchema(original)
+            query_slice = self._allocation_schemas[identity].select_query(numerical_paths, resource_paths or ())
+        if query_slice is not None:
+            schema, source_children = query_slice
+        elif (contract_only or resource_only and numerical_paths is not None) and any(
                 item["kind"] in ("owner", "owner_input") for item in original.values()):
             from ._package_resource_slice import AllocationSchema
 
@@ -335,12 +483,19 @@ class OwnerGraph:
             if identity not in self._allocation_schemas:
                 self._allocation_schemas[identity] = AllocationSchema(original)
             _, source_children = self._allocation_schemas[identity].select(paths)
-        if resource_paths is not None:
+        if resource_paths is not None and query_slice is None:
             from ._package_resource_slice import AllocationSchema
 
             if identity not in self._allocation_schemas:
                 self._allocation_schemas[identity] = AllocationSchema(original)
-            schema, source_children = self._allocation_schemas[identity].select(resource_paths)
+            allocation, required_children = self._allocation_schemas[identity].select(resource_paths)
+            if numerical_paths is None:
+                schema, source_children = allocation, required_children
+            else:
+                # A declined numerical slice retains its complete local view;
+                # an additional layout borrow must not replace those reads.
+                for child, members in required_children.items():
+                    source_children.setdefault(child, set()).update(members)
         resource_key = None
         if resource_only:
             token = identity, None if resource_paths is None else tuple(sorted(resource_paths))
@@ -352,7 +507,7 @@ class OwnerGraph:
                     + ".".join(path)
                 )
             references = (*references, token)
-            if resource_paths is None:
+            if resource_paths is None or numerical_paths is not None:
                 # A storage borrow still omits its provider's owned graph.
                 # A numerical object input also needs children explicitly read
                 # by its Kernel or device methods. Keep those declared namespaces

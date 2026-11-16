@@ -241,9 +241,9 @@ class Model:
     output = tmp_path / 'sdk'
     manifest = ti.aot.export_package(package, output, artifact_format='bc-library')
     entries = [item for item in manifest['entries'].values() if item['definition'].endswith('Model.step')]
-    # The outer owner guard still selects construction. The borrowed leaf's
-    # presence is prepared from the actual binding, not another producer axis.
-    assert len(entries) == 2
+    # Both namespace guards come from the binding. An absent outer owner must
+    # short-circuit the inner view before its dimensions or buffers are read.
+    assert len(entries) == 1
     with Runtime(manifest['target']) as runtime, load_package(runtime, output) as code:
         values = runtime.ndarray('f32', (4,))
         values.from_numpy(np.full(4, 2, np.float32))
@@ -424,6 +424,216 @@ class Model:
         (output / 'package.json').write_text(json.dumps({**manifest, 'version': 92}), encoding='utf8')
         with Runtime(manifest['target']) as runtime, pytest.raises(ValueError, match='version 93'):
             load_package(runtime, output)
+
+
+@test_utils.test(arch=ti.cpu, offline_cache=False)
+def test_package_optional_constructor_reference_keeps_managed_scope(tmp_path, monkeypatch):
+    from taichi_forge_runtime.aot._package import _ResourceScope, _construction
+
+    package = _source_package(tmp_path, monkeypatch, '''
+import taichi_forge as ti
+@ti.data_oriented
+class Leaf:
+    def __init__(self):
+        scope = ti.experimental.ResourceScope(self)
+        scope.values = scope.field(ti.f32, shape=(), initialization='zero')
+@ti.data_oriented
+class Model:
+    def __init__(self, leaf: Leaf = None):
+        self.enabled = leaf is not None
+        scope = ti.experimental.ResourceScope(self)
+        scope.static('enabled', choices=(False, True))
+        if self.enabled:
+            scope.owner_reference('leaf', leaf)
+        else:
+            scope.owner_reference('leaf', None, optional=True)
+    @ti.kernel
+    def read(self) -> ti.f32:
+        value = 2.0
+        if ti.static(self.enabled):
+            value += self.leaf.values[None]
+        return value
+''')
+    output = tmp_path / 'sdk'
+    manifest = ti.aot.export_package(package, output)
+    with Runtime(manifest['target']) as runtime, load_package(runtime, output) as code:
+        tensor = runtime.ndarray('f32', (3,), element_shape=(2,))
+        tensor.fill(1.25)
+        np.testing.assert_array_equal(tensor.to_numpy(), np.full((3, 2), 1.25, np.float32))
+        absent, leaf = code.host.Model(), code.host.model.Leaf()
+        present = code.host.Model(leaf)
+        leaf.values.from_numpy(np.array(5, np.float32))
+        assert absent.read() == 2 and present.read() == 7
+        scope = _ResourceScope(present)
+        with pytest.raises(ValueError, match='managed constructor'):
+            scope.owner_reference('leaf', None, optional=True)
+        token = _construction.set((code, [], absent, None))
+        try:
+            with pytest.raises(ValueError, match='managed constructor'):
+                scope.owner_reference('leaf', None, optional=True)
+        finally:
+            _construction.reset(token)
+        assert present.leaf is leaf and present.read() == 7
+
+
+def test_package_nested_presence_checks_dependencies_before_members():
+    from types import SimpleNamespace
+    from taichi_forge.aot._package_optional import ordered_presence_conditions
+    from taichi_forge_runtime.aot._package_values import capture_is_absent, check_admission, presence_active
+
+    schema = {'z_outer': {}, 'a_inner': {'conditions': {'z_outer': True}}}
+    paths = {name: (name,) for name in schema}
+    conditions = ordered_presence_conditions(schema, paths, ('a_inner', 'z_outer'))
+    predicates = [{'path': paths[name]} for name in conditions]
+    owner = SimpleNamespace(z_outer=False)
+    assert not presence_active(owner, {'presence_conditions': predicates})
+    assert capture_is_absent(owner, {'nullable_booleans': predicates, 'nullable_record': ['child', 'view']})
+    owner.z_outer, owner.a_inner = True, False
+    contract = {'admission': {
+        'input_records': {name: {'path': [name], 'boolean': True, 'required_when': []} for name in schema},
+        'dimensions': {'n': {'path': ['child', 'n'], 'expression': None, 'kind': 'extent'}},
+        'constraints': {'capacity': {'when': 'values', 'left': ['dim', 'n'], 'right': ['const', 4]}},
+        'constraint_records': {'capacity': 'z_outer'},
+        'constraint_conditions': {'capacity': conditions},
+    }}
+    check_admission(owner, contract)  # No child or dimension exists while the inner branch is absent.
+    owner.a_inner, owner.child = True, SimpleNamespace(n=5)
+    with pytest.raises(ValueError, match='Dimension constraint'):
+        check_admission(owner, contract)
+    owner.child.n = 4
+    check_admission(owner, contract)
+
+
+@test_utils.test(arch=ti.cuda, offline_cache=False)
+def test_package_nested_query_inputs_share_code_and_guard_absent_parents(tmp_path, monkeypatch):
+    source = '''
+import taichi_forge as ti
+@ti.data_oriented
+class Table:
+    def __init__(self, n):
+        self.n, self.capacity = n, n + 1
+        scope = ti.experimental.ResourceScope(self)
+        scope.values = scope.field(ti.f32, shape=scope.dim('n'), initialization='zero')
+        scope.sibling = scope.field(ti.i32, shape=scope.dim('n'), initialization='zero')
+        scope.require_le('fits', scope.dim('n'), scope.dim('capacity'), when='values')
+    @ti.func
+    def sample(self):
+        self.values[0] += 1
+        return self.values[0]
+@ti.data_oriented
+class Query:
+    def __init__(self):
+        self.enabled = False
+        self.table = None
+        scope = ti.experimental.ResourceScope(self)
+        scope.static('enabled', choices=(False, True))
+        scope.owner_reference('table', None, optional=True)
+        scope.required = Table(1)
+    def bind(self, table: Table = None):
+        self.enabled = table is not None
+        scope = ti.experimental.ResourceScope(self)
+        if self.enabled:
+            scope.owner_reference('table', table)
+        else:
+            scope.owner_reference('table', None, optional=True)
+    @ti.func
+    def sample(self):
+        value = 2.0 + self.required.values[0]
+        if ti.static(self.table is not None):
+            value += self.table.sample()
+        return value
+@ti.data_oriented
+class Model:
+    def __init__(self):
+        self.enabled = False
+        self.query = None
+        scope = ti.experimental.ResourceScope(self)
+        scope.static('enabled', choices=(False, True))
+        scope.owner_reference('query', None, optional=True)
+        scope.out = scope.field(ti.f32, shape=(), initialization='zero')
+    def bind(self, query: Query = None):
+        self.enabled = query is not None
+        scope = ti.experimental.ResourceScope(self)
+        if self.enabled:
+            scope.owner_reference('query', query)
+        else:
+            scope.owner_reference('query', None, optional=True)
+    @ti.kernel
+    def step(self):
+        value = 1.0
+        if ti.static(self.query is not None):
+            value += self.query.sample()
+        self.out[None] = value
+    @ti.kernel
+    def required(self) -> ti.f32:
+        return self.query.table.values[0]
+    def graph(self):
+        builder = ti.graph.GraphBuilder()
+        builder.dispatch(self.step)
+        return builder.compile()
+'''
+    package = _source_package(tmp_path, monkeypatch, source)
+    references = []
+    for outer, inner in ((False, False), (True, False), (True, True)):
+        model = package.Model()
+        query = package.model.Query() if outer else None
+        if inner:
+            query.bind(package.model.Table(3))
+        model.bind(query)
+        values = []
+        for _ in range(3):
+            model.step()
+            values.append(model.out[None])
+        references.append(values)
+    output = tmp_path / 'sdk'
+    manifest = ti.aot.export_package(package, output, artifact_format='bc-library')
+    entries = [entry for entry in manifest['entries'].values() if entry['definition'].endswith('Model.step')]
+    assert len(entries) == 1
+    assert manifest['version'] == 94
+    assert entries[0]['admission']['constraint_conditions']
+    with Runtime(manifest['target']) as runtime, load_package(runtime, output) as code:
+        for index, (outer, inner) in enumerate(((False, False), (True, False), (True, True))):
+            model = code.host.Model()
+            query = code.host.model.Query() if outer else None
+            if inner:
+                query.bind(code.host.model.Table(3))
+            model.bind(query)
+            for expected in references[index]:
+                model.step()
+                assert model.out[None] == expected
+            if outer:
+                required = query.required
+                query.required = None
+                with pytest.raises(ValueError, match='child owner'):
+                    model.step()
+                query.required = required
+            if not inner:
+                with pytest.raises(ValueError, match='presence'):
+                    model.required()
+            else:
+                assert model.required() == 3.0
+                query.table.capacity = 2
+                with pytest.raises(ValueError, match='Dimension constraint'):
+                    model.step()
+                query.table.capacity = 4
+                query.table.sibling.from_numpy(np.array([8, 9, 10], dtype=np.int32))
+                query.table.values.fill(10.)
+                np.testing.assert_array_equal(query.table.sibling.to_numpy(), [8, 9, 10])
+                model.graph().run({})
+                assert model.out[None] == 14.0
+                table = query.table
+                query.bind(None)
+                model.step()
+                assert model.out[None] == 3.0
+                query.bind(table)
+                model.step()
+                assert model.out[None] == 15.0
+            model.bind(None)
+            model.step()
+            assert model.out[None] == 1.0
+    (output / 'package.json').write_text(json.dumps({**manifest, 'version': 93}), encoding='utf8')
+    with Runtime(manifest['target']) as runtime, pytest.raises(ValueError, match='version 94'):
+        load_package(runtime, output)
 
 
 @test_utils.test(arch=[ti.cpu, ti.cuda], offline_cache=False)
@@ -14555,6 +14765,19 @@ def test_package_admission_reads_record_guards_only_on_reached_branches():
     with pytest.raises(ValueError, match="presence changed outside"):
         check_admission(owner, contract)
     owner.primary_present = False
+    # A nested conditional scalar uses the same inactive zero as its capture
+    # ABI, including inside an eager scalar select. No absent member is read.
+    contract["admission"]["input_guard_values"]["primary_kind"]["nullable_booleans"] = [
+        {"path": ["primary_present"]}
+    ]
+    contract["admission"]["input_records"]["aux"]["required_when"] = [[
+        [["select", present, selected, ["const", 0]], True]
+    ]]
+    check_admission(owner, contract)
+    owner.primary, owner.primary_present = SimpleNamespace(kind=2**31), True
+    with pytest.raises(ValueError, match="i32"):
+        check_admission(owner, contract)
+    owner.primary, owner.primary_present = None, False
     contract["admission"]["input_records"]["primary"]["required_when"] = [[]]
     with pytest.raises(ValueError, match="record presence is required"):
         check_admission(owner, contract)
@@ -14626,7 +14849,8 @@ class Model:
     manifest = ti.aot.export_package(package, tmp_path / "sdk")
     # Only the explicit algorithm option remains static; two record-presence
     # axes share each implementation and required reads are checked at bind.
-    assert manifest["version"] == (80 if guard == "record_value" else 64)
+    # Record-member guards retain the nullable scalar capture ABI in format 94.
+    assert manifest["version"] == (94 if guard == "record_value" else 64)
     assert sorted(len(entry["variants"]) for entry in manifest["entry_families"].values()) == [2]
     for name in tuple(sys.modules):
         if name == "definition_fixture" or name.startswith("definition_fixture."):
@@ -28028,3 +28252,281 @@ def diagnostics():
         assert native.visited is True
         with pytest.raises(RuntimeError, match='ti.runtime.stats.*producer-only'):
             code.host.diagnostics()
+
+
+def test_package_query_slice_keeps_native_groups_and_declared_dependencies():
+    from taichi_forge.aot._package_resource_slice import AllocationSchema
+
+    schema = {
+        'present': dict(kind='static'),
+        'n': dict(kind='dimension'),
+        'pose_mode': dict(kind='static'),
+        'poses': dict(kind='ndarray', shape_policy=dict(condition='pose_mode', if_true=['n', 'n'], if_false=['n'])),
+        'query': dict(kind='owner_input', conditions={'present': True}),
+        'record': dict(kind='record'),
+        'value': dict(kind='dense_field', path=['record', 'value'], group='cache', shape=['n']),
+        'sibling': dict(kind='dense_field', group='cache', shape=['n']),
+        'producer': dict(kind='dense_field', group='unrelated', shape=[10]),
+        'input_present': dict(kind='value'),
+        'external': dict(kind='ndarray', shape_expressions=[('dim', 'n')], input_presence_attribute='input_present'),
+    }
+    index = AllocationSchema(schema)
+    selected, children = index.select_query([('query', 'sample'), ('record', 'value')])
+    assert set(selected) == {'query', 'present', 'record', 'value', 'sibling', 'n'}
+    # Query methods are numerical dependencies, not native allocation members.
+    assert children == {}
+    selected, children = index.select_query([('query', 'sample')], [('record', 'value')])
+    assert set(selected) == {'query', 'present', 'record', 'value', 'sibling', 'n'}
+    assert children == {}
+    selected, _ = index.select_query([('external', 'shape')])
+    assert set(selected) == {'external', 'n', 'input_present'}
+    selected, _ = index.select_query([('poses',)])
+    assert set(selected) == {'poses', 'n', 'pose_mode'}
+    for paths in ([()], [('unknown',)], [('record',)]):
+        assert index.select_query(paths) is None
+
+
+def test_package_query_paths_follow_exact_helpers_and_literal_static_branches():
+    import ast
+    from types import ModuleType
+
+    from taichi_forge.aot._package_owner_graph import _MethodInputPaths
+
+    def source(text):
+        return ast.parse(text).body[0]
+
+    module, foreign = ModuleType('query_fixture'), ModuleType('other_fixture')
+    module.ti = ModuleType('forge_fixture')
+    module.ti.static = object()
+    module.sample = object()
+    module.imported_alias = module.sample
+    foreign.sample = object()
+    module.foreign = foreign
+    helper = source('''
+def sample(owner, channel, *, gradient=None):
+    if ti.static(gradient is not None and owner.mipmaps):
+        return getattr(owner, channel + '_mips')[0]
+    return getattr(owner, 'has_' + channel + '_texture') + getattr(owner, channel + '_values')[0]
+''')
+    other_helper = source('''
+def sample(owner, channel):
+    return owner.other_values[0]
+''')
+    methods = {node.name: node for node in ast.parse('''
+def query(self, provider):
+    return self.wrap('alpha') + sample(provider, 'base') + imported_alias(owner=provider, channel='mask')
+def wrap(self, channel):
+    return sample(self, channel)
+def other(self, provider):
+    return foreign.sample(provider, 'alpha')
+def dynamic(self, provider, channel):
+    return sample(provider, channel)
+def unknown(self, provider):
+    return external(provider)
+def shadowed(self, provider, sample):
+    return sample(provider, 'alpha')
+def rebound(self, provider):
+    provider = replacement
+    return provider.values[0]
+def rebound_literal(self, channel):
+    channel = unknown_channel
+    return sample(self, channel)
+def literal_caller(self):
+    return self.rebound_literal('alpha')
+def keyword(self, provider):
+    return self.forward(value=provider)
+def forward(self, value):
+    return value.depth[0]
+def footprint(self, provider, gradient):
+    return sample(provider, 'base', gradient=gradient)
+def boolean(self, flag):
+    if ti.static(flag is True):
+        return self.boolean_value[0]
+    else:
+        return self.integer_value[0]
+def recursive_literal(self, channel):
+    return self.recursive_literal(channel + 'x')
+''').body}
+    nodes = [*methods.values(), helper, other_helper]
+    reader = _MethodInputPaths(
+        {'Owner': methods}, {id(node): module for node in nodes},
+        {id(module.sample): helper, id(foreign.sample): other_helper}, module.ti.static)
+    assert reader.parameter('Owner', 'query', 'self') == {('has_alpha_texture',), ('alpha_values',)}
+    assert reader.parameter('Owner', 'query', 'provider') == {
+        ('has_base_texture',), ('base_values',), ('has_mask_texture',), ('mask_values',)}
+    assert reader.parameter('Owner', 'other', 'provider') == {('other_values',)}
+    assert reader.parameter('Owner', 'keyword', 'provider') == {('depth',)}
+    assert reader.parameter('Owner', 'footprint', 'provider') == {
+        ('mipmaps',), ('base_mips',), ('has_base_texture',), ('base_values',)}
+    assert reader.parameter('Owner', 'boolean', 'self', literals=(('flag', True),)) == {('boolean_value',)}
+    assert reader.parameter('Owner', 'boolean', 'self', literals=(('flag', 1),)) == {('integer_value',)}
+    assert () in reader.parameter('Owner', 'recursive_literal', 'self', literals=(('channel', ''),))
+    for method, parameter in [('dynamic', 'provider'), ('unknown', 'provider'), ('shadowed', 'provider'),
+                              ('rebound', 'provider'), ('literal_caller', 'self')]:
+        assert () in reader.parameter('Owner', method, parameter)
+
+
+@test_utils.test(arch=ti.cuda, offline_cache=False)
+def test_package_optional_owner_boolean_operands_keep_short_circuit_admission(tmp_path, monkeypatch):
+    package = _source_package(tmp_path, monkeypatch, '''
+import taichi_forge as ti
+@ti.data_oriented
+class Leaf:
+    def __init__(self, built: bool):
+        self._built = built
+        scope = ti.experimental.ResourceScope(self)
+        scope.static('_built', choices=(False, True))
+        scope.values = scope.field(ti.f32, shape=1, initialization='zero')
+@ti.data_oriented
+class Model:
+    def __init__(self):
+        self._has_leaf = False
+        scope = ti.experimental.ResourceScope(self)
+        scope.static('_has_leaf', choices=(False, True))
+        scope.owner_reference('leaf', None, optional=True)
+    def bind(self, leaf: Leaf = None):
+        self._has_leaf = leaf is not None
+        scope = ti.experimental.ResourceScope(self)
+        if self._has_leaf:
+            scope.owner_reference('leaf', leaf)
+        else:
+            scope.owner_reference('leaf', None, optional=True)
+    @ti.kernel
+    def and_query(self) -> ti.f32:
+        result = 2.0
+        if ti.static(self.leaf is not None and self.leaf._built):
+            result += self.leaf.values[0]
+        return result
+    @ti.kernel
+    def or_query(self) -> ti.f32:
+        result = 2.0
+        if ti.static(self.leaf is None or not self.leaf._built):
+            result = -1.0
+        else:
+            result += self.leaf.values[0]
+        return result
+    @ti.kernel
+    def required(self) -> ti.f32:
+        return self.leaf.values[0]
+''')
+    references = []
+    for built in (None, False, True):
+        normal = package.Model()
+        if built is not None:
+            leaf = package.model.Leaf(built)
+            leaf.values.from_numpy(np.array([5], np.float32))
+            normal.bind(leaf)
+        references.append((normal.and_query(), normal.or_query()))
+    output = tmp_path / 'sdk'
+    manifest = ti.aot.export_package(package, output, artifact_format='bc-library')
+    for method in ('and_query', 'or_query', 'required'):
+        assert sum(item['definition'].endswith('.Model.' + method) for item in manifest['entries'].values()) == 1
+    with Runtime(manifest['target']) as runtime, load_package(runtime, output) as code:
+        for built, expected in zip((None, False, True), references):
+            model = code.host.Model()
+            if built is not None:
+                leaf = code.host.model.Leaf(built)
+                leaf.values.from_numpy(np.array([5], np.float32))
+                model.bind(leaf)
+            assert (model.and_query(), model.or_query()) == expected
+            if built is None:
+                with pytest.raises(ValueError, match='presence'):
+                    model.required()
+            else:
+                assert model.required() == 5
+                model.bind(None)
+                assert (model.and_query(), model.or_query()) == references[0]
+                with pytest.raises(ValueError, match='presence'):
+                    model.required()
+                model.bind(leaf)
+                assert (model.and_query(), model.or_query()) == expected
+
+
+@test_utils.test(arch=ti.cuda, offline_cache=False)
+def test_package_optional_query_helper_preserves_affine_group_dependencies(tmp_path, monkeypatch):
+    source = '''
+import taichi_forge as ti
+@ti.data_oriented
+class Leaf:
+    def __init__(self, n: int):
+        self.n = n
+        fields = ti.FieldsBuilder()
+        scope = ti.experimental.ResourceScope(self, builder=fields)
+        cells = scope.dense(ti.i, scope.dim('n'))
+        scope.values = scope.field(ti.f32, shape=scope.dim('n'), placement=cells)
+        scope.padding = scope.vector_field(3, ti.i32, shape=scope.dim('n'), placement=cells)
+        self.tree = fields.finalize()
+    @ti.real_func
+    def sample(self, i: ti.i32) -> ti.f32:
+        return self.values[i] * 2.0 + 1.0
+@ti.data_oriented
+class Model:
+    def __init__(self, n: int):
+        self.n, self._has_child = n, False
+        scope = ti.experimental.ResourceScope(self)
+        scope.static('_has_child', choices=(False, True))
+        scope.owner_reference('child', None, optional=True)
+        scope.out = scope.field(ti.f32, shape=scope.dim('n'))
+    def bind(self, child: Leaf = None):
+        self._has_child = child is not None
+        scope = ti.experimental.ResourceScope(self)
+        if self._has_child:
+            scope.owner_reference('child', child)
+        else:
+            scope.owner_reference('child', None, optional=True)
+    @ti.kernel
+    def step(self):
+        for i in range(self.n):
+            value = -1.0
+            if ti.static(self.child is not None):
+                value = self.child.sample(i)
+            self.out[i] = value
+'''
+    package = _source_package(tmp_path, monkeypatch, source)
+    inputs = [np.arange(7, dtype=np.float32) + offset for offset in (3, -5)]
+    references = []
+    for values in inputs:
+        model, leaf = package.Model(7), package.model.Leaf(7)
+        leaf.values.from_numpy(values)
+        model.bind(leaf)
+        model.step()
+        references.append(model.out.to_numpy())
+    output = tmp_path / 'sdk'
+    manifest = ti.aot.export_package(package, output, artifact_format='bc-library')
+    entries = [entry for entry in manifest['entries'].values() if entry['definition'].endswith('.Model.step')]
+    assert len(entries) == 1
+    entry = entries[0]
+    capture_index = next(index for index, capture in enumerate(entry['captures'])
+                         if capture.get('path') == ['child', 'values'])
+    with zipfile.ZipFile(output / 'code.tcm') as archive:
+        metadata = json.loads(archive.read('aot_metadata.json'))
+        assert any(name.startswith('code_units/') for name in archive.namelist())
+    # The consumer receives projected Host classes; the private helper body is absent.
+    assert 'def sample(' not in (output / 'host' / 'model.py').read_text(encoding='utf8')
+    with Runtime('cuda') as runtime, load_package(runtime, output) as code:
+        absent = code.host.Model(7)
+        absent.step()
+        np.testing.assert_array_equal(absent.out.to_numpy(), -1)
+        peers = []
+        for values, expected in zip(inputs, references):
+            model, leaf = code.host.Model(7), code.host.model.Leaf(7)
+            leaf.values.from_numpy(values)
+            leaf.padding.from_numpy(np.full((7, 3), 91, np.int32))
+            model.bind(leaf)
+            model.step()
+            np.testing.assert_array_equal(model.out.to_numpy(), expected)
+            call = next(iter(model._forge_package_calls.values()))
+            assert call.specialize and call.prepared is not None
+            peers.append((model, leaf, call.prepared))
+        model, leaf, prepared = peers[0]
+        leaf.values.from_numpy(inputs[0] + 4)
+        model.step()
+        np.testing.assert_array_equal(model.out.to_numpy(), references[0] + 8)
+        np.testing.assert_array_equal(leaf.padding.to_numpy(), 91)
+        np.testing.assert_array_equal(peers[1][0].out.to_numpy(), references[1])
+        assert next(iter(model._forge_package_calls.values())).prepared is prepared
+        model.bind(None)
+        model.step()
+        np.testing.assert_array_equal(model.out.to_numpy(), -1)
+    affine = dict((item['key'], item['value']) for item in metadata['kernel_runtime_affine_arrays'])
+    assert [capture_index] in affine[entry['symbol']]

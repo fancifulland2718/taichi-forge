@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <map>
+#include <unordered_map>
 #include <unordered_set>
 
 #include "taichi/ir/frontend_ir.h"
@@ -46,13 +47,25 @@ class SNodeTreeDependencyCollector : public BasicStmtVisitor {
 
   void visit(FuncCallStmt *stmt) override {
     visit_function(stmt->func);
+    if (collect_array_layouts_)
+      merge_function_array_layouts(stmt);
   }
 
   void visit(FrontendFuncCallStmt *stmt) override {
     visit_function(stmt->func);
+    // Descriptor leaves have not been lowered to their argument origins yet.
+    if (collect_array_layouts_)
+      arrays_.known = false;
   }
 
   void visit(Block *block) override {
+    if (collect_array_layouts_) {
+      for (const auto &stmt : block->statements)
+        for (int index = 0; index < stmt->num_operands(); ++index)
+          if (auto *operand = stmt->operand(index))
+            if (auto *pointer = operand->cast<ExternalTensorBasePtrStmt>())
+              ++arrays_.pointer_uses[pointer][stmt.get()];
+    }
     for (SNode *snode : block->stop_gradients) {
       record(snode);
     }
@@ -133,36 +146,37 @@ class SNodeTreeDependencyCollector : public BasicStmtVisitor {
   }
   void visit(ExternalFuncCallStmt *) override {
     runtime_state_ |= runtime_state_external;
-    array_layouts_known_ = false;
+    arrays_.known = false;
   }
   void visit(ExternalTensorShapeAlongAxisStmt *stmt) override {
     // A descriptor shape query is independent of storage strides. Keep its
     // argument eligible when there is no data access; an actual compact/raw
     // access to the same argument still vetoes the proof in either order.
     if (collect_array_layouts_)
-      array_layouts_.try_emplace(stmt->arg_id, true);
+      arrays_.arguments.try_emplace(stmt->arg_id, true);
   }
   void visit(ExternalTensorBasePtrStmt *stmt) override {
-    // An escaped raw address has no affine indexing proof.
+    // A real-function descriptor forwards this address together with its
+    // shape/strides. Defer the escape decision until every use is known.
     if (collect_array_layouts_)
-      array_layouts_[stmt->arg_id] = false;
+      arrays_.pointer_uses.try_emplace(stmt);
   }
   void visit(ExternalPtrStmt *stmt) override {
     if (!collect_array_layouts_) return;
     const auto *argument = stmt->base_ptr->cast<ArgLoadStmt>();
     if (!argument) {
-      array_layouts_known_ = false;
+      arrays_.known = false;
       return;
     }
     const bool affine = stmt->runtime_affine && stmt->byte_stride == 0;
-    auto [entry, inserted] = array_layouts_.emplace(argument->arg_id, affine);
+    auto [entry, inserted] = arrays_.arguments.emplace(argument->arg_id, affine);
     if (!inserted)
       entry->second &= affine;
   }
   void visit(InternalFuncStmt *stmt) override {
     // Internal pointer consumers need a separate argument-layout proof.
     if (!is_layout_independent_cuda_intrinsic(*stmt))
-      array_layouts_known_ = false;
+      arrays_.known = false;
     if (stmt->with_runtime_context)
       runtime_state_ |= runtime_state_external;
   }
@@ -193,18 +207,169 @@ class SNodeTreeDependencyCollector : public BasicStmtVisitor {
            (may_trigger_hash_overflow_ ? runtime_state_error : 0u);
   }
 
-  std::vector<std::vector<int>> runtime_affine_arrays() const {
+  std::vector<std::vector<int>> runtime_affine_arrays() {
+    finish_array_layouts();
     std::vector<std::vector<int>> result;
-    if (array_layouts_known_)
-      for (const auto &[argument, affine] : array_layouts_)
+    if (arrays_.known)
+      for (const auto &[argument, affine] : arrays_.arguments)
         if (affine) result.push_back(argument);
     return result;
   }
 
  private:
+  using ArrayArguments = std::map<std::vector<int>, bool>;
+  using PointerUses = std::unordered_map<
+      const ExternalTensorBasePtrStmt *, std::map<const Stmt *, std::size_t>>;
+  struct ArrayLayouts {
+    bool known{true};
+    ArrayArguments arguments;
+    PointerUses pointer_uses, descriptor_uses;
+  };
+  struct FunctionArrayLayouts {
+    // An unfinished recursive summary remains unqualified.
+    bool known{false};
+    ArrayArguments arguments;
+  };
+
+  void finish_array_layouts() {
+    for (const auto &[pointer, uses] : arrays_.pointer_uses) {
+      const auto forwarded = arrays_.descriptor_uses.find(pointer);
+      if (uses.empty() || forwarded == arrays_.descriptor_uses.end() ||
+          forwarded->second != uses)
+        arrays_.arguments[pointer->arg_id] = false;
+    }
+  }
+
+  // Match the same recursive leaf order as LLVM set_struct_to_buffer. Logical
+  // parameter indices cannot index FuncCallStmt::args after tensor/record and
+  // ndarray descriptors have been flattened.
+  static bool argument_leaves(
+      const Type *type, const std::vector<Stmt *> &args, std::size_t &offset,
+      std::vector<int> path, std::map<std::vector<int>, Stmt *> &leaves) {
+    if (auto *structure = type->cast<StructType>()) {
+      for (int index = 0; index < structure->elements().size(); ++index) {
+        auto child = path;
+        child.push_back(index);
+        if (!argument_leaves(structure->elements()[index].type, args, offset,
+                             std::move(child), leaves))
+          return false;
+      }
+      return true;
+    }
+    if (auto *tensor = type->cast<TensorType>()) {
+      for (int index = 0; index < tensor->get_num_elements(); ++index) {
+        auto child = path;
+        child.push_back(index);
+        if (!argument_leaves(tensor->get_element_type(), args, offset,
+                             std::move(child), leaves))
+          return false;
+      }
+      return true;
+    }
+    if ((!type->is<PrimitiveType>() && !type->is<PointerType>()) ||
+        offset >= args.size() || (const Type *)args[offset]->ret_type != type)
+      return false;
+    leaves.emplace(std::move(path), args[offset++]);
+    return true;
+  }
+
+  void merge_function_array_layouts(FuncCallStmt *call) {
+    const auto &summary = function_array_layouts_.at(call->func);
+    if (!summary.known) {
+      arrays_.known = false;
+      return;
+    }
+    std::map<std::vector<int>, Stmt *> leaves;
+    std::size_t offset = 0;
+    if ((!call->func->args_type && !call->args.empty()) ||
+        (call->func->args_type &&
+         !argument_leaves(call->func->args_type, call->args, offset, {}, leaves)) ||
+        offset != call->args.size()) {
+      arrays_.known = false;
+      return;
+    }
+    std::map<std::vector<int>, std::vector<int>> origins;
+    for (const auto &[id, parameter] : call->func->nested_parameters) {
+      if (parameter.ptype != ParameterType::kNdarray)
+        continue;
+      const int ndim = parameter.total_dim - parameter.element_shape.size();
+      const auto leaf = [&](std::vector<int> suffix) -> Stmt * {
+        auto path = id;
+        path.insert(path.end(), suffix.begin(), suffix.end());
+        const auto found = leaves.find(path);
+        return found == leaves.end() ? nullptr : found->second;
+      };
+      auto *data = leaf({TypeFactory::DATA_PTR_POS_IN_NDARRAY});
+      auto *pointer = data ? data->cast<ExternalTensorBasePtrStmt>() : nullptr;
+      if (!pointer || pointer->is_grad) {
+        arrays_.known = false;
+        return;
+      }
+      const auto &origin = pointer->arg_id;
+      auto descriptor_type = parameter.get_dtype();
+      // Callable stores a scalar data pointer after ndarray scalarization, but
+      // the caller's descriptor ArgLoad keeps the original tensor element type.
+      // Both are the same ABI; preserve the exact rank/element/gradient layout.
+      const Type *tensor_descriptor_type = descriptor_type;
+      if (!parameter.element_shape.empty()) {
+        auto *element_type = descriptor_type->as<StructType>()
+                                 ->get_element_type({TypeFactory::DATA_PTR_POS_IN_NDARRAY})
+                                 ->as<PointerType>()->get_pointee_type();
+        auto &factory = TypeFactory::get_instance();
+        tensor_descriptor_type = factory.get_ndarray_struct_type(
+            factory.get_tensor_type(parameter.element_shape, element_type), ndim,
+            parameter.needs_grad);
+      }
+      bool valid = true;
+      for (int axis = 0; axis < TypeFactory::ndarray_shape_member_count(ndim); ++axis) {
+        auto *value = leaf({TypeFactory::SHAPE_POS_IN_NDARRAY, axis});
+        if (ndim == 0) {
+          auto *padding = value ? value->cast<ConstStmt>() : nullptr;
+          valid &= padding && padding->val.val_int() == 0;
+        } else {
+          auto *shape = value ? value->cast<ExternalTensorShapeAlongAxisStmt>() : nullptr;
+          valid &= shape && shape->arg_id == origin && shape->axis == axis;
+        }
+      }
+      for (int field = TypeFactory::ndarray_shape_member_count(ndim);
+           field <= TypeFactory::affine_mode_pos_in_ndarray(ndim); ++field) {
+        auto *value = leaf({TypeFactory::SHAPE_POS_IN_NDARRAY, field});
+        auto *member = value ? value->cast<GetElementStmt>() : nullptr;
+        auto *source = member ? member->src->cast<ArgLoadStmt>() : nullptr;
+        valid &= member && !member->is_ptr && source && source->is_ptr &&
+                 !source->create_load && source->arg_id == origin &&
+                 (source->ret_type.ptr_removed() == descriptor_type ||
+                  (const Type *)source->ret_type.ptr_removed() == tensor_descriptor_type) &&
+                 member->index == std::vector<int>{TypeFactory::SHAPE_POS_IN_NDARRAY, field};
+      }
+      ExternalTensorBasePtrStmt *gradient = nullptr;
+      if (parameter.needs_grad) {
+        auto *value = leaf({TypeFactory::GRAD_PTR_POS_IN_NDARRAY});
+        gradient = value ? value->cast<ExternalTensorBasePtrStmt>() : nullptr;
+        valid &= gradient && gradient->is_grad && gradient->arg_id == origin;
+      }
+      if (!valid) {
+        arrays_.known = false;
+        return;
+      }
+      origins.emplace(id, origin);
+      ++arrays_.descriptor_uses[pointer][call];
+      if (gradient)
+        ++arrays_.descriptor_uses[gradient][call];
+    }
+    for (const auto &[argument, affine] : summary.arguments) {
+      const auto origin = origins.find(argument);
+      if (origin == origins.end()) {
+        arrays_.known = false;
+        return;
+      }
+      auto [entry, inserted] = arrays_.arguments.emplace(origin->second, affine);
+      if (!inserted)
+        entry->second &= affine;
+    }
+  }
+
   void visit_function(Function *func) {
-    // Independent function arguments require their own caller mapping proof.
-    array_layouts_known_ = false;
     // Field roots used only by a callee still belong to the caller's binding
     // table and lifetime contract. Mark before visiting to handle recursion.
     if (visited_functions_.insert(func).second) {
@@ -215,7 +380,17 @@ class SNodeTreeDependencyCollector : public BasicStmtVisitor {
         const auto &ids = func->source_snode_tree_dependencies();
         tree_ids_.insert(ids.begin(), ids.end());
       }
-      func->ir->accept(this);
+      if (collect_array_layouts_) {
+        function_array_layouts_.try_emplace(func);
+        auto caller = std::move(arrays_);
+        arrays_ = {};
+        func->ir->accept(this);
+        finish_array_layouts();
+        function_array_layouts_[func] = {arrays_.known, std::move(arrays_.arguments)};
+        arrays_ = std::move(caller);
+      } else {
+        func->ir->accept(this);
+      }
     }
   }
 
@@ -259,9 +434,9 @@ class SNodeTreeDependencyCollector : public BasicStmtVisitor {
       SNodeRelocationStructure::none};
   bool may_trigger_hash_overflow_{false};
   std::uint32_t runtime_state_{runtime_state_known};
-  bool array_layouts_known_{true};
   bool collect_array_layouts_{false};
-  std::map<std::vector<int>, bool> array_layouts_;
+  ArrayLayouts arrays_;
+  std::unordered_map<Function *, FunctionArrayLayouts> function_array_layouts_;
 };
 
 bool tree_contains_non_dense_snode(const SNode &node) {

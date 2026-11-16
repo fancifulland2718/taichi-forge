@@ -986,6 +986,15 @@ class NdArray:
             raise ValueError("NumPy source shape differs from the native array")
         self.write(np.ascontiguousarray(source, dtype=np.dtype(format)))
 
+    def fill(self, value):
+        """Initialize values with a Host upload through the native descriptor."""
+        import numpy as np
+
+        if isinstance(self.dtype, StructLayout):
+            raise TypeError("Struct arrays require their explicit layout transfer interface")
+        _, format, _ = _dtype(self.dtype)
+        self.from_numpy(np.full(self.shape + self.element_shape, value, dtype=np.dtype(format)))
+
     def to_numpy(self):
         """Return an independent writable Host copy; no frontend or copy kernel."""
         import numpy as np

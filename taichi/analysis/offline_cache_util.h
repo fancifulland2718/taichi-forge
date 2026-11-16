@@ -217,7 +217,9 @@ class Kernel;
 // 99 - Qualify CPU code for instance-owned sparse runtime views.
 // 100 - Retain affine array proofs across layout-independent CUDA intrinsics.
 // 101 - Model-sized shared pointers and immutable invocation allocation contracts.
-constexpr std::uint32_t kOfflineCacheSchemaVersion = 102;
+// 103 - Retain affine array proofs through complete real-function descriptors;
+//       cached modules with the old empty proof must be regenerated.
+constexpr std::uint32_t kOfflineCacheSchemaVersion = 103;
 
 // Fast sufficient check for identical serialized configuration inputs. A
 // reordered disabled-pass list may conservatively return false; hashing still

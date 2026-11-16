@@ -2443,6 +2443,34 @@ def _export_package(package, output, *, arch, caps, source_root, compilation, ar
                     # Reuses the optional typed-owner and nullable resource
                     # contracts already understood by the version 93 consumer.
                     manifest["version"] = max(93, manifest["version"])
+                if any(item.get('nested_query_input') for item in compilation_schema.values()):
+                    manifest['version'] = max(94, manifest['version'])
+
+                def presence_conditions(item):
+                    if not item.get('nested_query_input'):
+                        return {}
+                    from ._package_optional import ordered_presence_conditions
+
+                    flags = ordered_presence_conditions(
+                        compilation_schema, environment._paths,
+                        (flag for flag in item.get('conditions', {})
+                         if flag != item.get('input_presence_attribute')))
+                    return {'presence_conditions': [dict(path=list(environment._paths[flag])) for flag in flags]} if flags else {}
+
+                def nullable_capture(resource):
+                    result = {}
+                    if resource.get("input_record"):
+                        predicate = resource["input_record"]
+                        nullable = ("nullable_boolean" if compilation_schema[predicate].get("dynamic_storage_condition")
+                                    else "nullable_record")
+                        result[nullable] = list(environment._paths[predicate])
+                    if resource.get("input_conditions"):
+                        result["nullable_booleans"] = [
+                            {"path": list(environment._paths[predicate])}
+                            for predicate in resource["input_conditions"]
+                        ]
+                    return result
+
                 for key, item in compilation_schema.items():
                     previous = family_schema.get(key)
                     if previous is not None and item["kind"] == previous["kind"] == "static":
@@ -2484,6 +2512,7 @@ def _export_package(package, output, *, arch, caps, source_root, compilation, ar
                     item["input_presence_attribute"]: dict(
                         path=list(environment._paths[key]),
                         flag_path=list(environment._paths[item["input_presence_attribute"]]),
+                        **presence_conditions(item),
                     )
                     for key, item in compilation_schema.items()
                     if item.get("external")
@@ -2497,6 +2526,7 @@ def _export_package(package, output, *, arch, caps, source_root, compilation, ar
                         path=list(environment._paths[key]),
                         required_when=contract.get("input_requirements", {}).get(key, []),
                         **({"boolean": True} if item.get("dynamic_storage_condition") else {}),
+                        **presence_conditions(item),
                     )
                     for key, item in compilation_schema.items()
                     if (item.get("dynamic_input_record") or item.get("dynamic_storage_condition")) and key in code.used
@@ -2507,12 +2537,14 @@ def _export_package(package, output, *, arch, caps, source_root, compilation, ar
                         path=list(environment._paths[key]),
                         flag_path=list(environment._paths[flag]),
                         **({"boolean": True} if compilation_schema[key].get("dynamic_storage_condition") else {}),
+                        **presence_conditions(compilation_schema[key]),
                     )
                     manifest["version"] = max(64, manifest["version"])
                 from taichi_forge_runtime._dimensions import extent_dependencies
 
                 guard_values = {
-                    key: dict(path=list(environment._paths[key]))
+                    key: dict(path=list(environment._paths[key]),
+                              **nullable_capture(compilation_schema[key]))
                     for paths in contract.get("input_requirements", {}).values()
                     for branch in paths
                     for expression, _ in branch
@@ -2521,12 +2553,15 @@ def _export_package(package, output, *, arch, caps, source_root, compilation, ar
                 }
                 if guard_values:
                     manifest["version"] = max(80, manifest["version"])
+                    if any(set(binding) - {"path"} for binding in guard_values.values()):
+                        manifest["version"] = max(94, manifest["version"])
                 used_paths = [environment._paths[key] for key in bound_used if key in environment._paths]
                 source_bindings = {
                     key: dict(
                         path=list(environment._paths[key]),
                         source_path=item["source_path"],
                         **({"presence": item["source_presence"]} if item.get("source_presence") else {}),
+                        **presence_conditions(item),
                     )
                     for key, item in compilation_schema.items()
                     if item["kind"] == "borrowed_field"
@@ -2536,6 +2571,8 @@ def _export_package(package, output, *, arch, caps, source_root, compilation, ar
                     )
                 }
                 child_bindings = owner_bindings(environment, compilation_schema, bound_used)
+                for key, binding in child_bindings.items():
+                    binding.update(presence_conditions(compilation_schema[key]))
                 from taichi_forge_runtime._dimensions import extent_dependencies
 
                 external_resources = {
@@ -2553,6 +2590,7 @@ def _export_package(package, output, *, arch, caps, source_root, compilation, ar
                             else {}
                         ),
                         **({"input_record": item["input_record"]} if item.get("input_record") else {}),
+                        **presence_conditions(item),
                     )
                     for key, item in compilation_schema.items()
                     if key in code.dynamic and item.get("external")
@@ -2577,9 +2615,16 @@ def _export_package(package, output, *, arch, caps, source_root, compilation, ar
                 if conditional_resources:
                     manifest["version"] = max(65, manifest["version"])
                 constants = {
-                    key: dict(path=list(environment._paths[key]), value=value)
+                    key: dict(path=list(environment._paths[key]), value=value,
+                              **presence_conditions(compilation_schema[key]))
                     for key, value in code.static.items()
                     if compilation_schema.get(key, {}).get("kind") == "constant"
+                }
+                constraint_conditions = {
+                    key: compilation_schema[constraint["when"]]["input_conditions"]
+                    for key, constraint in constraints.items()
+                    if compilation_schema.get(constraint["when"], {}).get("nested_query_input")
+                    and compilation_schema[constraint["when"]].get("input_conditions")
                 }
                 admission = (
                     dict(
@@ -2598,6 +2643,7 @@ def _export_package(package, output, *, arch, caps, source_root, compilation, ar
                                     for key, constraint in constraints.items()
                                     if compilation_schema.get(constraint["when"], {}).get("input_record")
                                 },
+                                **({"constraint_conditions": constraint_conditions} if constraint_conditions else {}),
                             }
                             if input_records
                             else {}
@@ -2636,19 +2682,8 @@ def _export_package(package, output, *, arch, caps, source_root, compilation, ar
                         if resource.get("prepare_static"):
                             item["prepare_static"] = resource["choices"]
                             manifest["version"] = max(81, manifest["version"])
-                        if resource.get("input_record"):
-                            predicate = resource["input_record"]
-                            nullable = (
-                                "nullable_boolean"
-                                if compilation_schema[predicate].get("dynamic_storage_condition")
-                                else "nullable_record"
-                            )
-                            item[nullable] = list(environment._paths[predicate])
+                        item.update(nullable_capture(resource))
                         if resource.get("input_conditions"):
-                            item["nullable_booleans"] = [
-                                {"path": list(environment._paths[predicate])}
-                                for predicate in resource["input_conditions"]
-                            ]
                             manifest["version"] = max(79, manifest["version"])
                         if resource.get("external") and (
                             resource.get("optional_input") or resource.get("input_record")

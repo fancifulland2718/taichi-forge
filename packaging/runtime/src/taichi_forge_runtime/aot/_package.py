@@ -1242,15 +1242,19 @@ class _ResourceScope:
 
     def owner_reference(self, name, value, *, optional=False):
         # Proven non-null references are projected through _ModuleBinding.
-        # The normal API also permits an explicit absent preparation binding.
+        # Explicit absence uses the same constructor/preparation ownership.
         from ._package_values import owner_type
 
         package = getattr(self._root, "_forge_package_owner", None)
         contract = package.manifest["owners"].get(owner_type(self._root), {}).get(name, {}) if package else {}
         if (self._parent is not None or type(name) is not str or optional is not True or value is not None
-                or contract.get("kind") != "owner_input" or not contract.get("optional_presence")
-                or contract.get("binding_phase") != "preparation"):
-            raise ValueError("Absent owner reference requires a declared optional preparation input")
+                or contract.get("kind") != "owner_input" or not contract.get("optional_presence")):
+            raise ValueError("Absent owner reference requires a declared optional input")
+        package._check()
+        construction = _construction.get()
+        if contract.get("binding_phase") != "preparation" and (
+                construction is None or construction[0] is not package or construction[2] is not self._root):
+            raise ValueError("Owner input requires its managed constructor scope")
         setattr(self._owner, name, None)
 
     def record(self, name, value, *, optional=False):
@@ -1935,6 +1939,7 @@ class LoadedPackage:
                 91,
                 92,
                 93,
+                94,
             )
             or self.manifest.get("kind") != "forge_definition_package_prototype"
         ):
@@ -1944,6 +1949,17 @@ class LoadedPackage:
             raise ValueError("Application source package is missing its import boundary")
         if self.manifest["target"] != runtime.arch:
             raise ValueError("Package target differs from Runtime")
+        if self.manifest['version'] < 94 and (any(
+                (entry.get('admission') or {}).get('constraint_conditions') or any(
+                    set(binding) & {'nullable_record', 'nullable_boolean', 'nullable_booleans'}
+                    for binding in (entry.get('admission') or {}).get('input_guard_values', {}).values())
+                for entry in self.manifest['entries'].values()) or any(
+                binding.get('presence_conditions')
+                for entry in self.manifest['entries'].values()
+                for group in (entry.get('admission') or {}).values()
+                if isinstance(group, dict)
+                for binding in group.values() if isinstance(binding, dict))):
+            raise ValueError('Nested query inputs require definition package version 94')
         if self.manifest["version"] < 93 and (any(
             item["kind"] in ("owner", "owner_input") and item.get("dynamic_input_record")
             for schema in self.manifest.get("owners", {}).values() for item in schema.values()

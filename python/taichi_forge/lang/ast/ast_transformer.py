@@ -1270,7 +1270,13 @@ class ASTTransformer(Builder):
             is_and = isinstance(node.op, ast.And)
             accumulated = None
             for index, value in enumerate(node.values):
-                build_stmt(ctx, value)
+                # A dynamic presence operand selects whether the next operand
+                # is read. Keep that same short-circuit path in AOT admission;
+                # constructing the scalar select below does not read both owners.
+                guard = (ctx.deployment.input_condition(accumulated, is_and)
+                         if ctx.deployment is not None and accumulated is not None else nullcontext())
+                with guard:
+                    build_stmt(ctx, value)
                 if accumulated is not None:
                     # Python and/or select an operand, not a boolean result.
                     node.ptr = (ti_ops.ifte(accumulated, value.ptr, accumulated) if is_and

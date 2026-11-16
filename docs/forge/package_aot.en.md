@@ -61,6 +61,36 @@ call. Conditional types, model-sized elements, sparse trees and arbitrary unknow
 Field sources remain outside this addition. Local CPU/CUDA evidence does not
 qualify a complete renderer.
 
+Format 94 lets eligible nested optional query inputs share a CUDA `bc-library`
+entry. Typed numeric namespaces keep their original Dense groups or external
+array ports; actual binding supplies presence and specialization facts. Cold
+binding checks parent predicates before child flags, dimensions, layouts or
+constraints. Missing reachable inputs still reject, data updates reuse prepared
+code, and rebinding preserves older explicitly bound Graph snapshots. Real
+implementation, element-type and layout alternatives remain distinct.
+Static `and`/`or` captures retain their short-circuit input requirements; Host
+admission uses the capture ABI's inactive scalar value under the same nullable
+parent conditions. Reachable values retain their original range checks.
+Independent `real_func` calls retain runtime-stride eligibility when the compiler
+proves that shape, stride, layout mode and data/gradient pointers forward the same
+array descriptor. Mixed origins, raw pointer escapes and compact-only accesses
+remain ineligible; shared-tree fields keep their original allocation layout.
+Previously exported code lacking this proof must be re-exported; changing its
+manifest does not add compiler qualification.
+
+Query dependency analysis follows exact declared device methods and module-level
+helpers, including literal arguments and proven static short-circuits. It retains
+the native allocation dependency closure while omitting unrelated producer state.
+Unknown calls, dynamic member names and whole-record escapes retain the complete
+view. This is producer-side dependency analysis, not numerical helper inlining
+or runtime source inference. Local source-free query checks do not qualify a full
+renderer package or full-frame performance.
+
+Declared optional owner inputs may be explicitly absent in their managed
+constructor as well as a preparation binding. Host array `fill` uses a temporary
+NumPy buffer and the existing descriptor-aware upload; it creates no JIT kernel
+and retains the transfer's synchronization semantics.
+
 An otherwise uncalled Kernel may describe its template inputs with ordinary
 `typing.overload` signatures preceding the original `@ti.kernel` implementation.
 Template annotations must name declared owner classes (or finite unions) or
