@@ -1940,6 +1940,7 @@ class LoadedPackage:
                 92,
                 93,
                 94,
+                95,
             )
             or self.manifest.get("kind") != "forge_definition_package_prototype"
         ):
@@ -1949,6 +1950,11 @@ class LoadedPackage:
             raise ValueError("Application source package is missing its import boundary")
         if self.manifest["target"] != runtime.arch:
             raise ValueError("Package target differs from Runtime")
+        if self.manifest['version'] < 95 and any(
+                'required_when' in resource
+                for entry in (*self.manifest['entries'].values(), *self.manifest.get('entry_bindings', {}).values())
+                for resource in (entry.get('admission') or {}).get('conditional_resources', {}).values()):
+            raise ValueError('Conditional member read admission requires definition package version 95')
         if self.manifest['version'] < 94 and (any(
                 (entry.get('admission') or {}).get('constraint_conditions') or any(
                     set(binding) & {'nullable_record', 'nullable_boolean', 'nullable_booleans'}

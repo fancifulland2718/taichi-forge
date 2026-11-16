@@ -26405,6 +26405,70 @@ print('INDEPENDENT_FIELD_SOURCE_FREE_OK')
                     load_package(runtime, tmp_path / 'sdk')
 
 
+@test_utils.test(arch=[ti.cpu, ti.cuda], offline_cache=False)
+def test_package_independent_field_template_keeps_optional_source_admission(tmp_path, monkeypatch):
+    package, _ = _resource_context_fixture(tmp_path, monkeypatch, model='''
+import taichi_forge as ti
+from resource_contexts import resource_group
+@ti.data_oriented
+class Input:
+    def __init__(self, n, present=True):
+        self.n, self.present = n, present
+        self.values = None
+        scope = ti.experimental.ResourceScope(self)
+        scope.static('present', choices=(False, True))
+        if self.present:
+            with resource_group(self, 'input') as fields:
+                fields.values = fields.vector_field(3, ti.f32, shape=fields.dim('n'))
+@ti.data_oriented
+class Model:
+    def __init__(self, n):
+        self.n = n
+        scope = ti.experimental.ResourceScope(self)
+        scope.out = scope.vector_field(3, ti.f32, shape=scope.dim('n'))
+    @ti.kernel
+    def add(self, values: ti.template(), gain: ti.f32):
+        for i in self.out:
+            self.out[i] = values[i % values.shape[0]] * gain
+    def update(self, source: Input, gain):
+        self.add(source.values, gain)
+''')
+    reference, source = package.Model(7), package.model.Input(3)
+    values = np.arange(9, dtype=np.float32).reshape(3, 3)
+    source.values.from_numpy(values)
+    reference.update(source, 2)
+    expected = reference.out.to_numpy()
+    output = tmp_path / 'sdk'
+    manifest = ti.aot.export_package(package, output)
+    assert len([entry for entry in manifest['entries'].values()
+                if entry['definition'].endswith('Model.add')]) == 1
+    with Runtime(manifest['target']) as runtime, load_package(runtime, output) as code:
+        model, source = code.host.Model(7), code.host.model.Input(3)
+        absent = code.host.model.Input(3, False)
+        assert absent.values is None
+        source.values.from_numpy(values)
+        model.update(source, 2)
+        np.testing.assert_array_equal(model.out.to_numpy(), expected)
+        with pytest.raises(ValueError, match='template inputs'):
+            model.update(absent, 2)
+        wrong = runtime.ndarray('i32', (3,), element_shape=(3,))
+        original = source.values
+        source.values = wrong
+        with pytest.raises(ValueError, match='template inputs'):
+            model.update(source, 2)
+        source.values = runtime.ndarray('f32', (3, 1), element_shape=(3,))
+        with pytest.raises(ValueError, match='template inputs'):
+            model.update(source, 2)
+        source.values = original
+        other = code.host.model.Input(5)
+        other.values.from_numpy(np.full((5, 3), 11, np.float32))
+        model.update(other, 3)
+        np.testing.assert_array_equal(model.out.to_numpy(), np.full((7, 3), 33))
+        source.values.from_numpy(values + 1)
+        model.update(source, 2)
+        np.testing.assert_array_equal(model.out.to_numpy(), 2 * (values + 1)[np.arange(7) % 3])
+
+
 @pytest.mark.parametrize('change', ['version', 'type', 'context', 'path'])
 @test_utils.test(arch=ti.cpu, offline_cache=False)
 def test_package_independent_owner_inputs_reject_malformed_contract(tmp_path, monkeypatch, change):
@@ -28440,6 +28504,93 @@ class Model:
                     model.required()
                 model.bind(leaf)
                 assert (model.and_query(), model.or_query()) == expected
+
+
+@test_utils.test(arch=ti.cuda, offline_cache=False)
+def test_package_optional_owner_late_field_uses_reachable_read_admission(tmp_path, monkeypatch):
+    package, _ = _resource_context_fixture(tmp_path, monkeypatch, model='''
+import taichi_forge as ti
+from resource_contexts import resource_group
+@ti.data_oriented
+class Leaf:
+    def __init__(self):
+        self.enabled = False
+        self.extra = None
+        scope = ti.experimental.ResourceScope(self)
+        scope.static('enabled', choices=(False, True))
+        scope.base = scope.field(ti.f32, shape=(), initialization='zero')
+    def prepare(self):
+        self._allocate()
+        self.extra[None] = 5.0
+        self.enabled = True
+    def _allocate(self):
+        with resource_group(self, 'extra') as fields:
+            fields.extra = fields.field(ti.f32, shape=())
+@ti.data_oriented
+class Model:
+    def __init__(self):
+        self._has_leaf = False
+        scope = ti.experimental.ResourceScope(self)
+        scope.static('_has_leaf', choices=(False, True))
+        scope.owner_reference('leaf', None, optional=True)
+    def bind(self, leaf: Leaf = None):
+        self._has_leaf = leaf is not None
+        scope = ti.experimental.ResourceScope(self)
+        if self._has_leaf:
+            scope.owner_reference('leaf', leaf)
+        else:
+            scope.owner_reference('leaf', None, optional=True)
+    @ti.kernel
+    def query(self) -> ti.f32:
+        result = 2.0
+        if ti.static(self.leaf is not None):
+            result += self.leaf.base[None]
+            if ti.static(self.leaf.enabled):
+                result += self.leaf.extra[None]
+        return result
+''')
+    references = []
+    for state in ('absent', 'disabled', 'enabled'):
+        normal = package.Model()
+        if state != 'absent':
+            leaf = package.model.Leaf()
+            leaf.base[None] = 3
+            if state == 'enabled':
+                leaf.prepare()
+            normal.bind(leaf)
+        references.append(normal.query())
+    output = tmp_path / 'sdk'
+    manifest = ti.aot.export_package(package, output, artifact_format='bc-library')
+    assert sum(item['definition'].endswith('.Model.query') for item in manifest['entries'].values()) == 1
+    assert manifest['version'] == 95
+    with Runtime(manifest['target']) as runtime, load_package(runtime, output) as code:
+        model = code.host.Model()
+        assert model.query() == references[0]
+        leaf = code.host.model.Leaf()
+        leaf.base[None] = 3
+        model.bind(leaf)
+        assert leaf.extra is None and model.query() == references[1]
+        leaf.enabled = True
+        with pytest.raises(ValueError, match='required'):
+            model.query()
+        leaf.prepare()
+        assert model.query() == references[2]
+        owned = leaf.extra
+        leaf.extra = runtime.ndarray('f32', ())
+        with pytest.raises(ValueError, match='owned Field'):
+            model.query()
+        leaf.extra = owned
+        leaf.extra[None] = 7
+        assert model.query() == references[2] + 2
+        leaf.enabled = False
+        assert model.query() == references[1]
+        model.bind(None)
+        assert model.query() == references[0]
+    manifest['version'] = 94
+    (output / 'package.json').write_text(json.dumps(manifest), encoding='utf8')
+    with Runtime(manifest['target']) as runtime:
+        with pytest.raises(ValueError, match='member read admission'):
+            load_package(runtime, output)
 
 
 @test_utils.test(arch=ti.cuda, offline_cache=False)

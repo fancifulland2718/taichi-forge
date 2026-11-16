@@ -366,9 +366,12 @@ class OwnerGraph:
             if tuple(item.get("path", (attribute,))) != key[1]:
                 continue
             if (item["kind"] != "dense_field" or item.get("dtype_policy") or item.get("shape_policy")
-                    or item.get("conditions") or item.get("element", {}).get("kind") not in ("scalar", "tensor")
+                    or item.get("element", {}).get("kind") not in ("scalar", "tensor")
                     or item.get("element", {}).get("model_tensor")):
-                raise ValueError("Independent Field template requires an unconditional fixed element type and rank")
+                raise ValueError("Independent Field template requires a fixed element type and rank")
+            # Allocation conditions govern the provider's storage, not this
+            # fixed input ABI. The call binder still requires a present, typed
+            # resource; inspecting its declaration does not make it optional.
             result = dict(element=item["element"], ndim=len(item["shape"]))
             self._input_field_types[key] = result
             return result

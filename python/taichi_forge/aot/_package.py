@@ -2614,6 +2614,14 @@ def _export_package(package, output, *, arch, caps, source_root, compilation, ar
                 }
                 if conditional_resources:
                     manifest["version"] = max(65, manifest["version"])
+                    requirements = contract.get("input_requirements", {})
+                    for key, resource in conditional_resources.items():
+                        member_reads = requirements.get(key, [[]])
+                        if member_reads != requirements.get(resource["input_record"], [[]]):
+                            # Keep ownership admission for present storage, but
+                            # do not require a late member on an inactive branch.
+                            resource["required_when"] = member_reads
+                            manifest["version"] = max(95, manifest["version"])
                 constants = {
                     key: dict(path=list(environment._paths[key]), value=value,
                               **presence_conditions(compilation_schema[key]))

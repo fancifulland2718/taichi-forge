@@ -2420,6 +2420,11 @@ class _Capture:
                         return _OptionalArrayReference(path)
                     if not _argument_binding:
                         self.input_requirements.setdefault(condition, set()).add(tuple(self.input_guards))
+                        if isinstance(declaration, _ConditionalDenseField):
+                            # A present namespace can contain a late-allocated
+                            # member used only by a narrower branch. Preserve
+                            # the member's read requirement as well as presence.
+                            self.input_requirements.setdefault(name, set()).add(tuple(self.input_guards))
                     continue
                 if isinstance(predicate, Record) and predicate.optional and not getattr(predicate, "conditions", ()):
                     actual = self.attribute(ctx, condition) is not None

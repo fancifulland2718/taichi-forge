@@ -110,6 +110,10 @@ def check_admission(owner, contract):
             if not all(records[key] for key in resource.get("input_conditions", (resource["input_record"],))):
                 continue
             value = path_value(owner, resource["path"])
+            if value is None and "required_when" in resource:
+                if required(resource["required_when"]):
+                    raise ValueError("Conditional workspace is required by the selected execution branch")
+                continue
             allocated_owner = path_value(owner, resource.get("layout_owner_path", ()))
             # Whole optional StructFields bind their ordinary Dense members.
             # The allocation namespace and member path remain authoritative;
