@@ -5392,6 +5392,195 @@ def test_package_optional_owner_union_constructs_absent_without_extra_context(tm
                 code.host.Model(5, other.host.ScalarStorage(5))
 
 
+@pytest.mark.parametrize('template_field', [False, True])
+@test_utils.test(arch=[ti.cpu, ti.cuda], offline_cache=False)
+def test_package_graph_array_exemplar_keeps_runtime_binding(tmp_path, monkeypatch, template_field):
+    source = '''
+import taichi_forge as ti
+@ti.data_oriented
+class Model:
+    @ti.kernel
+    def write(self, gain: ti.f32, out: ti.types.ndarray(dtype=ti.math.vec3, ndim=1)):
+        for i in range(out.shape[0]):
+            out[i] = ti.Vector([gain, i, -gain])
+    def graph(self, exemplar):
+        builder = ti.graph.GraphBuilder()
+        builder.dispatch(self.write,
+            ti.graph.Arg(ti.graph.ArgKind.SCALAR, 'gain', ti.f32),
+            ti.graph.Arg(ti.graph.ArgKind.NDARRAY, 'out', ti.math.vec3, ndim=1),
+            template_args={'self': self, 'out': exemplar})
+        return builder.compile()
+'''
+    if template_field:
+        source = source.replace('class Model:', '''class Model:
+    def __init__(self):
+        scope = ti.experimental.ResourceScope(self)
+        scope.bias = scope.field(ti.f32, shape=(), initialization='zero')''')
+        source = source.replace('ndim=1)):', 'ndim=1), bias: ti.template()):')
+        source = source.replace('out[i] = ti.Vector([gain, i, -gain])',
+                                'out[i] = ti.Vector([gain + bias[None], i, -gain])')
+        source = source.replace("'out': exemplar}", "'out': exemplar, 'bias': self.bias}")
+        source += '''
+    def run(self, gain, out):
+        self.write(gain, out, self.bias)
+'''
+    package = _source_package(tmp_path, monkeypatch, source)
+    exemplar = ti.Vector.ndarray(3, ti.f32, shape=2)
+    output = ti.Vector.ndarray(3, ti.f32, shape=7)
+    package.Model().graph(exemplar).run(dict(gain=2.0, out=output))
+    expected = output.to_numpy()
+    manifest = ti.aot.export_package(package, tmp_path / 'sdk')
+    with Runtime(manifest['target']) as runtime, load_package(runtime, tmp_path / 'sdk') as code:
+        model = code.host.Model()
+        exemplar = runtime.ndarray('f32', (2,), element_shape=(3,))
+        output = runtime.ndarray('f32', (7,), element_shape=(3,))
+        allocated = set(runtime._resources)
+        graph = model.graph(exemplar)
+        assert set(runtime._resources) == allocated
+        # Recording retains only the ABI. Retiring the compile hint must not
+        # retire the actual invocation, whose size/data come from its binding.
+        exemplar._memory.close()
+        graph.run(dict(gain=2.0, out=output))
+        np.testing.assert_array_equal(output.to_numpy(), expected)
+        graph.run(dict(gain=-3.0, out=output))
+        expected[:, 0], expected[:, 2] = -3.0, 3.0
+        np.testing.assert_array_equal(output.to_numpy(), expected)
+        wrong = runtime.ndarray('f32', (7,))
+        with pytest.raises(ValueError, match="exemplar.*type"):
+            model.graph(wrong)
+        with pytest.raises(RuntimeError, match='closed'):
+            model.graph(exemplar)
+
+
+def test_package_binding_guard_observes_optional_parent_and_live_host_values():
+    from types import SimpleNamespace
+    from taichi_forge_runtime.aot._package_calls import OwnerGuard
+    from taichi_forge_runtime.aot._package_values import HostTensor
+
+    package = SimpleNamespace(manifest={'owners': {}})
+    owner = SimpleNamespace(child=None, value=0.0, vector=HostTensor([1.0, 2.0]), values=[1])
+    contract = dict(captures=[dict(name=name, kind='value', path=path)
+                             for name, path in (('child_value', ['child', 'value']),
+                                                ('child_vector', ['child', 'vector']),
+                                                ('value', ['value']), ('vector', ['vector']),
+                                                ('values', ['values']))])
+    guard = OwnerGuard.for_graph(package, owner, [contract])
+    assert guard.matches(owner)
+    owner.child = SimpleNamespace(value=4.0, vector=HostTensor([3.0, 4.0]))
+    assert not guard.matches(owner)
+    for update in (lambda: setattr(owner, 'value', -0.0),
+                   lambda: owner.vector.__setitem__(0, 9.0),
+                   lambda: owner.values.__setitem__(0, 2),
+                   lambda: setattr(owner.child, 'value', 5.0),
+                   lambda: setattr(owner, 'child', None)):
+        guard = OwnerGuard.for_graph(package, owner, [contract])
+        assert guard.matches(owner)
+        update()
+        assert not guard.matches(owner)
+
+
+@pytest.mark.parametrize('template_output', [False, True])
+@test_utils.test(arch=[ti.cpu, ti.cuda], offline_cache=False)
+def test_package_host_composition_keeps_independent_owner_families(tmp_path, monkeypatch, template_output):
+    source = TYPED_OWNER_INPUT_SOURCE.split('@ti.data_oriented\nclass Model:')[0]
+    source = source.replace('def __init__(self, source):',
+                            'def __init__(self, source: ScalarStorage | VectorStorage):')
+    source += '''
+class Display:
+    def __init__(self, reader: Reader = None):
+        scope = ti.experimental.ResourceScope(self)
+        self.enabled = reader is not None
+        scope.static('enabled', choices=(False, True), kernel_only=False)
+        if self.enabled:
+            scope.reader = reader
+        else:
+            scope.record('reader', None, optional=True)
+    def run(self, gain):
+        if self.enabled:
+            self.reader.step(gain)
+@ti.data_oriented
+class Composer:
+    def __init__(self, first: Reader, second: Reader = None):
+        scope = ti.experimental.ResourceScope(self)
+        scope.owner_reference('first', first)
+        scope.second = second
+        scope.display = Display(second)
+    def run(self, gain):
+        self.first.step(gain)
+        self.display.run(gain)
+    def backend(self):
+        arch = ti.lang.impl.current_cfg().arch
+        for name in ('cpu', 'cuda', 'vulkan'):
+            if getattr(ti, name) == arch:
+                return name
+        return 'unknown'
+'''
+    if template_output:
+        source = source.replace('def step(self, gain: ti.f32):',
+                                'def step(self, gain: ti.f32, out: ti.template()):')
+        source = source.replace('self.output[i] = gain', 'out[i] = gain')
+        source = source.replace('self.reader.step(gain)', 'self.reader.step(gain, self.reader.output)')
+        source = source.replace('self.first.step(gain)', 'self.first.step(gain, self.first.output)')
+    package = _source_package(tmp_path, monkeypatch, source,
+        initializer='from .model import Reader, ScalarStorage, VectorStorage, Composer\n')
+    first, second = package.Reader(package.ScalarStorage(5)), package.Reader(package.VectorStorage(7))
+    import inspect
+
+    parameters = tuple(inspect.signature(first.step).parameters)
+    assert parameters == (('gain', 'out') if template_output else ('gain',))
+    package.Composer(first, second).run(2.0)
+    expected = first.output.to_numpy(), second.output.to_numpy()
+    manifest = ti.aot.export_package(package, tmp_path / 'sdk')
+    assert len(manifest['input_families']['definition_fixture.model.Reader']) == 2
+    with Runtime(manifest['target']) as runtime, load_package(runtime, tmp_path / 'sdk') as code:
+        first = code.host.Reader(code.host.ScalarStorage(5))
+        second = code.host.Reader(code.host.VectorStorage(7))
+        assert tuple(inspect.signature(first.step).parameters) == parameters
+        composition = code.host.Composer(first, second)
+        assert not hasattr(composition, '_forge_package_owner')
+        assert not hasattr(composition.display, '_forge_package_owner')
+        assert composition.backend() == ('cpu' if manifest['target'] in ('x64', 'arm64') else manifest['target'])
+        composition.run(2.0)
+        np.testing.assert_array_equal(first.output.to_numpy(), expected[0])
+        np.testing.assert_array_equal(second.output.to_numpy(), expected[1])
+        code.host.Composer(first).run(-3.0)
+        np.testing.assert_array_equal(first.output.to_numpy(), -9.0)
+        np.testing.assert_array_equal(second.output.to_numpy(), expected[1])
+        assert first._forge_package_owner is code and second._forge_package_owner is code
+        with pytest.raises(TypeError, match='non-null'):
+            code.host.Composer(None)
+
+
+@test_utils.test(arch=ti.cpu, offline_cache=False)
+def test_package_numerically_captured_composition_stays_managed(tmp_path, monkeypatch):
+    source = TYPED_OWNER_INPUT_SOURCE.split('@ti.data_oriented\nclass Reader:')[0]
+    source += '''
+class Host:
+    def __init__(self, source: ScalarStorage):
+        scope = ti.experimental.ResourceScope(self)
+        scope.source = source
+@ti.data_oriented
+class Consumer:
+    def __init__(self, host: Host):
+        scope = ti.experimental.ResourceScope(self)
+        scope.host = host
+    @ti.kernel
+    def read(self) -> ti.f32:
+        return self.host.source.read(0)
+'''
+    package = _source_package(tmp_path, monkeypatch, source,
+        initializer='from .model import Host, ScalarStorage, Consumer\n')
+    reference = package.Consumer(package.Host(package.ScalarStorage(3))).read()
+    manifest = ti.aot.export_package(package, tmp_path / 'sdk')
+    with Runtime(manifest['target']) as runtime, load_package(runtime, tmp_path / 'sdk') as code:
+        host = code.host.Host(code.host.ScalarStorage(3))
+        assert host._forge_package_owner is code
+        assert code.host.Consumer(host).read() == reference
+        with load_package(runtime, tmp_path / 'sdk') as other:
+            with pytest.raises(ValueError, match='source type or identity'):
+                code.host.Host(other.host.ScalarStorage(3))
+
+
 @test_utils.test(arch=ti.cpu, offline_cache=False)
 def test_package_owner_unions_share_code_for_unused_peer_types(tmp_path, monkeypatch):
     source = TYPED_OWNER_INPUT_SOURCE.split('@ti.data_oriented\nclass Model:')[0]

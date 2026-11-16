@@ -13,7 +13,7 @@ from types import SimpleNamespace
 import weakref
 
 from ._plan import ExecutionPlan
-from ._runtime import PreparedCall, Scalar
+from ._runtime import NdArray, PreparedCall, Scalar
 from ._package_values import capture_value, check_admission, owner_type
 from .._dimensions import extent_dependencies, local_workspace_shape, check_model_static_ranges
 from .._static_values import static_key
@@ -136,10 +136,9 @@ class GraphBuilder:
 
         self.package._check()
         if isinstance(kernel, (_FunctionEntry, _BoundMethodEntry)):
-            kernel, args = kernel._graph_bind(args, template_args)
-            template_args = None
+            kernel, args, template_args = kernel._graph_bind(args, template_args)
         if isinstance(kernel, _TemplateEntry):
-            if not template_args or set(template_args) != {"self"}:
+            if not template_args or "self" not in template_args:
                 raise ValueError("Package factory Graph requires its explicit template receiver")
             kernel = kernel.__get__(template_args["self"])
         owner = None
@@ -151,8 +150,27 @@ class GraphBuilder:
         check_admission(owner, kernel.contract)
         kernel._check_layout(owner)
         if template_args:
-            if owner is None or set(template_args) != {"self"} or template_args["self"] is not owner:
-                raise ValueError("Package Graph template receiver must match its bound entry")
+            # JIT Graph uses array exemplars to obtain argument types.
+            # Published entries already carry those types; verify the hints
+            # without retaining their storage or replacing symbolic bindings.
+            expected_by_name = {item["name"]: item for item in kernel.contract["arguments"]}
+            for name, value in template_args.items():
+                if name == "self" and owner is not None:
+                    if value is not owner:
+                        raise ValueError("Package Graph template receiver must match its bound entry")
+                    continue
+                item = expected_by_name.get(name, {})
+                if item.get("kind") == "ndarray":
+                    value = self.package.runtime._adapt_package_array(value)
+                    if not isinstance(value, NdArray):
+                        raise TypeError(f"Graph exemplar {name!r} requires a device ndarray")
+                    value._descriptor(self.package.runtime)
+                    element = item["element"]
+                    if (value.dtype != element["dtype"] or len(value.shape) != item["ndim"]
+                            or value.element_shape != tuple(element.get("element_shape", ()))):
+                        raise ValueError(f"Graph exemplar {name!r} differs from the entry's type")
+                else:
+                    raise ValueError(f"Unknown or non-resource Graph template argument {name!r}")
         if kernel.contract["captures"] and owner is None:
             raise ValueError("Captured Graph entries require their bound instance")
         if owner is not None and getattr(owner, "_forge_package_owner", None) is not self.package:

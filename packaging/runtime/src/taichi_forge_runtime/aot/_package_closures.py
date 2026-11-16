@@ -169,6 +169,7 @@ class _FunctionEntry:
         self.signature = inspect.Signature(
             [inspect.Parameter(name, inspect.Parameter.POSITIONAL_OR_KEYWORD) for name in parameters]
         )
+        self.__signature__ = self.signature
         self._entries = {}
         self._resource_entries = {}
         self._input_entries = {}
@@ -362,9 +363,11 @@ class _FunctionEntry:
         return self._bind(inputs)(**bound.arguments)
 
     def _graph_bind(self, args, templates):
-        if not isinstance(templates, dict) or set(templates) != set(self.templates):
+        if not isinstance(templates, dict) or not set(self.templates) <= templates.keys():
             raise ValueError("Free Kernel Graph requires its declared template receiver")
-        return self._bind(templates), args
+        inputs = {name: templates[name] for name in self.templates}
+        exemplars = {name: value for name, value in templates.items() if name not in inputs}
+        return self._bind(inputs), args, exemplars
 
 
 class _MethodEntry(_FunctionEntry):
@@ -386,6 +389,13 @@ class _BoundMethodEntry:
 
     def __call__(self, *args, **kwargs):
         return self.entry(self.owner, *args, **kwargs)
+
+    @property
+    def __signature__(self):
+        return self.entry.signature.replace(parameters=[
+            parameter for name, parameter in self.entry.signature.parameters.items()
+            if name != self.entry.receiver
+        ])
 
     def _graph_bind(self, args, templates):
         templates = {} if templates is None else dict(templates)

@@ -904,6 +904,20 @@ def _host_projection(
                 )
             previous, self.owner = self.owner, node.name
             managed = (node.lineno, node.col_offset) in owners_at
+            if node.name in getattr(tree, "_package_host_compositions", ()):
+                from ._package_host_composition import ProjectHostComposition
+
+                self.minimum_version = max(self.minimum_version, 96)
+                node.decorator_list = []
+                node = ProjectHostComposition(kind).visit(node)
+                # Source schemas already served type discovery. Do not turn
+                # plain Host references into instance resource contracts.
+                previous_schema = binding_schemas.pop(node.name, None)
+                node = self.generic_visit(node)
+                if previous_schema is not None:
+                    binding_schemas[node.name] = previous_schema
+                self.owner = previous
+                return node
             if managed or getattr(node, "_package_constructor_template", False):
                 node.decorator_list = []
             node = self.generic_visit(node)
@@ -1655,6 +1669,9 @@ def _preflight_package(package, *, arch=None, source_root=None):
     from ._package_closures import calls as closure_calls
 
     factory_calls = closure_calls(sources, imported_modules, _fail)
+    from ._package_host_composition import mark_host_compositions
+
+    mark_host_compositions(sources, function_inputs, factory_calls)
     return (
         sources, namespaces, dependency_report, application_modules, imported_modules,
         host_contexts, function_inputs, factory_calls, target_arch, packages,

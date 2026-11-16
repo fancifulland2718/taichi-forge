@@ -16,6 +16,7 @@ import itertools
 import json
 import math
 import operator
+import platform
 from pathlib import Path
 import sys
 import threading
@@ -189,6 +190,8 @@ class _ModuleBinding:
                 GraphBuilder=PackageGraphBuilder,
                 structured_control_capabilities=self.control_capabilities,
             ),
+            cpu=_BACKENDS["arm64" if platform.machine().lower() in ("arm64", "aarch64") else "x64"],
+            **_BACKENDS,
             **{dtype: dtype for dtype in _DTYPES},
         )
 
@@ -1050,6 +1053,16 @@ class _ModuleBinding:
             raise ValueError("Resource scope belongs to another loaded package")
         return _ResourceScope(owner)
 
+    @staticmethod
+    def host_reference(owner, name, value, *, optional=False, record=False):
+        # Only producer-proven Host compositions use this projection. Keep
+        # their explicit non-null contract without fixing a child's code family.
+        if value is None and not optional:
+            if record:
+                raise ValueError("A required resource record cannot be None")
+            raise TypeError("An owner reference requires a non-null owner unless optional=True")
+        setattr(owner, name, value)
+
     def child_scope(self, parent, name, owner):
         from ._package_values import owner_type, selected_owner_declaration
 
@@ -1628,6 +1641,7 @@ class entry:
                 for item in self.contract["arguments"]
             ]
         )
+        self.__signature__ = self.signature
 
     def __get__(self, owner, cls=None):
         if owner is None:
@@ -1854,6 +1868,9 @@ class _BoundEntry:
     entry: entry
     owner: object
 
+    def __post_init__(self):
+        object.__setattr__(self, "__signature__", self.entry.signature)
+
     def __call__(self, *args, **kwargs):
         return self.entry._call(self.entry.package, self.owner, *args, **kwargs)
 
@@ -1967,6 +1984,7 @@ class LoadedPackage:
                 93,
                 94,
                 95,
+                96,
             )
             or self.manifest.get("kind") != "forge_definition_package_prototype"
         ):

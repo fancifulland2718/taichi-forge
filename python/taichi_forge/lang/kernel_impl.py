@@ -4579,6 +4579,13 @@ class _BoundedDifferentiableMethod:
         self._is_staticmethod = wrapped_kernel_func._is_staticmethod
         self.__name__ = None
 
+    @property
+    def __signature__(self):
+        signature = self._primal._definition.signature
+        if self._is_staticmethod:
+            return signature
+        return signature.replace(parameters=list(signature.parameters.values())[1:])
+
     def __call__(self, *args, **kwargs):
         try:
             if self._is_staticmethod:

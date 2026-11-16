@@ -528,6 +528,33 @@ def discover(sources, imported, *, preparation_receivers=None, resource_inventor
     if not kernels and not requested and preparation_receivers is None:
         return {}, []
 
+    # A public constructor annotation names a source class, not the last
+    # resource context produced for that class. Preserve its declared family
+    # at Host call sites; each numerical callee still receives only its actual
+    # typed tuple. Do not multiply the enclosing orchestration owner itself.
+    from ._package_input_families import owner_annotation_types
+
+    class_contexts = {}
+    for identity, cls in classes.items():
+        class_contexts.setdefault(cls, []).append(identity)
+    input_families = {}
+    for identity, schema in owners.items():
+        constructor = classes[identity].__init__
+        if not inspect.isfunction(constructor):
+            continue
+        parameters = inspect.signature(constructor).parameters
+        for name, item in schema.items():
+            if item.get('kind') != 'owner_input' or 'input_parameter' not in item:
+                continue
+            parameter = parameters.get(item['input_parameter'])
+            if parameter is None:
+                continue
+            kinds = owner_annotation_types(parameter.annotation, constructor.__globals__)
+            # Explicit union selections are already exact contexts. Only a
+            # single annotated class can stand for its nested input family.
+            if kinds and len(kinds) == 1 and len(class_contexts.get(kinds[0], ())) > 1:
+                input_families[identity, name] = tuple(class_contexts[kinds[0]])
+
     pending = deque()
     annotation_namespaces = {}
     module_nodes = {module: tree for module, _, _, _, tree, _, _, _ in sources}
@@ -738,6 +765,10 @@ def discover(sources, imported, *, preparation_receivers=None, resource_inventor
         if not isinstance(owner, _Owner):
             return None
         item = owners[owner.identity].get(name, {})
+        family = input_families.get((owner.identity, name))
+        if family:
+            root, path = owner.root or owner.identity, (*owner.path, name)
+            return _Choice((root, path), tuple(_Owner(kind, root, path) for kind in family))
         alternatives = tuple(dict.fromkeys(choice.get('owner_type') for choice in item.get('owner_alternatives', ())))
         if resource_inventory is not None and len(alternatives) > 1 and all(kind in owners for kind in alternatives):
             root, path = owner.root or owner.identity, (*owner.path, name)
@@ -1731,7 +1762,12 @@ def discover(sources, imported, *, preparation_receivers=None, resource_inventor
                                     mapping = {}
                                 else:
                                     mapping[receiver] = kernel.receiver
-                            record(kernel.function, mapping if set(mapping) == set(parameters) else {}, call, module, chain)
+                            # Graph also accepts ndarray/texture exemplars for
+                            # ordinary symbolic arguments. They do not define
+                            # the template input domain or new code families.
+                            inputs = ({name: mapping[name] for name in parameters}
+                                      if set(parameters) <= mapping.keys() else {})
+                            record(kernel.function, inputs, call, module, chain)
                         continue
                     callee, receiver = target(call.func)
                     if callee not in kernels and callee not in functions:

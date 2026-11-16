@@ -196,9 +196,28 @@ class OwnerGuard:
             paths.add(("_forge_package_contract",))
             paths.add(("_forge_package_type",))
             paths.add(("_forge_package_owner",))
-        self.readers = tuple(operator.attrgetter(".".join(p)) for p in sorted(paths) if p)
+        # An absent parent makes every descendant unreachable. Observe the
+        # first absent namespace once; if it appears, ordinary admission and
+        # binding rebuild the complete dependency snapshot. This is especially
+        # relevant to optional nested inputs in a shared generic helper.
+        reachable = set()
+        for parts in paths:
+            value = owner
+            for index, part in enumerate(parts):
+                try:
+                    value = getattr(value, part)
+                except AttributeError:
+                    value = _MISSING
+                if value is None or value is _MISSING:
+                    reachable.add(parts[:index + 1])
+                    break
+            else:
+                reachable.add(parts)
+        self.readers = tuple(operator.attrgetter(".".join(p)) for p in sorted(reachable) if p)
         self.values = self.read(owner)
         self.tokens = tuple(_token(x) for x in self.values)
+        self.identity_safe = tuple(type(x) not in (tuple, list, dict) and not isinstance(x, HostTensor)
+                                   for x in self.values)
 
     def read(self, owner):
         values = []
@@ -212,7 +231,12 @@ class OwnerGuard:
         return tuple(values)
 
     def matches(self, owner):
-        return tuple(_token(x) for x in self.read(owner)) == self.tokens
+        # Identity is sufficient for immutable values and resource handles.
+        # CPU tensors/containers still need content tokens even when their
+        # Python object is unchanged. No device data is inspected here.
+        return all((safe and value is previous) or _token(value) == token
+                   for value, previous, token, safe in
+                   zip(self.read(owner), self.values, self.tokens, self.identity_safe))
 
 
 class CachedCall:

@@ -10,6 +10,23 @@ No export decorator, per-kernel registration or component root is required.
 This is a limited prototype, not a complete engine distribution interface.
 Its format and supported scope are experimental.
 
+Format 96 retains simple Host composition objects as ordinary Python when export
+proves that they allocate no resources and are not captured by numerical definitions.
+Their declarations still prove independent input types during production, without
+fixing each child to one numerical implementation family. Numerical owners, allocation
+ownership and constructor rollback remain managed. Actual helper calls select legal
+nested input types without duplicating the enclosing Host composition. Unknown scope
+aliases and escaping scopes remain outside this projection.
+
+Ordinary JIT Kernels and loaded entries expose argument order through `inspect.signature`.
+Package Graph accepts existing ndarray type exemplars, validates fixed type/rank and
+keeps the symbolic runtime argument. Another compatible array may be bound at execution;
+the exemplar is neither retained storage nor a request to recompile numerical code.
+Template owners/Fields keep their declared selection domain. Stable calls observe
+reachable input paths; a newly present parent re-enters admission, and in-place Host
+tensor/container changes remain observable. Focused CPU/CUDA checks do not qualify all
+renderers or external providers.
+
 Format 87 projects the Host query `ti.runtime.fault_snapshot()` onto the
 runtime's existing first-fault domain. It returns an immutable snapshot with
 the same fault fields, including an optional record accepted by `dataclasses.asdict`.
