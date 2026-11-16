@@ -545,13 +545,17 @@ class StaticPreparation:
                 # build time also keeps unsupported/dead branches unreachable;
                 # turning it into a runtime value would capture both arms.
                 reason = "single_choice"
-            elif name in protected or item.get("conditions"):
+            elif name in protected:
                 reason = "resource_or_layout"
             elif not all(v[0] in ("bool", "int") and -(2**31) <= v[1] < 2**31 for v in choices):
                 reason = "type_or_non_i32_value"
             elif reasons != {"prepare_condition"}:
                 reason = ",".join(sorted(reasons - {"prepare_condition"}))
             else:
+                # Being inside a statically selected optional owner does not
+                # make a scalar control that owner's layout. Its enclosing
+                # presence guards remain captured and checked before binding;
+                # only this proven numerical predicate moves to preparation.
                 reason = "prepare_condition"
             facts[name] = reason
         return facts

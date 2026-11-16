@@ -1539,6 +1539,90 @@ class Model:
 
 
 @test_utils.test(arch=ti.cuda, offline_cache=False)
+def test_package_library_prepares_scalar_conditions_inside_optional_children(tmp_path, monkeypatch):
+    source = '''import taichi_forge as ti
+@ti.data_oriented
+class Child:
+    def __init__(self, boost: bool):
+        self.boost = boost
+        ti.experimental.ResourceScope(self).static('boost', choices=(False, True))
+    @ti.func
+    def value(self, i):
+        value = i
+        if ti.static(self.boost):
+            value += 7
+        return value
+@ti.data_oriented
+class Model:
+    def __init__(self, n: int, enabled: bool, boost: bool):
+        self.n, self.enabled = n, enabled
+        scope = ti.experimental.ResourceScope(self)
+        scope.dim('n')
+        scope.static('enabled', choices=(False, True))
+        scope.out = scope.field(ti.i32, shape=scope.dim('n'))
+        if self.enabled:
+            scope.child = Child(boost)
+    @ti.kernel
+    def step(self):
+        for i in range(self.n):
+            value = -1
+            if ti.static(self.enabled):
+                value = self.child.value(i)
+            self.out[i] = value
+    def graph(self):
+        builder = ti.graph.GraphBuilder()
+        builder.dispatch(self.step)
+        return builder.compile()
+'''
+    package = _source_package(tmp_path, monkeypatch, source)
+    manifest = ti.aot.export_package(package, tmp_path / 'sdk', artifact_format='bc-library')
+    entries = [v for v in manifest['entries'].values() if v['definition'].endswith('.Model.step')]
+    assert len(entries) == 2  # Parent presence stays static; its child's scalar does not multiply code.
+    assert sum('prepare_static' in c for e in entries for c in e['captures']) == 1
+    with Runtime('cuda') as runtime, load_package(runtime, tmp_path / 'sdk') as code:
+        for n, enabled, boost in ((3, False, False), (7, True, False), (11, True, True)):
+            normal, loaded = package.Model(n, enabled, boost), code.host.Model(n, enabled, boost)
+            normal.step()
+            loaded.step()
+            np.testing.assert_array_equal(loaded.out.to_numpy(), normal.out.to_numpy())
+            assert hasattr(loaded, 'child') == enabled
+            if enabled:
+                assert next(iter(loaded._forge_package_calls.values())).prepared is not None
+                loaded.child.boost = 'invalid'
+                with pytest.raises(ValueError, match='declared package domain'):
+                    loaded.step()
+    probe = tmp_path / 'consume_conditional_scalar.py'
+    probe.write_text(textwrap.dedent('''
+        import importlib.abc, sys, numpy as np
+        class NoSource(importlib.abc.MetaPathFinder):
+            def find_spec(self, fullname, path=None, target=None):
+                if fullname.split('.')[0] in ('taichi', 'taichi_forge', 'definition_fixture'):
+                    raise AssertionError(fullname)
+        sys.meta_path.insert(0, NoSource())
+        from taichi_forge_runtime.aot import Runtime, load_package
+        with Runtime('cuda') as runtime, load_package(runtime, sys.argv[1]) as code:
+            a, b = code.host.Model(13, True, False), code.host.Model(23, False, True)
+            a.step(); b.step()
+            with a.graph().bind({}) as call:
+                a.child.boost = True
+                call.run()
+                np.testing.assert_array_equal(a.out.to_numpy(), np.arange(13))
+            a.step()
+            np.testing.assert_array_equal(a.out.to_numpy(), np.arange(13) + 7)
+            np.testing.assert_array_equal(b.out.to_numpy(), -1)
+            assert not hasattr(b, 'child')
+        print('CONDITIONAL_SCALAR_SOURCE_FREE_OK')
+    '''), encoding='utf8')
+    result = subprocess.run([sys.executable, '-B', str(probe), str(tmp_path / 'sdk')], cwd=tmp_path,
+        env=dict(os.environ, PYTHONDONTWRITEBYTECODE='1',
+                 PYTHONPATH=str(Path(__file__).resolve().parents[2] / 'packaging/runtime/src'),
+                 TAICHI_NATIVE_RUNTIME_DIR=str(Path(utils._loaded_native_runtime_path).parent)),
+        text=True, capture_output=True, timeout=120)
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert 'CONDITIONAL_SCALAR_SOURCE_FREE_OK' in result.stdout
+
+
+@test_utils.test(arch=ti.cuda, offline_cache=False)
 def test_package_library_classifies_static_use_per_entry(tmp_path, monkeypatch):
     source = '''import taichi_forge as ti
 @ti.data_oriented
