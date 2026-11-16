@@ -2188,6 +2188,19 @@ class _Capture:
                     (path for child, path in self._method_owners if args[index] is child), None))
                 for index in function.template_slot_locations
             )
+            if any(path is not None for _, path in receivers):
+                # Package helpers capture these receivers through declaration
+                # paths, not through the witness object's address. Preserve the
+                # concrete receiver type and every other mapper feature: ordinary
+                # templates and explicit array ABIs still distinguish calls.
+                receiver_features = list(features)
+                for index, path in receivers:
+                    if path is not None:
+                        receiver_features[index] = ("component_owner", type(args[index]), path)
+                identity = (
+                    function,
+                    ("receiver_features", function.mapper._make_cache_key(tuple(receiver_features))),
+                )
             identity = (*identity, function._real_function_compile_variant(), receivers)
         state = self._real_functions.get(identity)
         if state is None and track_dependencies:

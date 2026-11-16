@@ -13,6 +13,137 @@ from taichi_forge_runtime.aot import Scalar
 from tests import test_utils
 
 
+@test_utils.test(arch=ti.cpu, offline_cache=False, compile_tier="full")
+def test_package_helpers_reuse_declared_receivers_across_instances(tmp_path, monkeypatch):
+    from collections import Counter
+    import gc
+    import weakref
+    import numpy as np
+    from taichi_forge.aot._package_compilation import PackageCompilation
+    from taichi_forge.lang.kernel_impl import Func
+    from taichi_forge_runtime.aot import Runtime
+    from tests.python.test_aot_package import _source_package
+
+    source = '''import taichi_forge as ti
+@ti.data_oriented
+class Child:
+    def __init__(self, bias, dtype, interleaved):
+        self.bias = bias
+        scope = ti.experimental.ResourceScope(self)
+        scope.static('bias', choices=(3, 9))
+        if interleaved:
+            layout = scope.dense(ti.i, 3)
+            scope.pad = scope.field(ti.i32, shape=3, placement=layout)
+            scope.data = scope.field(dtype, shape=3, placement=layout)
+        else:
+            scope.data = scope.field(dtype, shape=3)
+    @ti.func
+    def leaf(self, i: ti.i32, offset: ti.template()) -> ti.i32:
+        return ti.cast(self.data[i], ti.i32) + ti.static(self.bias) + offset
+    @ti.func
+    def parent(self, i: ti.i32, offset: ti.template()) -> ti.i32:
+        return self.leaf(i, offset) * 2
+class OtherChild(Child):
+    pass
+@ti.data_oriented
+class Model:
+    def __init__(self, child, other, shadow):
+        self.shadow = shadow
+        scope = ti.experimental.ResourceScope(self)
+        scope.static('shadow', choices=(False, True))
+        scope.child = child
+        scope.other = other
+        scope.out = scope.field(ti.i32, shape=3)
+'''
+    # Separate entries force a helper lookup instead of a whole-entry cache hit.
+    cases = (
+        ("first", "Child", "child", False, 3, 2, ti.i32, False, None, 1),
+        ("with_shadow", "Child", "child", True, 3, 2, ti.i32, False, None, 1),
+        ("static", "Child", "child", False, 9, 2, ti.i32, False, None, 2),
+        ("template", "Child", "child", True, 9, 4, ti.i32, False, None, 3),
+        ("dtype", "Child", "child", False, 9, 4, ti.f32, False, None, 4),
+        ("layout", "Child", "child", False, 9, 4, ti.f32, True, None, 5),
+        ("receiver_type", "OtherChild", "child", False, 9, 4, ti.f32, True, None, 6),
+        ("receiver_path", "OtherChild", "other", False, 9, 4, ti.f32, True, None, 7),
+        ("tier", "OtherChild", "other", False, 9, 4, ti.f32, True, "fast", 8),
+    )
+    for name, _, receiver, _, _, offset, _, _, tier, _ in cases:
+        decorator = "@ti.kernel" if tier is None else f"@ti.kernel(opt_level={tier!r})"
+        source += f'''
+    {decorator}
+    def {name}(self):
+        for i in range(3):
+            self.out[i] = self.{receiver}.parent(i, {offset})
+            if ti.static(self.shadow):
+                self.out[i] += 1
+'''
+    package = _source_package(tmp_path, monkeypatch, source)
+    frontend, originals, owner_refs, snapshots = Counter(), [], [], []
+    original_compile = Func.do_compile
+
+    def observe(function, *args, **kwargs):
+        if function.is_real_function:
+            frontend[function.func.__name__] += 1
+        return original_compile(function, *args, **kwargs)
+
+    monkeypatch.setattr(Func, "do_compile", observe)
+    with PackageCompilation() as compilation:
+        module = ti.aot.Module(artifact_format="bc")
+        compilation.attach(module, function_library=True)
+        for name, child_type, receiver, shadow, bias, offset, dtype, interleaved, _, count in cases:
+            child = getattr(package.model, child_type)(bias, dtype, interleaved)
+            other = getattr(package.model, child_type)(bias, dtype, interleaved)
+            values = np.arange(3, dtype=np.int32 if dtype == ti.i32 else np.float32) + 5
+            child.data.from_numpy(values)
+            other.data.from_numpy(values)
+            owner = package.model.Model(child, other, shadow)
+            owner_refs.extend((weakref.ref(owner), weakref.ref(child), weakref.ref(other)))
+            expected = (values.astype(np.int32) + bias + offset) * 2 + int(shadow)
+            # Ordinary JIT is the independent execution reference and remains usable.
+            getattr(owner, name)()
+            np.testing.assert_array_equal(owner.out.to_numpy(), expected)
+            component = ti.aot.Component.from_owner(owner)
+            code = component.compile(compilation.entry(getattr(owner, name)), owner=owner)
+            assert frontend == {"leaf": count, "parent": count}
+            compilation.compile(code)
+            live = {native for function in compilation.functions.values()
+                    for native in function.taichi_functions.values()}
+            assert len(live) == 2
+            assert len(compilation._retained_functions) == 2
+            assert all(native in live or native._definition_retired() for native in originals)
+            originals.extend(live)
+            bindings = []
+            for capture in code.dynamic:
+                field = component.read(owner, capture)
+                bindings.append((str(field.dtype), field.shape, field.to_numpy(), field is owner.out))
+            snapshots.append((compilation.symbol(code), bindings, expected))
+            getattr(owner, name)()
+            np.testing.assert_array_equal(owner.out.to_numpy(), expected)
+        path = tmp_path / "receiver-reuse.tcm"
+        module.archive(str(path))
+        del owner, child, other, component, field, code
+        gc.collect()
+        assert all(reference() is None for reference in owner_refs)
+    assert all(native._definition_retired() for native in originals)
+    with Runtime("cpu") as runtime:
+        loaded = runtime.load_module(str(path))
+        for symbol, bindings, expected in snapshots:
+            arrays = [runtime.ndarray(dtype, shape) for dtype, shape, _, _ in bindings]
+            for array, (_, _, initial, output) in zip(arrays, bindings):
+                array.write((np.full_like(initial, -1234) if output else initial).tobytes())
+            with loaded.kernel(symbol).bind(*arrays).prepare(specialize=True) as ready:
+                ready.submit().wait()
+                output = next(array for array, binding in zip(arrays, bindings) if binding[3])
+                np.testing.assert_array_equal(np.frombuffer(output.read(), np.int32), expected)
+                for array, (_, _, initial, is_output) in zip(arrays, bindings):
+                    if not is_output:
+                        array.write((initial + 7).tobytes())
+                ready.submit().wait()
+                np.testing.assert_array_equal(np.frombuffer(output.read(), np.int32), expected + 14)
+            for array in arrays:
+                array.close()
+
+
 @test_utils.test(arch=[ti.cpu, ti.cuda], offline_cache=False)
 def test_plan_specialization_preserves_control_aliases_and_independent_bindings(tmp_path):
     import numpy as np
