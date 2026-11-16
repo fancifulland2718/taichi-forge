@@ -636,6 +636,11 @@ class _ModuleBinding:
                 raise ValueError("Typed external resource requires its managed package scope")
             owner_key = self.owner_contract(scope._root, owner_key)
             contract = self.package.manifest["owners"][owner_key].get(scope._identity(name), {})
+            for flag, expected in contract.get("conditions", {}).items():
+                guard = self.package.manifest["owners"][owner_key][flag]
+                selected = path_value(scope._root, guard.get("path", (flag,)))
+                if type(selected) is not bool or selected is not expected:
+                    raise ValueError("External resource binding contradicts its declared presence")
             if contract.get("dtype_policy"):
                 policy = contract["dtype_policy"]
                 guard = self.package.manifest["owners"][owner_key][policy["condition"]]
@@ -1890,6 +1895,7 @@ class LoadedPackage:
                 87,
                 88,
                 89,
+                90,
             )
             or self.manifest.get("kind") != "forge_definition_package_prototype"
         ):
@@ -1904,6 +1910,11 @@ class LoadedPackage:
             for schema in self.manifest.get("owners", {}).values() for member in schema.values()
         ):
             raise ValueError("External shape selection requires definition package version 88")
+        if self.manifest["version"] < 90 and any(
+            item.get("external") and item.get("conditions")
+            for schema in self.manifest.get("owners", {}).values() for item in schema.values()
+        ):
+            raise ValueError("Conditional external inputs require definition package version 90")
         if self.manifest["version"] < 89 and any(
             member.get("external") and member.get("dtype_policy")
             for owner in self.manifest["owners"].values() for member in owner.values()

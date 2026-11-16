@@ -12962,6 +12962,133 @@ class Model:
             load_package(runtime, tmp_path / 'sdk')
 
 
+CONDITIONAL_EXTERNAL_RECORD_SOURCE = '''
+import taichi_forge as ti
+@ti.data_oriented
+class Model:
+    def __init__(self, n: int, enabled: bool, packet):
+        self.n, self.enabled = n, enabled
+        scope = ti.experimental.ResourceScope(self)
+        scope.static('enabled', choices=(False, True))
+        scope.out = scope.field(ti.f32, shape=scope.dim('n'), initialization='zero')
+        record = scope.record('packet', packet)
+        if self.enabled:
+            record.derived_dim('n', record.parent_dim('n'))
+            record.static('batched', choices=(False, True))
+            shape = (record.dim('rows'), record.dim('n')) if record.batched else (record.dim('n'),)
+            record.borrow('values', packet.values, external=True, dtype=ti.f32, shape=shape)
+    @ti.kernel
+    def update(self, gain: ti.f32):
+        for i in range(self.n):
+            if ti.static(self.enabled):
+                if ti.static(self.packet.batched):
+                    self.out[i] = gain * self.packet.values[self.packet.rows - 1, i]
+                else:
+                    self.out[i] = gain * self.packet.values[i]
+            else:
+                self.out[i] = -7
+    def graph(self):
+        b = ti.graph.GraphBuilder()
+        b.dispatch(self.update, ti.graph.Arg(ti.graph.ArgKind.SCALAR, 'gain', ti.f32))
+        return b.compile()
+'''
+
+
+@test_utils.test(arch=[ti.cpu, ti.cuda], offline_cache=False)
+def test_package_conditional_external_record_preserves_layout_and_absence(tmp_path, monkeypatch):
+    from types import SimpleNamespace
+    package = _source_package(tmp_path, monkeypatch, CONDITIONAL_EXTERNAL_RECORD_SOURCE)
+    manifest = ti.aot.export_package(package, tmp_path / 'sdk')
+    assert manifest['version'] == 90
+    values = ti.field(ti.f32, shape=(2, 5))
+    values.from_numpy(np.arange(10, dtype=np.float32).reshape(2, 5))
+    original = package.Model(5, True, SimpleNamespace(n=5, rows=2, batched=True, values=values))
+    original.update(3)
+    with Runtime(manifest['target']) as runtime, load_package(runtime, tmp_path / 'sdk') as code:
+        disabled = code.host.Model(5, False, SimpleNamespace())
+        disabled.update(1)
+        np.testing.assert_array_equal(disabled.out.to_numpy(), -7)
+        arrays = []
+        for n, batched in ((5, True), (11, False)):
+            shape = (2, n) if batched else (n,)
+            array = runtime.ndarray('f32', shape)
+            arrays.append(array)
+            data = np.arange(np.prod(shape), dtype=np.float32).reshape(shape)
+            array.from_numpy(data)
+            packet = SimpleNamespace(n=n, rows=2, batched=batched, values=array)
+            model = code.host.Model(n, True, packet)
+            assert model.packet is packet and model.packet.values is array
+            saved = model.graph().bind({'gain': 3})
+            saved.run()
+            np.testing.assert_array_equal(model.out.to_numpy(), 3 * (data[-1] if batched else data))
+            if batched:
+                np.testing.assert_array_equal(model.out.to_numpy(), original.out.to_numpy())
+            array.from_numpy(data + 13)
+            saved.run()
+            np.testing.assert_array_equal(model.out.to_numpy(), 3 * ((data[-1] if batched else data) + 13))
+            saved.close()
+            with pytest.raises(ValueError, match='[Dd]imension|[Dd]erived|shape'):
+                code.host.Model(n + 1, True, packet)
+        disabled.update(1)
+        np.testing.assert_array_equal(disabled.out.to_numpy(), -7)
+    probe = tmp_path / 'consume_conditional_record.py'
+    probe.write_text('''
+import importlib.abc, sys
+from types import SimpleNamespace
+import numpy as np
+from taichi_forge_runtime.aot import Runtime, load_package
+class NoSource(importlib.abc.MetaPathFinder):
+    def find_spec(self, fullname, path=None, target=None):
+        if fullname.split('.')[0] in ('taichi', 'taichi_forge', 'definition_fixture'):
+            raise ImportError(fullname)
+sys.meta_path.insert(0, NoSource())
+with Runtime(sys.argv[2]) as runtime, load_package(runtime, sys.argv[1]) as code:
+    absent = code.host.Model(3, False, SimpleNamespace())
+    absent.update(2)
+    np.testing.assert_array_equal(absent.out.to_numpy(), -7)
+    for batched in (False, True):
+        shape = (2, 3) if batched else (3,)
+        array = runtime.ndarray('f32', shape)
+        data = np.arange(np.prod(shape), dtype=np.float32).reshape(shape)
+        array.from_numpy(data)
+        model = code.host.Model(3, True, SimpleNamespace(n=3, rows=2, batched=batched, values=array))
+        model.update(4)
+        np.testing.assert_array_equal(model.out.to_numpy(), 4 * (data[-1] if batched else data))
+        array.close()
+print('CONDITIONAL_RECORD_SOURCE_FREE_OK')
+''', encoding='utf8')
+    result = subprocess.run(
+        [sys.executable, '-B', str(probe), str(tmp_path / 'sdk'), manifest['target']], cwd=tmp_path,
+        env=dict(os.environ, PYTHONDONTWRITEBYTECODE='1',
+                 PYTHONPATH=str(Path(__file__).parents[2] / 'packaging/runtime/src'),
+                 TAICHI_NATIVE_RUNTIME_DIR=str(Path(utils._loaded_native_runtime_path).parent),
+                 TAICHI_RUNTIME_DIR=utils._runtime_bitcode_dir()),
+        capture_output=True, text=True, timeout=90)
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert 'CONDITIONAL_RECORD_SOURCE_FREE_OK' in result.stdout
+    manifest_path = tmp_path / 'sdk' / 'package.json'
+    stored = json.loads(manifest_path.read_text())
+    stored['version'] = 89
+    manifest_path.write_text(json.dumps(stored))
+    with Runtime(manifest['target']) as runtime:
+        with pytest.raises(ValueError, match='Conditional external inputs.*90'):
+            load_package(runtime, tmp_path / 'sdk')
+
+
+@test_utils.test(arch=ti.cpu, offline_cache=False)
+@pytest.mark.parametrize('case', ['unknown_guard', 'escaped_shape'])
+def test_package_conditional_external_record_requires_declared_branch(tmp_path, monkeypatch, case):
+    source = CONDITIONAL_EXTERNAL_RECORD_SOURCE
+    if case == 'unknown_guard':
+        source = source.replace("        scope.static('enabled', choices=(False, True))\n", '')
+    else:
+        source = source.replace("            record.borrow('values'", "        record.borrow('values'")
+    package = _source_package(tmp_path, monkeypatch, source)
+    with pytest.raises(ValueError, match='declared boolean|declaration branch'):
+        ti.aot.check_package(package)
+    assert ti.lang.impl.get_runtime().get_num_compiled_functions() == 0
+
+
 @pytest.mark.parametrize("tensor", [False, True])
 @test_utils.test(arch=[ti.cpu, ti.cuda], offline_cache=False)
 def test_package_typed_external_borrow_uses_caller_storage_contract(tmp_path, monkeypatch, tensor):

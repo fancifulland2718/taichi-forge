@@ -19,6 +19,17 @@ rejects a faulted runtime. A package declaring this requirement rejects a native
 runtime without the query before loading its Host modules. This does not project
 full `ti.runtime.stats()` or enable telemetry during export or execution.
 
+Format 90 allows typed external borrows inside a declared boolean layout branch,
+including members of a read-only record. An inactive branch need not provide those
+members. A shape flag declared inside the branch may select rank there; a local
+shape alias cannot escape its declaration branch. Export carries these conditions
+into code selection, and cold binding checks the active shape, type and declared
+dimension relations before publication. The original provider and its storage are
+retained; data updates do not create new code identities. CPU/CUDA checks cover
+absent inputs, both ranks, live data, Graph calls, source-free consumption and invalid
+declarations. This does not add conditional owner-type inference or a new derived-
+dimension expression language.
+
 Format 89 extends typed external borrows to scalar element-type choices such as
 `dtype=ti.i32 if self.categorical else ti.f32`. The condition must be an
 unconditional boolean static declaration, not `kernel_only`. The selected type

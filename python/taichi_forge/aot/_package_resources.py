@@ -1362,9 +1362,10 @@ def scope_declarations(
                 declaration.get("kind") == "static"
                 and {tuple(value) for value in declaration["choices"]} == {("bool", False), ("bool", True)}
                 and not declaration.get("kernel_only")
-                and not declaration.get("conditions")
+                and all(current_conditions.get(key) is value
+                        for key, value in declaration.get("conditions", {}).items())
             ):
-                fail(module, choice, "Field shape selection requires an unconditional declared boolean static")
+                fail(module, choice, "Field shape selection requires a declared boolean static on this branch")
             branches = [dimension(branch) for branch in (choice.body, choice.orelse)]
             branches = [(branch,) if isinstance(branch, Extent) else branch for branch in branches]
             if any(not isinstance(branch, tuple) for branch in branches):
@@ -1947,7 +1948,6 @@ def scope_declarations(
                     or not {"external", "dtype", "shape"} <= keywords.keys()
                     or not isinstance(keywords["external"], ast.Constant)
                     or keywords["external"].value is not True
-                    or conditions
                 ):
                     fail(module, call, "Typed external borrow requires a name, dtype, shape and external=True")
                 optional = keywords.get("optional", ast.Constant(False))
@@ -1973,6 +1973,7 @@ def scope_declarations(
                         call.args[0].value,
                         kind="ndarray",
                         external=True,
+                        **({"conditions": dict(conditions)} if conditions else {}),
                         type_node=dtype,
                         **({"dtype_policy": dtype_policy} if dtype_policy else {}),
                         ndim=len(shape),
@@ -2617,8 +2618,10 @@ def scope_declarations(
                         isinstance(expression, ast.Name) and expression.id in local_types
                     ):
                         local_types[target.id] = expand_local_type(expression, local_types, kind)
-                    if isinstance(expression, (ast.IfExp, ast.Name)):
-                        shape_aliases[target.id] = expression
+                if (isinstance(target, ast.Name) and stores[target.id] == 1 and target.id not in deleted
+                        and isinstance(expression, (ast.IfExp, ast.Name))):
+                    shape_aliases[target.id] = expression
+                    alias_conditions[target.id] = dict(conditions)
                 if isinstance(target, (ast.Tuple, ast.List)) and isinstance(expression, ast.GeneratorExp):
                     # Tuple unpacking consumes the same literal-name generator
                     # once. Reuse the existing proof; do not run the generator.

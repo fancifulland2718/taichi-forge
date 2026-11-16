@@ -176,7 +176,7 @@ class OwnerGraph:
         # once for each borrowed allocation.
         schema = copy.deepcopy(schema)
         static_values = {
-            key: (choices or {}).get((*path, key), read_static_key(item["choices"][0]))
+            key: (choices or {}).get((*path, *item.get("path", (key,))), read_static_key(item["choices"][0]))
             for key, item in schema.items()
             if item["kind"] == "static"
         }
@@ -392,7 +392,8 @@ class OwnerGraph:
                 if item.get("external") and item["element"]["kind"] not in ("scalar", "tensor"):
                     raise ValueError("Typed external borrow requires scalar/vector/matrix elements")
                 conditions = {**item.get("conditions", {}), **item.get("dtype_guards", {})}
-                layout_conditions = {**item.get("dtype_guards", {}), **item.get("shape_guards", {})}
+                layout_conditions = {**item.get("conditions", {}),
+                                     **item.get("dtype_guards", {}), **item.get("shape_guards", {})}
                 declarations[attribute] = (
                     _OptionalArray(dtype, item["ndim"], presence=item["input_presence_attribute"],
                                    conditions=tuple(layout_conditions.items()))
