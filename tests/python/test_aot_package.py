@@ -24615,6 +24615,72 @@ class Driver:
     assert not (tmp_path / 'sdk').exists()
 
 
+FINITE_FIELD_SEQUENCE_SOURCE = '''
+import taichi_forge as ti
+@ti.kernel
+def transfer(owner: ti.template(), src: ti.template(), dst: ti.template(), gain: ti.f32):
+    for i in dst:
+        dst[i] = src[i] * gain
+
+@ti.data_oriented
+class Model:
+    def __init__(self, n: int):
+        self.n = n
+        scope = ti.experimental.ResourceScope(self)
+        scope.a = scope.field(ti.f32, shape=scope.dim('n'))
+        scope.b = scope.field(ti.f32, shape=scope.dim('n'))
+    def pairs(self):
+        return ((self.a, self.b), (self.b, self.a))
+    def update(self, gain):
+        for src, dst in self.pairs():
+            transfer(self, src, dst, gain)
+    def graph(self):
+        builder = ti.graph.GraphBuilder()
+        gain = ti.graph.Arg(ti.graph.ArgKind.SCALAR, 'gain', ti.f32)
+        for src, dst in self.pairs():
+            builder.dispatch(transfer, gain, template_args=dict(owner=self, src=src, dst=dst))
+        return builder.compile()
+'''
+
+
+@test_utils.test(arch=[ti.cpu, ti.cuda], offline_cache=False)
+def test_package_finite_host_field_sequence_preserves_order_and_live_data(tmp_path, monkeypatch):
+    package = _source_package(tmp_path, monkeypatch, FINITE_FIELD_SEQUENCE_SOURCE)
+    manifest = ti.aot.export_package(package, tmp_path / 'sdk')
+    with Runtime(manifest['target']) as runtime, load_package(runtime, tmp_path / 'sdk') as code:
+        first = code.host.model.Model(7)
+        second = code.host.model.Model(11)
+        first.a.from_numpy(np.full(7, 2, dtype=np.float32))
+        first.update(3)
+        np.testing.assert_array_equal(first.a.to_numpy(), np.full(7, 18))
+        np.testing.assert_array_equal(first.b.to_numpy(), np.full(7, 6))
+        with second.graph().bind(dict(gain=2)) as call:
+            for value in (4, 7):
+                second.a.from_numpy(np.full(11, value, dtype=np.float32))
+                call.run()
+                np.testing.assert_array_equal(second.a.to_numpy(), np.full(11, value * 4))
+                np.testing.assert_array_equal(second.b.to_numpy(), np.full(11, value * 2))
+        np.testing.assert_array_equal(first.a.to_numpy(), np.full(7, 18))
+
+
+@pytest.mark.parametrize('change', ['mutable', 'rebound', 'unknown'])
+@test_utils.test(arch=ti.cpu, offline_cache=False)
+def test_package_host_field_sequence_rejects_unproven_sources(tmp_path, monkeypatch, change):
+    source = FINITE_FIELD_SEQUENCE_SOURCE
+    if change == 'mutable':
+        source = source.replace('return ((self.a, self.b), (self.b, self.a))',
+                                'return [(self.a, self.b), (self.b, self.a)]')
+    elif change == 'rebound':
+        source = source.replace('            transfer(self, src, dst, gain)',
+                                '            src = object()\n            transfer(self, src, dst, gain)')
+    else:
+        source = source.replace('return ((self.a, self.b), (self.b, self.a))', 'return object()')
+    package = _source_package(tmp_path, monkeypatch, source)
+    with pytest.raises(ti.aot.PackageExportError, match='unproven template input'):
+        ti.aot.export_package(package, tmp_path / 'sdk')
+    assert not (tmp_path / 'sdk').exists()
+
+
 @pytest.mark.parametrize('vector', [False, True])
 @test_utils.test(arch=[ti.cpu, ti.cuda], offline_cache=False)
 def test_package_independent_field_template_uses_live_shape_and_storage(tmp_path, monkeypatch, vector):

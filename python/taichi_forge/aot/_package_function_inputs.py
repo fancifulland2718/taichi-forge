@@ -63,6 +63,15 @@ class _InventoryIteration(ast.NodeTransformer):
     visit_AsyncFunctionDef = visit_ClassDef = visit_FunctionDef
 
 
+def _copy_call_sites(node):
+    """Retain coverage of the source call when projecting a finite Host loop."""
+    copied = copy.deepcopy(node)
+    for original, projected in zip(ast.walk(node), ast.walk(copied)):
+        if isinstance(original, ast.Call):
+            projected._package_call_site = getattr(original, '_package_call_site', id(original))
+    return copied
+
+
 def source_function_namespace(function, node, imported):
     """Resolve local imports only from the already admitted source closure."""
     bindings, shadowed = {}, set(inspect.signature(function).parameters)
@@ -738,8 +747,7 @@ def discover(sources, imported, *, preparation_receivers=None, resource_inventor
                         return
                     if isinstance(statement, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
                         return
-                    if (resource_inventory is not None and condition_value is not None
-                            and isinstance(statement, ast.For)):
+                    if condition_value is not None and isinstance(statement, ast.For):
                         from ._package_source_sequences import SourceSequences, UnprovenSourceSequence
 
                         projection = source_projection()
@@ -780,7 +788,7 @@ def discover(sources, imported, *, preparation_receivers=None, resource_inventor
                                 sequence_projector.bind(statement.target, item, bindings)
 
                                 for body in statement.body:
-                                    walk(_InventoryIteration(sequence_projector, bindings).visit(copy.deepcopy(body)))
+                                    walk(_InventoryIteration(sequence_projector, bindings).visit(_copy_call_sites(body)))
                             for body in statement.orelse:
                                 walk(body)
                             return
@@ -954,7 +962,7 @@ def discover(sources, imported, *, preparation_receivers=None, resource_inventor
                 def value(expression, visiting=(), bindings=None):
                     if getattr(expression, '_package_unknown_iteration', False):
                         return None
-                    if resource_inventory is not None and hasattr(expression, '_package_input_fact'):
+                    if hasattr(expression, '_package_input_fact'):
                         return expression._package_input_fact
                     bindings = bindings or {}
 
@@ -962,7 +970,7 @@ def discover(sources, imported, *, preparation_receivers=None, resource_inventor
                         return value(item, visiting, bindings)
 
                     def source(item):
-                        if resource_inventory is not None and hasattr(item, '_package_source_callable'):
+                        if hasattr(item, '_package_source_callable'):
                             return item._package_source_callable
                         root = item
                         while isinstance(root, ast.Attribute):
@@ -1447,20 +1455,21 @@ def discover(sources, imported, *, preparation_receivers=None, resource_inventor
                                 inventory_input(fact)
 
                 def record(callee, inputs, call):
+                    call_site = getattr(call, '_package_call_site', id(call))
                     if resource_inventory is not None:
                         if any(inputs.get(name) is None for name in kernels[callee][2]):
                             missing = ', '.join(name for name in kernels[callee][2] if inputs.get(name) is None)
                             failures.append(f"{module}:{call.lineno}: write inventory Kernel {callee.__qualname__} "
                                             f"has unproven template inputs: {missing}")
                             return
-                        pending.append((callee, inputs, (*chain, callee), id(call)))
+                        pending.append((callee, inputs, (*chain, callee), call_site))
                         return
                     origin, definition, parameters = kernels[callee]
                     missing = [key for key in parameters if _has_unbound_input(inputs.get(key))]
                     if missing:
                         known = tuple((key, inputs[key].identity) for key in parameters
                                       if isinstance(inputs.get(key), _Owner))
-                        deferred_inputs[(callee, id(call), known)] = (
+                        deferred_inputs[(callee, call_site, known)] = (
                             f"{module}:{call.lineno}: free Kernel {origin}.{definition['name']} "
                             f"has an unproven template input: {', '.join(missing)}")
                         return
@@ -1511,9 +1520,9 @@ def discover(sources, imported, *, preparation_receivers=None, resource_inventor
                         return
                     domains.setdefault(callee, set()).add(
                         (owner.identity, receiver, tuple(values), tuple(resources), owner_inputs, tuple(field_inputs)))
-                    complete_inputs.setdefault((callee, id(call)), set()).add(
+                    complete_inputs.setdefault((callee, call_site), set()).add(
                         tuple((key, inputs[key].identity) for key in receivers))
-                    covered.add(id(call))
+                    covered.add(call_site)
 
                 def forward_call(callee, receiver, call, selected_values=None):
                     if resource_inventory is not None and receiver is None and callee not in kernels:
@@ -1558,7 +1567,8 @@ def discover(sources, imported, *, preparation_receivers=None, resource_inventor
                                 inventory_input(item)
                         return
                     if callee in kernels:
-                        record(callee, bound.arguments, call)
+                        for context in _choice_contexts(bound.arguments):
+                            record(callee, context, call)
                     elif any(item is not None for item in bound.arguments.values()):
                         for name, parameter in signature.parameters.items():
                             if name not in bound.arguments and parameter.default is not inspect.Parameter.empty:
@@ -1584,7 +1594,8 @@ def discover(sources, imported, *, preparation_receivers=None, resource_inventor
                                         f"{module}:{call.lineno}: recursive Kernel input forwarding changes its source context"
                                     )
                             else:
-                                pending.append((callee, context, (*chain, callee), id(call)))
+                                pending.append((callee, context, (*chain, callee),
+                                                getattr(call, '_package_call_site', id(call))))
 
 
                 for call in (part for part in nodes if isinstance(part, ast.Call)):

@@ -60,6 +60,12 @@ elsewhere does not qualify another site or an uncalled subclass. Rebinding a
 parameter to an opaque value still rejects. This producer-only analysis adds no
 runtime inference, model execution or consumer checks.
 
+Finite immutable Host sequences of declared resource paths can forward Kernel
+inputs through ordinary loops and Graph dispatch. Signature discovery reuses the
+existing source-sequence proof, preserving paired inputs and original call-site
+coverage. Host execution order remains unchanged; mutable, rebound and unknown
+iteration sources do not establish an input ABI.
+
 For normal Component capture, a read-only record view does not become another
 ownership path to its provider. A typed view of a Dense Field already owned by the
 same component reuses that allocation's layout and initialization path; the declared
