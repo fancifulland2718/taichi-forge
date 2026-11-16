@@ -1972,6 +1972,66 @@ class Model:
                 np.testing.assert_array_equal(aot.out.to_numpy(), jit.out.to_numpy())
 
 
+@test_utils.test(arch=ti.cuda, offline_cache=False)
+@pytest.mark.parametrize('expression', ('ti.Vector([i, 2])', 'ti.Matrix([[i, 2], [0, 0]])',
+                                      'ti.Vector.zero(ti.i32, 2)', 'ti.Matrix.zero(ti.i32, 2, 2)'))
+def test_package_library_prepares_branch_local_tensor_values(tmp_path, monkeypatch, expression):
+    source = '''import taichi_forge as ti
+@ti.data_oriented
+class Model:
+    def __init__(self, n: int, enabled: bool):
+        self.n, self.enabled = n, enabled
+        scope = ti.experimental.ResourceScope(self)
+        scope.static('enabled', choices=(False, True))
+        scope.out = scope.field(ti.i32, shape=scope.dim('n'))
+    @ti.kernel
+    def step(self):
+        for i in range(self.n):
+            total = i
+            if ti.static(self.enabled):
+                point = EXPRESSION
+                total += point.sum() + 3
+            self.out[i] = total
+'''.replace('EXPRESSION', expression)
+    package = _source_package(tmp_path, monkeypatch, source)
+    manifest = ti.aot.export_package(package, tmp_path / 'sdk', artifact_format='bc-library')
+    entry, = (e for e in manifest['entries'].values() if e['definition'].endswith('.Model.step'))
+    assert {c['name'] for c in entry['captures'] if 'prepare_static' in c} == {'enabled'}
+    with Runtime('cuda') as runtime, load_package(runtime, tmp_path / 'sdk') as code:
+        instances = []
+        for n, enabled in ((3, False), (17, True)):
+            jit, aot = package.model.Model(n, enabled), code.host.Model(n, enabled)
+            jit.step()
+            aot.step()
+            expected = jit.out.to_numpy()
+            np.testing.assert_array_equal(aot.out.to_numpy(), expected)
+            instances.append((aot, expected))
+        for aot, expected in instances:
+            aot.step()
+            np.testing.assert_array_equal(aot.out.to_numpy(), expected)
+
+
+@pytest.mark.parametrize('expression,tail', (
+    ('ti.Vector.zero(ti.i32, self.width)', ''),
+    ('ti.Vector.zero(ti.f64 if self.wide else ti.f32, 2)', ''),
+    ('ti.Vector([1, 2])', '    return point\n'),
+))
+def test_package_static_tensor_proof_keeps_shape_type_and_escaping_values(expression, tail):
+    from taichi_forge.aot._package_static import StaticPreparation
+    from taichi_forge.tools._compiled_host import decorator_resolver
+
+    source = '''import taichi_forge as ti
+@ti.func
+def selected(self):
+    if ti.static(self.flag):
+        point = EXPRESSION
+        self.out[0] = point.sum()
+'''.replace('EXPRESSION', expression) + tail
+    tree = ast.parse(source)
+    proof = StaticPreparation([('model', None, None, source, tree, decorator_resolver(tree), None, None)])
+    assert proof.entry_uses('model.selected')['flag'] != {'prepare_condition'}
+
+
 @test_utils.test(arch=[ti.cpu, ti.cuda], offline_cache=False)
 @pytest.mark.parametrize('attribute_access', ('direct', 'getattr'))
 def test_package_library_prepares_device_loop_transfers(tmp_path, monkeypatch, attribute_access):

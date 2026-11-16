@@ -2328,7 +2328,7 @@ def _export_package(package, output, *, arch, caps, source_root, compilation, ar
                 ):
                     _fail(name, node, "Closure factory using a child implementation choice requires its own typed root")
                 condition_values = {**code.static, **{key: static_key(value) for key, value in code.objects.items()}}
-                for attribute in {key for key, _ in code.contract["captures"]} | code.static.keys():
+                for attribute in set(code.dynamic) | code.static.keys():
                     resource = capture_schema.get(attribute, {})
                     if (resource.get("external") or resource.get("dynamic_input_storage")) and attribute in code.dynamic:
                         continue
@@ -2372,6 +2372,9 @@ def _export_package(package, output, *, arch, caps, source_root, compilation, ar
             variants = []
             family_schema, family_paths = {}, {}
             for code, owner, environment, compilation_schema in contexts:
+                # The immutable contract is serialized on the code object.
+                # Decode once for this projection, not once per captured port.
+                contract = code.contract
                 if compilation.static_preparation is not None:
                     environment, compilation_schema, _ = compilation.static_preparation.project(
                         environment, compilation_schema, code.kernel)
@@ -2427,7 +2430,7 @@ def _export_package(package, output, *, arch, caps, source_root, compilation, ar
                 input_records = {
                     key: dict(
                         path=list(environment._paths[key]),
-                        required_when=code.contract.get("input_requirements", {}).get(key, []),
+                        required_when=contract.get("input_requirements", {}).get(key, []),
                         **({"boolean": True} if item.get("dynamic_storage_condition") else {}),
                     )
                     for key, item in compilation_schema.items()
@@ -2445,7 +2448,7 @@ def _export_package(package, output, *, arch, caps, source_root, compilation, ar
 
                 guard_values = {
                     key: dict(path=list(environment._paths[key]))
-                    for paths in code.contract.get("input_requirements", {}).values()
+                    for paths in contract.get("input_requirements", {}).values()
                     for branch in paths
                     for expression, _ in branch
                     for key in extent_dependencies(expression)
@@ -2480,7 +2483,7 @@ def _export_package(package, output, *, arch, caps, source_root, compilation, ar
                             {dim for axis in item["shape_expressions"] for dim in extent_dependencies(axis)},
                         ),
                         **(
-                            {"required_when": code.contract.get("input_requirements", {}).get(key, [[]])}
+                            {"required_when": contract.get("input_requirements", {}).get(key, [[]])}
                             if item.get("optional_input")
                             else {}
                         ),
@@ -2561,7 +2564,7 @@ def _export_package(package, output, *, arch, caps, source_root, compilation, ar
                             "dtype": schema[1],
                             **({"element_shape": list(schema[2])} if schema[0] == "value" and schema[2] else {}),
                         }
-                        for capture_name, schema in code.contract["captures"]
+                        for capture_name, schema in contract["captures"]
                     ]
                     for item in capture:
                         resource = compilation_schema.get(item["name"], {})
@@ -2647,7 +2650,7 @@ def _export_package(package, output, *, arch, caps, source_root, compilation, ar
                         definitions=[definition_name],
                         arguments=argument_schema,
                         captures=capture,
-                        dependencies=dict(methods=code.contract["methods"], functions=code.contract["functions"]),
+                        dependencies=dict(methods=contract["methods"], functions=contract["functions"]),
                         compile_options=compile_options,
                     )
                     from ._resource_effects import package_effects
@@ -2659,12 +2662,12 @@ def _export_package(package, output, *, arch, caps, source_root, compilation, ar
                             kernel.arguments[slot[0]].name: list(environment._paths[binding])
                             for slot, binding in code.resource_templates.items()
                         }
-                    if code.contract.get("model_static_ranges"):
+                    if contract.get("model_static_ranges"):
                         manifest["version"] = max(28, manifest["version"])
-                        entry_manifest["model_static_ranges"] = code.contract["model_static_ranges"]
-                    if code.contract.get("model_blocks"):
+                        entry_manifest["model_static_ranges"] = contract["model_static_ranges"]
+                    if contract.get("model_blocks"):
                         manifest["version"] = max(29, manifest["version"])
-                        entry_manifest["model_blocks"] = code.contract["model_blocks"]
+                        entry_manifest["model_blocks"] = contract["model_blocks"]
                     manifest["entries"][symbol] = entry_manifest
                     shared_entries[identity] = entry_manifest
                 if admission:

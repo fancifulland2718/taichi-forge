@@ -375,7 +375,46 @@ class StaticPreparation:
         # These operations define types, Python objects, or execution structure.
         # Their branch alternatives cannot be represented by a scalar IR phi.
         fixed_cast_types = set()
+        fixed_tensor_values = set()
+        branch = parents.get(id(node))
+        branch_nodes = set()
+        if isinstance(branch, ast.If):
+            statements = branch.body if node in branch.body else branch.orelse
+            branch_nodes = {id(part) for statement in statements for part in ast.walk(statement)}
+        function = node
+        while function is not None and not isinstance(function, ast.FunctionDef):
+            function = parents.get(id(function))
+        reads = self._local_values.get(id(function), ({}, {}, {}))[0]
         for part in ast.walk(node):
+            if isinstance(part, ast.Call) and not part.keywords:
+                # Fixed-shape vector/matrix construction creates a numerical
+                # value, not a new resource or a producer-selected type.
+                # Model-sized and conditional-dtype tensors keep their old rule.
+                constructor = part.func
+                tensor_kind = kind(constructor)
+                assignment = parents.get(id(part))
+                local_value = not isinstance(assignment, ast.Assign) or (
+                    all(isinstance(target, ast.Name) for target in assignment.targets)
+                    and all(id(read) in branch_nodes for target in assignment.targets
+                            for read in reads.get(target.id, ())))
+                literal = len(part.args) == 1 and isinstance(part.args[0], (ast.List, ast.Tuple))
+                if local_value and literal and tensor_kind in ('Vector', 'Matrix'):
+                    elements = part.args[0].elts
+                    rectangular = tensor_kind == 'Vector' or (
+                        elements and all(isinstance(row, (ast.List, ast.Tuple)) for row in elements)
+                        and len({len(row.elts) for row in elements}) == 1
+                        and len(elements[0].elts) > 0)
+                    if elements and rectangular:
+                        fixed_tensor_values.add(id(constructor))
+                if isinstance(constructor, ast.Attribute) and constructor.attr == 'zero':
+                    dimensions = {'Vector': 1, 'Matrix': 2}.get(kind(constructor.value))
+                    if (local_value and dimensions is not None and len(part.args) == dimensions + 1
+                            and kind(part.args[0]) in ('i8', 'i16', 'i32', 'i64', 'u8', 'u16', 'u32', 'u64',
+                                                       'f16', 'f32', 'f64')
+                            and all(isinstance(axis, ast.Constant) and type(axis.value) is int and axis.value > 0
+                                    for axis in part.args[1:])):
+                        fixed_tensor_values.add(id(constructor.value))
+                        fixed_cast_types.add(id(part.args[0]))
             if isinstance(part, ast.Call) and kind(part.func) == 'cast':
                 # A literal dtype operand of the normal numeric cast creates a
                 # value, not a Python type/layout alternative. Keep conditional
@@ -403,7 +442,8 @@ class StaticPreparation:
                 ):
                     return True
             if isinstance(part, ast.Attribute) and (
-                part.attr in ("loop_config", "SharedArray", "Vector", "Matrix", "field", "ndarray")
+                part.attr in ("loop_config", "SharedArray", "field", "ndarray")
+                or part.attr in ("Vector", "Matrix") and id(part) not in fixed_tensor_values
                 or (kind(part) or "").startswith("types.")
                 or (kind(part) in ("i8", "i16", "i32", "i64", "u8", "u16", "u32", "u64", "f16", "f32", "f64")
                     and id(part) not in fixed_cast_types)
