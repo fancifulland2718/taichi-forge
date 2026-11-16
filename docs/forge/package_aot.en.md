@@ -52,6 +52,16 @@ call. Conditional types, model-sized elements, sparse trees and arbitrary unknow
 Field sources remain outside this addition. Local CPU/CUDA evidence does not
 qualify a complete renderer.
 
+An otherwise uncalled Kernel may describe its template inputs with ordinary
+`typing.overload` signatures preceding the original `@ti.kernel` implementation.
+Template annotations must name declared owner classes (or finite unions) or
+fixed scalar/tensor ndarray element types and ranks. The empty declarations must
+retain the implementation's parameter names, defaults and non-template types.
+They reuse the same input contracts as typed Host calls; they do not replace the
+Kernel, execute a sample model, or add consumer-side inference. Direct and Graph
+calls still bind live resources and runtime values through the existing ABI.
+Local CPU/CUDA tests cover source-free calls and incompatible input rejection.
+
 An unannotated Host forwarding parameter may obtain its type from actual calls
 in the exported definitions. Initial inspection with only `self` known defers
 that unresolved input until source traversal finishes. Every Kernel call site

@@ -24519,6 +24519,113 @@ class Derived(Model):
 """
 
 
+DECLARED_KERNEL_INPUTS_SOURCE = '''
+from typing import overload
+import taichi_forge as ti
+constructors = 0
+Input = ti.types.ndarray(dtype=ti.f32, ndim=1)
+@ti.data_oriented
+class Model:
+    def __init__(self, n: int):
+        global constructors
+        constructors += 1
+        self.n = n
+        scope = ti.experimental.ResourceScope(self)
+        scope.values = scope.field(ti.f32, shape=scope.dim('n'))
+    @overload
+    def apply(self, source: 'Model', field: Input, gain: ti.f32): ...
+    @ti.kernel
+    def apply(self, source: ti.template(), field: ti.template(), gain: ti.f32):
+        for i in self.values:
+            self.values[i] = source.values[i % source.n] * gain + field[0]
+
+@overload
+def combine(output: Model, source: Model, field: Input, gain: ti.f32): ...
+@ti.kernel
+def combine(output: ti.template(), source: ti.template(), field: ti.template(), gain: ti.f32):
+    for i in output.values:
+        output.values[i] = source.values[i % source.n] * gain + field[0]
+'''
+
+
+@test_utils.test(arch=[ti.cpu, ti.cuda], offline_cache=False)
+def test_package_uncalled_kernel_input_declarations_preserve_direct_and_graph(tmp_path, monkeypatch):
+    package = _source_package(tmp_path, monkeypatch, DECLARED_KERNEL_INPUTS_SOURCE)
+    manifest = ti.aot.export_package(package, tmp_path / 'sdk')
+    assert package.model.constructors == 0
+    assert len([item for item in manifest['entries'].values()
+                if item['definition'].endswith(('.Model.apply', '.combine'))]) == 2
+    a, b = package.Model(7), package.Model(3)
+    b.values.from_numpy(np.arange(3, dtype=np.float32) + 2)
+    field = ti.field(ti.f32, shape=4)
+    field.fill(3)
+    a.apply(b, field, 2)
+    expected = a.values.to_numpy()
+    builder = ti.graph.GraphBuilder()
+    gain = ti.graph.Arg(ti.graph.ArgKind.SCALAR, 'gain', ti.f32)
+    builder.dispatch(package.model.combine, gain, template_args={'output': a, 'source': b, 'field': field})
+    builder.compile().run(dict(gain=2))
+    np.testing.assert_array_equal(a.values.to_numpy(), expected)
+    probe = tmp_path / 'declared_inputs_consume.py'
+    probe.write_text('''
+import importlib.abc, sys
+import numpy as np
+from taichi_forge_runtime.aot import Runtime, load_package
+class RejectSource(importlib.abc.MetaPathFinder):
+    def find_spec(self, fullname, path=None, target=None):
+        if fullname.split('.')[0] in ('taichi', 'taichi_forge', 'definition_fixture'):
+            raise ImportError(fullname)
+sys.meta_path.insert(0, RejectSource())
+with Runtime(sys.argv[2]) as runtime, load_package(runtime, sys.argv[1]) as code:
+    a, b = code.host.Model(7), code.host.Model(3)
+    b.values.from_numpy(np.arange(3, dtype=np.float32) + 2)
+    field = runtime.ndarray('f32', (4,))
+    field.write(np.full(4, 3, dtype=np.float32))
+    a.apply(b, field, 2)
+    np.testing.assert_array_equal(a.values.to_numpy(), 2 * (np.arange(7) % 3 + 2) + 3)
+    ti = code.host.model.ti
+    builder = ti.graph.GraphBuilder()
+    gain = ti.graph.Arg(ti.graph.ArgKind.SCALAR, 'gain', ti.f32)
+    builder.dispatch(code.host.model.combine, gain, template_args={'output': a, 'source': b, 'field': field})
+    with builder.compile().bind(dict(gain=4)) as call:
+        b.values.from_numpy(np.full(3, 5, dtype=np.float32))
+        field.write(np.full(4, 7, dtype=np.float32))
+        call.run()
+        np.testing.assert_array_equal(a.values.to_numpy(), np.full(7, 27))
+    c = code.host.Model(11)
+    c.apply(b, field, 3)
+    np.testing.assert_array_equal(c.values.to_numpy(), np.full(11, 22))
+    try:
+        c.apply(b, runtime.ndarray('i32', (4,)), 3)
+    except ValueError:
+        pass
+    else:
+        raise AssertionError('incompatible input was admitted')
+print('DECLARED_INPUTS_SOURCE_FREE_OK')
+''', encoding='utf8')
+    result = subprocess.run(
+        [sys.executable, '-B', str(probe), str(tmp_path / 'sdk'), manifest['target']], cwd=tmp_path,
+        env=dict(os.environ, PYTHONPATH=str(Path(__file__).parents[2] / 'packaging/runtime/src'),
+                 TAICHI_NATIVE_RUNTIME_DIR=str(Path(utils._loaded_native_runtime_path).parent),
+                 TAICHI_RUNTIME_DIR=utils._runtime_bitcode_dir()),
+        capture_output=True, text=True, timeout=90)
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert 'DECLARED_INPUTS_SOURCE_FREE_OK' in result.stdout
+
+
+@pytest.mark.parametrize('change, error', [
+    (('source: Model, field: Input', 'renamed: Model, field: Input'), 'preserve implementation parameters'),
+    (('source: Model, field: Input', 'source: Model, field: object'), 'declared owner or fixed array'),
+    (('field: Input, gain: ti.f32): ...', 'field: Input, gain: ti.i32): ...'), 'preserve non-template'),
+])
+@test_utils.test(arch=ti.cpu, offline_cache=False)
+def test_package_kernel_input_declarations_reject_incompatible_signatures(tmp_path, monkeypatch, change, error):
+    package = _source_package(tmp_path, monkeypatch, DECLARED_KERNEL_INPUTS_SOURCE.replace(*change))
+    with pytest.raises(ValueError, match=error):
+        ti.aot.export_package(package, tmp_path / 'sdk')
+    assert package.model.constructors == 0
+
+
 INDEPENDENT_OWNER_INPUTS_SOURCE = '''
 import taichi_forge as ti
 constructors = 0

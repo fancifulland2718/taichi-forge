@@ -16,6 +16,7 @@ import inspect
 import importlib.util
 import json
 import types
+import typing
 
 from taichi_forge_runtime._static_values import static_key
 from ._package_factories import _source_value
@@ -335,6 +336,7 @@ class _FunctionSyntax:
     def __init__(self, node):
         nodes = []
         pending = list(reversed(node.body))
+
         while pending:
             part = pending.pop()
             if isinstance(part, ast.Lambda):
@@ -529,6 +531,47 @@ def discover(sources, imported, *, preparation_receivers=None, resource_inventor
     pending = deque()
     annotation_namespaces = {}
     module_nodes = {module: tree for module, _, _, _, tree, _, _, _ in sources}
+    def annotation_fact(annotation, function, identity, name, parameter):
+        if isinstance(annotation, ast.Constant) and isinstance(annotation.value, str):
+            try:
+                annotation = ast.parse(annotation.value, mode="eval").body
+            except SyntaxError:
+                return None
+        namespace = function.__globals__
+        declared = _source_value(annotation, namespace)
+        if declared is None:
+            # TYPE_CHECKING imports may name classes already
+            # present in the actual source closure. Reuse import
+            # resolution without importing annotation-only code.
+            origin = function.__module__
+            if origin not in annotation_namespaces:
+                annotation_namespaces[origin] = source_function_namespace(
+                    function, module_nodes[origin], imported)
+            namespace = annotation_namespaces[origin]
+            declared = _source_value(annotation, namespace)
+        if declared is GraphBuilder:
+            return _Graph()
+        else:
+            from ._package_input_families import owner_annotation_types
+            from ._package_types import type_spec
+            from taichi_forge.types._argument_descriptor import describe_annotation
+            from taichi_forge.types.ndarray_type import NdarrayType
+
+            kinds = owner_annotation_types(annotation, namespace)
+            if kinds and all(classes.get(kind.__module__ + "." + kind.__qualname__) is kind
+                             for kind in kinds):
+                root = identity + ":" + parameter
+                choices = tuple(_Owner(kind.__module__ + "." + kind.__qualname__, root) for kind in kinds)
+                return choices[0] if len(choices) == 1 else _Choice((identity, name, parameter), choices)
+            elif isinstance(declared, NdarrayType):
+                descriptor = describe_annotation(declared)
+                if (descriptor.element is not None and descriptor.element.is_complete
+                        and descriptor.element.category in ('scalar', 'tensor')
+                        and type(declared.ndim) is int and declared.ndim >= 0
+                        and not declared.needs_grad):
+                    element = type_spec(declared.dtype, imported[function.__module__])
+                    return _FieldABI(json.dumps(element, sort_keys=True), declared.ndim)
+
     for identity, cls in classes.items():
         if resource_inventory is not None:
             break
@@ -551,47 +594,9 @@ def discover(sources, imported, *, preparation_receivers=None, resource_inventor
                         for parameter in (*node.args.posonlyargs, *node.args.args, *node.args.kwonlyargs):
                             if parameter.arg == "self" or parameter.annotation is None:
                                 continue
-                            annotation = parameter.annotation
-                            if isinstance(annotation, ast.Constant) and isinstance(annotation.value, str):
-                                try:
-                                    annotation = ast.parse(annotation.value, mode="eval").body
-                                except SyntaxError:
-                                    continue
-                            namespace = function.__globals__
-                            declared = _source_value(annotation, namespace)
-                            if declared is None:
-                                # TYPE_CHECKING imports may name classes already
-                                # present in the actual source closure. Reuse import
-                                # resolution without importing annotation-only code.
-                                origin = function.__module__
-                                if origin not in annotation_namespaces:
-                                    annotation_namespaces[origin] = source_function_namespace(
-                                        function, module_nodes[origin], imported)
-                                namespace = annotation_namespaces[origin]
-                                declared = _source_value(annotation, namespace)
-                            if declared is GraphBuilder:
-                                inputs[parameter.arg] = _Graph()
-                            else:
-                                from ._package_input_families import owner_annotation_types
-                                from ._package_types import type_spec
-                                from taichi_forge.types._argument_descriptor import describe_annotation
-                                from taichi_forge.types.ndarray_type import NdarrayType
-
-                                kinds = owner_annotation_types(annotation, namespace)
-                                if kinds and all(classes.get(kind.__module__ + "." + kind.__qualname__) is kind
-                                                 for kind in kinds):
-                                    root = identity + ":" + parameter.arg
-                                    choices = tuple(_Owner(kind.__module__ + "." + kind.__qualname__, root) for kind in kinds)
-                                    inputs[parameter.arg] = (choices[0] if len(choices) == 1 else
-                                                             _Choice((identity, name, parameter.arg), choices))
-                                elif isinstance(declared, NdarrayType):
-                                    descriptor = describe_annotation(declared)
-                                    if (descriptor.element is not None and descriptor.element.is_complete
-                                            and descriptor.element.category in ('scalar', 'tensor')
-                                            and type(declared.ndim) is int and declared.ndim >= 0
-                                            and not declared.needs_grad):
-                                        element = type_spec(declared.dtype, imported[function.__module__])
-                                        inputs[parameter.arg] = _FieldABI(json.dumps(element, sort_keys=True), declared.ndim)
+                            fact = annotation_fact(parameter.annotation, function, identity, name, parameter.arg)
+                            if fact is not None:
+                                inputs[parameter.arg] = fact
                         if preparation_receivers is None:
                             for parameter in parameters[1:]:
                                 inputs.setdefault(parameter, _UnboundInput((identity, name, parameter)))
@@ -617,6 +622,78 @@ def discover(sources, imported, *, preparation_receivers=None, resource_inventor
     return_cache = {}
     binding_domains = {}
     syntax = {}
+
+    def record(callee, inputs, call, module, chain=()):
+        call_site = getattr(call, '_package_call_site', id(call))
+        if resource_inventory is not None:
+            if any(inputs.get(name) is None for name in kernels[callee][2]):
+                missing = ', '.join(name for name in kernels[callee][2] if inputs.get(name) is None)
+                failures.append(f"{module}:{call.lineno}: write inventory Kernel {callee.__qualname__} "
+                                f"has unproven template inputs: {missing}")
+                return
+            pending.append((callee, inputs, (*chain, callee), call_site))
+            return
+        origin, definition, parameters = kernels[callee]
+        missing = [key for key in parameters if _has_unbound_input(inputs.get(key))]
+        if missing:
+            known = tuple((key, inputs[key].identity) for key in parameters
+                          if isinstance(inputs.get(key), _Owner))
+            deferred_inputs[(callee, call_site, known)] = (
+                f"{module}:{call.lineno}: free Kernel {origin}.{definition['name']} "
+                f"has an unproven template input: {', '.join(missing)}")
+            return
+        receivers = [key for key in parameters if isinstance(inputs.get(key), _Owner)]
+        if not receivers:
+            failures.append(
+                f"{module}:{call.lineno}: free Kernel {origin}.{definition['name']} "
+                "requires a definition-proven owner receiver"
+            )
+            invalid.add(callee)
+            return
+        receiver = receivers[0]
+        owner = inputs[receiver]
+        try:
+            values, resources, field_inputs = [], [], []
+            for key in parameters:
+                if key in receivers:
+                    continue
+                item = inputs.get(key)
+                if isinstance(item, _FieldABI):
+                    field_inputs.append((key, None, item))
+                elif isinstance(item, _Resource):
+                    if item.optional:
+                        raise ValueError("Optional Field forwarding requires its declared presence binding")
+                    path = (*item.owner.path, *item.path)
+                    sources = [
+                        name for name in receivers
+                        if (item.owner.root or item.owner.identity)
+                        == (inputs[name].root or inputs[name].identity)
+                        and path[:len(inputs[name].path)] == inputs[name].path
+                    ]
+                    if not sources:
+                        field_inputs.append((key, item.owner.identity, item.path))
+                        continue
+                    source = max(sources, key=lambda name: len(inputs[name].path))
+                    relative = path[len(inputs[source].path):]
+                    resources.append((key, source, relative))
+                else:
+                    values.append((key, _literal_key(item)))
+            owner_inputs = (tuple((key, inputs[key].identity) for key in receivers)
+                            if len(receivers) > 1 or field_inputs else ())
+            resources = [(key, ("_arg_" + source, *relative) if owner_inputs else relative)
+                         for key, source, relative in resources]
+        except ValueError as error:
+            failures.append(
+                f"{module}:{call.lineno}: free Kernel {origin}.{definition['name']} "
+                f"has an unproven template input {key!r}: {error}"
+            )
+            invalid.add(callee)
+            return
+        domains.setdefault(callee, set()).add(
+            (owner.identity, receiver, tuple(values), tuple(resources), owner_inputs, tuple(field_inputs)))
+        complete_inputs.setdefault((callee, call_site), set()).add(
+            tuple((key, inputs[key].identity) for key in receivers))
+        covered.add(call_site)
 
     def source_callable(expression, namespace):
         if resource_inventory is not None and hasattr(expression, '_package_source_callable'):
@@ -1417,6 +1494,63 @@ def discover(sources, imported, *, preparation_receivers=None, resource_inventor
                 namespace = arguments = nodes = aliases = stores = None
 
 
+        if resource_inventory is None and preparation_receivers is None:
+            for entry, (module, definition, templates) in kernels.items():
+                owner = definition['owner']
+                tree = module_nodes[module]
+                body = tree.body
+                if owner is not None:
+                    source_owner = source_class(tree, owner)
+                    body = next(node.body for node in body
+                                if isinstance(node, ast.ClassDef) and node.name == source_owner)
+                original = definition['node']
+                namespace = vars(imported[module])
+                declarations = [node for node in body
+                                if isinstance(node, ast.FunctionDef) and node.name == original.name
+                                and len(node.decorator_list) == 1
+                                and _source_value(node.decorator_list[0], namespace) is typing.overload]
+                for declaration in declarations:
+                    # Overloads describe the existing implementation, never execute
+                    # a model or replace its Kernel/Graph dispatch identity.
+                    prefix = f"{module}:{declaration.lineno}: Kernel overload {definition['name']}"
+                    args = copy.deepcopy(declaration.args)
+                    expected = copy.deepcopy(original.args)
+                    for group in (args, expected):
+                        for arg in (*group.posonlyargs, *group.args, *group.kwonlyargs):
+                            arg.annotation = None
+                    if ast.dump(args) != ast.dump(expected):
+                        raise ValueError(prefix + ' must preserve implementation parameters and defaults')
+                    statements = [node for node in declaration.body if not (
+                        isinstance(node, ast.Expr) and isinstance(node.value, ast.Constant)
+                        and isinstance(node.value.value, str))]
+                    if len(statements) != 1 or not (isinstance(statements[0], ast.Pass) or (
+                        isinstance(statements[0], ast.Expr) and isinstance(statements[0].value, ast.Constant)
+                        and statements[0].value.value is Ellipsis)):
+                        raise ValueError(prefix + ' must be an empty type declaration')
+                    parameters = {arg.arg: arg for arg in (*declaration.args.posonlyargs,
+                                  *declaration.args.args, *declaration.args.kwonlyargs)}
+                    implementation = {arg.arg: arg for arg in (*original.args.posonlyargs,
+                                      *original.args.args, *original.args.kwonlyargs)}
+                    inputs = {}
+                    if owner is not None:
+                        inputs[templates[0]] = _Owner(module + '.' + owner)
+                    for name, arg in parameters.items():
+                        if name in inputs:
+                            continue
+                        if name not in templates:
+                            if (ast.dump(arg.annotation) if arg.annotation is not None else None) != (
+                                    ast.dump(implementation[name].annotation)
+                                    if implementation[name].annotation is not None else None):
+                                raise ValueError(prefix + ' must preserve non-template parameter types: ' + name)
+                            continue
+                        fact = annotation_fact(arg.annotation, entry._primal.func,
+                                               module + '.' + definition['name'], original.name, name)
+                        if not isinstance(fact, (_Owner, _Choice, _FieldABI)):
+                            raise ValueError(prefix + ' requires a declared owner or fixed array type: ' + name)
+                        inputs[name] = fact
+                    for context in _choice_contexts(inputs):
+                        record(entry, context, declaration, module)
+
         while pending:
             function, arguments, chain, call_site = pending.popleft()
             identity = (function, tuple(sorted(arguments.items())))
@@ -1495,78 +1629,6 @@ def discover(sources, imported, *, preparation_receivers=None, resource_inventor
                             if isinstance(fact, _Resource):
                                 inventory_input(fact)
 
-                def record(callee, inputs, call):
-                    call_site = getattr(call, '_package_call_site', id(call))
-                    if resource_inventory is not None:
-                        if any(inputs.get(name) is None for name in kernels[callee][2]):
-                            missing = ', '.join(name for name in kernels[callee][2] if inputs.get(name) is None)
-                            failures.append(f"{module}:{call.lineno}: write inventory Kernel {callee.__qualname__} "
-                                            f"has unproven template inputs: {missing}")
-                            return
-                        pending.append((callee, inputs, (*chain, callee), call_site))
-                        return
-                    origin, definition, parameters = kernels[callee]
-                    missing = [key for key in parameters if _has_unbound_input(inputs.get(key))]
-                    if missing:
-                        known = tuple((key, inputs[key].identity) for key in parameters
-                                      if isinstance(inputs.get(key), _Owner))
-                        deferred_inputs[(callee, call_site, known)] = (
-                            f"{module}:{call.lineno}: free Kernel {origin}.{definition['name']} "
-                            f"has an unproven template input: {', '.join(missing)}")
-                        return
-                    receivers = [key for key in parameters if isinstance(inputs.get(key), _Owner)]
-                    if not receivers:
-                        failures.append(
-                            f"{module}:{call.lineno}: free Kernel {origin}.{definition['name']} "
-                            "requires a definition-proven owner receiver"
-                        )
-                        invalid.add(callee)
-                        return
-                    receiver = receivers[0]
-                    owner = inputs[receiver]
-                    try:
-                        values, resources, field_inputs = [], [], []
-                        for key in parameters:
-                            if key in receivers:
-                                continue
-                            item = inputs.get(key)
-                            if isinstance(item, _FieldABI):
-                                field_inputs.append((key, None, item))
-                            elif isinstance(item, _Resource):
-                                if item.optional:
-                                    raise ValueError("Optional Field forwarding requires its declared presence binding")
-                                path = (*item.owner.path, *item.path)
-                                sources = [
-                                    name for name in receivers
-                                    if (item.owner.root or item.owner.identity)
-                                    == (inputs[name].root or inputs[name].identity)
-                                    and path[:len(inputs[name].path)] == inputs[name].path
-                                ]
-                                if not sources:
-                                    field_inputs.append((key, item.owner.identity, item.path))
-                                    continue
-                                source = max(sources, key=lambda name: len(inputs[name].path))
-                                relative = path[len(inputs[source].path):]
-                                resources.append((key, source, relative))
-                            else:
-                                values.append((key, _literal_key(item)))
-                        owner_inputs = (tuple((key, inputs[key].identity) for key in receivers)
-                                        if len(receivers) > 1 or field_inputs else ())
-                        resources = [(key, ("_arg_" + source, *relative) if owner_inputs else relative)
-                                     for key, source, relative in resources]
-                    except ValueError as error:
-                        failures.append(
-                            f"{module}:{call.lineno}: free Kernel {origin}.{definition['name']} "
-                            f"has an unproven template input {key!r}: {error}"
-                        )
-                        invalid.add(callee)
-                        return
-                    domains.setdefault(callee, set()).add(
-                        (owner.identity, receiver, tuple(values), tuple(resources), owner_inputs, tuple(field_inputs)))
-                    complete_inputs.setdefault((callee, call_site), set()).add(
-                        tuple((key, inputs[key].identity) for key in receivers))
-                    covered.add(call_site)
-
                 def forward_call(callee, receiver, call, selected_values=None):
                     if resource_inventory is not None and receiver is None and callee not in kernels:
                         if scope_factory(callee, call) is not None:
@@ -1611,7 +1673,7 @@ def discover(sources, imported, *, preparation_receivers=None, resource_inventor
                         return
                     if callee in kernels:
                         for context in _choice_contexts(bound.arguments):
-                            record(callee, context, call)
+                            record(callee, context, call, module, chain)
                     elif any(item is not None for item in bound.arguments.values()):
                         for name, parameter in signature.parameters.items():
                             if name not in bound.arguments and parameter.default is not inspect.Parameter.empty:
@@ -1669,7 +1731,7 @@ def discover(sources, imported, *, preparation_receivers=None, resource_inventor
                                     mapping = {}
                                 else:
                                     mapping[receiver] = kernel.receiver
-                            record(kernel.function, mapping if set(mapping) == set(parameters) else {}, call)
+                            record(kernel.function, mapping if set(mapping) == set(parameters) else {}, call, module, chain)
                         continue
                     callee, receiver = target(call.func)
                     if callee not in kernels and callee not in functions:
