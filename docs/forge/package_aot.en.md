@@ -30,6 +30,13 @@ absent inputs, both ranks, live data, Graph calls, source-free consumption and i
 declarations. This does not add conditional owner-type inference or a new derived-
 dimension expression language.
 
+For normal Component capture, a read-only record view does not become another
+ownership path to its provider. A typed view of a Dense Field already owned by the
+same component reuses that allocation's layout and initialization path; the declared
+view dimensions remain checked relations. True duplicate owning paths and retargeted
+bindings still reject. Independent typed inputs continue to use the definition-
+package ABI; this does not extend normal Component capture to arbitrary external storage.
+
 Format 89 extends typed external borrows to scalar element-type choices such as
 `dtype=ti.i32 if self.categorical else ti.f32`. The condition must be an
 unconditional boolean static declaration, not `kernel_only`. The selected type

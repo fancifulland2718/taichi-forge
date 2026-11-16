@@ -112,6 +112,67 @@ def test_unused_reference_does_not_pollute_kernel_identity_or_allow_ambiguous_ow
 
 
 @ti.data_oriented
+class _TypedView:
+    def __init__(self, source):
+        self.n = source.n
+        scope = ti.experimental.ResourceScope(self)
+        scope.dim("n")
+        view = scope.record("storage", source)
+        view.derived_dim("n", view.parent_dim("n"))
+        view.borrow("data", source.data, external=True, dtype=ti.i32, shape=view.dim("n"))
+
+    @ti.kernel
+    def step(self):
+        for i in range(self.n):
+            self.storage.data[i] += 3
+
+
+@ti.data_oriented
+class _TypedViewRoot:
+    def __init__(self, n):
+        scope = ti.experimental.ResourceScope(self)
+        scope.source = _Motion(n)
+        scope.view = _TypedView(self.source)
+
+    def record(self, builder):
+        builder.dispatch(self.source.stage.step)
+        builder.dispatch(self.view.step)
+
+
+@test_utils.test(arch=[ti.cpu, ti.cuda], offline_cache=False)
+def test_typed_record_view_preserves_unique_owner_and_visible_allocation(tmp_path):
+    root, other = _TypedViewRoot(3), _TypedViewRoot(7)
+    env = ti.aot.Component.from_owner(root)
+    code = env.compile(root.view.step, owner=root)
+    code.run(env, root)
+    np.testing.assert_array_equal(root.source.data.to_numpy(), np.full(3, 3))
+    root.view.storage = other.source
+    with pytest.raises((ValueError, ti.TaichiCompilationError), match="bindings|alias|resource|layout"):
+        code.run(env, root)
+    root.view.storage = root.source
+    root.view.n = 2
+    with pytest.raises((ValueError, ti.TaichiCompilationError), match="constraint|[Dd]imension|derived"):
+        env.compile(root.view.step, owner=root)
+    root.view.n = 3
+    graph = env.compile_graph(root.record)
+    assert len(graph.contract["groups"]) == 1
+    module = ti.aot.Module()
+    graph.export(module, "view")
+    artifact = tmp_path / "view.tcm"
+    module.archive(str(artifact))
+    arch = ti.cfg.arch.name
+    ti.reset()
+    with Runtime(arch) as runtime, runtime.load_module(artifact) as module:
+        component = module.component("view")
+        dimensions = {name: 37 for name in component.input_sources()["dimensions"]}
+        with component.instantiate(dimensions) as instance:
+            with instance.prepare() as call:
+                call.run()
+            actual = instance.resource(component.resource_name(["source", "data"])).read()
+            np.testing.assert_array_equal(np.frombuffer(actual, np.int32), np.full(37, 4))
+
+
+@ti.data_oriented
 class _OptionalMotion(_Motion):
     def __init__(self, n, linked=False):
         super().__init__(n)

@@ -1005,6 +1005,7 @@ class Component:
         "_dense_members",
         "_sources",
         "_paths",
+        "_normal_owner_paths",
         "_borrowed_reads",
         "_source_scope_paths",
         "_derived_attributes",
@@ -1068,6 +1069,7 @@ class Component:
         add(declarations)
         self._set_declarations(flattened)
         self._paths = MappingProxyType(paths)
+        self._normal_owner_paths = None
         self._sources = MappingProxyType({})
         self._borrowed_reads = MappingProxyType({})
         self._source_scope_paths = MappingProxyType({})
@@ -1156,7 +1158,7 @@ class Component:
         inherited_dimensions, record_options, constraints, owner_sequences = {}, {}, {}, {}
         derived_attributes = set()
         namespaces, record_shapes, record_extents, array_declarations = {}, {}, {}, {}
-        declared_owners, owner_references, referenced_dimensions = [], [], []
+        declared_owners, owner_references, referenced_dimensions, typed_inputs = [], [], [], []
 
         def root_of(field, name):
             nodes = tuple(member.ptr.snode() for member in field._get_field_members())
@@ -1170,8 +1172,10 @@ class Component:
                 raise TaichiCompilationError("Normal resource records must form a bounded acyclic declaration tree")
             if registry is None:
                 registry = _member(current, "_forge_resource_declarations")
-            if current is not None:
-                declared_owners.append((current, prefix))
+                if current is not None:
+                    # A record describes selected members without acquiring the
+                    # provider's allocation namespace or a second owning path.
+                    declared_owners.append((current, prefix))
             namespaces[id(registry)] = prefix
 
             def qualify(expression):
@@ -1233,6 +1237,9 @@ class Component:
                 root_id = root_of(field, name)
                 borrowed.append((path, field, declaration, root_id))
                 roots.setdefault(root_id, set()).add("borrow:" + ".".join((*prefix, declaration["group"])))
+            for name, declaration in registry.get("typed_inputs", {}).items():
+                typed_inputs.append(((*prefix, name), _member(current, name),
+                                     tuple(qualify(axis) for axis in declaration["shape"])))
             for name, source in registry.get("records", {}).items():
                 sources[_capture_id((*prefix, name))] = source
                 record_options[_capture_id((*prefix, name))] = registry.get("record_options", {}).get(name, False)
@@ -1409,6 +1416,7 @@ class Component:
             return result
 
         result = cls(**complete(declarations, values))
+        result._normal_owner_paths = frozenset(path for _, path in declared_owners)
         flattened = dict(result.declarations)
         flattened.update(record_extents)
         flattened.update(array_declarations)
@@ -1421,6 +1429,37 @@ class Component:
         result._set_declarations(flattened)
         visible_fields = [(field, _capture_id((*prefix, name))) for _, prefix, name, field, _, _ in fields]
         result._project_borrowed(borrowed, roots, sources, visible_dimensions, constraints, visible_fields, namespaces)
+        # A typed view may describe storage already owned by this component.
+        # Reuse that exact allocation and its initialization path. Independent
+        # caller storage still uses the definition-package external-input ABI.
+        if typed_inputs:
+            flattened, paths = dict(result.declarations), dict(result._paths)
+            aliases = dict(result._source_scope_paths)
+            visible_names = {}
+            for field, name in visible_fields:
+                visible_names.setdefault(id(field), name)
+            for path, field, expected_shape in typed_inputs:
+                source_name = visible_names.get(id(field))
+                if source_name is None:
+                    continue  # An unused input is harmless; capture still rejects an undeclared use.
+                source = flattened[source_name]
+                if not isinstance(source, DenseField):
+                    continue
+                name = _capture_id(path)
+                if len(source.shape) != len(expected_shape):
+                    raise TaichiCompilationError(f"Typed view {'.'.join(path)!r} differs from its owned storage rank")
+                _source_scope_alias(flattened, paths, aliases, name, path, source_name)
+                for axis, (actual, expected) in enumerate(zip(source.shape, expected_shape)):
+                    actual = ("dim", actual) if isinstance(actual, str) else ("const", actual)
+                    if actual == expected:
+                        continue
+                    for side, left, right in (("source", actual, expected), ("view", expected, actual)):
+                        key = "typed_view_" + _digest((path, axis, side))
+                        constraints[key] = dict(spec=dict(left=left, right=right, when=name),
+                                                source=sources.get(source_name))
+            result._set_declarations(flattened)
+            result._paths = MappingProxyType(paths)
+            result._source_scope_paths = MappingProxyType(aliases)
         result._sources = MappingProxyType(sources)
         result._derived_attributes = frozenset(derived_attributes)
         result._constraints = MappingProxyType(constraints)
@@ -1638,6 +1677,8 @@ class Component:
             return ()
         paths = [self._paths[name] for name, declaration in self.declarations.items()
                  if isinstance(declaration, Record) and self.available(owner, name)
+                 and (self._normal_owner_paths is None
+                      or self._paths[name] in self._normal_owner_paths)
                  and self.read(owner, name) is entry_owner]
         if len(paths) != 1:
             raise TaichiCompilationError(
