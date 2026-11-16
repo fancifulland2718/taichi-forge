@@ -1806,6 +1806,7 @@ class Component:
 
     def _template_argument(self, owner, entry_owner, entry_path, value, slot, argument, resources):
         from taichi_forge.lang.field import Field
+        from taichi_forge.lang._ndarray import Ndarray
         from taichi_forge.lang.snode import SNode
 
         if value is entry_owner:
@@ -1816,7 +1817,7 @@ class Component:
             # attribute lowering collects actual resource/static dependencies.
             return _RecordReference(()), ("root_owner", None)
         record = self._template_record(owner, value)
-        if isinstance(value, (Field, SNode)):
+        if isinstance(value, (Field, SNode, Ndarray)):
             if isinstance(value, SNode):
                 name, depth = self._template_snode(owner, value, argument)
             else:
@@ -1853,7 +1854,7 @@ class Component:
         # Identity is used to associate this call with a declared binding; no
         # Python object identity is retained in the code key or artifact.
         for name, declaration in sorted(self.declarations.items()):
-            if not isinstance(declaration, (DenseField, FixedSNodeField)):
+            if not isinstance(declaration, (DenseField, FixedSNodeField, Array)):
                 continue
             if name != _capture_id(self._paths[name]):
                 # Borrow projection includes layout-only siblings. They are

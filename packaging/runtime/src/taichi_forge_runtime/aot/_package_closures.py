@@ -142,6 +142,7 @@ class _FunctionEntry:
 
     def __init__(self, package, identity):
         from ._package import entry, _entry_contract
+        from ._runtime import _DTYPES
 
         self.package = package
         spec = package.manifest.get("function_entries", {}).get(identity)
@@ -178,7 +179,7 @@ class _FunctionEntry:
             for case in cases:
                 if (
                     not isinstance(case, dict)
-                    or set(case) not in ({"symbol", "values"}, {"symbol", "values", "resources"},
+                    or set(case) - {"fields"} not in ({"symbol", "values"}, {"symbol", "values", "resources"},
                                         {"symbol", "values", "inputs", "context"},
                                         {"symbol", "values", "resources", "inputs", "context"})
                     or not isinstance(case["symbol"], str)
@@ -188,20 +189,42 @@ class _FunctionEntry:
                     raise ValueError("Free Kernel has an invalid template input case")
                 inputs = case.get("inputs", {})
                 context = case.get("context", owner)
+                fields = case.get("fields", {})
+                if "fields" in case:
+                    if (package.manifest["version"] < 92 or "inputs" not in case
+                            or not isinstance(fields, dict) or not fields
+                            or not fields.keys() <= set(self.static_parameters)
+                            or any(not isinstance(spec, dict) or set(spec) != {"element", "ndim"}
+                                   or type(spec["ndim"]) is not int or spec["ndim"] < 0
+                                   or not isinstance(spec["element"], dict)
+                                   or spec["element"].get("kind") not in ("scalar", "tensor")
+                                   or not isinstance(spec["element"].get("dtype"), str)
+                                   or spec["element"]["dtype"] not in _DTYPES
+                                   or not isinstance(spec["element"].get("element_shape", []), list)
+                                   or any(type(axis) is not int or axis <= 0
+                                          for axis in spec["element"].get("element_shape", []))
+                                   or (len(spec["element"].get("element_shape", [])) not in (1, 2)
+                                       if spec["element"]["kind"] == "tensor"
+                                       else bool(spec["element"].get("element_shape")))
+                                   for spec in fields.values())):
+                        raise ValueError("Free Kernel has an invalid independent Field input")
                 if "inputs" in case:
                     if (package.manifest["version"] < 91 or not isinstance(inputs, dict)
-                            or len(inputs) < 2 or inputs.get(receiver) != owner
+                            or len(inputs) < (1 if fields else 2) or inputs.get(receiver) != owner
                             or not inputs.keys() <= set(templates)
                             or not isinstance(context, str)
                             or any(not isinstance(kind, str) or kind not in package.manifest["owners"]
                                    for kind in inputs.values())
                             or package.manifest["owners"].get(context) != {
-                                "_arg_" + key: dict(kind="owner_input", owner_type=value) for key, value in inputs.items()}):
+                                **{"_arg_" + key: dict(kind="owner_input", owner_type=value)
+                                   for key, value in inputs.items()},
+                                **{"_arg_" + key: dict(kind="ndarray", **value) for key, value in fields.items()}}):
                         raise ValueError("Free Kernel has an invalid independent input context")
                 resources = case.get("resources", {})
                 if (set(resources) & case["values"].keys()
-                        or (set(resources) | case["values"].keys()) & inputs.keys()
-                        or set(resources) | case["values"].keys() | (inputs.keys() - {receiver})
+                        or (set(resources) | case["values"].keys()) & (inputs.keys() | fields.keys())
+                        or inputs.keys() & fields.keys()
+                        or set(resources) | case["values"].keys() | fields.keys() | (inputs.keys() - {receiver})
                         != set(self.static_parameters)):
                     raise ValueError("Free Kernel has an invalid template input case")
                 if (
@@ -220,6 +243,8 @@ class _FunctionEntry:
                 values = {name: static_key(read_static_key(value)) for name, value in case["values"].items()}
                 key = tuple(
                     ("owner", inputs[name]) if name in inputs else
+                    ("field", fields[name]["element"]["kind"], fields[name]["element"]["dtype"],
+                     fields[name]["ndim"], tuple(fields[name]["element"].get("element_shape", ()))) if name in fields else
                     ("path", tuple(resources[name])) if name in resources else ("static", values[name])
                     for name in self.static_parameters
                 )
@@ -239,7 +264,7 @@ class _FunctionEntry:
                             _entry_contract(package.manifest, variant["symbol"]) for variant in bound.family["variants"]
                         ]
                     )
-                    template_paths = {**resources, **{name: ["_arg_" + name] for name in inputs}}
+                    template_paths = {**resources, **{name: ["_arg_" + name] for name in (*inputs, *fields)}}
                     for contract in contracts:
                         if any(
                             template_paths.get(name) != path
@@ -247,7 +272,7 @@ class _FunctionEntry:
                         ):
                             raise ValueError("Template resource paths differ from the compiled resource ABI")
                     if inputs:
-                        input_choices.append((values, resources, inputs, context, bound))
+                        input_choices.append((values, resources, inputs, fields, context, bound))
                     else:
                         resource_choices.append((values, resources, bound))
                 else:
@@ -279,18 +304,19 @@ class _FunctionEntry:
                 valid = False
             if valid:
                 matches.append((candidate, owner))
-        for values, paths, types, context, candidate in self._input_entries[identity]:
+        for values, paths, types, fields, context, candidate in self._input_entries[identity]:
             try:
                 valid = (all(static_key(inputs[name]) == value for name, value in values.items())
                          and all(owner_type(inputs[name]) == kind
                                  and getattr(inputs[name], "_forge_package_owner", None) is self.package
                                  for name, kind in types.items())
                          and all(path_value(inputs[path[0].removeprefix("_arg_")], path[1:]) is inputs[name]
-                                 for name, path in paths.items()))
+                                 for name, path in paths.items())
+                         and all(self._field_matches(inputs[name], spec) for name, spec in fields.items()))
             except (AttributeError, ValueError, KeyError):
                 valid = False
             if valid:
-                matches.append((candidate, (context, types)))
+                matches.append((candidate, (context, (*types, *fields))))
         if len({(candidate.symbol, None if context is owner else context[0])
                 for candidate, context in matches}) != 1:
             raise ValueError("Free Kernel template inputs are outside their definition-proven domain")
@@ -320,6 +346,15 @@ class _FunctionEntry:
                                        _forge_package_calls=cache)
                 contexts[self] = view
             return candidate.__get__(view)
+
+    def _field_matches(self, value, spec):
+        from ._runtime import NdArray
+
+        value = self.package.runtime._adapt_package_array(value)
+        element = spec["element"]
+        return (isinstance(value, NdArray) and value.dtype == element["dtype"]
+                and len(value.shape) == spec["ndim"]
+                and value.element_shape == tuple(element.get("element_shape", ())))
 
     def __call__(self, *args, **kwargs):
         bound = self.signature.bind(*args, **kwargs)

@@ -24551,6 +24551,122 @@ def test_package_independent_owner_inputs_keep_static_selection(tmp_path, monkey
         np.testing.assert_array_equal(a.values.to_numpy(), np.full(11, 14))
 
 
+@pytest.mark.parametrize('vector', [False, True])
+@test_utils.test(arch=[ti.cpu, ti.cuda], offline_cache=False)
+def test_package_independent_field_template_uses_live_shape_and_storage(tmp_path, monkeypatch, vector):
+    source = INDEPENDENT_OWNER_INPUTS_SOURCE.replace(
+        "def update(self, source: 'Model', gain):", "def update(self, source: 'Model', other: 'Model', gain):"
+    ).replace('combine(self, source, source.values, gain)', 'combine(self, source, other.values, gain)')
+    source = source.replace("def graph(self, source: 'Model'):", "def graph(self, source: 'Model', other: 'Model'):")
+    source = source.replace("'field': source.values", "'field': other.values")
+    source = source.replace('field[0]', 'field[i % field.shape[0]]')
+    source += '''
+    @ti.kernel
+    def copy_into(self, values: ti.template()):
+        for i in self.values:
+            self.values[i] = values[i % values.shape[0]]
+    def copy_from(self, other: 'Model'):
+        self.copy_into(other.values)
+    @ti.kernel
+    def write_into(self, target: ti.template()):
+        for i in target:
+            target[i] = self.values[i % self.n]
+    def publish(self, other: 'Model'):
+        self.write_into(other.values)
+'''
+    if vector:
+        source = source.replace('scope.field(ti.f32,', 'scope.field(ti.types.vector(3, ti.f32),')
+
+    def data(values):
+        values = np.asarray(values, dtype=np.float32)
+        return np.repeat(values[:, None], 3, axis=1) if vector else values
+
+    package = _source_package(tmp_path, monkeypatch, source)
+    manifest = ti.aot.export_package(package, tmp_path / 'sdk')
+    assert manifest['version'] == 92
+    ref, b, c = package.Model(7), package.Model(3), package.Model(5)
+    b.values.from_numpy(data(np.arange(3) + 2))
+    c.values.from_numpy(data(np.arange(5) + 11))
+    ref.update(b, c, 3)
+    expected = ref.values.to_numpy()
+    with Runtime(manifest['target']) as runtime, load_package(runtime, tmp_path / 'sdk') as code:
+        a, b, c = code.host.Model(7), code.host.Model(3), code.host.Model(5)
+        b.values.from_numpy(data(np.arange(3) + 2))
+        c.values.from_numpy(data(np.arange(5) + 11))
+        a.update(b, c, 3)
+        np.testing.assert_array_equal(a.values.to_numpy(), expected)
+        view = next(iter(a._forge_package_function_contexts.values()))
+        first = next(iter(view._forge_package_calls.values()))
+        a.update(b, c, 3)
+        assert next(iter(view._forge_package_calls.values())) is first
+        prepared = a.graph(b, c).bind(dict(gain=2))
+        a.update(b, b, 1)
+        c.values.from_numpy(data(np.full(5, 17)))
+        prepared.run()
+        np.testing.assert_array_equal(a.values.to_numpy(), data(2 * (np.arange(7) % 3 + 2) + 17))
+        prepared.close()
+        a.copy_from(c)
+        np.testing.assert_array_equal(a.values.to_numpy(), data(np.full(7, 17)))
+        extra = runtime.ndarray('f32', (4,), element_shape=(3,) if vector else ())
+        extra.from_numpy(data(np.arange(4) + 30))
+        code.host.model.combine(a, b, extra, 2)
+        np.testing.assert_array_equal(a.values.to_numpy(), data(2 * (np.arange(7) % 3 + 2) + np.arange(7) % 4 + 30))
+        a.publish(c)
+        np.testing.assert_array_equal(c.values.to_numpy(), a.values.to_numpy()[:5])
+        wrong = runtime.ndarray('i32', (5,))
+        with pytest.raises(ValueError, match='template inputs'):
+            code.host.model.combine(a, b, wrong, 1)
+        wrong.close()
+    probe = tmp_path / 'independent_field_consume.py'
+    probe.write_text('''
+import importlib.abc, sys
+import numpy as np
+from taichi_forge_runtime.aot import Runtime, load_package
+class RejectSource(importlib.abc.MetaPathFinder):
+    def find_spec(self, fullname, path=None, target=None):
+        if fullname.split('.')[0] in ('taichi', 'taichi_forge', 'definition_fixture'):
+            raise ImportError(fullname)
+sys.meta_path.insert(0, RejectSource())
+def data(n, value):
+    return np.full((n, 3) if sys.argv[3] == 'True' else (n,), value, dtype=np.float32)
+with Runtime(sys.argv[2]) as runtime, load_package(runtime, sys.argv[1]) as code:
+    a, b, c = code.host.Model(19), code.host.Model(2), code.host.Model(7)
+    b.values.from_numpy(data(2, 3))
+    c.values.from_numpy(data(7, 5))
+    a.update(b, c, 2)
+    np.testing.assert_array_equal(a.values.to_numpy(), data(19, 11))
+    with a.graph(b, c).bind(dict(gain=4)) as call:
+        c.values.from_numpy(data(7, 9))
+        call.run()
+        np.testing.assert_array_equal(a.values.to_numpy(), data(19, 21))
+    a.publish(c)
+    np.testing.assert_array_equal(c.values.to_numpy(), data(7, 21))
+print('INDEPENDENT_FIELD_SOURCE_FREE_OK')
+''', encoding='utf8')
+    result = subprocess.run(
+        [sys.executable, '-B', str(probe), str(tmp_path / 'sdk'), manifest['target'], str(vector)], cwd=tmp_path,
+        env=dict(os.environ, PYTHONPATH=str(Path(__file__).parents[2] / 'packaging/runtime/src'),
+                 TAICHI_NATIVE_RUNTIME_DIR=str(Path(utils._loaded_native_runtime_path).parent),
+                 TAICHI_RUNTIME_DIR=utils._runtime_bitcode_dir()),
+        capture_output=True, text=True, timeout=90)
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert 'INDEPENDENT_FIELD_SOURCE_FREE_OK' in result.stdout
+    if not vector and manifest['target'] == 'x64':
+        for change in ('version', 'rank', 'element'):
+            malformed = json.loads(json.dumps(manifest))
+            case = next(iter(malformed['function_entries']['definition_fixture.model.combine']['owners'].values()))[0]
+            if change == 'version':
+                malformed['version'] = 91
+            elif change == 'rank':
+                case['fields']['field']['ndim'] = -1
+            else:
+                case['fields']['field']['element']['element_shape'] = [2]
+            (tmp_path / 'sdk/package.json').write_text(json.dumps(malformed), encoding='utf8')
+            with Runtime(manifest['target']) as runtime:
+                with pytest.raises(ValueError, match='independent Field'):
+                    load_package(runtime, tmp_path / 'sdk')
+
+
 @pytest.mark.parametrize('change', ['version', 'type', 'context', 'path'])
 @test_utils.test(arch=ti.cpu, offline_cache=False)
 def test_package_independent_owner_inputs_reject_malformed_contract(tmp_path, monkeypatch, change):
@@ -25403,7 +25519,9 @@ class Model:
 """
     package = _source_package(tmp_path, monkeypatch, source)
     if change in ("unknown", "foreign_path"):
-        with pytest.raises(ti.aot.PackageExportError, match="unproven template input"):
+        # The foreign-path fixture also retains an uncalled, untyped forwarder;
+        # accepting a declared field port does not prove that separate call.
+        with pytest.raises(ti.aot.PackageExportError, match="unproven template input|no proven receiver context"):
             ti.aot.export_package(package, tmp_path / "sdk")
         assert not (tmp_path / "sdk").exists()
         return

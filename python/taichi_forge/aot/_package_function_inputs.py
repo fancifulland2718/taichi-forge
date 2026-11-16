@@ -1444,8 +1444,7 @@ def discover(sources, imported, *, preparation_receivers=None, resource_inventor
                     receiver = receivers[0]
                     owner = inputs[receiver]
                     try:
-                        values, resources = [], []
-                        owner_inputs = tuple((key, inputs[key].identity) for key in receivers) if len(receivers) > 1 else ()
+                        values, resources, field_inputs = [], [], []
                         for key in parameters:
                             if key in receivers:
                                 continue
@@ -1461,12 +1460,17 @@ def discover(sources, imported, *, preparation_receivers=None, resource_inventor
                                     and path[:len(inputs[name].path)] == inputs[name].path
                                 ]
                                 if not sources:
-                                    raise ValueError("Resource is outside its template receiver")
+                                    field_inputs.append((key, item.owner.identity, item.path))
+                                    continue
                                 source = max(sources, key=lambda name: len(inputs[name].path))
                                 relative = path[len(inputs[source].path):]
-                                resources.append((key, ("_arg_" + source, *relative) if owner_inputs else relative))
+                                resources.append((key, source, relative))
                             else:
                                 values.append((key, _literal_key(item)))
+                        owner_inputs = (tuple((key, inputs[key].identity) for key in receivers)
+                                        if len(receivers) > 1 or field_inputs else ())
+                        resources = [(key, ("_arg_" + source, *relative) if owner_inputs else relative)
+                                     for key, source, relative in resources]
                     except ValueError as error:
                         failures.append(
                             f"{module}:{call.lineno}: free Kernel {origin}.{definition['name']} "
@@ -1475,7 +1479,7 @@ def discover(sources, imported, *, preparation_receivers=None, resource_inventor
                         invalid.add(callee)
                         return
                     domains.setdefault(callee, set()).add(
-                        (owner.identity, receiver, tuple(values), tuple(resources), owner_inputs))
+                        (owner.identity, receiver, tuple(values), tuple(resources), owner_inputs, tuple(field_inputs)))
                     covered.add(id(call))
 
                 def forward_call(callee, receiver, call, selected_values=None):
@@ -1720,7 +1724,7 @@ def discover(sources, imported, *, preparation_receivers=None, resource_inventor
             if kernel in invalid:
                 continue
             module, definition, parameters = kernels[kernel]
-            receivers = {receiver for _, receiver, _, _, _ in identities}
+            receivers = {receiver for _, receiver, _, _, _, _ in identities}
             if len(receivers) != 1:
                 failures.append(f"{module}.{definition['name']}: template receiver position changes between definitions")
                 continue
@@ -1730,7 +1734,7 @@ def discover(sources, imported, *, preparation_receivers=None, resource_inventor
                 item["free_template"] = receiver
                 item["function_templates"] = parameters
                 item["function_identity"] = public_identity
-            for identity, _, values, resources, owner_inputs in sorted(identities, key=repr):
+            for identity, _, values, resources, owner_inputs, field_inputs in sorted(identities, key=repr):
                 result.setdefault(identity, []).append(
                     dict(
                         kernel=kernel,
@@ -1739,6 +1743,7 @@ def discover(sources, imported, *, preparation_receivers=None, resource_inventor
                         templates=dict(values),
                         resources=dict(resources),
                         owner_inputs=dict(owner_inputs),
+                        field_inputs={key: dict(owner_type=kind, path=path) for key, kind, path in field_inputs},
                         node=definition["node"],
                     )
                 )

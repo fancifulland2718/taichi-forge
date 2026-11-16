@@ -1872,30 +1872,39 @@ def _export_package(package, output, *, arch, caps, source_root, compilation, ar
                     )
             else:
                 compiled_definitions.append(definition)
+        function_definitions = set()
         for class_name in schemas:
             for call in function_inputs.get(name + "." + class_name, ()):
                 call_owner = class_name
+                try:
+                    input_fields = {
+                        key: owner_graph.input_field_type(value["owner_type"], value["path"])
+                        for key, value in call["field_inputs"].items()
+                    }
+                except ValueError as error:
+                    _fail(name, call["node"], str(error))
                 if call["owner_inputs"]:
                     call_owner = "__call_" + hashlib.sha256(
-                        json.dumps(call["owner_inputs"], sort_keys=True).encode()).hexdigest()
-                    owner_graph.register_call_context(name + "." + call_owner, call["owner_inputs"])
+                        json.dumps([call["owner_inputs"], input_fields], sort_keys=True).encode()).hexdigest()
+                    owner_graph.register_call_context(name + "." + call_owner, call["owner_inputs"], input_fields)
                     manifest["owners"][name + "." + call_owner] = {
-                        "_arg_" + key: dict(kind="owner_input", owner_type=value)
-                        for key, value in call["owner_inputs"].items()
+                        **{"_arg_" + key: dict(kind="owner_input", owner_type=value)
+                           for key, value in call["owner_inputs"].items()},
+                        **{"_arg_" + key: dict(kind="ndarray", **value) for key, value in input_fields.items()},
                     }
-                    manifest["version"] = max(91, manifest["version"])
+                    manifest["version"] = max(92 if input_fields else 91, manifest["version"])
+                function_name = call_owner + ".__function_" + hashlib.sha256(
+                    json.dumps([call["definition"], call["templates"], call["resources"]], sort_keys=True).encode()
+                ).hexdigest()
+                if function_name in function_definitions:
+                    continue  # Equal typed ports do not compile once per upstream owner path.
+                function_definitions.add(function_name)
                 compiled_definitions.append(
                     dict(
                         owner=call_owner,
                         node=call["node"],
                         kind="kernel",
-                        name=call_owner
-                        + ".__function_"
-                        + hashlib.sha256(
-                            json.dumps(
-                                [call["definition"], call["templates"], call["resources"]], sort_keys=True
-                            ).encode()
-                        ).hexdigest(),
+                        name=function_name,
                         function_kernel=call["kernel"],
                         function_identity=call["definition"],
                         function_receiver=call["receiver"],
@@ -1903,6 +1912,7 @@ def _export_package(package, output, *, arch, caps, source_root, compilation, ar
                         function_resources=call["resources"],
                         function_owner_inputs=call["owner_inputs"],
                         function_owner_type=name + "." + class_name,
+                        function_field_inputs=input_fields,
                     )
                 )
         numerical_owners = {
@@ -2243,6 +2253,7 @@ def _export_package(package, output, *, arch, caps, source_root, compilation, ar
                         *definition["function_templates"],
                         *definition["function_resources"],
                         *definition["function_owner_inputs"],
+                        *definition["function_field_inputs"],
                     }
                 ]
                 if "function_kernel" in definition
@@ -2303,6 +2314,7 @@ def _export_package(package, output, *, arch, caps, source_root, compilation, ar
                 return {
                     **({key: getattr(receiver, "_arg_" + key) for key in definition["function_owner_inputs"]}
                        if definition["function_owner_inputs"] else {definition["function_receiver"]: receiver}),
+                    **{key: getattr(receiver, "_arg_" + key) for key in definition["function_field_inputs"]},
                     **{key: read_static_key(value) for key, value in definition["function_templates"].items()},
                     **{key: reduce(getattr, path, receiver) for key, path in definition["function_resources"].items()},
                 }
@@ -2732,6 +2744,7 @@ def _export_package(package, output, *, arch, caps, source_root, compilation, ar
                                 *definition["function_templates"],
                                 *definition["function_resources"],
                                 *definition["function_owner_inputs"],
+                                *definition["function_field_inputs"],
                             }
                         ],
                         owners={},
@@ -2743,6 +2756,8 @@ def _export_package(package, output, *, arch, caps, source_root, compilation, ar
                     case["resources"] = definition["function_resources"]
                 if definition["function_owner_inputs"]:
                     case.update(inputs=definition["function_owner_inputs"], context=name + "." + owner_name)
+                if definition["function_field_inputs"]:
+                    case["fields"] = definition["function_field_inputs"]
                 cases = descriptor["owners"].setdefault(definition["function_owner_type"], [])
                 if case not in cases:
                     cases.append(case)

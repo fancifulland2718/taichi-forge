@@ -42,6 +42,7 @@ class OwnerGraph:
         self._allocation_schemas = {}
         self._field_witnesses = {}
         self._call_contexts = set()
+        self._input_field_types = {}
         self.definitions = {
             name + "." + owner: (name, source_class(tree, owner), copy.deepcopy(schema))
             for name, _, _, _, tree, _, schemas, _ in sources
@@ -50,9 +51,31 @@ class OwnerGraph:
         for identity in self.definitions:
             self._validate(identity, ())
 
-    def register_call_context(self, identity, inputs):
+    def input_field_type(self, identity, path):
+        """Use the declared field ABI without constructing a consumer owner."""
+        key = identity, tuple(path)
+        if key in self._input_field_types:
+            return self._input_field_types[key]
+        # Reuse allocation slicing before copying declarations. A depth input
+        # must not construct its provider's unrelated children or buffers merely
+        # to discover a scalar type. The existing witness pool owns the slice.
+        _, _, _, schema = self.construct(identity, resource_only=True, resource_paths=(key[1],))
+        for attribute, item in schema.items():
+            if tuple(item.get("path", (attribute,))) != key[1]:
+                continue
+            if (item["kind"] != "dense_field" or item.get("dtype_policy") or item.get("shape_policy")
+                    or item.get("conditions") or item.get("element", {}).get("kind") not in ("scalar", "tensor")
+                    or item.get("element", {}).get("model_tensor")):
+                raise ValueError("Independent Field template requires an unconditional fixed element type and rank")
+            result = dict(element=item["element"], ndim=len(item["shape"]))
+            self._input_field_types[key] = result
+            return result
+        raise ValueError("Independent Field template has no declared field path")
+
+    def register_call_context(self, identity, inputs, fields):
         """Compose declared input views without an application owner or constructor."""
         schema = {"_arg_" + key: dict(kind="owner_input", owner_type=value) for key, value in inputs.items()}
+        schema.update({"_arg_" + key: dict(kind="ndarray", **value) for key, value in fields.items()})
         if identity in self.definitions:
             if self.definitions[identity][2] != schema:
                 raise ValueError("Call context changed its declared input types")
@@ -398,7 +421,14 @@ class OwnerGraph:
                     from ._package_types import resolve_scalar_dtype_policy
 
                     item["dtype_policy"] = resolve_scalar_dtype_policy(item["dtype_policy"], namespace, self.module)
-                dtype = resolve_type(item.pop("type_node"), namespace)
+                if "type_node" in item:
+                    dtype = resolve_type(item.pop("type_node"), namespace)
+                else:
+                    element = item["element"]
+                    dtype = getattr(ti, element["dtype"])
+                    shape = element.get("element_shape", ())
+                    if shape:
+                        dtype = ti.types.vector(shape[0], dtype) if len(shape) == 1 else ti.types.matrix(*shape, dtype)
                 item["element"] = type_spec(dtype, self.module)
                 if item.get("external") and item["element"]["kind"] not in ("scalar", "tensor"):
                     raise ValueError("Typed external borrow requires scalar/vector/matrix elements")

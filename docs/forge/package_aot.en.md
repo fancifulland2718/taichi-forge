@@ -39,8 +39,18 @@ leases. Rebinding does not rewrite an older Graph snapshot. Ordinary calls keep
 one latest input view per receiver/function and reuse preparation while bindings
 remain stable; field data stays live. Static layout choices and declared fixed
 integer policy remain eligible for ordinary consumer specialization. A separate
-Field template must still belong to one of the supplied owners; arbitrary external
-Field provenance and complete renderer qualification are not implied.
+Field template in format 91 must belong to one of the supplied owners.
+
+Format 92 also accepts an independent Field template whose fixed scalar/tensor
+element type and rank are proven by a Dense declaration. Only the required
+allocation slice is inspected for its ABI; the call uses the existing ndarray
+port and actual consumer shape/storage. Compatible inputs from distinct upstream
+paths share the same typed call context. This preserves field iteration, shape
+queries, live data and Graph snapshots without requiring the provider object as
+an additional argument. The original provider is not copied or allocated by the
+call. Conditional types, model-sized elements, sparse trees and arbitrary unknown
+Field sources remain outside this addition. Local CPU/CUDA evidence does not
+qualify a complete renderer.
 
 For normal Component capture, a read-only record view does not become another
 ownership path to its provider. A typed view of a Dense Field already owned by the
