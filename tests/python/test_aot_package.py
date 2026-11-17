@@ -17605,6 +17605,44 @@ class Model:
             ga.run(dict(gain=4.0))
 
 
+@test_utils.test(arch=ti.cuda, offline_cache=False)
+def test_package_graph_prepares_live_parameters_in_execution_domain(tmp_path, monkeypatch):
+    package = _source_package(tmp_path, monkeypatch, OWNER_GRAPH_SOURCE)
+    reference = package.Model(7, 2.0)
+    reference.graph().run(dict(increment=3, extra=ti.Vector([0.0, 0.0])))
+    expected = reference.values.to_numpy()
+    manifest = ti.aot.export_package(package, tmp_path / "sdk", artifact_format="bc-library")
+    with Runtime(manifest["target"]) as runtime, load_package(runtime, tmp_path / "sdk") as code:
+        first, peer = code.host.Model(7, 2.0), code.host.Model(19, -1.0)
+        graph, other = first.graph(), peer.graph()
+        args = dict(increment=3, extra=(0.0, 0.0))
+        with runtime.execution_domain(capacity=2) as domain:
+            with graph.prepare(args, execution_domain=domain, mutable_parameters=("increment",)) as call, \
+                    other.prepare(args, execution_domain=domain, mutable_parameters=("increment",)) as second:
+                call.initialize()
+                second.initialize()
+                first.gain = 11.0  # Preparation retains the original capture snapshot.
+                for increment in (3, -4, 9):
+                    with second.submit(values=dict(increment=increment)) as ticket:
+                        ticket.wait()
+                    with call.submit(values=dict(increment=increment)) as ticket:
+                        ticket.wait()
+                    np.testing.assert_array_equal(first.values.to_numpy(), expected + 2 * (increment - 3))
+                    np.testing.assert_array_equal(peer.values.to_numpy(), 1 - increment - 2 * np.arange(19))
+                with pytest.raises(ValueError, match="exactly"):
+                    call.submit(values={})
+            with pytest.raises(ValueError, match="explicit Graph arguments"):
+                graph.prepare(args, execution_domain=domain, mutable_parameters=(next(iter(graph.captures)),))
+            with pytest.raises(ValueError, match="scalar"):
+                graph.prepare(args, execution_domain=domain, mutable_parameters=("extra",))
+        with pytest.raises(ValueError, match="independent execution domain"):
+            graph.prepare(args, mutable_parameters=("increment",))
+        # Ordinary immutable binding remains valid after the domain retires.
+        with graph.bind(args) as frozen:
+            frozen.run()
+            np.testing.assert_array_equal(first.values.to_numpy(), 22 * np.arange(7) + 46)
+
+
 @test_utils.test(arch=[ti.cpu, ti.cuda, ti.vulkan], offline_cache=False)
 def test_package_graph_captures_are_instance_snapshots_without_new_code(tmp_path, monkeypatch):
     package = _source_package(tmp_path, monkeypatch, OWNER_GRAPH_SOURCE)

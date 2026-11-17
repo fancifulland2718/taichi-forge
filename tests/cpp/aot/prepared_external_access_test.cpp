@@ -119,6 +119,48 @@ TEST(PreparedExternalAccess,
 
 namespace taichi::lang {
 namespace {
+TEST(PreparedExternalAccess, DefaultCudaRecipeUsesOneCompleteOwnershipEpoch) {
+  if (!cuda::ExecutionDomain::available())
+    GTEST_SKIP();
+  Program program(Arch::cuda);
+  program.materialize_runtime();
+  auto &device = static_cast<cuda::CudaDevice &>(*program.get_compute_device());
+  auto [buffer, status] = device.allocate_memory_unique({sizeof(std::uint32_t)});
+  ASSERT_EQ(status, RhiResult::success);
+  {
+    FixedExecution recipe(
+        Arch::cuda, device, nullptr,
+        {FixedExecution::BufferFill{buffer->get_ptr(), sizeof(std::uint32_t), 12345}},
+        nullptr, program.runtime_fault_domain());
+    auto first = std::make_shared<CountingExternalDomain>(1);
+    auto second = std::make_shared<CountingExternalDomain>(2);
+    recipe.bind_external_access({first, second, first});
+    EXPECT_THROW(recipe.bind_external_access({first}), std::invalid_argument);
+    second->fail_acquire = true;
+    EXPECT_THROW(recipe.run(), std::runtime_error);
+    EXPECT_EQ(first->acquires, 1);
+    EXPECT_EQ(first->releases, 1);
+    EXPECT_EQ(second->acquires, 0);
+    second->fail_acquire = false;
+    for (int i = 0; i < 3; ++i)
+      recipe.run();
+    EXPECT_EQ(first->acquires, 4);
+    EXPECT_EQ(first->releases, 4);
+    EXPECT_EQ(second->acquires, 3);
+    EXPECT_EQ(second->releases, 3);
+    EXPECT_EQ(first->selected.owner_domain, program.runtime_program_generation());
+    EXPECT_EQ(first->selected.stream_identity, 1);
+    EXPECT_EQ(first->selected.native_stream, nullptr);
+    std::uint32_t actual = 0;
+    auto context = CUDAContext::get_instance().get_guard();
+    CUDADriver::get_instance().memcpy_device_to_host(
+        &actual, device.get_memory_addr(*buffer), sizeof(actual));
+    EXPECT_EQ(actual, 12345);
+  }
+  buffer.reset();
+  program.finalize();
+}
+
 TEST(PreparedExternalAccess,
      UnreadyInputRejectsWholeRecipeWithoutDeviceEffects) {
   if (!cuda::ExecutionDomain::available())

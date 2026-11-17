@@ -1509,6 +1509,11 @@ static TiPreparedExecution prepare_execution_plan_impl(
     }
   }
   const auto &plan = family ? family->plan : parsed;
+  // External storage is admitted only by recipes which install a complete
+  // acquire/work/release epoch. Binding-frame families retain their original
+  // exclusion; default CUDA support is checked by FixedExecution before use.
+  const bool prepared_external_access = bool(domain) ||
+      (rt.arch == taichi::Arch::cuda && !family);
   if (parameter_count && (!domain || family))
     throw MemoryBindingError(
         "Submission parameters require an independent execution domain");
@@ -1619,10 +1624,10 @@ static TiPreparedExecution prepare_execution_plan_impl(
   for (const auto &[name, argument] : arguments)
     if (!frozen_metadata.count(name) &&
         argument->type == TI_ARGUMENT_TYPE_NDARRAY)
-      rt.get_memory(argument->value.ndarray.memory, bool(domain));
+      rt.get_memory(argument->value.ndarray.memory, prepared_external_access);
   for (const auto &[name, binding] : layouts)
     if (!frozen_metadata.count(name) && binding->gradient)
-      rt.get_memory(binding->gradient->memory, bool(domain));
+      rt.get_memory(binding->gradient->memory, prepared_external_access);
   // A frozen structure source carries its whole named ABI, not merely a member
   // path or record width. Check public sources before resolving private data;
   // private descriptors are checked after metadata resolution, before allocation.
@@ -1652,7 +1657,7 @@ static TiPreparedExecution prepare_execution_plan_impl(
     if (!private_storage)
       capi::validated_struct_ndarray_bytes(
           rt, array, binding->second->layout, binding->second->layout_version,
-          bool(domain));
+          prepared_external_access);
     used_bindings.insert(required.array);
   };
   std::vector<const aot::ExecutionPlan::StructArrayLayout *> private_structures;
@@ -1959,7 +1964,7 @@ static TiPreparedExecution prepare_execution_plan_impl(
   auto resource_bindings = capi::bind_execution_resources(
       rt, mod, resource_description, arguments, layouts,
       family ? family->arrays.get() : nullptr, frozen_metadata,
-      resolve_allocator, bool(domain), [&] {
+      resolve_allocator, prepared_external_access, [&] {
         for (const auto *required : private_structures)
           validate_structure(*required, true);
       }, preparation.upload_owned_data);
@@ -1995,16 +2000,16 @@ static TiPreparedExecution prepare_execution_plan_impl(
         throw MemoryBindingError("Structure memory operation requires its layout: " + name);
       bytes = capi::validated_struct_ndarray_bytes(
           rt, array, binding->second->layout, binding->second->layout_version,
-          bool(domain));
+          prepared_external_access);
       element_bytes = rt.get_layout(binding->second->layout).stride;
       used_bindings.insert(name);
     } else {
-      bytes = capi::validated_ndarray_bytes(rt, array, &element_bytes, bool(domain));
+      bytes = capi::validated_ndarray_bytes(rt, array, &element_bytes, prepared_external_access);
     }
     if (offset > bytes)
       throw MemoryBindingError(
           "Execution memory offset exceeds ndarray extent");
-    const auto allocation = rt.get_memory(array.memory, bool(domain));
+    const auto allocation = rt.get_memory(array.memory, prepared_external_access);
     prepared->memories.push_back(array.memory);
     return Storage{
         allocation.allocation.get_ptr(allocation.byte_offset + offset),
@@ -2018,7 +2023,7 @@ static TiPreparedExecution prepare_execution_plan_impl(
       const auto &array = arguments.at(slot)->value.ndarray;
       found =
           native_arrays
-              .emplace(slot, capi::bind_native_array(rt, array, bool(domain)))
+              .emplace(slot, capi::bind_native_array(rt, array, prepared_external_access))
               .first;
     }
     return found->second;
@@ -2384,7 +2389,7 @@ static TiPreparedExecution prepare_execution_plan_impl(
             kernel_args.data(), static_cast<uint32_t>(kernel_bindings.size()),
             kernel_bindings.data(),
             kernel->bounded_range && !kernel->bounded_range->cuda,
-            kernel_resources, bool(domain),
+            kernel_resources, prepared_external_access,
             prepared->snode_instance ? prepared->snode_instance->kernel_view(kernel->entry) : nullptr);
         if (!bound)
           return false;
@@ -2530,7 +2535,7 @@ static TiPreparedExecution prepare_execution_plan_impl(
         const auto &array = arguments.at(fill.destination)->value.ndarray;
         if (bytes > dst.size ||
             bytes > std::numeric_limits<std::size_t>::max() ||
-            rt.get_memory(array.memory, bool(domain)).base_offset % 4)
+            rt.get_memory(array.memory, prepared_external_access).base_offset % 4)
           throw MemoryBindingError(
               "Execution fill exceeds ndarray extent or alignment");
         operations.emplace_back(FixedExecution::BufferFill{
@@ -2583,7 +2588,7 @@ static TiPreparedExecution prepare_execution_plan_impl(
   if (used_bindings.size() != layouts.size())
     throw MemoryBindingError(
         "Ndarray layout/gradient binding is unused by any kernel");
-  if (domain) {
+  if (prepared_external_access) {
     auto external_access = [&](const std::set<std::string> &names) {
       std::vector<std::shared_ptr<ExternalSynchronizationDomain>> access;
       auto add = [&](TiMemory handle) {

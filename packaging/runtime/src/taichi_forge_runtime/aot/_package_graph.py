@@ -460,6 +460,20 @@ class Graph:
         return tuple(result.values())
 
     def bind(self, arguments):
+        return self.prepare(arguments)
+
+    def prepare(self, arguments, *, execution_domain=None, mutable_parameters=()):
+        """Prepare the recorded package plan with optional live submission values.
+
+        Captures and resources retain the same immutable binding and leases as
+        bind(). Explicit scalar arguments may use an independent execution
+        domain's existing parameter-update protocol.
+        """
+        from ._parameters import SubmissionParameters
+
+        mutable_parameters = SubmissionParameters(mutable_parameters).names
+        if any(name not in self.arguments for name in mutable_parameters):
+            raise ValueError("Mutable Graph parameters must be explicit Graph arguments")
         self.package._check()
         if arguments.keys() != self.arguments.keys():
             raise ValueError("Graph binding must supply exactly its declared arguments")
@@ -507,7 +521,8 @@ class Graph:
         plan = self.plan.with_argument_resources(resources) if resources else self.plan
         plan = self._specialized_plan(plan)
         values = {name: self.package.runtime._adapt_package_array(value) for name, value in values.items()}
-        prepared = plan.prepare(self.package._module, values)
+        prepared = plan.prepare(self.package._module, values, execution_domain=execution_domain,
+                                mutable_parameters=mutable_parameters)
         # A cached call must not create Graph -> call -> Graph ownership cycles.
         # Native owners already retain the module and every argument resource.
         prepared._forge_package_graph = weakref.ref(self)

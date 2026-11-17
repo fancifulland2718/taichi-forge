@@ -83,6 +83,10 @@ struct FixedExecution::State {
   }
 #endif
 #ifdef TI_WITH_CUDA
+  // Default-stream recipes use the same coarse external ownership epoch as
+  // ordinary JIT Graphs. Declare it before recordings so graph retirement
+  // completes before the last external allocation owner is released.
+  std::unique_ptr<PreparedExternalAccess> cuda_default_external_access;
   std::optional<cuda::KernelLauncher::SparseAccess> cuda_sparse_access;
   std::shared_ptr<cuda::ExecutionDomain> cuda_domain;
   std::shared_ptr<cuda::ExecutionInstance> cuda_registration;
@@ -1910,9 +1914,15 @@ void FixedExecution::bind_external_access(
     instance.external_access = std::move(plan);
     return;
   }
+  if (state_->cuda_graph && !state_->cuda_domain && state_->fault_domain &&
+      !state_->cuda_default_external_access) {
+    state_->cuda_default_external_access =
+        std::make_unique<PreparedExternalAccess>(std::move(domains));
+    return;
+  }
 #endif
   throw std::invalid_argument(
-      "Prepared external access requires an independent CUDA or Vulkan instance");
+      "Prepared external access requires a flat default CUDA recipe or an independent CUDA/Vulkan instance");
 }
 RuntimeCompletion FixedExecution::submit(
     const std::vector<RuntimeCompletion> &dependencies,
@@ -2046,11 +2056,26 @@ void FixedExecution::run() {
     state_->fault_domain->throw_if_submission_disallowed("run fixed execution");
   try {
 #ifdef TI_WITH_CUDA
+    const auto replay = [&] {
+      if (state_->cuda_default_external_access) {
+        auto epoch = state_->cuda_default_external_access->acquire(
+            ExternalStreamDomain::cuda(state_->fault_domain->program_domain(), 1));
+        run_impl();
+        epoch.release();
+      } else {
+        run_impl();
+      }
+    };
     if (state_->cuda_sparse_access) {
       auto lock = CUDAContext::get_instance().get_submission_lock_guard();
       // Cover copies, native prefixes, all control branches and binding-frame
       // replay as one transaction; a later conflict must execute no prefix.
-      state_->cuda_sparse_access->submit([&] { run_impl(); });
+      state_->cuda_sparse_access->submit(replay);
+    } else if (state_->cuda_default_external_access) {
+      auto &cuda = CUDAContext::get_instance();
+      auto guard = cuda.get_guard();
+      auto lock = cuda.get_submission_lock_guard();
+      replay();
     } else
 #endif
     {
