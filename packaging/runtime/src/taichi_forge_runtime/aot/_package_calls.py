@@ -35,11 +35,16 @@ def specialization_entries(path, target, entries):
     if "device_range_dispatch" not in metadata:
         return frozenset()
     excluded = {item["name"] for item in metadata["device_range_dispatch"] if item["tasks"]}
-    aliases = {item["key"]: item["value"] for item in metadata.get("kernel_aliases", ())}
+    if llvm:
+        aliases = {item["key"]: item["value"] for item in metadata.get("kernel_aliases", ())}
+    else:
+        aliases = {item["name"]: metadata["kernels"][item["kernel_index"]]["name"]
+                   for item in metadata.get("kernel_aliases", ())}
     # Sampled images retain the existing managed-resource kernel route. Package
     # automatic specialization currently admits ordinary value/array bindings.
     return frozenset(name for name in entries if name not in excluded and aliases.get(name, name) not in excluded
-                     and not any(item["kind"] == "texture" for item in entries[name]["arguments"]))
+                     and not any(item["kind"] in ("texture", "rw_texture", "acceleration_structure")
+                                 for item in entries[name]["arguments"]))
 
 
 def specialization_constant_args(contract, owner_schema, owners=None):
@@ -107,6 +112,9 @@ def _token(value):
         # changing their contents must neither read them back nor reprepare.
         array = value.entries
         return kind, array.dtype.str, array.shape, array.tobytes()
+    from ._package_native import NativeObject
+    if isinstance(value, NativeObject):
+        return kind, id(value), id(value.resource)
     return kind, id(value)
 
 
@@ -262,7 +270,8 @@ class OwnerGuard:
         self._present_count = len(present)
         self._missing_readers = tuple((name, operator.attrgetter(name)) for name in missing)
         self.tokens = tuple(_token(x) for x in self.values)
-        self.identity_safe = tuple(type(x) not in (tuple, list, dict) and not isinstance(x, HostTensor)
+        from ._package_native import NativeObject
+        self.identity_safe = tuple(type(x) not in (tuple, list, dict) and not isinstance(x, (HostTensor, NativeObject))
                                    for x in self.values)
 
     def read(self, owner):

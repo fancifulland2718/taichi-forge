@@ -2420,10 +2420,11 @@ static TiPreparedExecution prepare_execution_plan_impl(
               patches.back().argument_offset, patches.back().bytes);
         }
         if (kernel->specialization) {
-          if ((!arch_is_cpu(rt.arch) && rt.arch != taichi::Arch::cuda) ||
+          if ((!arch_is_cpu(rt.arch) && rt.arch != taichi::Arch::cuda &&
+               rt.arch != taichi::Arch::vulkan) ||
               family || prepared->snode_instance || !bound->kernel_resources.empty())
             throw MemoryBindingError(
-                "Plan specialization requires ordinary CPU/CUDA bindings without "
+                "Plan specialization requires ordinary CPU/CUDA/Vulkan bindings without "
                 "binding families, SNode instances or managed kernel resources");
           std::vector<std::uint32_t> constants;
           for (const auto index : *kernel->specialization) {

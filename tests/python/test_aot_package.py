@@ -70,7 +70,7 @@ class Model:
     assert result.returncode == 0, result.stdout + result.stderr
 
 
-@test_utils.test(arch=ti.cuda, offline_cache=False)
+@test_utils.test(arch=[ti.cpu, ti.cuda, ti.vulkan], offline_cache=False)
 def test_package_build_cache_skips_witnesses_and_rejects_changed_inputs(tmp_path, monkeypatch):
     from taichi_forge.aot._package_compilation import PackageCompilation
     from taichi_forge.aot._package_owner_graph import OwnerGraph
@@ -97,6 +97,12 @@ class Model:
             self.out[i] = data[i]
 '''
     package = _source_package(tmp_path, monkeypatch, source)
+    arch = ti.lang.impl.current_cfg().arch
+    artifact_format = 'bc-library' if arch == ti.cuda else 'bc' if arch == ti.cpu else None
+    # Freeze the ordinary path before exercising producer cache behavior.
+    baseline = package.model.Model(3)
+    baseline.run(2)
+    np.testing.assert_array_equal(baseline.out.to_numpy(), (np.arange(3) + 2) * 3 + 2)
     counts = dict(compile=0, witness=0)
     original_compile, original_owner = PackageCompilation.compile, OwnerGraph.context
 
@@ -114,7 +120,7 @@ class Model:
     def export(name):
         counts.update(compile=0, witness=0)
         path = tmp_path / name
-        manifest = ti.aot.export_package(package, path, artifact_format='bc-library', build_cache=tmp_path / 'cache')
+        manifest = ti.aot.export_package(package, path, artifact_format=artifact_format, build_cache=tmp_path / 'cache')
         return path, manifest
 
     cold, cold_manifest = export('cold')
@@ -124,7 +130,7 @@ class Model:
     assert json.loads(json.dumps(cold_manifest)) == warm_manifest
     assert (cold / 'code.tcm').read_bytes() == (warm / 'code.tcm').read_bytes()
     assert not any((tmp_path / 'cache').rglob('*.tcm'))
-    with Runtime('cuda') as runtime, load_package(runtime, warm) as code:
+    with Runtime(arch.name) as runtime, load_package(runtime, warm) as code:
         for n in (3, 13):
             aot, jit = code.host.Model(n), package.model.Model(n)
             for value in (2, 11):
@@ -143,7 +149,7 @@ class Model:
     package.model.BIAS = 9
     changed, _ = export('global')
     assert counts['compile'] and counts['witness']
-    with Runtime('cuda') as runtime, load_package(runtime, changed) as code:
+    with Runtime(arch.name) as runtime, load_package(runtime, changed) as code:
         model = code.host.Model(5)
         model.run(4)
         np.testing.assert_array_equal(model.out.to_numpy(), (np.arange(5) + 4) * 3 + 9)
@@ -170,7 +176,7 @@ class Model:
     assert counts['compile'] and counts['witness']
 
 
-@test_utils.test(arch=ti.cuda, offline_cache=False)
+@test_utils.test(arch=[ti.cpu, ti.cuda, ti.vulkan], offline_cache=False)
 def test_package_build_cache_source_changes_and_missing_index(tmp_path, monkeypatch):
     from taichi_forge.aot._package_compilation import PackageCompilation
 
@@ -180,8 +186,11 @@ def compute(x: ti.i32) -> ti.i32:
     return x * 3
 '''
     package = _source_package(tmp_path, monkeypatch, source, initializer='from .model import compute\n')
+    arch = ti.lang.impl.current_cfg().arch
+    artifact_format = 'bc-library' if arch == ti.cuda else 'bc' if arch == ti.cpu else None
+    assert package.compute(5) == 15
     cache = tmp_path / 'cache'
-    ti.aot.export_package(package, tmp_path / 'first', artifact_format='bc-library', build_cache=cache)
+    ti.aot.export_package(package, tmp_path / 'first', artifact_format=artifact_format, build_cache=cache)
     path = Path(package.model.__file__)
     path.write_text(source.replace('x * 3', 'x * 7'), encoding='utf8')
     # Execute the changed source without relying on timestamp-granularity pyc.
@@ -195,13 +204,13 @@ def compute(x: ti.i32) -> ti.i32:
         return original(self, *args, **kwargs)
 
     monkeypatch.setattr(PackageCompilation, 'compile', compile_entry)
-    ti.aot.export_package(package, tmp_path / 'changed', artifact_format='bc-library', build_cache=cache)
+    ti.aot.export_package(package, tmp_path / 'changed', artifact_format=artifact_format, build_cache=cache)
     assert count
-    with Runtime('cuda') as runtime, load_package(runtime, tmp_path / 'changed') as code:
+    with Runtime(arch.name) as runtime, load_package(runtime, tmp_path / 'changed') as code:
         assert code.host.compute(5) == 35
     (cache / 'latest.json').write_text('{unfinished', encoding='utf8')
     count.clear()
-    ti.aot.export_package(package, tmp_path / 'recovered', artifact_format='bc-library', build_cache=cache)
+    ti.aot.export_package(package, tmp_path / 'recovered', artifact_format=artifact_format, build_cache=cache)
     assert count
     assert json.loads((cache / 'latest.json').read_text())['output'] == str(tmp_path / 'recovered')
     index = (cache / 'latest.json').read_bytes()
@@ -210,7 +219,7 @@ def compute(x: ti.i32) -> ti.i32:
     exec(compile(invalid, str(path), 'exec'), package.model.__dict__)
     package.compute = package.model.compute
     with pytest.raises(ti.aot.PackageExportError):
-        ti.aot.export_package(package, tmp_path / 'failed', artifact_format='bc-library', build_cache=cache)
+        ti.aot.export_package(package, tmp_path / 'failed', artifact_format=artifact_format, build_cache=cache)
     assert (cache / 'latest.json').read_bytes() == index
     assert not (tmp_path / 'failed').exists()
 
@@ -781,7 +790,7 @@ def test_package_nested_presence_checks_dependencies_before_members():
     check_admission(owner, contract)
 
 
-@test_utils.test(arch=ti.cuda, offline_cache=False)
+@test_utils.test(arch=[ti.cpu, ti.cuda, ti.vulkan], offline_cache=False, vk_api_version="1.3")
 def test_package_nested_query_inputs_share_code_and_guard_absent_parents(tmp_path, monkeypatch):
     source = '''
 import taichi_forge as ti
@@ -863,7 +872,7 @@ class Model:
             values.append(model.out[None])
         references.append(values)
     output = tmp_path / 'sdk'
-    manifest = ti.aot.export_package(package, output, artifact_format='bc-library')
+    manifest = ti.aot.export_package(package, output, artifact_format=('bc-library' if ti.cfg.arch == ti.cuda else 'bc' if ti.cfg.arch == ti.cpu else None))
     entries = [entry for entry in manifest['entries'].values() if entry['definition'].endswith('Model.step')]
     assert len(entries) == 1
     assert manifest['version'] == 95  # Includes the required() conditional member read.
@@ -1576,6 +1585,185 @@ def test_package_sampled_texture_inputs_preserve_live_data_and_bindings(tmp_path
     np.testing.assert_array_equal(model.output.to_numpy(), np.full((3, 5), 14, np.float32))
     assert adapter(image) is borrowed and len(adapter._cache) == imports
     ti.reset()
+
+
+@test_utils.test(arch=ti.vulkan, offline_cache=False)
+@pytest.mark.parametrize("resource_kind", ("rw_texture", "acceleration_structure"))
+def test_package_vulkan_resource_parameters_keep_native_abi(tmp_path, monkeypatch, resource_kind):
+    if resource_kind == "acceleration_structure" and not ti.hardware.ray.is_available():
+        pytest.skip("Vulkan ray query features are unavailable")
+    source = """import taichi_forge as ti
+@ti.data_oriented
+class Model:
+    def __init__(self, n):
+        self.n = n
+        scope = ti.experimental.ResourceScope(self)
+        scope.out = scope.field(ti.f32, shape=scope.dim('n'))
+    @ti.kernel
+    def run(self, image: ti.types.rw_texture(2, fmt=ti.Format.rgba32f), gain: ti.f32):
+        for i in range(self.n):
+            image.store(ti.Vector([i, 0]), ti.Vector([gain + i, 0.0, 0.0, 1.0]))
+    @ti.kernel
+    def read(self, image: ti.types.texture(2)):
+        for i in range(self.n):
+            self.out[i] = image.fetch(ti.Vector([i, 0]), 0).x
+    def graph(self):
+        builder = ti.graph.GraphBuilder()
+        builder.dispatch(self.run, ti.graph.Arg(ti.graph.ArgKind.RWTEXTURE, 'image', ndim=2,
+            fmt=ti.Format.rgba32f), ti.graph.Arg(ti.graph.ArgKind.SCALAR, 'gain', ti.f32))
+        return builder.compile()
+"""
+    if resource_kind == "acceleration_structure":
+        source = source[:source.index('    @ti.kernel')] + """    @ti.kernel
+    def run(self, scene: ti.types.acceleration_structure(), gain: ti.f32):
+        for i in range(self.n):
+            hit = scene.trace_closest(ti.Vector([0.0, 0.0, 1.0]), ti.Vector([0.0, 0.0, -1.0]))
+            self.out[i] = hit.t + gain + i if hit.hit else -1.0
+    def graph(self):
+        builder = ti.graph.GraphBuilder()
+        builder.dispatch(self.run, ti.graph.Arg(ti.graph.ArgKind.ACCELERATION_STRUCTURE, 'image'),
+            ti.graph.Arg(ti.graph.ArgKind.SCALAR, 'gain', ti.f32))
+        return builder.compile()
+"""
+    package = _source_package(tmp_path, monkeypatch, source)
+    if resource_kind == "rw_texture":
+        resource = ti.Texture(ti.Format.rgba32f, (5, 1))
+    else:
+        vertices = ti.ndarray(ti.f32, (3, 3))
+        indices = ti.ndarray(ti.i32, (1, 3))
+        vertices.from_numpy(np.array([[-1, -1, 0], [1, -1, 0], [0, 1, 0]], np.float32))
+        indices.from_numpy(np.array([[0, 1, 2]], np.int32))
+        blas = ti.hardware.ray.TriangleBLAS(vertices, indices)
+        resource = ti.hardware.ray.InstanceTLAS([ti.hardware.ray.RayInstance(blas)])
+    normal = package.Model(5)
+    normal.run(resource, 3.0)
+    if resource_kind == "rw_texture":
+        normal.read(resource)
+    expected = normal.out.to_numpy()
+    manifest = ti.aot.export_package(package, tmp_path / 'sdk',
+        caps=['spirv_has_ray_query'] if resource_kind == 'acceleration_structure' else None)
+    assert manifest['version'] == 98
+    with ti.aot.borrow_runtime() as runtime, load_package(runtime, tmp_path / 'sdk') as code:
+        image = (runtime.import_texture(resource) if resource_kind == "rw_texture"
+                 else runtime.import_acceleration_structure(resource))
+        model = code.host.Model(5)
+        graph = model.graph()
+        for gain in (3.0, 7.0):
+            model.run(image, gain)
+            model.run(image, gain)
+            if resource_kind == "rw_texture":
+                model.read(image)
+            np.testing.assert_array_equal(model.out.to_numpy(), expected + gain - 3.0)
+            call = model.graph().bind(dict(image=image, gain=gain))
+            call.run()
+            if resource_kind == "rw_texture":
+                model.read(image)
+            np.testing.assert_array_equal(model.out.to_numpy(), expected + gain - 3.0)
+            call.close()
+            graph.run(dict(image=image, gain=gain))
+            cached = graph._cached_call
+            assert cached is not None
+            graph.run(dict(image=image, gain=gain))
+            assert graph._cached_call is cached
+        graph.close()
+    manifest['version'] = 97
+    (tmp_path / 'sdk/package.json').write_text(json.dumps(manifest), encoding='utf8')
+    with Runtime('vulkan') as runtime:
+        with pytest.raises(ValueError, match='version 98'):
+            load_package(runtime, tmp_path / 'sdk')
+
+
+@test_utils.test(arch=ti.vulkan, offline_cache=False)
+def test_package_host_texture_constructs_without_frontend(tmp_path, monkeypatch):
+    source = SAMPLED_TEXTURE_SOURCE.replace(
+        "self.n, self.m = n, m", """self.n, self.m = n, m
+        self.image = ti.Texture(ti.Format.rgba32f, (n, m),
+            sampler=ti.hardware.sampling.SamplerConfig(address_mode_u='clamp_to_edge'))""") + """
+    @ti.kernel
+    def write(self, image: ti.types.rw_texture(2, fmt=ti.Format.rgba32f), gain: ti.f32):
+        for i, j in ti.ndrange(self.n, self.m):
+            image.store(ti.Vector([i, j]), ti.Vector([gain + i + j, 0.0, 0.0, 1.0]))
+"""
+    package = _source_package(tmp_path, monkeypatch, source)
+    normal = package.Model(3, 5)
+    normal.write(normal.image, 2.0)
+    normal.publish(normal.image, 3.0)
+    np.save(tmp_path / 'expected.npy', normal.output.to_numpy())
+    output = tmp_path / 'sdk'
+    ti.aot.export_package(package, output)
+    probe = tmp_path / 'consume.py'
+    probe.write_text(textwrap.dedent('''
+        import importlib.abc
+        import sys
+        import numpy as np
+        class NoSource(importlib.abc.MetaPathFinder):
+            def find_spec(self, fullname, path=None, target=None):
+                if fullname.split('.')[0] in ('taichi', 'taichi_forge', 'definition_fixture'):
+                    raise AssertionError(fullname)
+        sys.meta_path.insert(0, NoSource())
+        from taichi_forge_runtime.aot import Runtime, load_package
+        with Runtime('vulkan') as runtime, load_package(runtime, sys.argv[1]) as code:
+            first, second = code.host.Model(3, 5), code.host.Model(4, 7)
+            for model in (first, second):
+                model.write(model.image, 2.0)
+                model.publish(model.image, 3.0)
+            np.testing.assert_array_equal(first.output.to_numpy(), np.load(sys.argv[2]))
+            graph = first.graph()
+            graph.run(dict(image=first.image, gain=3.0))
+            cached = graph._cached_call
+            assert cached is not None
+            call = graph.bind(dict(image=first.image, gain=3.0))
+            first.write(first.image, 4.0)
+            graph.run(dict(image=first.image, gain=3.0))
+            assert graph._cached_call is cached
+            call.run()
+            np.testing.assert_array_equal(first.output.to_numpy(), np.load(sys.argv[2]) + 6.0)
+            np.testing.assert_array_equal(second.output.to_numpy(),
+                (2 + np.arange(4)[:, None] + np.arange(7)[None, :]) * 3)
+            call.close()
+            graph.close()
+            first.image.close()
+    '''), encoding='utf8')
+    env = dict(os.environ, PYTHONPATH=str(Path(__file__).resolve().parents[2] / 'packaging/runtime/src'),
+        TAICHI_NATIVE_RUNTIME_DIR=str(Path(utils._loaded_native_runtime_path).parent),
+        TAICHI_RUNTIME_DIR=utils._runtime_bitcode_dir())
+    result = subprocess.run([sys.executable, '-B', str(probe), str(output), str(tmp_path/'expected.npy')],
+        cwd=tmp_path, env=env, capture_output=True, text=True, timeout=90)
+    assert result.returncode == 0, result.stdout + result.stderr
+
+
+@test_utils.test(arch=ti.vulkan, offline_cache=False)
+def test_package_vulkan_aliases_keep_consumer_specialization(tmp_path, monkeypatch):
+    package = _source_package(tmp_path, monkeypatch, '''import taichi_forge as ti
+@ti.data_oriented
+class Model:
+    def __init__(self, n):
+        self.n = n
+        scope = ti.experimental.ResourceScope(self)
+        scope.out = scope.field(ti.i32, shape=scope.dim('n'))
+    @ti.kernel
+    def first(self, value: ti.i32):
+        for i in range(self.n):
+            self.out[i] = i + value
+    @ti.kernel
+    def second(self, value: ti.i32):
+        for i in range(self.n):
+            self.out[i] = i + value
+''')
+    original = package.Model(5)
+    original.first(3)
+    expected = original.out.to_numpy()
+    ti.aot.export_package(package, tmp_path / 'sdk')
+    with zipfile.ZipFile(tmp_path / 'sdk/code.tcm') as archive:
+        assert json.loads(archive.read('metadata.json'))['kernel_aliases']
+    with Runtime('vulkan') as runtime, load_package(runtime, tmp_path / 'sdk') as code:
+        owner = code.host.Model(5)
+        for entry in (owner.first, owner.second):
+            for value in (3, 8):
+                entry(value)
+                entry(value)
+                np.testing.assert_array_equal(owner.out.to_numpy(), expected + value - 3)
+        assert all(call.prepared is not None for call in owner._forge_package_calls.values())
 
 
 @test_utils.test(arch=ti.cpu, offline_cache=False)
@@ -2934,7 +3122,7 @@ class Model:
                 assert aot.summary[None] == jit.summary[None]
 
 
-@test_utils.test(arch=ti.cuda, offline_cache=False)
+@test_utils.test(arch=[ti.cpu, ti.cuda, ti.vulkan], offline_cache=False, vk_api_version="1.3")
 def test_package_library_prepares_independent_static_conditions(tmp_path, monkeypatch):
     from itertools import product
 
@@ -2973,22 +3161,30 @@ class Model:
             self.shared(i)
 '''
     package = _source_package(tmp_path, monkeypatch, source)
-    manifest = ti.aot.export_package(package, tmp_path / 'sdk', artifact_format='bc-library')
+    # Run the original JIT path before the production transformation.
+    references = []
+    for index, flags in enumerate(product((False, True), repeat=3)):
+        owner = package.model.Model(index + 2, *flags)
+        owner.step(5)
+        references.append(owner.out.to_numpy())
+    manifest = ti.aot.export_package(package, tmp_path / 'sdk', artifact_format=('bc-library' if ti.cfg.arch == ti.cuda else 'bc' if ti.cfg.arch == ti.cpu else None))
     entries = [v for v in manifest['entries'].values() if v['definition'].endswith('.Model.step')]
     assert len(entries) == 1  # three independent booleans must not create eight callers
     prepared = [v for v in entries[0]['captures'] if 'prepare_static' in v]
     assert {v['name'] for v in prepared} == {'first', 'second', 'third'}
-    with Runtime('cuda') as runtime, load_package(runtime, tmp_path / 'sdk') as code:
+    with Runtime(ti.cfg.arch.name) as runtime, load_package(runtime, tmp_path / 'sdk') as code:
         assert entries[0]['symbol'] in code._specialization_entries
         for index, flags in enumerate(product((False, True), repeat=3)):
             jit = package.model.Model(index + 2, *flags)
             jit.step(5)
             aot = code.host.Model(index + 2, *flags)
             aot.step(5)
-            np.testing.assert_array_equal(aot.out.to_numpy(), jit.out.to_numpy())
+            np.testing.assert_array_equal(aot.out.to_numpy(), references[index])
             ready = next(iter(aot._forge_package_calls.values()))
-            assert ready.prepared is not None  # the first ordinary package call specializes
+            if ti.cfg.arch != ti.vulkan:
+                assert ready.prepared is not None  # LLVM specializes on first use.
             aot.step(5)
+            assert ready.prepared is not None  # Vulkan prepares on stable reuse.
             assert next(iter(aot._forge_package_calls.values())) is ready
         aot.first = False
         aot.step(5)
@@ -3026,9 +3222,8 @@ class Model:
     package = _source_package(tmp_path, monkeypatch, source)
     manifest = ti.aot.export_package(package, tmp_path / 'sdk', artifact_format=artifact_format)
     entries = [v for v in manifest['entries'].values() if v['definition'].endswith('.Model.update')]
-    # Ordinary bc keeps producer static variants; library export defers this
-    # selection. First-use preparation must work with either existing format.
-    assert len(entries) == (1 if artifact_format == "bc-library" else 3)
+    # Both bitcode formats defer numeric policy to consumer specialization.
+    assert len(entries) == 1
     prepares = []
     prepare = _runtime.BoundCall.prepare
 
@@ -3177,7 +3372,7 @@ def step(self, other: ti.template()):
     assert proof.entry_uses('model.step')['flag'] != {'prepare_condition'}
 
 
-@test_utils.test(arch=ti.cuda, offline_cache=False)
+@test_utils.test(arch=[ti.cpu, ti.cuda, ti.vulkan], offline_cache=False, vk_api_version="1.3")
 def test_package_library_classifies_static_use_per_entry(tmp_path, monkeypatch):
     source = '''import taichi_forge as ti
 @ti.data_oriented
@@ -3204,11 +3399,11 @@ class Model:
                 self.out[i] += 5
 '''
     package = _source_package(tmp_path, monkeypatch, source)
-    manifest = ti.aot.export_package(package, tmp_path / 'sdk', artifact_format='bc-library')
+    manifest = ti.aot.export_package(package, tmp_path / 'sdk', artifact_format=('bc-library' if ti.cfg.arch == ti.cuda else 'bc' if ti.cfg.arch == ti.cpu else None))
     for name, count in (('parallel', 1), ('numerical', 1)):
         entries = [v for v in manifest['entries'].values() if v['definition'].endswith('.Model.' + name)]
         assert len(entries) == count
-    with Runtime('cuda') as runtime, load_package(runtime, tmp_path / 'sdk') as code:
+    with Runtime(ti.cfg.arch.name) as runtime, load_package(runtime, tmp_path / 'sdk') as code:
         for enabled in (False, True):
             owner = code.host.Model(37, enabled)
             owner.parallel()
@@ -14939,7 +15134,7 @@ def test_package_fixed_policy_requires_matching_scalar_declaration():
 
 
 @pytest.mark.parametrize('graph', [False, True])
-@test_utils.test(arch=[ti.cpu, ti.cuda], offline_cache=False)
+@test_utils.test(arch=[ti.cpu, ti.cuda, ti.vulkan], offline_cache=False, vk_api_version="1.3")
 def test_package_fixed_policy_specialization_keeps_live_values_and_instances(tmp_path, monkeypatch, graph):
     from taichi_forge_runtime.aot import _plan
 

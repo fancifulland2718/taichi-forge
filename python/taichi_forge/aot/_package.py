@@ -39,7 +39,7 @@ from ._package_construction import (
 _DTYPES = frozenset(("f32", "f64", "i8", "i16", "i32", "i64", "u8", "u16", "u32", "u64"))
 _DECORATORS = frozenset(("kernel", "func", "real_func", "pyfunc", "data_oriented", "dataclass"))
 _PREFIX = "_forge_package_"
-_HOST_OPS = frozenset(("ndarray", "graph", "sync", "algorithms", "hardware", "TaichiRuntimeError"))
+_HOST_OPS = frozenset(("ndarray", "graph", "sync", "algorithms", "hardware", "Format", "Texture", "TaichiRuntimeError"))
 _HOST_RESOURCE_TYPES = frozenset(("Field", "ScalarField", "MatrixField", "StructField"))
 _PRODUCER_ALLOCATIONS = frozenset(
     ("root", "FieldsBuilder", "field", "axes", "Vector.field", "Matrix.field", "Struct.field", "types.struct.field")
@@ -70,6 +70,16 @@ def _describe_entry_argument(argument):
             "the exporter cannot infer it from a model/test invocation"
         )
     descriptor = describe_annotation(annotation)
+    if descriptor.kind in ("acceleration_structure", "rw_texture"):
+        from taichi_forge.lang import impl
+
+        if impl.current_cfg().arch.name != "vulkan":
+            raise ValueError("acceleration structures and storage image inputs require Vulkan")
+        if descriptor.kind == "rw_texture" and descriptor.ndim not in (1, 2, 3):
+            raise ValueError("storage image arguments require rank 1, 2 or 3")
+        if argument.default is not inspect.Parameter.empty:
+            raise ValueError("kernel default arguments are not yet supported")
+        return descriptor
     if isinstance(annotation, TextureType):
         from taichi_forge.lang import impl
 
@@ -790,6 +800,8 @@ def _host_projection(
                     if a.name == "import_module"
                 ]
             if not node.level and node.module in ("taichi", "taichi_forge"):
+                if any(a.name in ("Format", "Texture") for a in node.names):
+                    self.minimum_version = max(self.minimum_version, 98)
                 if any(a.name in ("hardware", "TaichiRuntimeError") for a in node.names):
                     self.minimum_version = max(self.minimum_version, 97)
                 if any(a.name == "algorithms" for a in node.names):
@@ -1229,6 +1241,14 @@ def _host_projection(
                 self.minimum_version = max(self.minimum_version, 61)
             if role in ("hardware", "TaichiRuntimeError"):
                 self.minimum_version = max(self.minimum_version, 97)
+            if role in ("Format", "Texture"):
+                self.minimum_version = max(self.minimum_version, 98)
+            if isinstance(node.ctx, ast.Load) and kind(node.value) == "Format":
+                from taichi_forge._lib import core as _ti_core
+                if not hasattr(_ti_core.Format, node.attr):
+                    _fail(module, node, "unknown image format")
+                self.minimum_version = max(self.minimum_version, 98)
+                return ast.copy_location(ast.Constant(node.attr), node)
             if qualified_kind(node, kind) in (
                 "math.vec2",
                 "math.vec3",
@@ -1759,7 +1779,8 @@ def export_package(package, output, *, arch=None, caps=None, source_root=None, a
     A completed package is retained at the reported staging path if publication fails.
     Experimental CUDA ``artifact_format="bc-library"`` preserves typed function
     boundaries in the build copy and shares their bitcode across entry points.
-    ``build_cache=directory`` opts into producer warm start for CUDA bc-library.
+    ``build_cache=directory`` opts into producer warm start for CUDA bc-library,
+    CPU bc, and Vulkan default artifacts.
     Unchanged source-driven builds reuse the previous complete package before
     resource witnesses and numerical capture. Changed/opaque inputs use the
     ordinary compiler (including its existing offline cache). The directory
@@ -1807,7 +1828,11 @@ def _export_package(package, output, *, arch, caps, source_root, compilation, ar
     package = packages[0]
     module = Module(caps=caps, artifact_format=artifact_format)
     compilation.attach(module, function_library=artifact_format == "bc-library")
-    if artifact_format == "bc-library":
+    # Configuration classification belongs to the definition producer, not
+    # the CUDA function-library storage format. All specialization-capable IR
+    # routes must project the same numeric predicates and query resources
+    # before exploring their finite domain.
+    if artifact_format in ("bc", "bc-library") or module._arch == ti.vulkan:
         from ._package_static import StaticPreparation
 
         compilation.static_preparation = StaticPreparation(sources)
@@ -2372,7 +2397,19 @@ def _export_package(package, output, *, arch, caps, source_root, compilation, ar
                 except (TypeError, ValueError) as error:
                     _fail(name, node, f"argument {argument.name!r}: {error}")
                 dtype = str(descriptor.element.scalar_type) if descriptor.element is not None else None
-                if descriptor.kind == "texture":
+                if descriptor.kind == "acceleration_structure":
+                    # As in Graph injection, the type alone proves the ABI.
+                    # Do not construct producer geometry or an acceleration structure.
+                    values.append(None)
+                    argument_schema.append(dict(name=argument.name, kind="acceleration_structure"))
+                    manifest["version"] = max(98, manifest["version"])
+                elif descriptor.kind == "rw_texture":
+                    values.append(ti.Texture(descriptor.fmt, (2,) * descriptor.ndim))
+                    argument_schema.append(dict(name=argument.name, kind="rw_texture",
+                                                ndim=descriptor.ndim, fmt=descriptor.fmt.name,
+                                                lod=annotation.lod))
+                    manifest["version"] = max(98, manifest["version"])
+                elif descriptor.kind == "texture":
                     values.append(ti.Texture(ti.Format.rgba8, (2,) * descriptor.ndim))
                     argument_schema.append(dict(name=argument.name, kind="texture", ndim=descriptor.ndim))
                     manifest["version"] = max(86, manifest["version"])

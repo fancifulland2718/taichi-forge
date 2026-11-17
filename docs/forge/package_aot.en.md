@@ -10,7 +10,8 @@ No export decorator, per-kernel registration or component root is required.
 This is a limited prototype, not a complete engine distribution interface.
 Its format and supported scope are experimental.
 
-An optional producer warm start is available for CUDA bitcode libraries:
+An optional producer warm start is available for CUDA bitcode libraries, CPU
+bitcode (`artifact_format="bc"`), and Vulkan's default format (omit `artifact_format`):
 
 ```python
 ti.aot.export_package(app, "build/sdk-next", artifact_format="bc-library",
@@ -77,6 +78,25 @@ native resource/ExecutionPlan catalog; instance seeds come from the consumer.
 The adapter and vendor library remain external dependencies. Other `ti.hardware`
 families, alpha-mask factories and custom OptiX programs are not qualified by this
 package projection.
+
+Format 98 accepts Vulkan acceleration-structure and typed storage-image arguments,
+including symbolic package Graph bindings. Existing Runtime imports can supply
+the resources. Vulkan Host `Texture` construction and `SamplerConfig` project onto
+the native image owner for floating sampled/color-storage images. Like JIT Texture,
+the allocation has undefined initial contents: initialize it before reading it.
+The strict native `image/sampled` and `image/storage` factories still require their
+initial upload proof. No zero-fill or full-frame staging allocation is added.
+This does not provide Vulkan BLAS/TLAS Host factories or all Texture methods.
+Managed image/AS entries retain producer static choices and the qualified ordinary
+binding route; automatic consumer specialization currently covers value/array
+entries. Their native resource qualification must be rebuilt for a changed kernel
+before that specialization boundary can be expanded.
+
+CPU bitcode and Vulkan export use the same static-condition classification as
+CUDA bitcode libraries, independently of physical code storage format. Vulkan
+specialization preserves descriptor declarations required by task metadata even
+when the corresponding computation becomes dead. Deployment capabilities remain
+explicit; a package using 64-bit types/atomics or ray queries must declare them.
 
 Native recordings can execute directly or join package kernels with `append_native`.
 `freeze().select_execution_recipe(queue="preserve", binding_reuse="prefer")` and
@@ -1368,8 +1388,8 @@ only when their RuntimeContext provenance is proven; a `real_func`'s separate
 argument context is not confused with the kernel ABI. No numerical Python source,
 distribution changes or enumeration of model combinations is required.
 
-Ordinary package calls use the automatic policy above. CPU/CUDA package Graphs
-apply the same facts to eligible ordinary bitcode entries in a private preparation
+Ordinary package calls use the automatic policy above. CPU/CUDA/Vulkan package Graphs
+apply the same facts to eligible ordinary bitcode or SPIR-V entries in a private preparation
 copy during `bind()`; the public `Graph.plan` stays generic. Changed plan policy
 requires rebuilding the Graph; already bound calls retain their snapshots.
 ExecutionPlan v28 carries per-kernel `specialization.constant_args`. Mutable

@@ -172,6 +172,7 @@ class _ModuleBinding:
         from ._package_graph import Arg, ArgKind, GraphBuilder
         from ._package_algorithms import Algorithms
         from ._package_ray import RayAPI
+        from ._package_texture import Texture, SamplerConfig
         from ._c_api import AotError
 
         self.package = package
@@ -203,7 +204,11 @@ class _ModuleBinding:
             ndarray=self.ndarray,
             sync=package.runtime.wait,
             algorithms=Algorithms(package),
-            hardware=_HostAPI(ray=RayAPI(package)),
+            hardware=_HostAPI(ray=RayAPI(package), sampling=SimpleNamespace(SamplerConfig=SamplerConfig)),
+            Texture=functools.partial(Texture, package),
+            Format=SimpleNamespace(**{arg["fmt"]: arg["fmt"]
+                for entry in package.manifest["entries"].values() for arg in entry["arguments"]
+                if arg["kind"] == "rw_texture"}),
             TaichiRuntimeError=AotError,
             graph=SimpleNamespace(
                 Arg=Arg,
@@ -2018,6 +2023,7 @@ class LoadedPackage:
                 95,
                 96,
                 97,
+                98,
             )
             or self.manifest.get("kind") != "forge_definition_package_prototype"
         ):
@@ -2072,6 +2078,24 @@ class LoadedPackage:
             if self.manifest["version"] < 87:
                 raise ValueError("Runtime fault snapshots require definition package version 87")
             runtime._require_fault_snapshot()
+        hardware_arguments = [argument for entry in self.manifest["entries"].values()
+                              for argument in entry["arguments"]
+                              if argument.get("kind") in ("rw_texture", "acceleration_structure")]
+        if hardware_arguments:
+            if self.manifest["version"] < 98:
+                raise ValueError("Vulkan resource inputs require definition package version 98")
+            if runtime.arch != "vulkan":
+                raise ValueError("Vulkan resource inputs require a Vulkan Runtime")
+            for argument in hardware_arguments:
+                if argument["kind"] == "acceleration_structure":
+                    valid = set(argument) == {"name", "kind"}
+                else:
+                    valid = (set(argument) == {"name", "kind", "ndim", "fmt", "lod"}
+                             and type(argument["ndim"]) is int and argument["ndim"] in (1, 2, 3)
+                             and isinstance(argument["fmt"], str) and bool(argument["fmt"])
+                             and type(argument["lod"]) is int and argument["lod"] >= 0)
+                if not valid:
+                    raise ValueError("Invalid Vulkan resource input contract")
         texture_arguments = [argument for entry in self.manifest["entries"].values()
                              for argument in entry["arguments"] if argument.get("kind") == "texture"]
         if texture_arguments:

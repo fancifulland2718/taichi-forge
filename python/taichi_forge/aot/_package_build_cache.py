@@ -159,8 +159,14 @@ class PackageBuildCache:
         except (OSError, ValueError):
             self.previous = {}
         self.reason = "miss"
-        if artifact_format != "bc-library" or impl.current_cfg().arch != core.cuda:
-            raise ValueError("build_cache currently requires CUDA bc-library export")
+        arch = impl.current_cfg().arch
+        supported = (
+            (arch == core.cuda and artifact_format == "bc-library")
+            or (arch in (core.x64, core.arm64) and artifact_format == "bc")
+            or (arch == core.vulkan and artifact_format is None)
+        )
+        if not supported:
+            raise ValueError("build_cache requires CUDA bc-library, CPU bc, or Vulkan default export")
         try:
             self.inputs = dict(
                 sources={name: (str(path), str(relative), hashlib.sha256(text.encode("utf8")).hexdigest())

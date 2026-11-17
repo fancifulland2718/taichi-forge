@@ -33,7 +33,7 @@ from taichi_forge.lang.util import cook_dtype
 from taichi_forge.types import primitive_types
 from taichi_forge.types.ndarray_type import NdarrayType
 from taichi_forge.types.ray_type import AccelerationStructureType
-from taichi_forge.types.texture_type import TextureType
+from taichi_forge.types.texture_type import TextureType, RWTextureType
 from taichi_forge.types._argument_descriptor import describe_element_type
 from taichi_forge_runtime._static_values import StaticDType, static_key
 
@@ -1811,6 +1811,12 @@ class Component:
             elif isinstance(argument.annotation, (MatrixType, StructType)):
                 features.append(None)
                 abi.append(("value", describe_element_type(argument.annotation).structural_key()))
+            elif isinstance(argument.annotation, RWTextureType):
+                if impl.current_cfg().arch.name != "vulkan":
+                    raise TaichiCompilationError("Component storage image inputs require Vulkan")
+                feature = TaichiCallableTemplateMapper.extract_arg(value, argument.annotation, argument.name)
+                features.append(feature)
+                abi.append(("rw_texture", feature[0], feature[1].name, feature[2]))
             elif isinstance(argument.annotation, TextureType):
                 if impl.current_cfg().arch.name not in ("cuda", "vulkan"):
                     raise TaichiCompilationError("Component sampled textures require CUDA or Vulkan")

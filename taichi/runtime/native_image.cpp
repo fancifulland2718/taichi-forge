@@ -145,11 +145,18 @@ struct SampledImageDescription {
   static constexpr uint32_t version = 1;
   ImageParams parameters;
   std::optional<NativeArrayBinding> pixels;
+  bool application_initialization{false};
 };
 // Both descriptions use the same image owner, upload operations and retirement.
 // A separate capability prevents CUDA from advertising Vulkan storage images.
 struct StorageImageDescription : SampledImageDescription {
   static constexpr const char *kind = "storage_image";
+};
+// Normal Host Texture allocation has undefined initial contents, as in JIT.
+// Its caller initializes the image through kernels/Graphs. This is distinct
+// from the strict native sampled/storage factories whose plans prove upload.
+struct TextureImageDescription : SampledImageDescription {
+  static constexpr const char *kind = "texture_image";
 };
 struct ImageUploadOperation {
   static constexpr const char *kind = "image_upload";
@@ -481,7 +488,7 @@ class VulkanSampledImage final : public NativeSampledImage {
  public:
   VulkanSampledImage(NativePreparationContext &context,
                      const SampledImageDescription &d)
-      : NativeSampledImage(d.parameters, bool(d.pixels)),
+      : NativeSampledImage(d.parameters, bool(d.pixels) || d.application_initialization),
         device_(context.device),
         runtime_(*context.gfx_runtime),
         fault_(context.fault_domain) {
@@ -662,6 +669,19 @@ void register_image_operations(NativeOperationRegistry &registry) {
                                            NativeObjectKind::resource);
   registry.define<StorageImageDescription>(validate_image,
                                            NativeObjectKind::resource);
+  registry.define<TextureImageDescription>(validate_image,
+                                           NativeObjectKind::resource);
+  registry.register_schema<TextureImageDescription>(
+      "image", "texture", {},
+      [](const liong::json::JsonValue &p) {
+        const auto config = parameters(p);
+        return [config](const NativeOperationBindings &) {
+          TextureImageDescription d;
+          d.parameters = config;
+          d.application_initialization = true;
+          return d;
+        };
+      }, {});
   registry.register_schema<SampledImageDescription>(
       "image", "sampled", {},
       [](const liong::json::JsonValue &p) {
@@ -804,6 +824,9 @@ void register_image_operations(NativeOperationRegistry &registry) {
       Arch::vulkan, NativeOperationMode::vulkan_inline, create_vulkan_image,
       vulkan_available);
   registry.register_context_factory<StorageImageDescription>(
+      Arch::vulkan, NativeOperationMode::vulkan_inline, create_vulkan_image,
+      vulkan_available);
+  registry.register_context_factory<TextureImageDescription>(
       Arch::vulkan, NativeOperationMode::vulkan_inline, create_vulkan_image,
       vulkan_available);
   registry.register_factory<ImageUploadOperation>(

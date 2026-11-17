@@ -263,6 +263,10 @@ std::vector<uint32_t> specialize_spirv_arguments(
   optimizer.RegisterPass(spvtools::CreateSimplificationPass());
   optimizer.RegisterPass(spvtools::CreateDeadBranchElimPass());
   optimizer.RegisterPass(spvtools::CreateAggressiveDCEPass());
+  // Kernel metadata owns the descriptor ABI and prepared resource views reuse
+  // it. Fold unreachable computations while retaining their binding declarations;
+  // removing a variable here would disagree with that immutable task contract.
+  options.set_preserve_bindings(true);
   std::vector<uint32_t> output;
   if (!optimizer.Run(transformed.data(), transformed.size(), &output, options))
     throw std::invalid_argument("Cannot specialize SPIR-V arguments: " + diagnostic);

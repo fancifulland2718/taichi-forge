@@ -60,6 +60,8 @@ class ArgKind(Enum):
     MATRIX = "compound"
     STRUCT = "compound_struct"
     TEXTURE = "texture"
+    RWTEXTURE = "rw_texture"
+    ACCELERATION_STRUCTURE = "acceleration_structure"
 
 
 @dataclass(frozen=True)
@@ -68,6 +70,8 @@ class Arg:
     name: str
     dtype: object = None
     ndim: int = 0
+    fmt: object = None
+    lod: int = 0
 
     def schema(self):
         from ._package import _ElementType
@@ -76,6 +80,16 @@ class Arg:
             raise ValueError("Graph arguments require a name and supported ArgKind")
         if self.tag == ArgKind.SCALAR:
             return dict(kind="value", dtype=self.dtype)
+        if self.tag == ArgKind.ACCELERATION_STRUCTURE:
+            if self.dtype is not None or self.ndim != 0 or self.fmt is not None or self.lod != 0:
+                raise ValueError("Acceleration structure Graph arguments have no element or image layout")
+            return dict(kind="acceleration_structure")
+        if self.tag == ArgKind.RWTEXTURE:
+            fmt = getattr(self.fmt, "name", self.fmt)
+            if (self.dtype is not None or type(self.ndim) is not int or self.ndim not in (1, 2, 3)
+                    or not isinstance(fmt, str) or not fmt or type(self.lod) is not int or self.lod < 0):
+                raise ValueError("Storage image Graph arguments require rank, format and nonnegative lod")
+            return dict(kind="rw_texture", ndim=self.ndim, fmt=fmt, lod=self.lod)
         if self.tag == ArgKind.TEXTURE:
             if self.dtype is not None or type(self.ndim) is not int or self.ndim not in (1, 2, 3):
                 raise ValueError("Sampled texture Graph arguments require rank 1, 2 or 3 and no dtype")
@@ -679,7 +693,7 @@ class Graph:
         # Only the cold preparation copy selects code. The exposed generic plan
         # remains reusable with other binding strategies and SNode instances.
         if (plan.binding_strategy is not None
-                or self.package.runtime.arch not in ("cpu", "x64", "arm64", "cuda")):
+                or self.package.runtime.arch not in ("cpu", "x64", "arm64", "cuda", "vulkan")):
             return plan
         from ._package_calls import specialization_constant_args
 
@@ -801,7 +815,11 @@ class Graph:
         # Keep at most the current implicit binding. Explicit bind() continues
         # to create independent snapshots and workspaces for its caller.
         guards = self._binding_guards()
-        reusable = all(spec['kind'] in ('ndarray', 'native_resource') or reusable_value(value)
+        # Managed images/AS have immutable bindings just like arrays. Their
+        # contents remain live and native preparation retains the resource
+        # leases; treating them as unknown Python values rebuilds every frame.
+        reusable = all(spec['kind'] in ('ndarray', 'native_resource', 'texture',
+                                       'rw_texture', 'acceleration_structure') or reusable_value(value)
                        for spec, value in zip(self.arguments.values(), values))
         reusable = reusable and all(
             spec['kind'] not in ('value', 'dimension') or reusable_value(capture_value(owner, spec))

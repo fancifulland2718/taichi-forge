@@ -693,6 +693,16 @@ class StaticPreparation:
         return facts
 
     def project(self, environment, schema, kernel, *, query_paths=None):
+        from taichi_forge.types.ray_type import AccelerationStructureType
+        from taichi_forge.types.texture_type import TextureType, RWTextureType
+
+        # These managed resources retain a native qualification tied to the
+        # original kernel. Their existing ordinary/Graph route is supported,
+        # but switching to a specialized kernel needs a separate binding proof.
+        # Keep producer choices for these entries until that route is qualified.
+        if any(isinstance(arg.annotation, (AccelerationStructureType, TextureType, RWTextureType))
+               for arg in kernel.arguments):
+            return environment, schema, {}
         identity = kernel.func.__module__ + "." + kernel.func.__qualname__
         # Retain the environment identity for this build. An integer id alone
         # could be recycled while visiting another owner's layout alternatives.

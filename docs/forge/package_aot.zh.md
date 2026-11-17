@@ -7,7 +7,8 @@
 `@ti.func`、`@ti.real_func`、`@ti.pyfunc`、`@ti.dataclass` 和 `@ti.data_oriented`，无需增加导出装饰器、逐 Kernel 注册或组件根。
 这个接口目前是小范围原型，不是完整引擎的一键发行接口，格式和支持范围尚未稳定。
 
-CUDA bitcode 库可以显式开启生产端热启动：
+CUDA bitcode 库、CPU bitcode（`artifact_format="bc"`）与 Vulkan 默认格式
+（省略 `artifact_format`）可以显式开启生产端热启动：
 
 ```python
 ti.aot.export_package(app, "build/sdk-next", artifact_format="bc-library",
@@ -58,6 +59,19 @@ u8/f32 标量及一至四通道向量，在设备端打包。首次绑定编译�
 native resource/ExecutionPlan 目录；几何初值来自消费者。adapter 与 vendor 库仍是
 外部依赖。此投影不代表其他 `ti.hardware` 家族、alpha-mask 工厂或自定义 OptiX
 program 已取得定义包资格。
+
+格式 98 接入 Vulkan 加速结构和带格式的可写纹理参数，以及包内 Graph 符号绑定；
+资源可通过既有 Runtime 导入接口提供。Vulkan Host `Texture` 和 `SamplerConfig`
+使用原生图像所有者，当前覆盖浮点采样/颜色存储图像。与 JIT Texture 一样，新分配
+内容未定义，调用方须先初始化再读取；严格的原生 `image/sampled`、`image/storage`
+工厂仍要求初始上传证明，不额外添加清零或整帧暂存分配。本项不提供 Vulkan
+BLAS/TLAS Host 工厂，也不覆盖全部 Texture 方法。受管理图像/加速结构入口保留
+生产期静态选择及原有绑定路线；自动消费特化目前覆盖值/数组入口，扩展到上述
+资源前须为特化后的 Kernel 重新建立原生资源绑定资格。
+
+CPU bitcode、Vulkan 与 CUDA bitcode 库共用静态条件分类，分类不再依赖物理代码
+存储格式。Vulkan 特化删除无用计算时保留任务元数据所需的描述符声明。部署能力
+仍须显式声明；使用 64 位类型/原子操作、ray query 的包应带上对应要求。
 
 原生 recording 可直接执行，或通过 `append_native` 与包内 Kernel 组成 Graph。
 `freeze().select_execution_recipe(queue="preserve", binding_reuse="prefer")` 与
@@ -1597,8 +1611,8 @@ CUDA bitcode 的低层 `BoundCall.prepare(specialize=True, constant_args=(...))`
 回调只在能证明继承同一 RuntimeContext 时参与，`real_func` 自建参数上下文不混用。
 这不需要原数值 Python 源码，也不改变发行 TCM 或枚举模型组合。
 
-普通 package 调用采用上述自动策略。CPU/CUDA package Graph 在 `bind()` 的私有准备
-副本中，对适用的普通 bitcode 入口复用同一特化规则；公开 `Graph.plan` 保持通用。
+普通 package 调用采用上述自动策略。CPU/CUDA/Vulkan package Graph 在 `bind()` 的私有准备
+副本中，对适用的普通 bitcode / SPIR-V 入口复用同一特化规则；公开 `Graph.plan` 保持通用。
 Graph 策略参数变化须重建 Graph，已绑定调用保留原快照。ExecutionPlan v28 的逐核
 `specialization.constant_args` 传递整数位置；提交时可更新的标量即使列入候选也保持活值。
 设备条件数组不被读回或固定。特殊 launch、binding family、SNode instance 和 managed
