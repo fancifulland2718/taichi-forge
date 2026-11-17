@@ -10,6 +10,35 @@ No export decorator, per-kernel registration or component root is required.
 This is a limited prototype, not a complete engine distribution interface.
 Its format and supported scope are experimental.
 
+An optional producer warm start is available for CUDA bitcode libraries:
+
+```python
+ti.aot.export_package(app, "build/sdk-next", artifact_format="bc-library",
+                      build_cache="build/aot-cache")
+```
+
+The cache directory holds a small index referencing the last successfully
+published package. Keep that output until the next build. When the source closure,
+recordable Python bindings, compiler/runtime files, target and compilation options
+are unchanged, export copies the complete package before constructing resource
+witnesses or capturing numerical code. Files are checked while copying; TCM is
+neither unpacked nor finalized again. Outputs are independent files, not hardlinks.
+Publication remains atomic. A missing/corrupted index or result is an optional
+cache miss; a failed export does not replace the last successful index.
+Compiler file digests are memoized by file identity, size and timestamps in this
+trusted local development index; exported payload bytes are checked on each copy.
+
+This first stage reuses a complete unchanged build. Source edits still enter the
+normal compiler and its existing offline cache; it does **not** yet skip frontend
+capture per changed/unchanged entry or merge independently compiled resource
+contracts. Opaque mutable globals and external modules without a tracked identity
+also use ordinary export. Source-defined bindings, Forge types and simple immutable
+standard-library declarations are the initial supported identity scope. Do not use
+this cache for declarations with undeclared external state or runtime monkeypatches
+of Forge/standard-library implementations. There is no snapshot of frontend objects,
+resource witnesses, model data or consumer specializations. The option is off by
+default and adds no checks to ordinary JIT calls or loaded package execution.
+
 Host scripts composing numerical objects can select their recorder before recording:
 
 ```python

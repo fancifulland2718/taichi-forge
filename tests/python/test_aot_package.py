@@ -41,6 +41,176 @@ class Model:
 
 
 @test_utils.test(arch=ti.cuda, offline_cache=False)
+def test_package_build_cache_skips_witnesses_and_rejects_changed_inputs(tmp_path, monkeypatch):
+    from taichi_forge.aot._package_compilation import PackageCompilation
+    from taichi_forge.aot._package_owner_graph import OwnerGraph
+
+    source = '''import taichi_forge as ti
+from typing import Final
+BIAS: Final = 2
+@ti.data_oriented
+class Model:
+    def __init__(self, n):
+        self.n = n
+        scope = ti.experimental.ResourceScope(self)
+        scope.out = scope.field(ti.i32, shape=scope.dim('n'))
+    @ti.func
+    def leaf(self, x: ti.i32) -> ti.i32:
+        return x * 3 + BIAS
+    @ti.kernel
+    def run(self, value: ti.i32):
+        for i in range(self.n):
+            self.out[i] = self.leaf(i + value)
+    @ti.kernel
+    def copy(self, data: ti.types.ndarray(dtype=ti.i32, ndim=1)):
+        for i in range(self.n):
+            self.out[i] = data[i]
+'''
+    package = _source_package(tmp_path, monkeypatch, source)
+    counts = dict(compile=0, witness=0)
+    original_compile, original_owner = PackageCompilation.compile, OwnerGraph.context
+
+    def compile(self, *args, **kwargs):
+        counts['compile'] += 1
+        return original_compile(self, *args, **kwargs)
+
+    def owner(self, *args, **kwargs):
+        counts['witness'] += 1
+        return original_owner(self, *args, **kwargs)
+
+    monkeypatch.setattr(PackageCompilation, 'compile', compile)
+    monkeypatch.setattr(OwnerGraph, 'context', owner)
+
+    def export(name):
+        counts.update(compile=0, witness=0)
+        path = tmp_path / name
+        manifest = ti.aot.export_package(package, path, artifact_format='bc-library', build_cache=tmp_path / 'cache')
+        return path, manifest
+
+    cold, cold_manifest = export('cold')
+    assert counts['compile'] and counts['witness']
+    warm, warm_manifest = export('warm')
+    assert counts == dict(compile=0, witness=0)
+    assert json.loads(json.dumps(cold_manifest)) == warm_manifest
+    assert (cold / 'code.tcm').read_bytes() == (warm / 'code.tcm').read_bytes()
+    assert not any((tmp_path / 'cache').rglob('*.tcm'))
+    with Runtime('cuda') as runtime, load_package(runtime, warm) as code:
+        for n in (3, 13):
+            aot, jit = code.host.Model(n), package.model.Model(n)
+            for value in (2, 11):
+                aot.run(value)
+                jit.run(value)
+                np.testing.assert_array_equal(aot.out.to_numpy(), jit.out.to_numpy())
+            values = np.arange(n, dtype=np.int32)
+            aot.copy(values)
+            jit.copy(values)
+            np.testing.assert_array_equal(aot.out.to_numpy(), jit.out.to_numpy())
+            values += 5
+            aot.copy(values)
+            np.testing.assert_array_equal(aot.out.to_numpy(), values)
+
+    # Same source bytes but changed actual global input must not hit.
+    package.model.BIAS = 9
+    changed, _ = export('global')
+    assert counts['compile'] and counts['witness']
+    with Runtime('cuda') as runtime, load_package(runtime, changed) as code:
+        model = code.host.Model(5)
+        model.run(4)
+        np.testing.assert_array_equal(model.out.to_numpy(), (np.arange(5) + 4) * 3 + 9)
+
+    # A corrupted optional result rebuilds; published consumer validation is
+    # unchanged. Never copy a poisoned payload into a supposedly valid output.
+    (changed / 'code.tcm').write_bytes(b'corrupt')
+    repaired, _ = export('repaired')
+    assert counts['compile'] and counts['witness']
+    assert zipfile.is_zipfile(repaired / 'code.tcm')
+    config = ti.lang.impl.current_cfg()
+    previous = config.fast_math
+    config.fast_math = not previous
+    try:
+        export('config')
+        assert counts['compile'] and counts['witness']
+    finally:
+        config.fast_math = previous
+
+    # Opaque mutable globals have no portable dependency identity yet.
+    package.model.opaque = object()
+    export('opaque1')
+    export('opaque2')
+    assert counts['compile'] and counts['witness']
+
+
+@test_utils.test(arch=ti.cuda, offline_cache=False)
+def test_package_build_cache_source_changes_and_missing_index(tmp_path, monkeypatch):
+    from taichi_forge.aot._package_compilation import PackageCompilation
+
+    source = '''import taichi_forge as ti
+@ti.kernel
+def compute(x: ti.i32) -> ti.i32:
+    return x * 3
+'''
+    package = _source_package(tmp_path, monkeypatch, source, initializer='from .model import compute\n')
+    cache = tmp_path / 'cache'
+    ti.aot.export_package(package, tmp_path / 'first', artifact_format='bc-library', build_cache=cache)
+    path = Path(package.model.__file__)
+    path.write_text(source.replace('x * 3', 'x * 7'), encoding='utf8')
+    # Execute the changed source without relying on timestamp-granularity pyc.
+    exec(compile(path.read_text(encoding='utf8'), str(path), 'exec'), package.model.__dict__)
+    package.compute = package.model.compute
+    count = []
+    original = PackageCompilation.compile
+
+    def compile_entry(self, *args, **kwargs):
+        count.append(1)
+        return original(self, *args, **kwargs)
+
+    monkeypatch.setattr(PackageCompilation, 'compile', compile_entry)
+    ti.aot.export_package(package, tmp_path / 'changed', artifact_format='bc-library', build_cache=cache)
+    assert count
+    with Runtime('cuda') as runtime, load_package(runtime, tmp_path / 'changed') as code:
+        assert code.host.compute(5) == 35
+    (cache / 'latest.json').write_text('{unfinished', encoding='utf8')
+    count.clear()
+    ti.aot.export_package(package, tmp_path / 'recovered', artifact_format='bc-library', build_cache=cache)
+    assert count
+    assert json.loads((cache / 'latest.json').read_text())['output'] == str(tmp_path / 'recovered')
+    index = (cache / 'latest.json').read_bytes()
+    invalid = source.replace('x * 3', 'missing_capture')
+    path.write_text(invalid, encoding='utf8')
+    exec(compile(invalid, str(path), 'exec'), package.model.__dict__)
+    package.compute = package.model.compute
+    with pytest.raises(ti.aot.PackageExportError):
+        ti.aot.export_package(package, tmp_path / 'failed', artifact_format='bc-library', build_cache=cache)
+    assert (cache / 'latest.json').read_bytes() == index
+    assert not (tmp_path / 'failed').exists()
+
+
+def test_build_cache_toolchain_digest_reuses_only_unchanged_files(tmp_path, monkeypatch):
+    from taichi_forge.lang import _build_cache
+
+    library = tmp_path / 'compiler.bin'
+    library.write_bytes(b'first compiler')
+    reads = []
+    digest = _build_cache.file_digest
+
+    def read(path):
+        reads.append(path)
+        return digest(path)
+
+    monkeypatch.setattr(_build_cache, 'file_digest', read)
+    first = {}
+    original = _build_cache.unchanged_file_digest(library, {}, first)
+    second = {}
+    assert _build_cache.unchanged_file_digest(library, first, second) == original
+    assert len(reads) == 1
+    stamp = library.stat().st_mtime_ns
+    library.write_bytes(b'other compiler')
+    os.utime(library, ns=(stamp + 1_000_000_000, stamp + 1_000_000_000))
+    assert _build_cache.unchanged_file_digest(library, second, {}) != original
+    assert len(reads) == 2
+
+
+@test_utils.test(arch=ti.cuda, offline_cache=False)
 def test_package_query_borrows_conditional_fields_from_shared_tree(tmp_path, monkeypatch):
     source = '''
 import taichi_forge as ti

@@ -1745,7 +1745,8 @@ def _publish_package(staging, output):
                 ) from error
 
 
-def export_package(package, output, *, arch=None, caps=None, source_root=None, artifact_format=None):
+def export_package(package, output, *, arch=None, caps=None, source_root=None, artifact_format=None,
+                   build_cache=None):
     """Export decorated definitions without executing a model to discover coverage.
 
     ``check_package`` runs this same declaration phase without compilation.
@@ -1754,15 +1755,21 @@ def export_package(package, output, *, arch=None, caps=None, source_root=None, a
     A completed package is retained at the reported staging path if publication fails.
     Experimental CUDA ``artifact_format="bc-library"`` preserves typed function
     boundaries in the build copy and shares their bitcode across entry points.
+    ``build_cache=directory`` opts into producer warm start for CUDA bc-library.
+    Unchanged source-driven builds reuse the previous complete package before
+    resource witnesses and numerical capture. Changed/opaque inputs use the
+    ordinary compiler (including its existing offline cache). The directory
+    holds a small index; keep its referenced output until the next build.
     """
     from ._package_compilation import PackageCompilation
 
     with PackageCompilation() as compilation:
         return _export_package(package, output, arch=arch, caps=caps, source_root=source_root,
-                               compilation=compilation, artifact_format=artifact_format)
+                               compilation=compilation, artifact_format=artifact_format, build_cache=build_cache)
 
 
-def _export_package(package, output, *, arch, caps, source_root, compilation, artifact_format=None):
+def _export_package(package, output, *, arch, caps, source_root, compilation, artifact_format=None,
+                    build_cache=None):
     import taichi_forge as ti
     from taichi_forge.aot._component import Component
     from taichi_forge_runtime._static_values import static_key, read_static_key
@@ -1778,10 +1785,21 @@ def _export_package(package, output, *, arch, caps, source_root, compilation, ar
         raise FileExistsError(output)
     if source_root is not None and output.is_relative_to(Path(source_root).resolve()):
         raise ValueError("Package output must be outside its application source root")
+    if build_cache is not None and Path(build_cache).resolve().is_relative_to(output):
+        raise ValueError("Build cache index must be outside the package output")
     (
         sources, namespaces, dependency_report, application_modules, imported_modules,
         host_contexts, function_inputs, factory_calls, target_arch, packages,
     ) = _preflight_package(package, arch=arch, source_root=source_root)
+    cache = None
+    if build_cache is not None:
+        from ._package_build_cache import PackageBuildCache
+
+        cache = PackageBuildCache(build_cache, sources, imported_modules, packages, caps, artifact_format)
+        cached = cache.reuse(output, _publish_package)
+        if cached is not None:
+            cache.record(output)
+            return cached
     package = packages[0]
     module = Module(caps=caps, artifact_format=artifact_format)
     compilation.attach(module, function_library=artifact_format == "bc-library")
@@ -2990,4 +3008,6 @@ def _export_package(package, output, *, arch, caps, source_root, compilation, ar
         # This is the exact private staging directory allocated above, never user input.
         if not complete and staging.exists() and staging.parent == output.parent and staging.name.startswith(".forge-package-"):
             shutil.rmtree(staging)
+    if cache is not None:
+        cache.record(output)
     return manifest

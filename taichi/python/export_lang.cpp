@@ -1317,6 +1317,30 @@ void export_lang(py::module &m) {
     return result;
   });
 
+  // Cold build lookup, before a Kernel or its frontend IR exists. Reuse the
+  // compiler's configuration projection rather than maintaining a Python
+  // list of code-shaping options. This is not a per-call JIT cache lookup.
+  m.def("_build_cache_config_key",
+        [](const CompileConfig &cfg, const DeviceCapabilityConfig &caps,
+           bool aot) {
+          auto config = cfg;
+          if (aot) {
+            config.llvm_aot_relocatable_roots =
+                arch_is_cpu(config.arch) || config.arch == Arch::cuda;
+          }
+          std::string key = get_hashed_offline_cache_key_context(config, caps, nullptr);
+          // Decorator overrides may resolve defaults differently from the
+          // default entry. Include each existing tier, without compiling IR.
+          for (const auto &tier : {"", "fast", "balanced", "full"}) {
+            auto request = resolve_kernel_compile_request(
+                config, caps, *tier ? std::optional<std::string>(tier) : std::nullopt,
+                aot ? CompilePurpose::aot : CompilePurpose::jit);
+            key += get_hashed_offline_cache_key_context(
+                request.config(), request.device_caps(), nullptr);
+          }
+          return key;
+        });
+
   m.def("reset_default_compile_config",
         [&]() { default_compile_config = CompileConfig(); });
   m.def("_set_check_out_of_bound_explicit", [](bool explicit_value) {
