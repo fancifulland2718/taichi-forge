@@ -223,13 +223,46 @@ def discover_construction_methods(tree, namespace, module, fail, kind):
                     for call in calls(methods[name]) if call.func.attr in allocation_paths)
             return recursion[name]
 
-        # A method with an explicit independent group already has the normal
-        # preparation contract below. Calling it during __init__ does not turn
+        # Independent groups and input-only binding methods already have the
+        # normal preparation contract below. Calling them during __init__ does not turn
         # its Host arguments into construction-time code identities. Keep raw
         # allocations and nested, unproven allocation calls on the stricter
         # construction path. Existing self-only construction keeps its earlier
         # schema discovery and call-order semantics.
         grouped = set()
+
+        def binds_inputs(function):
+            """A local scope that only declares ports needs no allocation group."""
+            nodes, call_nodes, _ = syntax_of(function)
+            scopes = {}
+            for node in nodes:
+                if (isinstance(node, ast.Assign) and len(node.targets) == 1
+                        and isinstance(node.targets[0], ast.Name) and isinstance(node.value, ast.Call)):
+                    call = node.value
+                    normalized = call
+                    if qualified_kind(call, kind) != 'experimental.ResourceScope':
+                        try:
+                            normalized = prove_factory(_source_value(call.func, namespace), call)
+                        except (TypeError, ValueError, OSError):
+                            continue
+                    if (normalized is not None
+                            and qualified_kind(normalized, kind) == 'experimental.ResourceScope'):
+                        scopes[node.targets[0].id] = id(node.targets[0])
+            if not scopes:
+                return False
+            uses = set(scopes.values())
+            for call in call_nodes:
+                if (isinstance(call.func, ast.Attribute) and isinstance(call.func.value, ast.Name)
+                        and call.func.value.id in scopes):
+                    if call.func.attr not in (
+                            'record', 'value', 'static', 'dim', 'owner_dim', 'owner_reference', 'borrow'):
+                        return False
+                    if (call.func.attr == 'borrow'
+                            and not {keyword.arg for keyword in call.keywords} >= {'external', 'dtype', 'shape'}):
+                        return False
+                    uses.add(id(call.func.value))
+            return all(id(node) in uses for node in nodes if isinstance(node, ast.Name) and node.id in scopes)
+
         for name, function in methods.items():
             args = function.args
             self_only = (not args.posonlyargs and len(args.args) == 1
@@ -242,6 +275,9 @@ def discover_construction_methods(tree, namespace, module, fail, kind):
             if any(qualified_kind(call, kind) in (
                 'FieldsBuilder', 'field', 'Vector.field', 'Matrix.field', 'Struct.field'
             ) for call in call_nodes):
+                continue
+            if binds_inputs(function):
+                grouped.add(name)
                 continue
             for node in nodes:
                 if not isinstance(node, ast.With) or len(node.items) != 1:

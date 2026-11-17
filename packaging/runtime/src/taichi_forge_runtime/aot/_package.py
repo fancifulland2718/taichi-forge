@@ -1374,7 +1374,9 @@ def managed_class(package, cls):
     parameters = {
         name: item["presence_parameter"]
         for name, item in package.manifest["owners"].get(parameter_key, {}).items()
-        if item.get("presence_owner") == parameter_key
+        # Family contexts specialize input contracts; presence belongs to the
+        # original Python constructor, including its absent-input branch.
+        if item.get("presence_owner") == key
     }
     signature = inspect.signature(original) if parameters or family else None
     optional_inputs = {

@@ -2431,8 +2431,17 @@ def _export_package(package, output, *, arch, caps, source_root, compilation, ar
                     if (resource.get("external") or resource.get("dynamic_input_storage")
                             or resource.get("input_record")) and attribute in code.dynamic:
                         continue
+                    # A definition constant has no nullable storage to read.
+                    # Nested query projection retains its value and emits the
+                    # ordered presence predicates for consumer admission. Only
+                    # those projected predicates may move out of static guards;
+                    # finite layout/implementation ancestors remain required.
+                    prepared_conditions = (resource.get("input_conditions", ())
+                                           if resource.get("nested_query_input")
+                                           and resource.get("kind") == "constant" else ())
                     if any(condition_values.get(key) != static_key(value)
-                           for key, value in resource.get("conditions", {}).items()):
+                           for key, value in resource.get("conditions", {}).items()
+                           if key not in prepared_conditions):
                         _fail(
                             name,
                             node,

@@ -913,6 +913,224 @@ class Model:
         load_package(runtime, output)
 
 
+@test_utils.test(arch=ti.cuda, offline_cache=False)
+def test_package_nested_fixed_rank_ports_share_code_and_live_slots(tmp_path, monkeypatch):
+    """Distinct borrowed layouts stay local to ports, not parent combinations."""
+    source = '''
+import taichi_forge as ti
+@ti.data_oriented
+class Query:
+    BIAS = 0.5
+    def __init__(self, n: int, rows: int, slotted: bool):
+        self.n, self.rows, self.slotted = n, rows, slotted
+        scope = ti.experimental.ResourceScope(self)
+        scope.static('slotted', choices=(False, True))
+        scope.constant('BIAS')
+    def bind(self, values, slot):
+        scope = ti.experimental.ResourceScope(self)
+        scope.borrow('live', None if self.slotted else values, external=True,
+                     dtype=ti.math.vec3, shape=(scope.dim('n'),), optional=True)
+        scope.borrow('slots', values if self.slotted else None, external=True,
+                     dtype=ti.math.vec3, shape=(scope.dim('rows'), scope.dim('n')), optional=True)
+        scope.borrow('slot', slot, external=True, dtype=ti.i32, shape=(), optional=True)
+    @ti.func
+    def read(self) -> ti.math.vec3:
+        result = ti.Vector([0.0, 0.0, 0.0])
+        if ti.static(self.slotted):
+            result = self.slots[self.slot[None], 0]
+        else:
+            result = self.live[0]
+        return result + self.BIAS
+@ti.data_oriented
+class Model:
+    def __init__(self, left: Query = None, right: Query = None):
+        scope = ti.experimental.ResourceScope(self)
+        scope.out = scope.vector_field(3, ti.f32, shape=())
+        self.bind(left, right)
+    def bind(self, left: Query = None, right: Query = None):
+        self.has_left, self.has_right = left is not None, right is not None
+        scope = ti.experimental.ResourceScope(self)
+        scope.static('has_left', choices=(False, True))
+        scope.static('has_right', choices=(False, True))
+        if self.has_left:
+            scope.owner_reference('left', left)
+        else:
+            scope.owner_reference('left', None, optional=True)
+        if self.has_right:
+            scope.owner_reference('right', right)
+        else:
+            scope.owner_reference('right', None, optional=True)
+    @ti.kernel
+    def step(self, gain: ti.f32):
+        result = ti.Vector([1.0, 1.0, 1.0])
+        if ti.static(self.left is not None):
+            result += self.left.read()
+        if ti.static(self.right is not None):
+            result += self.right.read()
+        self.out[None] = gain * result
+    def graph(self):
+        builder = ti.graph.GraphBuilder()
+        builder.dispatch(self.step, ti.graph.Arg(ti.graph.ArgKind.SCALAR, 'gain', ti.f32))
+        return builder.compile()
+'''
+    package = _source_package(tmp_path, monkeypatch, source)
+    cases = ((None, None), (False, None), (None, True), (False, True), (True, False))
+    references = []
+    for modes in cases:
+        queries = []
+        for index, mode in enumerate(modes):
+            if mode is None:
+                queries.append(None)
+                continue
+            n = 3 + index
+            shape = (2, n) if mode else (n,)
+            values = ti.Vector.field(3, ti.f32, shape)
+            values.from_numpy(np.arange(np.prod(shape) * 3, dtype=np.float32).reshape(*shape, 3))
+            slot = ti.field(ti.i32, ()) if mode else None
+            if slot is not None:
+                slot[None] = 1
+            query = package.model.Query(n, 2, mode)
+            query.bind(values, slot)
+            queries.append(query)
+        owner = package.Model(*queries)
+        owner.step(2)
+        references.append(owner.out.to_numpy())
+    output = tmp_path / 'sdk'
+    manifest = ti.aot.export_package(package, output, artifact_format='bc-library')
+    entries = [e for e in manifest['entries'].values() if e['definition'].endswith('Model.step')]
+    assert len(entries) == 1
+    assert entries[0]['admission']['constants']
+    assert all(item.get('presence_conditions') for item in entries[0]['admission']['constants'].values())
+    with Runtime('cuda') as runtime, load_package(runtime, output) as code:
+        owners = []
+        for expected, modes in zip(references, cases):
+            queries = []
+            for index, mode in enumerate(modes):
+                if mode is None:
+                    queries.append(None)
+                    continue
+                n = 3 + index
+                shape = (2, n) if mode else (n,)
+                values = runtime.ndarray('f32', shape, element_shape=(3,))
+                values.from_numpy(np.arange(np.prod(shape) * 3, dtype=np.float32).reshape(*shape, 3))
+                slot = runtime.ndarray('i32', ()) if mode else None
+                if slot is not None:
+                    slot.from_numpy(np.array(1, np.int32))
+                query = code.host.model.Query(n, 2, mode)
+                query.bind(values, slot)
+                assert (query.live is None) is mode
+                assert (query.slots is values) is mode
+                queries.append(query)
+            owner = code.host.Model(*queries)
+            owner.step(2)
+            np.testing.assert_array_equal(owner.out.to_numpy(), expected)
+            owners.append(owner)
+        owner = owners[-1]
+        other = owners[-2]
+        frozen_other = other.out.to_numpy()
+        query = owner.left
+        original = query.slots
+        graph = owner.graph().bind({'gain': 2})
+        query.slot.from_numpy(np.array(0, np.int32))
+        original.from_numpy(np.full((2, 3, 3), 7, np.float32))
+        graph.run()
+        np.testing.assert_array_equal(owner.out.to_numpy(), 2 * (1 + 7.5 + np.arange(3) + .5))
+        replacement = runtime.ndarray('f32', (2, 3), element_shape=(3,))
+        replacement.from_numpy(np.full((2, 3, 3), 11, np.float32))
+        query.bind(replacement, query.slot)
+        original.from_numpy(np.full((2, 3, 3), 9, np.float32))
+        graph.run()  # Explicit prepared calls retain their old resource lease.
+        np.testing.assert_array_equal(owner.out.to_numpy(), 2 * (1 + 9.5 + np.arange(3) + .5))
+        owner.step(2)
+        np.testing.assert_array_equal(owner.out.to_numpy(), 2 * (1 + 11.5 + np.arange(3) + .5))
+        np.testing.assert_array_equal(other.out.to_numpy(), frozen_other)
+        query.bind(None, query.slot)
+        with pytest.raises(ValueError, match='presence'):
+            owner.step(2)
+        query.bind(replacement, query.slot)
+        query.BIAS = 3.0
+        with pytest.raises(ValueError, match='constant'):
+            owner.step(2)
+        query.BIAS = 0.5
+        wrong = runtime.ndarray('f32', (3,), element_shape=(3,))
+        with pytest.raises(ValueError, match='shape|rank|ndim'):
+            query.bind(wrong, query.slot)
+        graph.close()
+    # The package Host and compiled code also work without the numerical source.
+    probe = tmp_path / 'consume_fixed_ports.py'
+    probe.write_text(textwrap.dedent('''
+        import importlib.abc, sys
+        import numpy as np
+        class Block(importlib.abc.MetaPathFinder):
+            def find_spec(self, fullname, path=None, target=None):
+                if fullname.split('.')[0] in ('taichi', 'taichi_forge', 'definition_fixture'):
+                    raise AssertionError(fullname)
+        sys.meta_path.insert(0, Block())
+        from taichi_forge_runtime.aot import Runtime, load_package
+        with Runtime('cuda') as runtime, load_package(runtime, sys.argv[1]) as code:
+            absent = code.host.Model()
+            absent.step(1)
+            np.testing.assert_array_equal(absent.out.to_numpy(), [1, 1, 1])
+            values = runtime.ndarray('f32', (3, 7), element_shape=(3,))
+            data = np.arange(63, dtype=np.float32).reshape(3, 7, 3)
+            values.from_numpy(data)
+            slot = runtime.ndarray('i32', ())
+            query = code.host.model.Query(7, 3, True)
+            query.bind(values, slot)
+            owner = code.host.Model(query, None)
+            call = owner.graph().bind({'gain': 2})
+            for row in (0, 2, 1):
+                slot.from_numpy(np.array(row, np.int32))
+                call.run()
+                np.testing.assert_array_equal(owner.out.to_numpy(), 2 * (1.5 + data[row, 0]))
+            call.close()
+        print('FIXED_RANK_PORTS_SOURCE_FREE_OK')
+    '''), encoding='utf8')
+    env = dict(os.environ, PYTHONDONTWRITEBYTECODE='1',
+        PYTHONPATH=str(Path(__file__).resolve().parents[2] / 'packaging/runtime/src'),
+        TAICHI_NATIVE_RUNTIME_DIR=str(Path(utils._loaded_native_runtime_path).parent),
+        TAICHI_RUNTIME_DIR=utils._runtime_bitcode_dir())
+    result = subprocess.run([sys.executable, '-B', str(probe), str(output)],
+                            cwd=tmp_path, env=env, capture_output=True, text=True, timeout=90)
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert 'FIXED_RANK_PORTS_SOURCE_FREE_OK' in result.stdout
+
+
+@pytest.mark.parametrize('optional', [False, True])
+@test_utils.test(arch=ti.cuda, offline_cache=False)
+def test_package_conditional_external_read_rejects_absent_layout(tmp_path, monkeypatch, optional):
+    source = '''
+import taichi_forge as ti
+@ti.data_oriented
+class Model:
+    def __init__(self, enabled: bool, values):
+        self.enabled = enabled
+        scope = ti.experimental.ResourceScope(self)
+        scope.static('enabled', choices=(False, True))
+        if self.enabled:
+            scope.borrow('values', values, external=True, dtype=ti.f32, shape=(3,), optional=OPTIONAL)
+    @ti.kernel
+    def read(self) -> ti.f32:
+        return self.values[0]
+'''.replace('OPTIONAL', repr(optional))
+    package = _source_package(tmp_path, monkeypatch, source)
+    original = ti.field(ti.f32, 3)
+    original.fill(7)
+    assert package.Model(True, original).read() == 7
+    output = tmp_path / 'sdk'
+    manifest = ti.aot.export_package(package, output, artifact_format='bc-library')
+    entries = [e for e in manifest['entries'].values() if e['definition'].endswith('Model.read')]
+    assert len(entries) == 1  # The absent allocation is not exported as a no-op.
+    with Runtime('cuda') as runtime, load_package(runtime, output) as code:
+        data = runtime.ndarray('f32', (3,))
+        data.from_numpy(np.full(3, 7, np.float32))
+        assert code.host.Model(True, data).read() == 7
+        with pytest.raises(ValueError):
+            code.host.Model(False, None).read()
+        data.from_numpy(np.full(3, 9, np.float32))
+        assert code.host.Model(True, data).read() == 9
+
+
 @pytest.mark.parametrize('early_return', [False, True])
 @pytest.mark.parametrize('unused_layout', [False, True])
 @test_utils.test(arch=ti.cuda, offline_cache=False)
@@ -5946,8 +6164,9 @@ def test_package_owner_union_checks_declared_constructor_calls(tmp_path, monkeyp
         np.testing.assert_array_equal(model.second.output.to_numpy(), -10.0)
 
 
+@pytest.mark.parametrize('implicit_presence', [False, True])
 @test_utils.test(arch=[ti.cpu, ti.cuda], offline_cache=False)
-def test_package_optional_owner_union_constructs_absent_without_extra_context(tmp_path, monkeypatch):
+def test_package_optional_owner_union_constructs_absent_without_extra_context(tmp_path, monkeypatch, implicit_presence):
     source = TYPED_OWNER_INPUT_SOURCE.split('@ti.data_oriented\nclass Model:')[0]
     source = source.replace('def __init__(self, source):',
         'def __init__(self, n: int, source: ScalarStorage | VectorStorage = None):')
@@ -5965,6 +6184,11 @@ def test_package_optional_owner_union_constructs_absent_without_extra_context(tm
         '            self.output[i] = gain\n'
         '            if ti.static(self.has_source):\n'
         '                self.output[i] += self.source.read(i)')
+    if implicit_presence:
+        source = source.replace("        self.has_source = source is not None\n", '')
+        source = source.replace("        scope.static('has_source', choices=(False, True))\n", '')
+        source = source.replace('if self.has_source:', 'if source is not None:')
+        source = source.replace('ti.static(self.has_source)', 'ti.static(self.source is not None)')
     package = _source_package(tmp_path, monkeypatch, source,
         initializer='from .model import Reader as Model, ScalarStorage, VectorStorage\n')
     expected = []

@@ -2450,10 +2450,10 @@ class _Capture:
                     and ctx is not None
                     and not ctx.is_in_static_scope()
                     and isinstance(declaration, (_ConditionalDenseField, _ConditionalModelTensorField,
-                                                 _ConditionalOwnerRecord, _ChoiceRecord))
+                                                 _ConditionalOwnerRecord, _ChoiceRecord, _LayoutArray))
                 ):
                     self.missing_resource = name
-                    raise TaichiCompilationError(f"Numerical entry requires Field or owner self.{'.'.join(path)}")
+                    raise TaichiCompilationError(f"Numerical entry requires resource or owner self.{'.'.join(path)}")
                 return None
             if dynamic_record:
                 return _RecordReference(path)
