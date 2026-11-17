@@ -29668,6 +29668,46 @@ class Model:
 
 
 @test_utils.test(arch=ti.cuda, offline_cache=False)
+def test_package_ordered_replay_freezes_captures_without_owner_scans(tmp_path, monkeypatch):
+    from taichi_forge_runtime.aot._package_calls import OwnerGuard
+
+    package = _source_package(tmp_path, monkeypatch, OWNER_GRAPH_SOURCE)
+    args = dict(increment=3, extra=(0.0, 0.0))
+    original = package.Model(7, 2.0)
+    ordinary = original.graph()
+    original.gain = 11.0
+    ordinary.run(dict(increment=3, extra=ti.Vector([0.0, 0.0])))
+    expected = original.values.to_numpy()
+    ti.aot.export_package(package, tmp_path / 'sdk', artifact_format='bc-library')
+    with Runtime('cuda') as runtime, load_package(runtime, tmp_path / 'sdk') as code:
+        model = code.host.Model(7, 2.0)
+        graph = model.graph()
+        assert graph._prepare_ordered_replay(args)
+        model.gain = 11.0
+        original_storage = model.values
+        replacement = code.host.Model(7, -1.0)
+        replacement.values.fill(-9)
+        model.values = replacement.values
+        with monkeypatch.context() as stable:
+            def unexpected_guard(*args, **kwargs):
+                raise AssertionError('qualified capture snapshots must not scan owners')
+            stable.setattr(OwnerGuard, 'matches', unexpected_guard)
+            stable.setattr(OwnerGuard, 'for_graph', unexpected_guard)
+            graph.submit(args).wait()
+            np.testing.assert_array_equal(original_storage.to_numpy(), expected)
+            np.testing.assert_array_equal(model.values.to_numpy(), np.full(7, -9))
+            # Changed explicit arguments enter ordinary admission/preparation
+            # and capture the current owner, without reinstating hot guards.
+            graph.submit(dict(args, increment=4)).wait()
+            np.testing.assert_array_equal(model.values.to_numpy(), 22 * np.arange(7) + 57)
+            graph.submit(dict(args, increment=4)).wait()
+            np.testing.assert_array_equal(model.values.to_numpy(), 22 * np.arange(7) + 57)
+            model.values.close()
+            with pytest.raises(RuntimeError, match='closed|retired dependency'):
+                graph.submit(dict(args, increment=4))
+
+
+@test_utils.test(arch=ti.cuda, offline_cache=False)
 def test_package_ordered_replay_keeps_immutable_frames_and_queue_snapshots(tmp_path, monkeypatch):
     package = _source_package(tmp_path, monkeypatch, '''
 import taichi_forge as ti

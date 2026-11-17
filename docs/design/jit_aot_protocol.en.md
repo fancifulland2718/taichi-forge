@@ -210,6 +210,12 @@ Stable package binding guards observe declared presence predicates before
 inactive input members, and resolve dimension symbols through their declared
 attribute paths. They retain rebind, optional-presence and mutable Host-value
 invalidation without reading device contents.
+An explicitly qualified ordered CUDA Graph replays its admitted capture
+snapshot without repeating owner-attribute scans. Its caller owns invalidation
+when captured model facts or resources change; a new explicit-argument binding
+or replacement Graph performs admission again. Ordinary implicit calls retain
+capture-change observation. Native close, lifetime and in-flight lease checks
+remain active in both paths.
 Generations, close and in-flight retirement retain existing ownership/lease rules.
 Runtime/provider dependencies need not be embedded in TCM, but must resolve under their contracts.
 

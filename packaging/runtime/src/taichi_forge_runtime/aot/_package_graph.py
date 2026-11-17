@@ -640,6 +640,11 @@ class Graph:
         return ExecutionPlan(**document)
 
     def _binding_guards(self):
+        if self._ordered_replay_required:
+            # The caller has explicitly qualified this prepared snapshot for
+            # ordered replay. Captured owners are fixed until a cold rebind or
+            # Graph replacement, as in an explicitly bound PreparedCall.
+            return ()
         from ._package_calls import OwnerGuard
 
         groups = {}
@@ -675,7 +680,13 @@ class Graph:
                 and prepared.info['execution_kind'] == 'cuda_graph')
 
     def _prepare_ordered_replay(self, arguments):
-        """Qualify a stable binding once for queued whole-Graph submission."""
+        """Qualify a fixed capture snapshot for queued whole-Graph submission.
+
+        The caller owns Graph invalidation when captured model facts/resources
+        change. Explicit arguments still select a fresh binding when changed;
+        native resource lifetime and in-flight lease checks remain in force.
+        Ordinary implicit calls retain automatic capture-change observation.
+        """
         if self.package.runtime.arch != 'cuda':
             return False
         with self.package._call_lock:
@@ -683,6 +694,10 @@ class Graph:
             qualified = (prepared is self._cached_call
                          and self._can_replay_ordered(prepared))
             self._ordered_replay_required = qualified
+            if qualified:
+                # Preparation already admitted and retained these captures.
+                # Do not rescan the owner's Python attributes on every replay.
+                self._cached_guards = ()
             return qualified
 
     def _prepared(self, arguments):
