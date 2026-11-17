@@ -16474,11 +16474,13 @@ def _declared_private_arguments(declarations, args):
 def _bind_managed_array_arguments(builder, arguments):
     """Retain concrete normal arrays using Graph's existing fixed bindings."""
     from taichi_forge.lang._ndarray import Ndarray
+    from taichi_forge.lang._storage_view import DenseNdarrayView
 
     result = []
     for value in arguments:
-        if isinstance(value, Ndarray):
-            if value.arr is None or value._runtime_prog is not impl.get_runtime().prog:
+        if isinstance(value, (Ndarray, DenseNdarrayView)):
+            if (value._runtime_prog is not impl.get_runtime().prog or
+                    isinstance(value, Ndarray) and value.arr is None):
                 raise TaichiRuntimeError("Graph array belongs to a retired or different Runtime")
             # This name is local to a live JIT Graph, never a component code key.
             symbol = Arg(ArgKind.NDARRAY, f"__ti_managed_array_{id(value)}",

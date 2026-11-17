@@ -119,6 +119,26 @@ class _SubmissionLease:
         self._pacer._release_lease(self, completed=True)
 
 
+class _PacedPackageTicket:
+    """Observe an AOT completion through the same cooperative admission lease."""
+
+    def __init__(self, completion, admission):
+        self._completion = completion
+        self._admission = admission
+        self._api = completion._api
+
+    def done(self):
+        return self._admission._completion_done(self._completion)
+
+    def wait(self):
+        self._admission._completion_wait(self._completion)
+
+    def _borrow_wait_completion(self):
+        # CompletionSet retains the prefix natively during construction. This
+        # is the original ticket, not a newly published handle to close.
+        return self._completion
+
+
 class SubmissionPacer:
     """Bounds and fairly admits cooperating asynchronous submissions.
 
@@ -337,6 +357,27 @@ class SubmissionPacer:
         for lease, completion in snapshot:
             observed_ready = lease._completion_done(completion) or observed_ready
         return observed_ready
+
+    def _submit_package_graph(self, graph, arguments, *, lane, on_saturation):
+        from taichi_forge.lang import impl
+
+        runtime = impl.get_runtime()
+        if (runtime.prog is None or
+                getattr(graph.package.runtime, "_frontend_program", None) is not runtime.prog):
+            raise TaichiRuntimeError("Paced package Graph must borrow the current JIT runtime")
+        # Admission precedes argument capture and the package call lock, as in
+        # JIT Graph.submit(). Waiting never holds the owner's submission lock.
+        default_lane = getattr(graph, "_submission_lane", None)
+        if default_lane is None:
+            graph._submission_lane = default_lane = _new_submission_lane("package-graph")
+        admission = self._reserve(runtime, default_lane, lane=lane, on_saturation=on_saturation)
+        try:
+            completion = graph.submit(arguments)
+        except BaseException:
+            admission._cancel()
+            raise
+        admission._attach(completion)
+        return _PacedPackageTicket(completion, admission)
 
     def _reserve(self, runtime, default_lane, *, lane, on_saturation):
         lane = _normalize_lane(default_lane, lane)

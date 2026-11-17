@@ -29379,3 +29379,136 @@ class Model:
         np.testing.assert_array_equal(model.out.to_numpy(), -1)
     affine = dict((item['key'], item['value']) for item in metadata['kernel_runtime_affine_arrays'])
     assert [capture_index] in affine[entry['symbol']]
+
+
+@test_utils.test(arch=[ti.cpu, ti.cuda], offline_cache=False)
+def test_package_graph_retains_fixed_dense_arrays_and_live_inputs(tmp_path, monkeypatch):
+    source = '''
+import taichi_forge as ti
+@ti.kernel
+def copy(count: ti.i32, gain: ti.f32,
+         source: ti.types.ndarray(dtype=ti.types.vector(3, ti.f32), ndim=2),
+         target: ti.types.ndarray(dtype=ti.types.vector(3, ti.f32), ndim=2),
+         epoch: ti.types.ndarray(dtype=ti.i64, ndim=0)):
+    for i in range(count):
+        target[1, i] = source[0, i] * gain
+    epoch[None] += 1
+class Model:
+    def __init__(self, n: int):
+        self.n = n
+        scope = ti.experimental.ResourceScope(self)
+        scope.source = scope.vector_field(3, ti.f32, shape=(2, scope.dim('n')))
+        scope.target = scope.vector_field(3, ti.f32, shape=(2, scope.dim('n')))
+        scope.epoch = scope.field(ti.i64, shape=())
+    def graph(self):
+        graph = ti.graph.GraphBuilder()
+        graph.dispatch(copy, ti.graph.Arg(ti.graph.ArgKind.SCALAR, 'count', ti.i32),
+                       ti.graph.Arg(ti.graph.ArgKind.SCALAR, 'gain', ti.f32),
+                       ti.experimental.ndarray_view(self.source),
+                       ti.experimental.ndarray_view(self.target),
+                       ti.experimental.ndarray_view(self.epoch))
+        return graph.compile()
+'''
+    package = _source_package(tmp_path, monkeypatch, source)
+    initial = np.arange(42, dtype=np.float32).reshape(2, 7, 3)
+    reference = package.Model(7)
+    reference.source.from_numpy(initial)
+    graph = reference.graph()
+    graph.run({'count': 7, 'gain': 2.0})
+    expected = reference.target.to_numpy()
+    np.testing.assert_array_equal(expected[1], initial[0] * 2)
+    assert reference.epoch[None] == 1
+    manifest = ti.aot.export_package(package, tmp_path / 'sdk')
+    with Runtime(manifest['target']) as runtime, load_package(runtime, tmp_path / 'sdk') as code:
+        first, second = code.host.Model(7), code.host.Model(11)
+        first.source.from_numpy(initial)
+        first_graph = first.graph()
+        # Construction-time resource bindings are independent of live values.
+        first_graph.run({'count': 7, 'gain': 2.0})
+        np.testing.assert_array_equal(first.target.to_numpy(), expected)
+        first.source.from_numpy(initial + 5)
+        first_graph.run({'count': 4, 'gain': -3.0})
+        updated = first.target.to_numpy()
+        np.testing.assert_array_equal(updated[1, :4], (initial[0, :4] + 5) * -3)
+        np.testing.assert_array_equal(updated[1, 4:], expected[1, 4:])
+        assert first.epoch[None] == 2
+        second.source.fill(4)
+        second.graph().run({'count': 11, 'gain': 5.0})
+        np.testing.assert_array_equal(second.target.to_numpy()[1], 20)
+        np.testing.assert_array_equal(first.target.to_numpy(), updated)
+        old_target = first.target
+        first.target = second.target
+        first_graph.run({'count': 7, 'gain': 1.0})
+        # A recorded Graph keeps the old target even after the owner rebinds.
+        np.testing.assert_array_equal(old_target.to_numpy()[1], initial[0] + 5)
+        np.testing.assert_array_equal(second.target.to_numpy()[1], 20)
+        assert first.epoch[None] == 3
+        first.source = runtime.ndarray('i32', (2, 7), element_shape=(3,))
+        with pytest.raises(ValueError, match='fixed array differs'):
+            first.graph()
+
+
+@test_utils.test(arch=[ti.cpu, ti.cuda], offline_cache=False)
+def test_package_graph_shares_jit_pacer_and_completion_sets(tmp_path, monkeypatch):
+    from taichi_forge.graph._submission import _new_submission_lane
+    from taichi_forge.lang import impl
+    from taichi_forge.lang.exception import TaichiRuntimeError
+    from taichi_forge_runtime.aot import CompletionSet
+
+    package = _source_package(tmp_path, monkeypatch, '''
+import taichi_forge as ti
+@ti.kernel
+def add(value: ti.i32, out: ti.types.ndarray(dtype=ti.i32, ndim=1)):
+    out[0] += value
+class Model:
+    def __init__(self):
+        self.out = ti.ndarray(ti.i32, shape=1)
+    def graph(self):
+        graph = ti.graph.GraphBuilder()
+        graph.dispatch(add, ti.graph.Arg(ti.graph.ArgKind.SCALAR, 'value', ti.i32), self.out)
+        return graph.compile()
+''')
+    model = package.Model()
+    model.out.fill(0)
+    jit_graph = model.graph()
+    ti.aot.export_package(package, tmp_path / 'sdk')
+    pacer = ti.graph.SubmissionPacer(1)
+    with ti.aot.borrow_runtime() as runtime, load_package(runtime, tmp_path / 'sdk') as code:
+        aot = code.host.Model()
+        aot.out.fill(0)
+        graph = aot.graph()
+        first = jit_graph.submit({'value': 3}, pacer=pacer, lane='jit')
+        first.wait()
+        ticket = graph.submit({'value': 5}, pacer=pacer, lane='aot')
+        with CompletionSet([ticket]) as completions:
+            result = completions.wait(timeout=5)
+            assert result.status == 'ready' and result.index == 0
+        # Borrowing a native prefix must not close the original ticket.
+        assert ticket.done()
+        ticket.wait()
+        assert aot.out.to_numpy()[0] == 5
+        assert model.out.to_numpy()[0] == 3
+        stats = pacer.statistics()
+        assert stats['completed'] == 2 and stats['in_flight'] == 0
+        assert stats['lanes']['aot']['completed'] == 1
+        # Reserve the only launch turn: rejection must precede even argument
+        # preparation, and must not enqueue any extra numerical work.
+        held = pacer._reserve(impl.get_runtime(), _new_submission_lane('test'),
+                              lane='held', on_saturation='raise')
+        try:
+            with pytest.raises(TaichiRuntimeError, match='saturated'):
+                graph.submit({'value': 100}, pacer=pacer, lane='aot', on_saturation='raise')
+        finally:
+            held._cancel()
+        assert aot.out.to_numpy()[0] == 5
+        with pytest.raises(ValueError, match='exactly'):
+            graph.submit({}, pacer=pacer)
+        assert pacer.statistics()['in_flight'] == 0
+        # The pacer retains the exact native ticket if the caller drops it.
+        graph.submit({'value': 7}, pacer=pacer, lane='aot')
+        graph.submit({'value': 11}, pacer=pacer, lane='aot').wait()
+        assert aot.out.to_numpy()[0] == 23
+    with Runtime(str(ti.lang.impl.current_cfg().arch).split('.')[-1]) as runtime:
+        with load_package(runtime, tmp_path / 'sdk') as code:
+            with pytest.raises(TaichiRuntimeError, match='borrow the current'):
+                code.host.Model().graph().submit({'value': 1}, pacer=pacer)

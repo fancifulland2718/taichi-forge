@@ -57,6 +57,12 @@ class CompletionSet:
         sources, loans = [], []
         try:
             for index, value in enumerate(values):
+                borrow = getattr(value, "_borrow_wait_completion", None)
+                if borrow is not None:
+                    self._hooks[index] = value.done
+                    value = borrow()
+                    if not isinstance(value, SubmissionTicket):
+                        raise TypeError("Completion borrow did not return a submission ticket")
                 if not isinstance(value, (Completion, SubmissionTicket)):
                     loan = getattr(value, "_loan_wait_completion", None)
                     if loan is None:

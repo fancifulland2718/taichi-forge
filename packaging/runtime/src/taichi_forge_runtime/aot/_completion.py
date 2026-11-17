@@ -26,6 +26,12 @@ class SubmissionTicket:
         if self._handle is None:
             raise RuntimeError("Submission ticket is closed")
 
+    @property
+    def has_backend_work(self):
+        # The C ABI exposes a completion prefix, not an empty-work tag. Keep
+        # admission until that exact prefix is observed, including empty plans.
+        return True
+
     def done(self):
         with self._lock:
             self._check()

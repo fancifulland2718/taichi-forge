@@ -180,9 +180,27 @@ class GraphBuilder:
             raise ValueError("Graph dispatch argument count differs from the entry")
         arguments = dict(self.arguments)
         constants = dict(self._constants)
+        names, captures = [], dict(self._captures)
         for arg, item in zip(args, expected):
+            if not isinstance(arg, Arg) and item["kind"] == "ndarray":
+                array = self.package.runtime._adapt_package_array(arg)
+                if not isinstance(array, NdArray):
+                    raise TypeError("Graph fixed array requires device dense storage")
+                array._descriptor(self.package.runtime)
+                element = item["element"]
+                if (array.dtype != element["dtype"] or len(array.shape) != item["ndim"]
+                        or array.element_shape != tuple(element.get("element_shape", ()))):
+                    raise ValueError("Graph fixed array differs from the entry's type")
+                if array not in self._bindings.native_resources:
+                    self._bindings.native_resources[array] = SimpleNamespace(value=array)
+                holder = self._bindings.native_resources[array]
+                name, binding = self._bindings.capture(holder, dict(item, name="value"))
+                names.append(name)
+                captures[name] = binding
+                continue
             if not isinstance(arg, Arg):
                 raise TypeError("Graph dispatch arguments must be symbolic Arg values")
+            names.append(arg.name)
             schema = arg.schema()
             if schema != {key: value for key, value in item.items() if key != "name"}:
                 raise ValueError(f"Graph argument {arg.name!r} differs from the entry's type")
@@ -196,8 +214,6 @@ class GraphBuilder:
             if arg.name in arguments and arguments[arg.name] != schema:
                 raise ValueError(f"Graph argument {arg.name!r} has conflicting declarations")
             arguments[arg.name] = schema
-        names = [a.name for a in args]
-        captures = dict(self._captures)
         captured = {
             item["name"]: self._bindings.capture(owner, item)
             for item in kernel.contract["captures"]
@@ -638,11 +654,20 @@ class Graph:
         with self.package._call_lock:
             self._prepared(arguments).run()
 
-    def submit(self, arguments):
-        """Reuse the current immutable binding and return a Runtime ticket.
+    def submit(self, arguments, *, pacer=None, lane=None, on_saturation="wait"):
+        """Reuse the current immutable binding and return a completion ticket.
 
         Changed bindings re-enter preparation. Explicit bind() retains an
         independent snapshot; the ticket and Runtime retain resource leases.
+        A hybrid package may share its JIT runtime's SubmissionPacer. Admission
+        precedes binding; standalone Runtime submission needs no frontend.
         """
+        if pacer is not None:
+            submit = getattr(pacer, "_submit_package_graph", None)
+            if submit is None:
+                raise TypeError("pacer must support package Graph submission")
+            return submit(self, arguments, lane=lane, on_saturation=on_saturation)
+        if lane is not None or on_saturation != "wait":
+            raise ValueError("lane and on_saturation require a SubmissionPacer")
         with self.package._call_lock:
             return self._prepared(arguments).submit()
