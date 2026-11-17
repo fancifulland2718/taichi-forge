@@ -2600,7 +2600,7 @@ measurement-path changed，不能当作正常执行 wall time 发布。
 
 | API | 合同 |
 | --- | --- |
-| `GraphBuilder.compile(*, workspace_lanes=1, workspace_saturation='wait')` | 后续修改 builder 或原 `Sequential` 不改变已编译 graph。额外 workspace lane 惰性物化，并且只对含合格独占 Graph-owned internal storage 的 Graph（例如已记录的 SolvePlan）产生作用；provider-fixed worklist storage 明确只允许一个 lane，传入更大值会被拒绝。`workspace_saturation='raise'` 会在所有合格 lane 都忙时直接失败而不是等待。 |
+| `GraphBuilder.compile(*, workspace_lanes=1, workspace_saturation='wait')` | 后续修改 builder/`Sequential` 不改变已编译 graph。JIT Graph 对合格独占 Graph-owned 存储（例如已记录的 SolvePlan）惰性物化额外 lane；provider-fixed worklist 只允许一个 lane。加载的 package CUDA 平坦 kernel Graph 若无 initialization，可在首次使用时准备全部请求的活标量参数帧，共享相容特化代码；这些帧不提供共享输出租约或独立设备流，其他绑定保持不可变快照。`workspace_saturation='raise'` 在所有合格 lane 都忙时直接失败。package 范围见 [AOT 提交](aot_sdk.zh.md)。 |
 | `Graph.bind(arguments)` | 从 key 与声明完全一致的字典发布一个 `GraphBindingSet`。发布会快照 Python scalar/matrix 值并资格化当前 device resource identity；失败不会产生可见版本。应通过该工厂构造 BindingSet，而不是直接调用其构造器。 |
 | `Graph.run(args, *, trace=False)` | `args` 必须是 key 与声明参数完全一致的字典，或属于同一个 Graph 的 `GraphBindingSet`；missing/extra key、跨 Graph BindingSet 会抛 `TaichiRuntimeError`。默认返回 `None`，也不分配 dynamic control-flow trace。满足资格的 depth=2 CUDA/Vulkan structured Graph 与 `submit()` 共用 native 单提交路径，并只在 terminal completion 等待一次；它不保留同步 control-flow report。 |
 | `Graph.run(args, *, trace=True)` | 同步运行并返回 immutable `GraphControlFlowTrace`。其中有序 invocation 包含 `sequence`、静态 `definition_path`、动态 `invocation_path`、可选 `parent_iteration` 和本次调用的 while/branch report。与 `control_flow_stats()` 不同，它会保留每一次重复 nested invocation。trace 会绕过严格 Vulkan nested replay，改用精确 portable-parent 执行，使每次 invocation 都可观测。 |

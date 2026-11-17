@@ -1925,6 +1925,28 @@ with prepared.submit() as ticket:
 CPU/CUDA/Vulkan 已验证前向、ndarray 梯度及退休，两个 GPU 后端另验证注入的 owner
 故障；结果/工作区租约使用下述独立 pool API。
 
+加载的 package CUDA Graph 可通过 `builder.compile(workspace_lanes=2)` 在普通队列上
+复用活标量参数帧。首次使用准备两个绑定，共享相容的特化代码，各自保留独立参数存储。
+后续 `graph.submit(arguments)` 更新显式 `i32/u32/i64/u64/f32/f64` 输入时无需重新绑定。
+捕获的布局和模型事实继续参与特化；这些绑定发生变化时重新准备一对参数帧。
+当前路径要求无 initialization 区域的平坦 kernel Graph；复合值和资源绑定仍是
+每份绑定的不可变快照。
+
+即使调用方提前关闭 ticket，每帧也保留上次提交的完成记录，忙帧不会覆盖仍被设备
+读取的 pinned 参数快照。全部帧忙时，在 package 锁外等待；也可设置
+`workspace_saturation="raise"` 直接报错。这不会创建独立设备流，也不预留共享输出
+数组；输出消费者仍需自己的租约。默认 `workspace_lanes=1` 以及显式
+`graph.bind(arguments)` 保留原不可变绑定行为。
+
+自行管理普通 CUDA 参数帧时，可调用
+`graph.prepare(arguments, mutable_parameters=("epoch", "slot"))`，再通过
+`prepared.submit(values={"epoch": epoch, "slot": slot})` 提交。帧忙时返回 `None`，
+否则返回 `SubmissionTicket`。`ExecutionPlan` 准备接受相同选项，按编译标量 ABI 和
+固定 launch 要求核验参数用途。活参数帧使用 `submit`，不使用 `run`。对应 C API 为
+`ti_prepare_execution_plan_parameters_ext`、
+`ti_try_submit_prepared_ordinary_parameters_ext` 和
+`ti_wait_prepared_parameter_frame_ext`。
+
 固定 prepared 计划可通过 `Module.prepare_workspace_pool()` 使用完整工作区和结果租约。
 同一加载模块共享代码，各槽独立准备私有资源图，并分配自己的参数数组：
 

@@ -165,6 +165,8 @@ struct PreparedExecution {
   std::vector<DeviceAllocation> preparation_allocations;
   std::vector<SubmissionParameterValue> submission_values;
   std::vector<std::size_t> submission_widths;
+  RuntimeCompletion ordinary_parameter_use;
+  bool ordinary_parameter_failed{false};
   // Declared before backend recordings so owned buffers are destroyed last.
   std::shared_ptr<ExecutionResourceStorage> resources;
   std::vector<std::shared_ptr<NativeResource>> native_resources;
@@ -909,6 +911,8 @@ struct PreparedExecution {
     if (family && family->failed)
       throw MemoryBindingError(
           "Binding family initialization failed; prepare a new family");
+    if (!domain && !submission_values.empty())
+      throw MemoryBindingError("Mutable prepared execution requires parameter submission");
     result_valid = false;
     if (domain) {
       if (!domain_initialized)
@@ -1514,9 +1518,9 @@ static TiPreparedExecution prepare_execution_plan_impl(
   // exclusion; default CUDA support is checked by FixedExecution before use.
   const bool prepared_external_access = bool(domain) ||
       (rt.arch == taichi::Arch::cuda && !family);
-  if (parameter_count && (!domain || family))
+  if (parameter_count && (family || (!domain && rt.arch != taichi::Arch::cuda)))
     throw MemoryBindingError(
-        "Submission parameters require an independent execution domain");
+        "Submission parameters require ordinary CUDA or an independent execution domain");
   if (plan.vulkan_submission && rt.arch != taichi::Arch::vulkan)
     throw MemoryBindingError("Selected Vulkan submission requires Vulkan");
   const auto &resource_description =
@@ -2700,6 +2704,8 @@ static TiPreparedExecution prepare_execution_plan_impl(
   prepared->prepare_operations(rt, operations, initializers,
                               plan.vulkan_submission ? &*plan.vulkan_submission : nullptr,
                               plan.storage_ring ? &*plan.storage_ring : nullptr);
+  if (parameter_count)
+    prepared->native->validate_ordinary_parameters(parameter_count);
   return rt.prepared_registry().publish(std::move(prepared));
   TI_CAPI_TRY_CATCH_END();
   return TI_NULL_HANDLE;
@@ -2717,6 +2723,17 @@ TiPreparedExecution ti_prepare_execution_plan_ext(
   return prepare_execution_plan_impl(runtime, module, description_size,
                                      description, arg_count, args,
                                      binding_count, bindings, {});
+}
+
+TiPreparedExecution ti_prepare_execution_plan_parameters_ext(
+    TiRuntime runtime, TiAotModule module, uint64_t description_size,
+    const char *description, uint32_t arg_count, const TiNamedArgument *args,
+    uint32_t binding_count, const TiNamedNdArrayBinding *bindings,
+    uint32_t parameter_count, const char *const *parameter_names) {
+  return prepare_execution_plan_impl(runtime, module, description_size,
+                                     description, arg_count, args,
+                                     binding_count, bindings, {}, {},
+                                     parameter_count, parameter_names);
 }
 
 TiPreparedExecution ti_prepare_execution_plan_snode_instance_ext(
@@ -3251,6 +3268,66 @@ void ti_read_prepared_kernel_result_ext(TiRuntime runtime,
   }
   TI_CAPI_TRY_CATCH_END();
 }
+void ti_wait_prepared_parameter_frame_ext(TiRuntime runtime, TiPreparedExecution execution) {
+  TI_CAPI_TRY_CATCH_BEGIN();
+  TI_CAPI_ARGUMENT_NULL(runtime);
+  TI_CAPI_ARGUMENT_NULL(execution);
+  auto &rt = *reinterpret_cast<Runtime *>(runtime);
+  taichi::lang::RuntimeCompletion completion;
+  {
+    std::lock_guard<std::recursive_mutex> lock(rt.submission_mutex());
+    auto &entry = rt.prepared_registry().get(execution);
+    if (entry.domain || entry.submission_values.empty())
+      throw MemoryBindingError("Expected an ordinary parameter frame");
+    completion = entry.ordinary_parameter_use;
+  }
+  if (completion.valid())
+    completion.wait();
+  TI_CAPI_TRY_CATCH_END();
+}
+
+TiBool ti_try_submit_prepared_ordinary_parameters_ext(
+    TiRuntime runtime, TiPreparedExecution execution, uint32_t parameter_count,
+    const uint64_t *parameters, TiSubmissionTicket *ticket) {
+  TI_CAPI_TRY_CATCH_BEGIN();
+  TI_CAPI_ARGUMENT_NULL_RV(runtime);
+  TI_CAPI_ARGUMENT_NULL_RV(execution);
+  TI_CAPI_ARGUMENT_NULL_RV(ticket);
+  *ticket = TI_NULL_HANDLE;
+  auto &rt = *reinterpret_cast<Runtime *>(runtime);
+  std::lock_guard<std::recursive_mutex> lock(rt.submission_mutex());
+  auto &entry = rt.prepared_registry().get(execution);
+  if (!entry.live || entry.domain || entry.family || rt.arch != taichi::Arch::cuda ||
+      entry.ordinary_parameter_failed || !parameter_count ||
+      entry.submission_values.size() != parameter_count || !parameters)
+    throw MemoryBindingError("Invalid ordinary CUDA parameter submission");
+  for (uint32_t i = 0; i < parameter_count; ++i)
+    if (entry.submission_widths[i] == 4 && parameters[i] > UINT32_MAX)
+      throw MemoryBindingError("32-bit submission parameter requires zero upper 32 bits");
+  // A caller may release its ticket while work is in flight. The frame keeps
+  // its own reference to the exact completion; no host staging is overwritten.
+  if (entry.ordinary_parameter_use.valid() && !entry.ordinary_parameter_use.done())
+    return TI_FALSE;
+  if (entry.needs_initialization())
+    rt.prepared_registry().initialize(execution);
+  rt.prepare_submission_completion();
+  std::copy_n(parameters, parameter_count, entry.submission_values.begin());
+  try {
+    entry.native->run_parameters(entry.submission_values);
+    ++entry.info.launches;
+    *ticket = rt.finish_submission_completion();
+    entry.ordinary_parameter_use = rt.submission_completion(*ticket);
+  } catch (...) {
+    // A failed upload/launch may already have touched the staging buffer.
+    // Keep it unreusable until ordinary owner retirement drains the queue.
+    entry.ordinary_parameter_failed = true;
+    throw;
+  }
+  return TI_TRUE;
+  TI_CAPI_TRY_CATCH_END();
+  return TI_FALSE;
+}
+
 TiSubmissionTicket ti_submit_prepared_ext(TiRuntime runtime,
                                          TiPreparedExecution execution) {
   TI_CAPI_TRY_CATCH_BEGIN();

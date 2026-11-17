@@ -183,6 +183,10 @@ TiSubmissionTicket Runtime::finish_submission_completion() {
   }
 }
 
+taichi::lang::RuntimeCompletion Runtime::submission_completion(TiSubmissionTicket ticket) {
+  return tickets().get(reinterpret_cast<std::uintptr_t>(ticket));
+}
+
 void Runtime::complete_submission_completions() {
   if (submission_completions_)
     submission_completions_->pending.complete_synchronized();

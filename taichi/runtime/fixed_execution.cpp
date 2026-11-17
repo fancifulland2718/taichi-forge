@@ -2051,6 +2051,24 @@ RuntimeCompletion FixedExecution::submit(
   throw std::invalid_argument(
       "Fixed execution was not prepared for an independent domain");
 }
+void FixedExecution::validate_ordinary_parameters(std::size_t count) const {
+#ifdef TI_WITH_CUDA
+  if (state_->cuda_graph && state_->cuda_graph->parameter_count() == count)
+    return;
+#endif
+  throw std::invalid_argument(
+      "Ordinary submission parameters require a fixed CUDA graph");
+}
+
+void FixedExecution::run_parameters(
+    const std::vector<SubmissionParameterValue> &parameters) {
+  validate_ordinary_parameters(parameters.size());
+#ifdef TI_WITH_CUDA
+  state_->cuda_graph->snapshot_parameters(parameters);
+#endif
+  run();
+}
+
 void FixedExecution::run() {
   if (state_->fault_domain)
     state_->fault_domain->throw_if_submission_disallowed("run fixed execution");

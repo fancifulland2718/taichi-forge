@@ -402,7 +402,11 @@ class GraphBuilder:
         # neither a masked fallback nor per-iteration Host observation is inserted.
         return self.append(merged)
 
-    def compile(self):
+    def compile(self, *, workspace_lanes=1, workspace_saturation="wait"):
+        if type(workspace_lanes) is not int or workspace_lanes < 1:
+            raise ValueError("Graph workspace_lanes must be a positive integer")
+        if workspace_saturation not in ("wait", "raise"):
+            raise ValueError("Graph workspace_saturation must be 'wait' or 'raise'")
         self.package._check()
         self._check_plan_values()
         return Graph(
@@ -413,11 +417,14 @@ class GraphBuilder:
             list(self._admissions),
             list(self._range_checks),
             dict(self._plan_values),
+            workspace_lanes=workspace_lanes,
+            workspace_saturation=workspace_saturation,
         )
 
 
 class Graph:
-    def __init__(self, package, plan, arguments, captures=None, admissions=None, range_checks=None, plan_values=None):
+    def __init__(self, package, plan, arguments, captures=None, admissions=None, range_checks=None, plan_values=None,
+                 *, workspace_lanes=1, workspace_saturation="wait"):
         self.package, self.plan, self.arguments = package, plan, arguments
         self.captures = captures or {}
         self.admissions = admissions or []
@@ -428,6 +435,23 @@ class Graph:
         self._cached_tokens = ()
         self._cached_guards = ()
         self._ordered_replay_required = False
+        self._workspace_lanes = workspace_lanes
+        self._workspace_saturation = workspace_saturation
+        self._parameter_frames = []
+        self._frame_tokens = self._frame_guards = ()
+        self._next_parameter_frame = 0
+        self._live_parameters = ()
+        if workspace_lanes > 1:
+            document = json.loads(plan.to_json())
+            if (package.runtime.arch != "cuda" or document.get("initialization")
+                    or any(op["kind"] != "kernel" for op in document["operations"])):
+                raise ValueError("Package workspace lanes require ordinary CUDA kernel Graphs")
+            # Explicit scalar inputs are live values, unlike captured layout
+            # and model facts. Native preparation still validates every use.
+            self._live_parameters = tuple(name for name, spec in arguments.items()
+                if spec["kind"] == "value" and spec.get("dtype") in ("i32", "u32", "i64", "u64", "f32", "f64"))
+            if not self._live_parameters:
+                raise ValueError("Package workspace lanes require explicit live scalar arguments")
         package._graphs.add(self)
 
     def written_resources(self):
@@ -502,8 +526,8 @@ class Graph:
         """Prepare the recorded package plan with optional live submission values.
 
         Captures and resources retain the same immutable binding and leases as
-        bind(). Explicit scalar arguments may use an independent execution
-        domain's existing parameter-update protocol.
+        bind(). Explicit scalar arguments may use the ordinary CUDA queue or
+        an independent execution domain's parameter-update protocol.
         """
         from ._parameters import SubmissionParameters
 
@@ -635,6 +659,10 @@ class Graph:
             self._cached_call.close()
         self._cached_call = None
         self._cached_values = self._cached_tokens = self._cached_guards = ()
+        for frame in self._parameter_frames:
+            frame.close()
+        self._parameter_frames = []
+        self._frame_tokens = self._frame_guards = ()
 
     @staticmethod
     def _can_replay_ordered(prepared):
@@ -696,13 +724,53 @@ class Graph:
         return prepared
 
     def run(self, arguments):
+        if self._live_parameters and not isinstance(arguments, PreparedCall):
+            self.submit(arguments).close()
+            return
         with self.package._call_lock:
             self._prepared(arguments).run()
 
-    def submit(self, arguments, *, pacer=None, lane=None, on_saturation="wait"):
-        """Reuse the current immutable binding and return a completion ticket.
+    def _submit_parameter_frame(self, arguments):
+        self.package._check()
+        if arguments.keys() != self.arguments.keys():
+            raise ValueError("Graph binding must supply exactly its declared arguments")
+        from ._package_calls import _token
 
-        Changed bindings re-enter preparation. Explicit bind() retains an
+        tokens = tuple(_token(arguments[name]) for name in self.arguments if name not in self._live_parameters)
+        if (not self._parameter_frames or tokens != self._frame_tokens
+                or not all(guard.matches(owner) for owner, guard in self._frame_guards)):
+            guards = self._binding_guards()
+            frames = []
+            try:
+                for _ in range(self._workspace_lanes):
+                    frame = self.prepare(arguments, mutable_parameters=self._live_parameters)
+                    frames.append(frame)
+                    frame.initialize()
+            except BaseException:
+                for frame in frames:
+                    frame.close()
+                raise
+            self._clear_cached()
+            self._parameter_frames = frames
+            self._frame_tokens, self._frame_guards = tokens, guards
+            self._next_parameter_frame = 0
+        values = {name: arguments[name] for name in self._live_parameters}
+        start = self._next_parameter_frame
+        for offset in range(len(self._parameter_frames)):
+            index = (start + offset) % len(self._parameter_frames)
+            frame = self._parameter_frames[index]
+            ticket = frame.submit(values=values)
+            if ticket is not None:
+                self._next_parameter_frame = (index + 1) % len(self._parameter_frames)
+                return ticket, None
+        return None, self._parameter_frames[start]
+
+    def submit(self, arguments, *, pacer=None, lane=None, on_saturation="wait"):
+        """Replay a prepared binding and return a completion ticket.
+
+        Multiple workspace lanes reuse explicit scalar parameter frames on the
+        ordinary CUDA queue. Other changed bindings re-enter preparation.
+        Explicit bind() retains an
         independent snapshot; the ticket and Runtime retain resource leases.
         A hybrid package may share its JIT runtime's SubmissionPacer. Admission
         precedes binding; standalone Runtime submission needs no frontend.
@@ -714,5 +782,17 @@ class Graph:
             return submit(self, arguments, lane=lane, on_saturation=on_saturation)
         if lane is not None or on_saturation != "wait":
             raise ValueError("lane and on_saturation require a SubmissionPacer")
-        with self.package._call_lock:
-            return self._prepared(arguments).submit()
+        if self._live_parameters and not isinstance(arguments, PreparedCall):
+            arguments = dict(arguments)
+        while True:
+            with self.package._call_lock:
+                if not self._live_parameters or isinstance(arguments, PreparedCall):
+                    return self._prepared(arguments).submit()
+                ticket, pending = self._submit_parameter_frame(arguments)
+                if ticket is not None:
+                    return ticket
+                if self._workspace_saturation == "raise":
+                    raise RuntimeError("All Graph workspace lanes are occupied")
+            # Do not hold the shared package lock while another graph/thread
+            # can make progress. The native frame owns its completion lifetime.
+            pending._wait_parameter_frame()

@@ -147,6 +147,10 @@ class FixedExecution {
   FixedExecution(const FixedExecution &) = delete;
   FixedExecution &operator=(const FixedExecution &) = delete;
   void run();
+  // Ordinary CUDA queue parameter frames. The owner admits reuse only after
+  // the prior completion, independently of any public completion handle.
+  void validate_ordinary_parameters(std::size_t count) const;
+  void run_parameters(const std::vector<SubmissionParameterValue> &parameters);
   RuntimeCompletion submit(
       const std::vector<RuntimeCompletion> &dependencies = {},
       const std::vector<SubmissionParameterValue> &parameters = {},

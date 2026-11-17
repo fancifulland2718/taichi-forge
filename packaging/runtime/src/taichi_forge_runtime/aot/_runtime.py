@@ -1593,7 +1593,7 @@ class PreparedCall(_Resource):
         if self._execution_domain is None:
             if predecessors or ready_only or sample_gpu:
                 raise ValueError("wait_for/ready_only/sample_gpu requires an execution-domain binding")
-            return self._submit_ordinary()
+            return self._submit_ordinary(parameters)
         runtime = self._runtime
         if any(not isinstance(ticket, Completion) for ticket in predecessors):
             raise TypeError("wait_for must contain Completion tickets")
@@ -1650,7 +1650,14 @@ class PreparedCall(_Resource):
             runtime._pending.clear()
             return layout.decode(data)
 
-    def _submit_ordinary(self):
+    def _wait_parameter_frame(self):
+        # The native owner retains the completion even if its public ticket
+        # was closed. Never hold the Python submission lock while waiting.
+        self._check()
+        self._runtime._api.call(self._runtime._api.ti_wait_prepared_parameter_frame_ext,
+                               self._runtime._handle, self._handle)
+
+    def _submit_ordinary(self, parameters=()):
         """Run and return a completion ticket; output storage remains caller-owned."""
         runtime = self._runtime
         with runtime._lock:
@@ -1658,7 +1665,17 @@ class PreparedCall(_Resource):
             if self._replay_owners is not None or (self._family is not None and not self._family.initialized):
                 self.initialize()
             runtime._pending.add(self)
-            handle = runtime._api.call(runtime._api.ti_submit_prepared_ext, runtime._handle, self._handle)
+            if self._submission_parameters.names:
+                result = abi.Handle()
+                accepted = runtime._api.call(
+                    runtime._api.ti_try_submit_prepared_ordinary_parameters_ext,
+                    runtime._handle, self._handle, len(parameters),
+                    self._submission_parameters.bind(parameters), C.byref(result))
+                if not accepted:
+                    return None
+                handle = result.value
+            else:
+                handle = runtime._api.call(runtime._api.ti_submit_prepared_ext, runtime._handle, self._handle)
             try:
                 return SubmissionTicket(runtime._api, handle, (self,))
             except BaseException:

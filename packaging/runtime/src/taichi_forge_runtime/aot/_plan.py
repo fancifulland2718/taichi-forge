@@ -741,7 +741,8 @@ class ExecutionPlan:
         from ._parameters import SubmissionParameters
         submission_parameters = SubmissionParameters(mutable_parameters)
         if submission_parameters.names and execution_domain is None:
-            raise ValueError("mutable_parameters requires an independent execution domain")
+            if runtime.arch != "cuda" or source is not None or self.binding_strategy is not None:
+                raise ValueError("mutable_parameters requires ordinary CUDA or an independent execution domain")
         with runtime._lock:
             module._check()
             if execution_domain is not None:
@@ -813,10 +814,14 @@ class ExecutionPlan:
             suffix = ()
             vulkan_domain = execution_domain is not None and execution_domain.backend == "vulkan"
             if submission_parameters.names:
-                runtime._api.load_submission_parameters()
+                if execution_domain is None:
+                    runtime._api.load_ordinary_submission_parameters()
+                else:
+                    runtime._api.load_submission_parameters()
             if submission_parameters.names or vulkan_domain or (snode_instance is not None and runtime.arch == "cuda"):
                 function = (runtime._api.ti_prepare_execution_plan_on_vulkan_domain_ext if vulkan_domain
-                            else runtime._api.ti_prepare_execution_plan_parameters_on_domain_ext)
+                            else runtime._api.ti_prepare_execution_plan_parameters_on_domain_ext
+                            if execution_domain is not None else runtime._api.ti_prepare_execution_plan_parameters_ext)
                 names = (abi.C.c_char_p * len(submission_parameters.names))(
                     *(_name(name) for name in submission_parameters.names)
                 )

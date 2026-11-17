@@ -2503,6 +2503,33 @@ no runtime pointer. This interface was validated on Windows CPU/CUDA/Vulkan with
 forward results, ndarray gradients, retirement and injected owner faults on the
 two GPU backends. Result/workspace leasing uses the separate pool API below.
 
+Loaded package CUDA Graphs can reuse live scalar argument frames on the ordinary
+queue with `builder.compile(workspace_lanes=2)`. On first use, the Graph prepares
+two bindings that share compatible specialized code and retain separate argument
+storage. Subsequent `graph.submit(arguments)` calls update explicit
+`i32/u32/i64/u64/f32/f64` inputs without rebinding. Captured layout/model facts
+remain eligible for specialization; changing their binding prepares a new pair.
+This path currently requires a flat kernel Graph without an initialization
+region. Compound values and resource bindings remain immutable per binding.
+
+Each frame retains its previous completion even when the caller closes the
+ticket. A busy frame cannot overwrite its pinned parameter snapshot. If all
+frames are busy, submission waits outside the package lock, or raises with
+`workspace_saturation="raise"`. This does not create independent device streams
+or reserve shared output arrays. Output consumers still need their own leases.
+The default `workspace_lanes=1` and explicit `graph.bind(arguments)` keep their
+existing immutable binding behavior.
+
+For an explicitly managed ordinary CUDA frame, use
+`graph.prepare(arguments, mutable_parameters=("epoch", "slot"))`, then
+`prepared.submit(values={"epoch": epoch, "slot": slot})`. It returns `None` while
+that frame is busy; otherwise it returns a `SubmissionTicket`. `ExecutionPlan`
+preparation accepts the same option and validates parameter uses against the
+compiled scalar ABI and fixed launch requirements. Mutable frames use `submit`,
+not `run`. The C API entries are `ti_prepare_execution_plan_parameters_ext`,
+`ti_try_submit_prepared_ordinary_parameters_ext` and
+`ti_wait_prepared_parameter_frame_ext`.
+
 For a fixed prepared plan, `Module.prepare_workspace_pool()` provides complete
 workspace and result leases. One loaded module shares its code; each slot gets
 its own prepared private resource graph and owned argument arrays:

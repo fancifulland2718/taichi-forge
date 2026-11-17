@@ -163,6 +163,11 @@ struct FixedGraph::State final : RuntimeClient, RuntimeCompletionResources {
         observe(driver.mem_free.call(controls), "free graph control");
       if (backend_safe && arguments)
         observe(driver.mem_free.call(arguments), "free graph arguments");
+      if (backend_safe && parameter_staging) {
+        observe(driver.mem_free_host.call(parameter_staging),
+                "free graph parameter staging");
+        parameter_staging = nullptr;
+      }
       if (may_call && stream)
         observe(driver.stream_destroy.call(stream), "destroy graph stream");
     } catch (const BackendRuntimeError &error) {
@@ -437,6 +442,10 @@ void FixedGraph::snapshot_parameters(
   if (state_->parameter_count)
     std::memcpy(state_->parameter_staging, values.data(),
                 state_->parameter_count * sizeof(SubmissionParameterValue));
+}
+
+std::size_t FixedGraph::parameter_count() const {
+  return state_->parameter_count;
 }
 
 void FixedGraph::enqueue_parameter_upload(void *stream) {
@@ -957,12 +966,12 @@ void FixedGraph::initialize(const std::vector<Operation> &operations,
     for (const auto &patch : dispatch.parameters) {
       const auto width = patch.bytes;
       constexpr auto slot_width = sizeof(SubmissionParameterValue);
-      if (!state.independent || domain_ || (width != 4 && width != 8) ||
+      if (state.binding_frame || domain_ || (width != 4 && width != 8) ||
           patch.argument_offset % 4 ||
           patch.argument_offset > packet.arg_buffer_size ||
           width > packet.arg_buffer_size - patch.argument_offset ||
           patch.slot >= std::numeric_limits<std::size_t>::max() / slot_width)
-        throw std::invalid_argument("Invalid independent submission parameter");
+        throw std::invalid_argument("Invalid submission parameter");
       state.parameter_count = std::max(state.parameter_count, patch.slot + 1);
       State::ParameterUpload upload{
           patch.slot * slot_width,
@@ -992,11 +1001,16 @@ void FixedGraph::initialize(const std::vector<Operation> &operations,
     state.parameter_upload_function = driver_graph_prepare_parameter_upload();
     // Non-write-combined cuMemHostAlloc storage has the same host/device
     // address with UVA. GPU copies avoid a blocked peer's DMA queue head.
-    if (!allocation_domain)
-      throw std::invalid_argument("Submission parameters require a domain owner");
-    state.parameter_storage = allocation_domain->acquire_parameter_storage(
-        state.parameter_count * sizeof(SubmissionParameterValue));
-    state.parameter_staging = state.parameter_storage.get();
+    if (allocation_domain) {
+      state.parameter_storage = allocation_domain->acquire_parameter_storage(
+          state.parameter_count * sizeof(SubmissionParameterValue));
+      state.parameter_staging = state.parameter_storage.get();
+    } else {
+      // One ordinary prepared frame owns this pinned snapshot. Its caller
+      // must retain the previous queue completion before allowing an update.
+      driver.mem_host_alloc(&state.parameter_staging,
+                            state.parameter_count * sizeof(SubmissionParameterValue), 0);
+    }
   }
   if (grid_limit) {
     std::uint32_t error = CUDA_SUCCESS;
@@ -1395,6 +1409,7 @@ void FixedGraph::run() {
   try {
     state_->sparse_access.submit([&] {
       state_->submitted = true;
+      enqueue_parameter_upload(nullptr);
       CUDAContext::get_instance().launch_graph(state_->executable, nullptr);
     });
   } catch (const BackendRuntimeError &error) {

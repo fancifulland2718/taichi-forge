@@ -17222,11 +17222,11 @@ class Model:
                        template_args={'self': self})
         builder.append(child)
 
-    def graph(self):
+    def graph(self, lanes=1):
         builder = ti.graph.GraphBuilder()
         builder.dispatch(self.reset, template_args={'self': self})
         self.record(builder)
-        return builder.compile()
+        return builder.compile(workspace_lanes=lanes)
 
     def compile_component(self):
         return ti.aot.Component.from_owner(self).compile_graph(self.record)
@@ -17635,12 +17635,48 @@ def test_package_graph_prepares_live_parameters_in_execution_domain(tmp_path, mo
                 graph.prepare(args, execution_domain=domain, mutable_parameters=(next(iter(graph.captures)),))
             with pytest.raises(ValueError, match="scalar"):
                 graph.prepare(args, execution_domain=domain, mutable_parameters=("extra",))
-        with pytest.raises(ValueError, match="independent execution domain"):
-            graph.prepare(args, mutable_parameters=("increment",))
+        with graph.prepare(args, mutable_parameters=("increment",)) as ordinary:
+            with ordinary.submit(values=dict(increment=5)) as ticket:
+                ticket.wait()
+            np.testing.assert_array_equal(first.values.to_numpy(), 22 * np.arange(7) + 68)
         # Ordinary immutable binding remains valid after the domain retires.
         with graph.bind(args) as frozen:
             frozen.run()
             np.testing.assert_array_equal(first.values.to_numpy(), 22 * np.arange(7) + 46)
+
+
+@test_utils.test(arch=ti.cuda, offline_cache=False)
+def test_package_graph_reuses_live_parameter_lanes(tmp_path, monkeypatch):
+    package = _source_package(tmp_path, monkeypatch, OWNER_GRAPH_SOURCE)
+    manifest = ti.aot.export_package(package, tmp_path / "sdk", artifact_format="bc-library")
+    with Runtime(manifest["target"]) as runtime, load_package(runtime, tmp_path / "sdk") as code:
+        first, peer = code.host.Model(7, 2.0), code.host.Model(19, -1.0)
+        graph, other = first.graph(2), peer.graph(2)
+        args = dict(increment=3, extra=(0.0, 0.0))
+        with graph.bind(args) as frozen:
+            frames = None
+            for increment in (3, -4, 9, 13, -7):
+                # Discarding a ticket must not permit unsafe native frame reuse.
+                graph.submit(dict(args, increment=increment)).close()
+                other.submit(dict(args, increment=increment)).close()
+                if frames is None:
+                    frames = tuple(graph._parameter_frames)
+                assert tuple(graph._parameter_frames) == frames
+            runtime.wait()
+            np.testing.assert_array_equal(first.values.to_numpy(), 4 * np.arange(7) - 10)
+            np.testing.assert_array_equal(peer.values.to_numpy(), 8 - 2 * np.arange(19))
+            # Compound inputs still have their immutable ABI snapshot; changing
+            # one rebinds the pair, without changing the explicit old binding.
+            graph.run(dict(increment=4, extra=(0.0, 6.0)))
+            assert tuple(graph._parameter_frames) != frames
+            np.testing.assert_array_equal(first.values.to_numpy(), 4 * np.arange(7) + 24)
+            first.gain = 5.0
+            graph.run(dict(increment=4, extra=(0.0, 0.0)))
+            np.testing.assert_array_equal(first.values.to_numpy(), 10 * np.arange(7) + 27)
+            frozen.run()
+            np.testing.assert_array_equal(first.values.to_numpy(), 4 * np.arange(7) + 10)
+        with pytest.raises(ValueError, match="exactly"):
+            graph.submit(dict(increment=4))
 
 
 @test_utils.test(arch=[ti.cpu, ti.cuda, ti.vulkan], offline_cache=False)

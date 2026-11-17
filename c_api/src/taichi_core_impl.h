@@ -370,6 +370,7 @@ class Runtime {
       std::function<taichi::lang::RuntimeCompletion()> recorder);
   void prepare_submission_completion();
   TiSubmissionTicket finish_submission_completion();
+  taichi::lang::RuntimeCompletion submission_completion(TiSubmissionTicket ticket);
   void complete_submission_completions();
   void clear_submission_completions();
 

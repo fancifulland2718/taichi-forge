@@ -141,6 +141,7 @@ class FixedGraph {
   void enqueue_execution_part(void *stream);
   void snapshot_parameters(const std::vector<SubmissionParameterValue> &values);
   void enqueue_parameter_upload(void *stream);
+  std::size_t parameter_count() const;
   FixedGraph(const std::vector<Operation> &operations,
              std::shared_ptr<RuntimeFaultDomain> fault_domain,
              std::shared_ptr<void> operands,

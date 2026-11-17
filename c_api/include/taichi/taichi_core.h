@@ -1650,6 +1650,22 @@ ti_read_prepared_kernel_result_ext(TiRuntime runtime,
 // ones. Destroying a pending ticket does not wait or retire its execution.
 TI_DLL_EXPORT TiSubmissionTicket TI_API_CALL
 ti_submit_prepared_ext(TiRuntime runtime, TiPreparedExecution execution);
+// CUDA ordinary-queue live scalar frames. Preparation shares compiled code;
+// try-submit returns false while this frame's previous replay is still using
+// its parameter snapshot. Completion-handle release does not unlock the frame.
+TI_DLL_EXPORT TiPreparedExecution TI_API_CALL
+ti_prepare_execution_plan_parameters_ext(
+    TiRuntime runtime, TiAotModule module, uint64_t description_size,
+    const char *description, uint32_t arg_count, const TiNamedArgument *args,
+    uint32_t binding_count, const TiNamedNdArrayBinding *bindings,
+    uint32_t parameter_count, const char *const *parameter_names);
+TI_DLL_EXPORT TiBool TI_API_CALL
+ti_try_submit_prepared_ordinary_parameters_ext(
+    TiRuntime runtime, TiPreparedExecution execution, uint32_t parameter_count,
+    const uint64_t *parameters, TiSubmissionTicket *ticket);
+// Wait only this frame's previous use, without holding the submission lock.
+TI_DLL_EXPORT void TI_API_CALL
+ti_wait_prepared_parameter_frame_ext(TiRuntime runtime, TiPreparedExecution execution);
 // Ticket query/wait needs no live runtime handle. Owner retirement completes or
 // invalidates pending records before backend destruction. Waits do not hold the
 // runtime submission lock; errors remain sticky on each completion.

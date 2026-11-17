@@ -217,7 +217,9 @@ def test_plan_specialization_preserves_control_aliases_and_independent_bindings(
 
 @test_utils.test(arch=ti.cuda, offline_cache=False)
 @pytest.mark.parametrize("changing_dtype", [ti.i32, ti.f32, ti.f64])
-def test_plan_specialization_keeps_submission_parameters_live(tmp_path, changing_dtype):
+@pytest.mark.parametrize("ordinary", [False, True])
+def test_plan_specialization_keeps_submission_parameters_live(tmp_path, changing_dtype, ordinary):
+    from contextlib import nullcontext
     import numpy as np
     from taichi_forge_runtime.aot import ExecutionPlan, Runtime
 
@@ -237,7 +239,7 @@ def test_plan_specialization_keeps_submission_parameters_live(tmp_path, changing
         dtype = str(changing_dtype)
         numpy_dtype = {"i32": np.int32, "f32": np.float32, "f64": np.float64}[dtype]
         out = runtime.ndarray(dtype, (3,))
-        with runtime.execution_domain(capacity=2) as domain, plan.prepare(
+        with (nullcontext() if ordinary else runtime.execution_domain(capacity=2)) as domain, plan.prepare(
                 module, dict(out=out, fixed=Scalar("i32", 3), changing=Scalar(dtype, 1)),
                 execution_domain=domain, mutable_parameters=("changing",)) as call:
             call.initialize()
@@ -246,6 +248,67 @@ def test_plan_specialization_keeps_submission_parameters_live(tmp_path, changing
                 with call.submit(values=dict(changing=value)) as ticket:
                     ticket.wait()
                 np.testing.assert_array_equal(np.frombuffer(out.read(), numpy_dtype), [30 + value] * 3)
+
+
+@test_utils.test(arch=ti.cuda, offline_cache=False)
+def test_ordinary_parameter_frames_retain_pending_use_after_ticket_close(tmp_path):
+    import ctypes as C
+    import threading
+    import numpy as np
+    from taichi_forge_runtime.aot import ExecutionPlan, Runtime
+
+    @ti.kernel
+    def publish(out: ti.types.ndarray(ti.i32, 1), fixed: ti.i32, slot: ti.i32, value: ti.i32):
+        out[slot] = fixed * 10 + value
+
+    artifact = ti.aot.Module(artifact_format="bc-library")
+    artifact.add_kernel(publish)
+    path = tmp_path / "parameter-frames.tcm"
+    artifact.archive(str(path))
+    plan = ExecutionPlan([dict(kind="kernel", entry="publish", arguments=["out", "fixed", "slot", "value"],
+                               specialization=dict(constant_args=[1, 2, 3]))])
+    driver = C.WinDLL("nvcuda.dll") if sys.platform == "win32" else C.CDLL("libcuda.so.1")
+    callback_type = (C.WINFUNCTYPE if sys.platform == "win32" else C.CFUNCTYPE)(None, C.c_void_p)
+    enqueue = driver.cuLaunchHostFunc
+    enqueue.argtypes, enqueue.restype = [C.c_void_p, callback_type, C.c_void_p], C.c_int
+    push = driver.cuCtxPushCurrent_v2
+    push.argtypes, push.restype = [C.c_void_p], C.c_int
+    pop = driver.cuCtxPopCurrent_v2
+    pop.argtypes, pop.restype = [C.POINTER(C.c_void_p)], C.c_int
+    release = threading.Event()
+    entered = threading.Event()
+
+    @callback_type
+    def gate(_):
+        entered.set()
+        release.wait(10)  # Bounded failure escape; never invoke CUDA in a callback.
+
+    with Runtime("cuda") as runtime:
+        module = runtime.load_module(path)
+        out = runtime.ndarray("i32", (3,))
+        with runtime.execution_domain(capacity=1) as domain:
+            context = domain.info["context"]
+        arguments = dict(out=out, fixed=Scalar("i32", 3), slot=Scalar("i32", 0), value=Scalar("i32", 0))
+        with plan.prepare(module, arguments, mutable_parameters=("slot", "value")) as first, \
+                plan.prepare(module, arguments, mutable_parameters=("slot", "value")) as second:
+            first.initialize()
+            second.initialize()
+            assert push(context) == 0
+            try:
+                assert enqueue(None, gate, None) == 0
+                assert entered.wait(3)
+                first.submit(values=dict(slot=0, value=11)).close()
+                second.submit(values=dict(slot=1, value=22)).close()
+                assert first.submit(values=dict(slot=2, value=99)) is None
+                assert second.submit(values=dict(slot=2, value=99)) is None
+            finally:
+                release.set()
+                current = C.c_void_p()
+                assert pop(C.byref(current)) == 0
+            first._wait_parameter_frame()
+            with first.submit(values=dict(slot=2, value=33)) as ticket:
+                ticket.wait()
+            np.testing.assert_array_equal(np.frombuffer(out.read(), np.int32), [41, 52, 63])
 
 
 @test_utils.test(arch=ti.cuda, offline_cache=False)
