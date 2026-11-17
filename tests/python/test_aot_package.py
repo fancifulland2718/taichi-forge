@@ -1221,8 +1221,9 @@ class Model:
                 assert model.read() == expected + 2
 
 
+@pytest.mark.parametrize('implicit_absence', [False, True])
 @test_utils.test(arch=[ti.cpu, ti.cuda], offline_cache=False)
-def test_package_optional_owned_numeric_records_share_code(tmp_path, monkeypatch):
+def test_package_optional_owned_numeric_records_share_code(tmp_path, monkeypatch, implicit_absence):
     source = '''
 import taichi_forge as ti
 @ti.data_oriented
@@ -1273,7 +1274,15 @@ class Model:
         builder.dispatch(self.step)
         return builder.compile()
 '''
+    if implicit_absence:
+        source = source.replace("        else:\n            scope.record('primary', None, optional=True)\n", '')
     package = _source_package(tmp_path, monkeypatch, source)
+    configurations = ((3, False, False), (5, True, False), (7, False, True), (4, True, True))
+    baseline = []
+    for configuration in configurations:
+        normal = package.Model(*configuration)
+        normal.step()
+        baseline.append(normal.out.to_numpy())
     output = tmp_path / 'sdk'
     artifact_format = 'bc-library' if ti.cfg.arch == ti.cuda else 'bc'
     manifest = ti.aot.export_package(package, output, artifact_format=artifact_format)
@@ -1285,13 +1294,15 @@ class Model:
     # the same source-free, prepared and Graph consumer checks below.
     with Runtime(manifest['target']) as runtime, load_package(runtime, output) as code:
         instances = []
-        for n, first, second in ((3, False, False), (5, True, False), (7, False, True), (4, True, True)):
+        for index, (n, first, second) in enumerate(configurations):
             normal, loaded = package.Model(n, first, second), code.host.Model(n, first, second)
             instances.append(loaded)
-            for _ in range(3):
+            for step in range(3):
                 normal.step()
                 loaded.step()
                 np.testing.assert_array_equal(loaded.out.to_numpy(), normal.out.to_numpy())
+                if step == 0:
+                    np.testing.assert_array_equal(loaded.out.to_numpy(), baseline[index])
             if artifact_format == 'bc-library':
                 ready = next(iter(loaded._forge_package_calls.values()))
                 assert ready.prepared is not None and ready.specialize
@@ -1299,7 +1310,7 @@ class Model:
             graph.run({})
             normal.step()
             np.testing.assert_array_equal(loaded.out.to_numpy(), normal.out.to_numpy())
-            assert (loaded.primary is not None) is first
+            assert (getattr(loaded, 'primary', None) is not None) is first
             assert (loaded.secondary is not None) is second
             if not first:
                 with pytest.raises(ValueError, match='presence'):
@@ -1316,6 +1327,12 @@ class Model:
         try:
             with pytest.raises(ValueError, match='child owner'):
                 bad.step()
+        finally:
+            bad.primary = saved
+        del bad.primary
+        try:
+            with pytest.raises(AttributeError, match='primary'):
+                bad.required()
         finally:
             bad.primary = saved
     probe = tmp_path / 'consume_owned.py'

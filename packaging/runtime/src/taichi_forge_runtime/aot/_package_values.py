@@ -13,8 +13,27 @@ from .._static_values import read_static_key, static_key
 
 
 def path_value(owner, path):
-    for part in path:
-        owner = getattr(owner, part)
+    for index, part in enumerate(path):
+        try:
+            owner = getattr(owner, part)
+        except AttributeError:
+            # A conditional owned namespace need not have an explicit ``else``
+            # assignment in ordinary Host construction. Its declared false
+            # allocation guard proves absence just as an explicit None does.
+            # Never synthesize a missing numeric member or traverse an absent
+            # namespace, and still reject a missing child when its guard is on.
+            package = getattr(owner, "_forge_package_owner", None)
+            if index != len(path) - 1 or package is None:
+                raise
+            item = package.manifest["owners"].get(owner_type(owner), {}).get(part, {})
+            conditions = item.get("conditions", {})
+            if item.get("kind") != "owner" or not conditions:
+                raise
+            values = {flag: getattr(owner, flag) for flag in conditions}
+            if (any(type(value) is not bool for value in values.values())
+                    or all(values[flag] is expected for flag, expected in conditions.items())):
+                raise
+            owner = None
     return owner
 
 
