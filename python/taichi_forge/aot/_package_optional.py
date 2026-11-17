@@ -359,15 +359,18 @@ def project_nested_query_records(environment, schema, uses, *, query_paths=None)
     # variants. Include extent dependencies of every possibly read member;
     # computed reflection keeps the conservative complete-schema behavior.
     from taichi_forge_runtime._dimensions import extent_dependencies
-    required = set(schema) if '*' in uses else {
-        key for key in schema if paths[key][-1] in uses}
+    # Host sequences own independent entry instances, not a device path in
+    # this query. Keep their Host contract while projecting only device keys.
+    device_keys = {key for key, item in schema.items() if item['kind'] != 'host_owner_sequence'}
+    required = device_keys.copy() if '*' in uses else {
+        key for key in device_keys if paths[key][-1] in uses}
     if query_paths is not None:
         reads, unknown = query_paths
         # A resolved method can distinguish identically named members on
         # different receivers. For unresolved subtrees retain the existing
         # conservative closure (including computed-name patterns/reflection),
         # rather than treating the missing method proof as an empty readset.
-        required = {key for key in schema
+        required = {key for key in device_keys
                     if any(path[:len(paths[key])] == tuple(paths[key]) for path in reads)
                     or key in required and any(tuple(paths[key][:len(prefix)]) == prefix for prefix in unknown)}
     pending = list(required)
@@ -385,7 +388,7 @@ def project_nested_query_records(environment, schema, uses, *, query_paths=None)
             for expression in expressions:
                 dependencies.update(extent_dependencies(expression))
         dependencies.update(axis for axis in item.get('shape', ()) if isinstance(axis, str))
-        for key in (dependencies & schema.keys()) - required:
+        for key in (dependencies & device_keys) - required:
             required.add(key)
             pending.append(key)
     candidates = {key for key, item in schema.items()

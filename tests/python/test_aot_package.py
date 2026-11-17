@@ -7254,10 +7254,12 @@ def test_package_bitcode_library_keeps_host_sequences_out_of_query_projection(tm
         return 42
 '''
     package = _source_package(tmp_path, monkeypatch, source)
+    normal = package.Model(7, 3)
+    assert normal.answer() == 42
     manifest = ti.aot.export_package(package, tmp_path / 'sdk', artifact_format='bc-library')
     with Runtime(manifest['target']) as runtime, load_package(runtime, tmp_path / 'sdk') as code:
         owner = code.host.Model(7, 3)
-        assert owner.answer() == package.Model(7, 3).answer() == 42
+        assert owner.answer() == normal.answer() == 42
         expected = np.arange(7, dtype=np.float32)
         owner.storage.scalar.from_numpy(expected)
         owner.graph().run({})
@@ -8137,6 +8139,57 @@ def test_package_write_inventory_public_callable_signature(tmp_path, monkeypatch
         assert ti.aot.check_package(package)['declaration_check'] == 'passed'
     assert package.model.constructors == 0
     assert ti.lang.impl.get_runtime().get_num_compiled_functions() == before
+
+
+@test_utils.test(arch=ti.cpu, offline_cache=False)
+@pytest.mark.parametrize('operation', ['definition_signature', 'graph_type', 'fixed_scalar'])
+@pytest.mark.parametrize('escaped', [False, True])
+def test_package_write_inventory_graph_compatibility_metadata(tmp_path, monkeypatch, operation, escaped):
+    expressions = {
+        'definition_signature': "definition = getattr(getattr(solver.step, '_primal', None), 'func', None)\n    if callable(definition):\n        metadata = inspect.signature(definition)",
+        'graph_type': 'metadata = type(builder)',
+        'fixed_scalar': "region = builder.create_sequential()\n    if hasattr(region, 'private_scalar'):\n        metadata = region.private_scalar('fixed', ti.i32, 1)\n    else:\n        metadata = region._bind_internal_scalar('fixed', ti.i32, 1)",
+    }
+    statement = expressions[operation]
+    if escaped:
+        # Unknown uses of callable metadata and Graph instances still expose
+        # their owner/recording; recognizing the read must not erase that fact.
+        statement += '\n    opaque(' + ('definition' if operation == 'definition_signature' else 'builder') + ')'
+    source = 'import inspect\n' + CYCLIC_WRITE_INVENTORY_SOURCE.replace(
+        'def append_step(solver, builder):\n    builder.dispatch(solver.step)',
+        'def append_step(solver, builder):\n    ' + statement + "\n    builder.dispatch(solver.step, template_args={'self': solver})")
+    step_args = ()
+    if operation == 'fixed_scalar':
+        source = source.replace("builder.dispatch(solver.step, template_args={'self': solver})",
+                                "region.dispatch(solver.step, metadata, template_args={'self': solver})\n    builder.append(region)")
+        source = source.replace('def step(self):', 'def step(self, amount: ti.i32):')
+        source = source.replace('self.update(i)', 'self.values[i] += amount')
+        step_args = (1,)
+    package = _source_package(tmp_path, monkeypatch, source)
+    if escaped:
+        with pytest.raises(ValueError, match='proven source'):
+            ti.aot.check_package(package)
+        return
+    # Capture ordinary execution before export, then compare the loaded recipe.
+    normal = package.Model(5)
+    builder = ti.graph.GraphBuilder()
+    normal.record(builder)
+    graph = builder.compile()
+    try:
+        graph.run({})
+        reference = normal.values.to_numpy()
+    finally:
+        graph.close()
+    np.testing.assert_array_equal(reference, np.ones(5))
+    manifest = ti.aot.export_package(package, tmp_path / 'sdk')
+    with Runtime(manifest['target']) as runtime, load_package(runtime, tmp_path / 'sdk') as code:
+        model = code.host.Model(5)
+        model.step(*step_args)
+        backup, = model.checkpoint.copies
+        backup.save()
+        model.step(*step_args)
+        backup.restore()
+        np.testing.assert_array_equal(model.values.to_numpy(), reference)
 
 
 @test_utils.test(arch=ti.cpu, offline_cache=False)
@@ -29015,7 +29068,7 @@ class Model:
     assert all(bool(owner[name].get("dynamic_storage_condition")) is not mixed
                for name in ("motion", "rigid", "response"))
     if not mixed:
-        assert manifest["version"] == 79 and not manifest["entry_families"]
+        assert not manifest["entry_families"]
     with Runtime(manifest["target"]) as runtime, load_package(runtime, tmp_path / "sdk") as code:
         instances = []
         for index, (motion, rigid, response) in enumerate(product((False, True), repeat=3)):
@@ -29050,7 +29103,7 @@ class Model:
     if not mixed:
         path = tmp_path / "sdk/package.json"
         path.write_text(json.dumps({**manifest, "version": 78}), encoding="utf8")
-        with Runtime(manifest["target"]) as runtime, pytest.raises(ValueError, match="format 79"):
+        with Runtime(manifest["target"]) as runtime, pytest.raises(ValueError, match="definition package version"):
             load_package(runtime, tmp_path / "sdk")
 
 

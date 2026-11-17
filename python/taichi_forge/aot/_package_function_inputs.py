@@ -179,6 +179,7 @@ class _Host:
 @dataclass(frozen=True)
 class _CallableMetadata:
     source: object
+    path: tuple = ()
 
 
 @dataclass(frozen=True)
@@ -299,7 +300,7 @@ def _select_source_fact(value, source, index):
     if isinstance(value, (_Kernel, _Host)):
         return type(value)(value.function, _select_source_fact(value.receiver, source, index))
     if isinstance(value, _CallableMetadata):
-        return _CallableMetadata(_select_source_fact(value.source, source, index))
+        return _CallableMetadata(_select_source_fact(value.source, source, index), value.path)
     if isinstance(value, _ScopeReference):
         return _ScopeReference(_select_source_fact(value.owner, source, index))
     return value
@@ -817,7 +818,7 @@ def discover(sources, imported, *, preparation_receivers=None, resource_inventor
         if isinstance(receiver, _UnboundInput):
             return receiver
         if isinstance(receiver, _CallableMetadata):
-            return receiver
+            return _CallableMetadata(receiver.source, (*receiver.path, name))
         if isinstance(receiver, _ScopeReference):
             item = member(receiver.owner, name)
             if item is not None:
@@ -1056,7 +1057,7 @@ def discover(sources, imported, *, preparation_receivers=None, resource_inventor
                 def source_value(expression):
                     if (
                         isinstance(expression, ast.Name)
-                        and expression.id in ("getattr", "hasattr", "callable", "dict", "isinstance", "id")
+                        and expression.id in ("getattr", "hasattr", "callable", "dict", "isinstance", "id", "type")
                         and expression.id not in local_names
                     ):
                         builtin = getattr(builtins, expression.id)
@@ -1136,7 +1137,7 @@ def discover(sources, imported, *, preparation_receivers=None, resource_inventor
                     if isinstance(part.func, ast.Name) and isinstance(arguments.get(part.func.id), _Kernel):
                         known = True
                     pure_mapping_use = isinstance(part.func, ast.Attribute) and (
-                        (part.func.attr in ("dispatch", "private_scalar") and graph_source(part.func.value))
+                        (part.func.attr in ("dispatch", "private_scalar", "_bind_internal_scalar") and graph_source(part.func.value))
                         or (part.func.attr == "items" and not part.args and not part.keywords)
                     )
                     # A proven Graph private_scalar consumes a Python numeric value;
@@ -1311,11 +1312,20 @@ def discover(sources, imported, *, preparation_receivers=None, resource_inventor
                         if (resource_inventory is not None and cls is inspect.signature
                                 and len(expression.args) == 1 and not expression.keywords):
                             candidate = child(expression.args[0])
-                            if _callable_fact(candidate):
+                            if (_callable_fact(candidate) or isinstance(candidate, _CallableMetadata)
+                                    and candidate.path == ('_primal', 'func')
+                                    and _callable_fact(candidate.source)):
                                 # Public signatures describe a proven callable without
                                 # invoking it. Retain its provenance if this metadata
                                 # later escapes to an unknown Host operation.
-                                return _CallableMetadata(candidate)
+                                return _CallableMetadata(candidate, ('signature',))
+                        if (resource_inventory is not None and cls is builtins.type
+                                and len(expression.args) == 1 and not expression.keywords
+                                and isinstance(child(expression.args[0]), _Graph)):
+                            # Capability queries inspect a Graph's class, not its
+                            # recorded resources. Do not assume a Graph subtype.
+                            source_only_calls.add(id(expression))
+                            return None
                         if resource_inventory is not None and cls is builtins.callable and len(expression.args) == 1 and not expression.keywords:
                             source_only_calls.add(id(expression))
                             candidate = child(expression.args[0])
@@ -1339,7 +1349,7 @@ def discover(sources, imported, *, preparation_receivers=None, resource_inventor
                                 if resource_inventory is not None and name.value == '_primal' and _callable_fact(receiver):
                                     # Reading a proven function's metadata does not
                                     # invoke it or expose its bound owner to writes.
-                                    return _CallableMetadata(receiver)
+                                    return _CallableMetadata(receiver, ('_primal',))
                                 result = child(ast.Attribute(expression.args[0], name.value, ast.Load()))
                                 if resource_inventory is not None and result is None:
                                     # Same provenance as an ordinary attribute read.
@@ -1435,7 +1445,7 @@ def discover(sources, imported, *, preparation_receivers=None, resource_inventor
                             method = expression.func.attr
                             if method == 'compile':
                                 return _Graph()
-                            if method in ('private_scalar', 'private_ndarray'):
+                            if method in ('private_scalar', 'private_ndarray', '_bind_internal_scalar'):
                                 source_only_calls.add(id(expression))
                                 return None
                             children = expression.args

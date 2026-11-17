@@ -411,7 +411,7 @@ class OwnerGraph:
         owners = {tuple(paths[key]): item['owner_type'] for key, item in schema.items()
                   if item['kind'] in ('owner', 'owner_input')}
         declared = {tuple(paths[key]) for key, item in schema.items()
-                    if item['kind'] not in ('owner', 'owner_input')}
+                    if item['kind'] not in ('owner', 'owner_input', 'host_owner_sequence')}
         pending, visited = [(identity, (), (method,))], set()
         reads, unknown = set(), set()
         while pending:
