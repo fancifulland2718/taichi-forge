@@ -276,10 +276,17 @@ class Canvas:
     def set_image(self, img):
         """Set the content of this canvas to an `img`.
 
+        CUDA images allocated by an AOT Runtime borrowed from this Program are
+        also accepted (2D u8/f32 scalar or vector with one to four channels).
+        Packing stays on device and reuses the ordinary display converter;
+        the first binding compiles that converter, without reading engine source.
+
         Args:
             img (numpy.ndarray, :class:`~taichi_forge.MatrixField`, :class:`~taichi_forge.Field`, :class:`~taichi_forge.Texture`): \
                 the image to be shown.
         """
+        from taichi_forge_runtime.aot._runtime import NdArray as RuntimeArray
+
         if isinstance(img, (DisplayFrame, WritableDisplayFrame)):
             return self.submit_frame(img)
         if self._execution_domain is not None:
@@ -315,7 +322,11 @@ class Canvas:
             return True
         else:
             if prog_arch in (_ti_core.Arch.cuda, _ti_core.Arch.vulkan):
-                if prog_arch == _ti_core.Arch.cuda and hasattr(img, "shape"):
+                # Runtime conversion uses its existing ordered queue. Shared
+                # writable display memory requires an explicit execution domain;
+                # keep the ordinary packed device copy for this legacy API.
+                if (prog_arch == _ti_core.Arch.cuda and hasattr(img, "shape")
+                        and not isinstance(img, RuntimeArray)):
                     shared_view = self._acquire_shared_cuda_vulkan_view(
                         img.shape[0], img.shape[1]
                     )

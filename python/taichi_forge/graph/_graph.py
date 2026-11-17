@@ -17278,6 +17278,20 @@ class Sequential:
 
 
 class GraphBuilder:
+    @classmethod
+    def for_owners(cls, *owners):
+        """Create a recorder for the numerical owners used by a Host caller.
+
+        Source owners use the ordinary frontend builder. Owners from one loaded
+        definition package use its native Plan recorder, including consumer-time
+        specialization. Independent packages and mixed JIT/AOT recordings need
+        explicit composition and are rejected here. Selection does not compile
+        numerical code or allocate Graph workspace.
+        """
+        from taichi_forge_runtime.aot._package_graph import graph_builder_for_owners
+
+        return graph_builder_for_owners(owners, cls)
+
     def __init__(
         self,
         *,

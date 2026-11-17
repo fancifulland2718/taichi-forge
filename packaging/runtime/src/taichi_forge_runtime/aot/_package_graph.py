@@ -22,6 +22,25 @@ from .._static_values import static_key
 _MISSING_PLAN_VALUE = object()
 
 
+def graph_builder_for_owners(owners, default_factory):
+    """Select one recording owner before creating any Graph resources.
+
+    A package Plan retains its complete native recording. Mixing independently
+    loaded modules or source owners requires an explicit composition boundary;
+    it must not silently turn into a Python loop of loaded kernel calls.
+    """
+    packages = [getattr(owner, "_forge_package_owner", None) for owner in owners]
+    package = next((item for item in packages if item is not None), None)
+    if package is None:
+        return default_factory()
+    from ._package import LoadedPackage
+
+    if not isinstance(package, LoadedPackage) or any(item is not package for item in packages):
+        raise ValueError("Graph owners must all belong to the same loaded package, or all use JIT")
+    package._check()
+    return package.graph_builder()
+
+
 def _plan_value(owner, spec):
     # A deferred preparation may declare a parameter that this recording never
     # reads. Preserve absence as a guard instead of inventing a numeric default.
@@ -408,6 +427,7 @@ class Graph:
         self._cached_values = ()
         self._cached_tokens = ()
         self._cached_guards = ()
+        self._ordered_replay_required = False
         package._graphs.add(self)
 
     def written_resources(self):
@@ -616,11 +636,34 @@ class Graph:
         self._cached_call = None
         self._cached_values = self._cached_tokens = self._cached_guards = ()
 
+    @staticmethod
+    def _can_replay_ordered(prepared):
+        # Ordinary fixed CUDA graphs keep their argument frame immutable and
+        # enqueue all scratch accesses on the same runtime stream. Unlike JIT
+        # bindings they need no host-updated workspace lane between submissions.
+        # Host control, binding families and independent domains have different
+        # admission/ownership protocols and are not qualified by this fact.
+        return (prepared._execution_domain is None and prepared._family is None
+                and prepared.info['execution_kind'] == 'cuda_graph')
+
+    def _prepare_ordered_replay(self, arguments):
+        """Qualify a stable binding once for queued whole-Graph submission."""
+        if self.package.runtime.arch != 'cuda':
+            return False
+        with self.package._call_lock:
+            prepared = self._prepared(arguments)
+            qualified = (prepared is self._cached_call
+                         and self._can_replay_ordered(prepared))
+            self._ordered_replay_required = qualified
+            return qualified
+
     def _prepared(self, arguments):
         self.package._check()
         if isinstance(arguments, PreparedCall):
             if getattr(arguments, "_forge_package_graph", lambda: None)() is not self:
                 raise ValueError("Prepared Graph arguments belong to another recording")
+            if self._ordered_replay_required and arguments is not self._cached_call:
+                raise ValueError("Ordered replay requires the Graph's qualified binding")
             return arguments
         if arguments.keys() != self.arguments.keys():
             raise ValueError("Graph binding must supply exactly its declared arguments")
@@ -641,6 +684,8 @@ class Graph:
             for owner, spec in self.captures.values())
         prepared = self.bind(arguments)  # Full admission on every changed binding.
         try:
+            if self._ordered_replay_required and (not reusable or not self._can_replay_ordered(prepared)):
+                raise ValueError("Changed binding requires rebuilding the ordered Graph")
             self._clear_cached()
         except BaseException:
             prepared.close()

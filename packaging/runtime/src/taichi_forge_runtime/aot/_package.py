@@ -180,6 +180,23 @@ class _ModuleBinding:
             def __init__(self):
                 super().__init__(package)
 
+            @classmethod
+            def for_owners(cls, *owners):
+                from ._package_graph import graph_builder_for_owners
+
+                if owners and any(getattr(owner, "_forge_package_owner", None) is None for owner in owners):
+                    raise ValueError("Package Graph owners must belong to a loaded package")
+                return graph_builder_for_owners(owners, cls)
+
+        scheduling = {}
+        if getattr(package.runtime, "_frontend_program", None) is not None:
+            # Hybrid Host scheduling shares the existing Program's pacer. Only
+            # submission/completion APIs cross this boundary; numerical calls
+            # and Graph recording remain bound to published package entries.
+            from taichi_forge.graph import CompletionSet, SubmissionPacer, SubmissionTicket
+
+            scheduling.update(CompletionSet=CompletionSet, SubmissionPacer=SubmissionPacer,
+                              SubmissionTicket=SubmissionTicket)
         self.host = _HostAPI(
             ndarray=self.ndarray,
             sync=package.runtime.wait,
@@ -189,6 +206,7 @@ class _ModuleBinding:
                 ArgKind=ArgKind,
                 GraphBuilder=PackageGraphBuilder,
                 structured_control_capabilities=self.control_capabilities,
+                **scheduling,
             ),
             cpu=_BACKENDS["arm64" if platform.machine().lower() in ("arm64", "aarch64") else "x64"],
             **_BACKENDS,

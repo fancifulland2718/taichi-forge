@@ -432,6 +432,7 @@ image_field_cache = OrderedDict()
 _image_object_field_cache = weakref.WeakKeyDictionary()
 image_texture_cache = weakref.WeakKeyDictionary()
 image_packed_ndarray_cache = weakref.WeakKeyDictionary()
+_runtime_image_staging_cache = weakref.WeakKeyDictionary()
 _NUMPY_RGBA8_HOST_PACK_MAX_PIXELS = 1024 * 1024
 _TAICHI_NDARRAY_RGBA8_HOST_PACK_MAX_PIXELS = 128 * 128
 _TAICHI_FIELD_RGBA8_HOST_PACK_MAX_PIXELS = 128 * 128
@@ -447,6 +448,7 @@ def clear_staging_caches():
     _image_object_field_cache.clear()
     image_texture_cache.clear()
     image_packed_ndarray_cache.clear()
+    _runtime_image_staging_cache.clear()
 
 
 def _copy_numpy_image_to_rgba8(src, dst, num_components, gray_scale):
@@ -571,6 +573,10 @@ def to_rgba8_packed_ndarray(image, destination=None):
     the Taichi backend device, so CUDA/Vulkan set_image can avoid the old
     device -> host numpy -> graphics upload round trip.
     """
+    from taichi_forge_runtime.aot._runtime import NdArray as RuntimeArray
+
+    if isinstance(image, RuntimeArray):
+        return _pack_runtime_image(image, destination)
     if isinstance(image, (Texture, np.ndarray)):
         return None
     if image.dtype not in (u8, f32):
@@ -606,6 +612,78 @@ def to_rgba8_packed_ndarray(image, destination=None):
     else:
         copy_image_f32_to_rgba8(image, cached, channels, is_grayscale)
     return cached
+
+
+class _RuntimeImageStaging:
+    """Loan the ordinary display converter to a borrowed AOT Runtime once."""
+
+    def __init__(self, image):
+        from taichi_forge_runtime.aot._runtime import Module, NdArray as RuntimeArray
+
+        runtime = image._memory._runtime
+        channels = image.element_shape[0] if image.element_shape else 1
+        dtype = f32 if image.dtype == 'f32' else u8
+        element = ti.types.vector(channels, dtype) if image.element_shape else dtype
+        builder = ti.graph.GraphBuilder()
+        builder.dispatch(
+            copy_image_f32_to_rgba8_ti_ndarray if dtype == f32 else copy_image_u8_to_rgba8_ti_ndarray,
+            ti.graph.Arg(ti.graph.ArgKind.NDARRAY, 'src', element, ndim=2),
+            ti.graph.Arg(ti.graph.ArgKind.NDARRAY, 'dst', u32, ndim=2),
+            template_args=dict(num_components=channels, gray_scale=not image.element_shape,
+                               image_shape=tuple(image.shape)),
+        )
+        self.graph = builder.compile()
+        native = self.graph._spec.nodes[0].compiled_graph
+        self.module = Module(runtime, runtime._borrower.import_jit_kernels([('pack', native, 0, False)]))
+        self.kernel = self.module.kernel('pack')
+        # Keep the exact allocation/family alive without retaining the weak
+        # cache key. Explicit family close still revokes the native lease.
+        self.source = RuntimeArray(image._memory, image.dtype, image._code, image.shape, image.element_shape)
+        self.source._group_owner = getattr(image, '_group_owner', None)
+        self.bindings = weakref.WeakKeyDictionary()
+
+    def run(self, destination):
+        from taichi_forge.lang._storage_view import DenseNdarrayView
+
+        prepared = self.bindings.get(destination)
+        if prepared is None:
+            runtime = self.module._runtime
+            target = (runtime.import_dense_view(destination) if isinstance(destination, DenseNdarrayView)
+                      else runtime.import_ndarray(destination))
+            prepared = self.kernel.prepare(self.source, target)
+            self.bindings[destination] = prepared
+        prepared.run()
+
+
+def _pack_runtime_image(image, destination):
+    from taichi_forge.lang._storage_view import DenseNdarrayView
+
+    runtime = image._memory._runtime
+    if getattr(runtime, '_frontend_program', None) is not ti.lang.impl.get_runtime().prog:
+        raise ValueError('Runtime display images must borrow the current Program')
+    image._descriptor(runtime)
+    if runtime.arch != 'cuda':
+        raise ValueError('Runtime display staging currently requires CUDA')
+    if (image.dtype not in ('f32', 'u8') or len(image.shape) != 2
+            or len(image.element_shape) > 1
+            or (image.element_shape and not 1 <= image.element_shape[0] <= 4)):
+        raise ValueError('Runtime display image requires a 2D u8/f32 scalar or one-to-four-channel vector')
+    shape = tuple(image.shape)
+    if destination is not None:
+        dtype = destination._element_type if isinstance(destination, DenseNdarrayView) else destination.dtype
+        if tuple(destination.shape) != shape or dtype != u32:
+            raise ValueError('RGBA8 destination shape or dtype does not match the source image')
+    else:
+        destination = image_packed_ndarray_cache.get(image)
+        if not _cached_ndarray_matches(destination, shape):
+            destination = ndarray(dtype=u32, shape=shape)
+            image_packed_ndarray_cache[image] = destination
+    staging = _runtime_image_staging_cache.get(image)
+    if staging is None:
+        staging = _RuntimeImageStaging(image)
+        _runtime_image_staging_cache[image] = staging
+    staging.run(destination)
+    return destination
 
 
 def to_rgba8(image):

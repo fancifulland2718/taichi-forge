@@ -10,6 +10,54 @@ from taichi_forge.ui.staging_buffer import copy_image_f32_to_rgba8_ti_ndarray, r
 from tests import test_utils
 
 
+@pytest.mark.parametrize('dtype,channels', [('f32', 3), ('f32', 4), ('u8', 1)])
+@test_utils.test(arch=ti.cuda, offline_cache=False)
+def test_runtime_image_staging_reuses_device_code_and_releases_source(monkeypatch, dtype, channels):
+    import gc
+    import weakref
+    from taichi_forge.ui.staging_buffer import to_rgba8_packed_ndarray, _runtime_image_staging_cache
+
+    shape = (17, 9)
+    element = () if channels == 1 else (channels,)
+    values = np.arange(np.prod(shape + element)).reshape(shape + element)
+    values = ((values % 256) / 255).astype(np.float32) if dtype == 'f32' else (values % 256).astype(np.uint8)
+    source = (ti.ndarray(getattr(ti, dtype), shape) if not element
+              else ti.Vector.ndarray(channels, getattr(ti, dtype), shape))
+    source.from_numpy(values)
+    reference = to_rgba8_packed_ndarray(source).to_numpy()
+    with ti.aot.borrow_runtime() as runtime:
+        image = runtime.ndarray(dtype, shape, element_shape=element)
+        image.write(values.tobytes())
+        output = to_rgba8_packed_ndarray(image)
+        np.testing.assert_array_equal(output.to_numpy(), reference)
+        staging = _runtime_image_staging_cache[image]
+        module = staging.module
+        replacement = ti.ndarray(ti.u32, shape)
+        field = ti.field(ti.u32, shape=shape)
+        dense = ti.experimental.ndarray_view(field)
+        with monkeypatch.context() as guard:
+            def no_compile(*args, **kwargs):
+                raise AssertionError('Stable display conversion compiled again')
+            guard.setattr(Kernel, 'ensure_compiled', no_compile)
+            guard.setattr(image, 'read', no_compile)
+            guard.setattr(image, 'to_numpy', no_compile)
+            image.write(np.zeros_like(values).tobytes())
+            assert to_rgba8_packed_ndarray(image) is output
+            assert to_rgba8_packed_ndarray(image, destination=replacement) is replacement
+            assert to_rgba8_packed_ndarray(image, destination=dense) is dense
+        expected = np.uint32(0 if channels == 4 else 0xFF000000)
+        np.testing.assert_array_equal(replacement.to_numpy(), np.full(shape, expected))
+        np.testing.assert_array_equal(field.to_numpy(), np.full(shape, expected))
+        assert staging.module is module
+        with pytest.raises(ValueError, match='destination shape'):
+            to_rgba8_packed_ndarray(image, destination=ti.ndarray(ti.u32, (1, 1)))
+        reference = weakref.ref(image)
+        del image, staging, module
+        gc.collect()
+        assert reference() is None
+        assert len(_runtime_image_staging_cache) == 0
+
+
 @pytest.mark.parametrize("options", [dict(channels=True), dict(channels=0), dict(channels=5),
                                      dict(grayscale=1), dict(channels=3, grayscale=True)])
 def test_graph_image_staging_rejects_invalid_channel_layout(options):

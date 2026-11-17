@@ -26271,6 +26271,45 @@ class Derived(Model):
 """
 
 
+@test_utils.test(arch=[ti.cpu, ti.cuda], offline_cache=False)
+def test_package_external_host_selects_complete_graph_by_owners(tmp_path, monkeypatch):
+    package = _source_package(tmp_path, monkeypatch, FREE_RECEIVER_SOURCE)
+    normal = package.Model(5)
+    builder = ti.graph.GraphBuilder.for_owners(normal)
+    normal.record(builder)
+    builder.compile().run({'gain': 3})
+    reference = normal.values.to_numpy()
+    ti.aot.export_package(package, tmp_path / 'sdk')
+    with ti.aot.borrow_runtime() as runtime, load_package(runtime, tmp_path / 'sdk') as code:
+        first, second = code.host.Model(5), code.host.Model(11)
+        builder = ti.graph.GraphBuilder.for_owners(first, second)
+        for owner in (first, second):
+            region = builder.create_sequential()
+            owner.record(region)
+            builder.append(region)
+        graph = builder.compile()
+        # One native Plan, including both owners and their consumer facts.
+        assert len(json.loads(graph.plan.to_json())['operations']) == 2
+        assert graph._prepare_ordered_replay({'gain': 3}) == (ti.lang.impl.current_cfg().arch == ti.cuda)
+        graph.run({'gain': 3})
+        np.testing.assert_array_equal(first.values.to_numpy(), reference)
+        np.testing.assert_array_equal(second.values.to_numpy(), 3 * (np.arange(11) + 11))
+        graph.submit({'gain': 7}).wait()
+        np.testing.assert_array_equal(first.values.to_numpy(), 7 * (np.arange(5) + 5))
+        np.testing.assert_array_equal(second.values.to_numpy(), 7 * (np.arange(11) + 11))
+        assert code.host.model.ti.graph.GraphBuilder.for_owners(first).package is code
+        with pytest.raises(ValueError, match='loaded package'):
+            code.host.model.ti.graph.GraphBuilder.for_owners(normal)
+        with pytest.raises(ValueError, match='same loaded package'):
+            ti.graph.GraphBuilder.for_owners(first, normal)
+        with load_package(runtime, tmp_path / 'sdk') as other:
+            foreign = other.host.Model(3)
+            with pytest.raises(ValueError, match='same loaded package'):
+                ti.graph.GraphBuilder.for_owners(first, foreign)
+        with pytest.raises(RuntimeError, match='closed'):
+            ti.graph.GraphBuilder.for_owners(foreign)
+
+
 NUMERICAL_OWNER_CHILDREN_SOURCE = '''
 import taichi_forge as ti
 constructors = 0
@@ -29474,6 +29513,10 @@ class Model:
     ti.aot.export_package(package, tmp_path / 'sdk')
     pacer = ti.graph.SubmissionPacer(1)
     with ti.aot.borrow_runtime() as runtime, load_package(runtime, tmp_path / 'sdk') as code:
+        # Retained Host scheduling must use the same pacer as source callers.
+        assert code.host.model.ti.graph.SubmissionPacer is ti.graph.SubmissionPacer
+        assert code.host.model.ti.graph.SubmissionTicket is ti.graph.SubmissionTicket
+        assert code.host.model.ti.graph.CompletionSet is CompletionSet
         aot = code.host.Model()
         aot.out.fill(0)
         graph = aot.graph()
@@ -29510,8 +29553,73 @@ class Model:
         assert aot.out.to_numpy()[0] == 23
     with Runtime(str(ti.lang.impl.current_cfg().arch).split('.')[-1]) as runtime:
         with load_package(runtime, tmp_path / 'sdk') as code:
+            assert not hasattr(code.host.model.ti.graph, 'SubmissionPacer')
             with pytest.raises(TaichiRuntimeError, match='borrow the current'):
                 code.host.Model().graph().submit({'value': 1}, pacer=pacer)
+
+
+@test_utils.test(arch=ti.cuda, offline_cache=False)
+def test_package_ordered_replay_keeps_immutable_frames_and_queue_snapshots(tmp_path, monkeypatch):
+    package = _source_package(tmp_path, monkeypatch, '''
+import taichi_forge as ti
+@ti.kernel
+def add(out: ti.types.ndarray(dtype=ti.i32, ndim=1), delta: ti.i32):
+    out[0] += delta
+@ti.kernel
+def save(out: ti.types.ndarray(dtype=ti.i32, ndim=1), history: ti.types.ndarray(dtype=ti.i32, ndim=1), index: ti.i32):
+    history[index] = out[0]
+class Model:
+    def __init__(self):
+        self.out = ti.ndarray(ti.i32, shape=1)
+        self.history = ti.ndarray(ti.i32, shape=8)
+    def step(self):
+        builder = ti.graph.GraphBuilder()
+        builder.dispatch(add, self.out, ti.graph.Arg(ti.graph.ArgKind.SCALAR, 'delta', ti.i32))
+        return builder.compile()
+    def snapshot(self):
+        builder = ti.graph.GraphBuilder()
+        builder.dispatch(save, self.out, self.history, ti.graph.Arg(ti.graph.ArgKind.SCALAR, 'index', ti.i32))
+        return builder.compile()
+''')
+    original = package.Model()
+    original.out.fill(0)
+    step = original.step()
+    for index in range(8):
+        step.run({'delta': 3})
+        original.snapshot().run({'index': index})
+    expected = original.history.to_numpy()
+    ti.aot.export_package(package, tmp_path / 'sdk')
+    with ti.aot.borrow_runtime() as runtime, load_package(runtime, tmp_path / 'sdk') as code:
+        model = code.host.Model()
+        model.out.fill(0)
+        graph = model.step()
+        assert graph._prepare_ordered_replay({'delta': 3})
+        snapshots = [model.snapshot().bind({'index': index}) for index in range(8)]
+        cached = graph._cached_call
+        with monkeypatch.context() as stable:
+            def unexpected_bind(*args, **kwargs):
+                raise AssertionError('stable ordered replay must not prepare again')
+            stable.setattr(graph, 'bind', unexpected_bind)
+            tickets = []
+            for snapshot in snapshots:
+                tickets.append(graph.submit({'delta': 3}))
+                tickets.append(snapshot.submit())
+            # One terminal queue prefix proves every preceding step and copy.
+            tickets[-1].wait()
+        assert graph._cached_call is cached
+        assert all(ticket.done() for ticket in tickets)
+        np.testing.assert_array_equal(model.history.to_numpy(), expected)
+        # A changed live value may rebind without turning it into a code fact.
+        graph.submit({'delta': 5}).wait()
+        assert model.out.to_numpy()[0] == 29
+        foreign = graph.bind({'delta': 17})
+        with pytest.raises(ValueError, match='qualified binding'):
+            graph.submit(foreign)
+        foreign.close()
+        for ticket in tickets:
+            ticket.close()
+        for snapshot in snapshots:
+            snapshot.close()
 
 
 @test_utils.test(arch=ti.cpu, offline_cache=False)

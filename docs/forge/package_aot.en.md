@@ -10,6 +10,36 @@ No export decorator, per-kernel registration or component root is required.
 This is a limited prototype, not a complete engine distribution interface.
 Its format and supported scope are experimental.
 
+Host scripts composing numerical objects can select their recorder before recording:
+
+```python
+builder = ti.graph.GraphBuilder.for_owners(first, second)
+first.record(builder)
+second.record(builder)
+graph = builder.compile()
+```
+
+Source owners select the ordinary JIT builder. Owners from one loaded definition
+package select that package's complete native Plan recorder, preserving preparation
+and consumer specialization. Mixed JIT/AOT owners and independently loaded packages
+are rejected; this factory does not add cross-module linking or per-kernel Python
+submission. Frontend recipe/workspace-lane options remain specific to the frontend
+builder. In hybrid mode, retained Host code also shares the current Program's
+`SubmissionPacer`, `SubmissionTicket` and `CompletionSet`. Standalone packages do
+not import the frontend to supply those scheduling APIs.
+The host integration can qualify an immutable fixed CUDA Plan for ordered
+replay at preparation. It uses the existing queue and completion tickets,
+without duplicating JIT workspace lanes or promising concurrent device streams.
+
+Hybrid CUDA images can be passed to `Canvas.set_image`: two-dimensional Runtime
+u8/f32 arrays with scalar or one-to-four-channel vector elements are packed on
+device. The first binding compiles and loans the ordinary Forge display converter;
+stable source/destination pairs reuse preparation. This does not compile private
+engine definitions, export another package, or read pixels back to the CPU.
+The image must belong to an AOT Runtime borrowed from the current Program.
+This legacy Canvas route includes a device copy; direct shared-image presentation
+still requires the explicit display-frame ownership protocol.
+
 Format 96 retains simple Host composition objects as ordinary Python when export
 proves that they allocate no resources and are not captured by numerical definitions.
 Their declarations still prove independent input types during production, without

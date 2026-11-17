@@ -7,6 +7,31 @@
 `@ti.func`、`@ti.real_func`、`@ti.pyfunc`、`@ti.dataclass` 和 `@ti.data_oriented`，无需增加导出装饰器、逐 Kernel 注册或组件根。
 这个接口目前是小范围原型，不是完整引擎的一键发行接口，格式和支持范围尚未稳定。
 
+包外 Host 脚本组合数值对象时，可以先按对象选择录图器：
+
+```python
+builder = ti.graph.GraphBuilder.for_owners(first, second)
+first.record(builder)
+second.record(builder)
+graph = builder.compile()
+```
+
+源码对象使用普通 JIT builder；同一个加载包的对象使用该包的完整原生 Plan
+录制、准备和消费期特化。JIT/AOT 混合对象及独立加载包之间的组合明确拒绝，
+该工厂不增加跨模块链接或逐 Kernel Python 提交。前端 recipe 与 workspace lanes
+选项仍只属于前端 builder。hybrid 模式中，保留的 Host 代码共享当前 Program 的
+`SubmissionPacer`、`SubmissionTicket` 和 `CompletionSet`；独立部署不会为了
+提供这些调度接口而导入前端。
+Host 集成可在准备期确认不可变固定 CUDA Plan 的顺序重放资格，使用已有队列
+和完成票据，无需复制 JIT 工作区，也不宣称多个设备 stream 并发。
+
+hybrid CUDA 的二维 Runtime 图像数组可直接传入 `Canvas.set_image`：支持
+u8/f32 标量及一至四通道向量，在设备端打包。首次绑定编译并借用 Forge 原有的
+显示转换核；稳定源/目标复用准备结果。不编译私有引擎定义、不导出新包，也不把
+像素回读到 CPU。图像必须属于从当前 Program 借用的 AOT Runtime。
+这条普通 Canvas 路径包含一次设备复制；共享图像直接呈现仍使用显式显示帧
+的所有权协议。
+
 格式 96 将可证明不分配资源、也不被数值定义捕获的简单 Host 组合对象保留为普通 Python。
 原声明仍供生产期证明独立输入类型，组合对象不再固定子对象的某个数值实现族；数值 owner、
 分配所有权及构造失败回滚保持受管理。嵌套输入的合法类型由实际调用的 helper 选择，
