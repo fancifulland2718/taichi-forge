@@ -29512,3 +29512,67 @@ class Model:
         with load_package(runtime, tmp_path / 'sdk') as code:
             with pytest.raises(TaichiRuntimeError, match='borrow the current'):
                 code.host.Model().graph().submit({'value': 1}, pacer=pacer)
+
+
+@test_utils.test(arch=ti.cpu, offline_cache=False)
+def test_package_constructor_calls_parameterized_resource_group_method(tmp_path, monkeypatch):
+    source = """
+import taichi_forge as ti
+from resource_contexts import resource_group
+@ti.data_oriented
+class Model:
+    def __init__(self, n: int, seed: int):
+        self.n = n
+        self.prepare(seed)
+    def prepare(self, seed: int):
+        with resource_group(self, 'state', initialization='zero') as scope:
+            scope.values = scope.field(ti.i32, shape=scope.dim('n'))
+        self.values.fill(seed)
+    @ti.kernel
+    def step(self, delta: ti.i32):
+        for i in self.values:
+            self.values[i] += delta * (i + 1)
+"""
+    package, _ = _resource_context_fixture(tmp_path, monkeypatch, model=source)
+    original = package.Model(7, 3)
+    original.step(2)
+    expected = original.values.to_numpy()
+    manifest = ti.aot.export_package(package, tmp_path / 'sdk')
+    with Runtime(manifest['target']) as runtime, load_package(runtime, tmp_path / 'sdk') as code:
+        a, b = code.host.Model(7, 3), code.host.Model(11, -5)
+        a.step(2)
+        b.step(4)
+        np.testing.assert_array_equal(a.values.to_numpy(), expected)
+        np.testing.assert_array_equal(b.values.to_numpy(), -5 + 4 * (np.arange(11) + 1))
+
+
+@pytest.mark.parametrize('nested', ['raw', 'recursive'])
+@test_utils.test(arch=ti.cpu, offline_cache=False)
+def test_package_grouped_constructor_keeps_nested_allocation_checks(tmp_path, monkeypatch, nested):
+    source = """
+import taichi_forge as ti
+from resource_contexts import resource_group
+@ti.data_oriented
+class Model:
+    def __init__(self, n: int):
+        self.n = n
+        self.prepare(n)
+    def prepare(self, n):
+        with resource_group(self, 'state', initialization='zero') as scope:
+            scope.values = scope.field(ti.i32, shape=scope.dim('n'))
+        self.forward()
+    def forward(self):
+        self.hidden()
+    def hidden(self):
+        self.other = ti.field(ti.i32, shape=self.n)
+    @ti.kernel
+    def step(self):
+        for i in self.values:
+            self.values[i] = i
+"""
+    if nested == 'recursive':
+        source = source.replace('self.other = ti.field(ti.i32, shape=self.n)', 'self.prepare(self.n)')
+    package, _ = _resource_context_fixture(tmp_path, monkeypatch, model=source)
+    with pytest.raises(ti.aot.PackageExportError, match='[Cc]onstruction'):
+        ti.aot.export_package(package, tmp_path / 'sdk')
+    assert not (tmp_path / 'sdk').exists()

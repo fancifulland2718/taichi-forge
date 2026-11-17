@@ -203,12 +203,74 @@ def discover_construction_methods(tree, namespace, module, fail, kind):
                     return True
             return False
 
-        needed = {name for name, function in methods.items() if not function.decorator_list and allocates(function)}
+        allocation_paths = {name for name, function in methods.items()
+                            if not function.decorator_list and allocates(function)}
+        while True:
+            expanded = allocation_paths | {name for name, function in methods.items()
+                if not function.decorator_list
+                and any(call.func.attr in allocation_paths for call in calls(function))}
+            if expanded == allocation_paths:
+                break
+            allocation_paths = expanded
+
+        recursion = {}
+
+        def recursive_allocation(name, active):
+            if name in active:
+                return True
+            if name not in recursion:
+                recursion[name] = any(recursive_allocation(call.func.attr, active | {name})
+                    for call in calls(methods[name]) if call.func.attr in allocation_paths)
+            return recursion[name]
+
+        # A method with an explicit independent group already has the normal
+        # preparation contract below. Calling it during __init__ does not turn
+        # its Host arguments into construction-time code identities. Keep raw
+        # allocations and nested, unproven allocation calls on the stricter
+        # construction path. Existing self-only construction keeps its earlier
+        # schema discovery and call-order semantics.
+        grouped = set()
+        for name, function in methods.items():
+            args = function.args
+            self_only = (not args.posonlyargs and len(args.args) == 1
+                         and args.args[0].arg == 'self' and not args.kwonlyargs
+                         and not args.vararg and not args.kwarg)
+            if (name == '__init__' or function.decorator_list or self_only
+                    or recursive_allocation(name, set())):
+                continue
+            nodes, call_nodes, _ = syntax_of(function)
+            if any(qualified_kind(call, kind) in (
+                'FieldsBuilder', 'field', 'Vector.field', 'Matrix.field', 'Struct.field'
+            ) for call in call_nodes):
+                continue
+            for node in nodes:
+                if not isinstance(node, ast.With) or len(node.items) != 1:
+                    continue
+                call = node.items[0].context_expr
+                if not isinstance(call, ast.Call):
+                    continue
+                try:
+                    if prove_context(_source_value(call.func, namespace), call) is not None:
+                        grouped.add(name)
+                        break
+                except (TypeError, ValueError, OSError):
+                    pass  # The existing declaration path supplies its diagnostic.
+        while True:
+            proven = {name for name in grouped if not any(
+                call.func.attr not in grouped and call.func.attr in allocation_paths
+                for call in calls(methods[name])
+            )}
+            if proven == grouped:
+                break
+            grouped = proven
+        needed = {name for name, function in methods.items()
+                  if name not in grouped and not function.decorator_list and allocates(function)}
         while True:
             expanded = needed | {
                 name
                 for name, function in methods.items()
-                if not function.decorator_list and any(c.func.attr in needed for c in calls(function))
+                if name not in grouped and not function.decorator_list
+                and any(c.func.attr in needed for c in calls(function))
             }
             if expanded == needed:
                 break
