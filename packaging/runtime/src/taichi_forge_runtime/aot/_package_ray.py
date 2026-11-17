@@ -67,7 +67,14 @@ class RayAPI:
             raise ValueError("Required OptiX features are outside this Runtime factory contract")
         if type(validation) is not bool:
             raise TypeError("OptiX validation must be bool")
+        runtime = self.package.runtime
+        with runtime._lock:
+            configured = runtime._provider_paths.get(b"optix")
         paths = [Path(provider_path)] if provider_path else []
+        if not paths and configured is not None:
+            paths = [Path(os.fsdecode(configured[0]))]
+            if library_path is None and configured[1] is not None:
+                library_path = os.fsdecode(configured[1])
         if not paths:
             for name in ("taichi_forge_runtime", "taichi_forge"):
                 try:
@@ -82,7 +89,6 @@ class RayAPI:
             raise RuntimeError("No bundled OptiX provider adapter; supply provider_path")
         # Configuration belongs to this Runtime; creation validates the actual
         # adapter ABI/features and retains its library independent of later changes.
-        runtime = self.package.runtime
         errors = []
         for path in paths:
             runtime.configure_provider("optix", adapter_path=path,

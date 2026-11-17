@@ -162,6 +162,7 @@ class Runtime:
         self._resources = set()
         self._pending = set()
         self._domain_owners = {}
+        self._provider_paths = {}
         if arch == "cpu":
             arch = "arm64" if platform.machine().lower() in ("arm64", "aarch64") else "x64"
         try:
@@ -199,6 +200,7 @@ class Runtime:
         result._handle = None
         result._resources, result._pending = set(), set()
         result._domain_owners = {}
+        result._provider_paths = {}
         try:
             result._api = abi.Api(library_path)
             result.arch = str(client.arch).split(".")[-1]
@@ -364,6 +366,10 @@ class Runtime:
                 adapter_path,
                 library_path,
             )
+            if adapter_path is None:
+                self._provider_paths.pop(provider, None)
+            else:
+                self._provider_paths[provider] = (adapter_path, library_path)
 
     def configure_library(self, name, path):
         """Set a cold auxiliary-library location for this runtime owner.

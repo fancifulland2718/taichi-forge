@@ -28,7 +28,19 @@ output, adapter, library = sys.argv[1:]
 with Runtime("cuda") as runtime, load_package(runtime, output) as code:
     model = code.host.Model()
     from taichi_forge_runtime.aot._package_graph import Arg, ArgKind
-    with model.provider(adapter, library) as provider:
+    with model.provider(adapter, library) as direct:
+        assert direct.identity["adapter_path"] == str(Path(adapter).resolve())
+    runtime.configure_provider("optix", adapter_path=Path(adapter).with_name("missing-optix-provider.dll"),
+                               library_path=library)
+    with rejects(RuntimeError, "Cannot create OptiX context"):
+        model.provider(None, None)
+    runtime.configure_provider("optix", adapter_path=adapter, library_path=library)
+    # The normal Host factory must use this owner's explicit configuration
+    # without requiring a numerical frontend or a bundled default adapter.
+    with model.provider(None, None) as provider:
+        assert provider.identity["adapter_path"] == str(Path(adapter).resolve())
+        runtime.configure_provider("optix", adapter_path=None)
+        assert b"optix" not in runtime._provider_paths
         vertices = runtime.ndarray("f32", (3, 3))
         vertices.write(np.array([[-1,-1,0],[1,-1,0],[0,1,0]], np.float32).tobytes())
         indices = runtime.ndarray("i32", (1, 3))
