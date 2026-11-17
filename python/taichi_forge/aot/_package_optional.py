@@ -340,12 +340,12 @@ def ordered_presence_conditions(schema, paths, conditions):
     return ordered
 
 
-def project_nested_query_records(environment, schema, uses):
+def project_nested_query_records(environment, schema, uses, *, query_paths=None):
     """Project a joint presence closure, without changing the source layout.
 
-    Every guard in a nested query must qualify together. The invocation keeps
-    the ordered parent predicates so absent parents never expose child data.
-    Real implementation/type/layout alternatives keep their finite domain.
+    Dynamic guards qualify together inside their finite outer layout. The
+    invocation keeps their ordered predicates so absent parents never expose
+    child data. A producer-selected ancestor need not itself become dynamic.
     """
     from dataclasses import replace
     from taichi_forge.types import primitive_types
@@ -354,9 +354,46 @@ def project_nested_query_records(environment, schema, uses):
 
     paths = environment._paths
     inputs = [paths[key] for key, item in schema.items() if item['kind'] == 'owner_input']
+    # This is a query projection, not the owner's allocation schema. Unread
+    # construction members must not pin a query's presence to production
+    # variants. Include extent dependencies of every possibly read member;
+    # computed reflection keeps the conservative complete-schema behavior.
+    from taichi_forge_runtime._dimensions import extent_dependencies
+    required = set(schema) if '*' in uses else {
+        key for key in schema if paths[key][-1] in uses}
+    if query_paths is not None:
+        reads, unknown = query_paths
+        # A resolved method can distinguish identically named members on
+        # different receivers. For unresolved subtrees retain the existing
+        # conservative closure (including computed-name patterns/reflection),
+        # rather than treating the missing method proof as an empty readset.
+        required = {key for key in schema
+                    if any(path[:len(paths[key])] == tuple(paths[key]) for path in reads)
+                    or key in required and any(tuple(paths[key][:len(prefix)]) == prefix for prefix in unknown)}
+    pending = list(required)
+    while pending:
+        item = schema[pending.pop()]
+        dependencies = set(item.get('conditions', {}))
+        for part in ('choice_guards', 'shape_guards', 'dtype_guards', 'source_guards'):
+            dependencies.update(item.get(part, {}))
+        for part in ('input_presence_attribute', 'input_record'):
+            if item.get(part):
+                dependencies.add(item[part])
+        dependencies.update(item.get('input_conditions', ()))
+        for part in ('expression', 'shape_expressions'):
+            expressions = [item[part]] if part == 'expression' and part in item else item.get(part, ())
+            for expression in expressions:
+                dependencies.update(extent_dependencies(expression))
+        dependencies.update(axis for axis in item.get('shape', ()) if isinstance(axis, str))
+        for key in (dependencies & schema.keys()) - required:
+            required.add(key)
+            pending.append(key)
     candidates = {key for key, item in schema.items()
-                  if item['kind'] == 'static'
+                  if key in required and item['kind'] == 'static'
                   and {tuple(value) for value in item.get('choices', ())} == {('bool', False), ('bool', True)}
+                  # Existing nullable query schedules retain their guarded
+                  # parallel lowering. Type/alias/early-return uses do not.
+                  and uses.get(paths[key][-1], {'prepare_condition'}) <= {'prepare_condition', 'parallel_structure'}
                   and (any(len(paths[key]) > len(prefix) and paths[key][:len(prefix)] == prefix for prefix in inputs)
                        or any(item['kind'] == 'owner_input' and key in item.get('conditions', {})
                               for item in schema.values()))
@@ -383,33 +420,51 @@ def project_nested_query_records(environment, schema, uses):
     while True:
         accepted = set()
         for flag in candidates:
-            members = [(key, item) for key, item in schema.items() if flag in item.get('conditions', {})]
-            if (any(not numeric(key, item) or not item.get('conditions', {}).keys() <= candidates
-                    or any(value is not True for value in item.get('conditions', {}).values())
+            # An outer owner may have a real dtype/shape alternative. Its
+            # already-selected branch must not pin independent inner resource
+            # presence. Only dominating static ancestors can remain outside
+            # this joint dynamic closure; sibling/inner guards still qualify
+            # together, and no negative dynamic predicate is admitted.
+            parents = schema[flag].get('conditions', {})
+            fixed_parents = {key for key in parents if key not in candidates
+                             and schema[key]['kind'] == 'static'
+                             and not schema[key].get('prepare_static')
+                             and not schema[key].get('dynamic_storage_condition')}
+            members = [(key, item) for key, item in schema.items()
+                       if key in required and flag in item.get('conditions', {})]
+            if (any(not numeric(key, item)
+                    or not item.get('conditions', {}).keys() <= candidates | fixed_parents
+                    or any(item.get('conditions', {}).get(key) is not expected
+                           for key, expected in parents.items() if key in fixed_parents)
+                    or any(value is not True for key, value in item.get('conditions', {}).items()
+                           if key in candidates)
                     for key, item in members)
-                    or any(flag in item.get(part, {}) for item in schema.values()
+                    or any(flag in item.get(part, {}) for key, item in schema.items() if key in required
                            for part in ('choice_guards', 'shape_guards', 'dtype_guards', 'source_guards'))):
                 continue
             accepted.add(flag)
         if accepted == candidates:
             break
         candidates = accepted
-    # Flat records/groups are already handled above. Only this joint extension
-    # needs the consumer's parent-before-child admission contract.
-    if not any(len(set(item.get('conditions', {})) & candidates) > 1 for item in schema.values()):
+    # A single inner guard can remain after a finite outer layout was retained.
+    # It uses the same admission contract as the jointly dynamic nested case.
+    if not candidates or all(schema[key].get('dynamic_storage_condition') for key in candidates):
         return
     records = {key: item for key, item in schema.items()
-               if item['kind'] in ('owner', 'owner_input', 'record') and item.get('conditions')
-               and item['conditions'].keys() <= candidates
-               and any(paths[flag][:-1] == paths[key][:-1] for flag in item['conditions'])}
+               if key in required and item['kind'] in ('owner', 'owner_input', 'record') and item.get('conditions')
+               and any(flag in candidates and paths[flag][:-1] == paths[key][:-1]
+                       for flag in item['conditions'])}
     declarations = dict(environment.declarations)
     for flag in candidates:
         schema[flag] = {**schema[flag], 'dynamic_storage_condition': True,
                         'input_presence_attribute': flag, 'prepare_static': True, 'nested_query_input': True}
         declarations[flag] = _InputPresence(primitive_types.i32)
     for key, original in list(schema.items()):
-        conditions = original.get('conditions', {})
-        if not conditions or not conditions.keys() <= candidates:
+        if key not in required:
+            continue
+        conditions = {flag: expected for flag, expected in original.get('conditions', {}).items()
+                      if flag in candidates}
+        if not conditions:
             continue
         guards = ordered_presence_conditions(schema, paths, conditions)
         item = schema[key] = {**original, 'input_conditions': guards, 'nested_query_input': True}

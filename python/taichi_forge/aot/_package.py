@@ -2464,6 +2464,10 @@ def _export_package(package, output, *, arch, caps, source_root, compilation, ar
                             template_args=template_arguments(owner),
                             on_compiled=compilation.compile,
                             validate_capture=validate_capture,
+                            query_paths=(owner_graph.entry_query_paths(
+                                name + "." + owner_name, entry._primal.func.__name__,
+                                compilation_schema, environment._paths)
+                                if owner_name is not None and "closure_environment" not in definition else None),
                         )
                     ]
             except Exception as error:

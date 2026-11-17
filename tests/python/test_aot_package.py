@@ -571,7 +571,9 @@ class Model:
             np.testing.assert_array_equal(loaded.out.to_numpy(), normal.out.to_numpy())
             instances.append(loaded)
             if not present:
-                with pytest.raises(ValueError, match='configuration' if layout_variant else 'presence'):
+                # required() reads scale only; State.values' dtype choice is
+                # irrelevant, but the missing State must still be rejected.
+                with pytest.raises(ValueError, match='presence'):
                     loaded.required()
             else:
                 assert loaded.required() == 3.0
@@ -864,7 +866,7 @@ class Model:
     manifest = ti.aot.export_package(package, output, artifact_format='bc-library')
     entries = [entry for entry in manifest['entries'].values() if entry['definition'].endswith('Model.step')]
     assert len(entries) == 1
-    assert manifest['version'] == 94
+    assert manifest['version'] == 95  # Includes the required() conditional member read.
     assert entries[0]['admission']['constraint_conditions']
     with Runtime(manifest['target']) as runtime, load_package(runtime, output) as code:
         for index, (outer, inner) in enumerate(((False, False), (True, False), (True, True))):
@@ -906,9 +908,99 @@ class Model:
             model.bind(None)
             model.step()
             assert model.out[None] == 1.0
-    (output / 'package.json').write_text(json.dumps({**manifest, 'version': 93}), encoding='utf8')
-    with Runtime(manifest['target']) as runtime, pytest.raises(ValueError, match='version 94'):
+    (output / 'package.json').write_text(json.dumps({**manifest, 'version': 94}), encoding='utf8')
+    with Runtime(manifest['target']) as runtime, pytest.raises(ValueError, match='version 95'):
         load_package(runtime, output)
+
+
+@pytest.mark.parametrize('early_return', [False, True])
+@pytest.mark.parametrize('unused_layout', [False, True])
+@test_utils.test(arch=ti.cuda, offline_cache=False)
+def test_package_nested_query_presence_with_static_outer_layout(tmp_path, monkeypatch, early_return, unused_layout):
+    source = '''
+import taichi_forge as ti
+@ti.data_oriented
+class Leaf:
+    def __init__(self):
+        scope = ti.experimental.ResourceScope(self)
+        scope.value = scope.field(ti.f32, shape=(), initialization='zero')
+    @ti.func
+    def read(self):
+        return self.value[None]
+@ti.data_oriented
+class Query:
+    def __init__(self, wide: bool, leaf: Leaf = None):
+        self.wide = wide
+        self.enabled = leaf is not None
+        scope = ti.experimental.ResourceScope(self)
+        scope.static('wide', choices=(False, True))
+        scope.static('enabled', choices=(False, True))
+        scope.bias = scope.field(ti.f64 if self.wide else ti.f32, shape=(), initialization='zero')
+        if self.enabled:
+            scope.owner_reference('leaf', leaf)
+        else:
+            scope.owner_reference('leaf', None, optional=True)
+    @ti.func
+    def read(self):
+        result = ti.cast(self.bias[None], ti.f32)
+        if ti.static(self.enabled):
+            result += self.leaf.read()
+        return result
+@ti.data_oriented
+class Model:
+    def __init__(self, query: Query = None):
+        self.enabled = query is not None
+        scope = ti.experimental.ResourceScope(self)
+        scope.static('enabled', choices=(False, True))
+        if self.enabled:
+            scope.owner_reference('query', query)
+        else:
+            scope.owner_reference('query', None, optional=True)
+    @ti.kernel
+    def read(self) -> ti.f32:
+        result = 1.0
+        if ti.static(self.enabled):
+            result += self.query.read()
+        return result
+'''
+    if early_return:
+        source = source.replace('result += self.leaf.read()', 'return result + self.leaf.read()')
+    if unused_layout:
+        source = source.replace('scope.bias = scope.field(ti.f64 if self.wide else ti.f32,',
+                                'scope.value = scope.field(ti.f64 if self.wide else ti.f32,')
+        # Leaf.value is read, but Query.value is producer-only. A leaf-name
+        # readset must not make the latter's dtype pin the query's presence.
+        source = source.replace('        if self.enabled:\n',
+                                "        scope.bias = scope.field(ti.f32, shape=(), initialization='zero')\n        if self.enabled:\n", 1)
+    package = _source_package(tmp_path, monkeypatch, source)
+    references = []
+    for wide, present in ((False, False), (False, True), (True, False), (True, True)):
+        leaf = package.model.Leaf() if present else None
+        if leaf is not None:
+            leaf.value[None] = 5
+        query = package.model.Query(wide, leaf)
+        query.bias[None] = 2
+        references.append(package.Model(query).read())
+    assert package.Model().read() == 1
+    output = tmp_path / 'sdk'
+    manifest = ti.aot.export_package(package, output, artifact_format='bc-library')
+    entries = [e for e in manifest['entries'].values() if e['definition'].endswith('Model.read')]
+    # Absent parent + two genuinely distinct scalar ABIs. Leaf presence does
+    # not multiply either ABI, and absent parents must not read a child flag.
+    assert len(entries) == ((3 if early_return else 1) if unused_layout else (5 if early_return else 3))
+    with Runtime(manifest['target']) as runtime, load_package(runtime, output) as code:
+        assert code.host.Model().read() == 1
+        for expected, (wide, present) in zip(references, ((False, False), (False, True), (True, False), (True, True))):
+            leaf = code.host.model.Leaf() if present else None
+            if leaf is not None:
+                leaf.value.from_numpy(np.array(5, np.float32))
+            query = code.host.model.Query(wide, leaf)
+            query.bias.from_numpy(np.array(2, np.float64 if wide and not unused_layout else np.float32))
+            model = code.host.Model(query)
+            assert model.read() == expected
+            if leaf is not None:
+                leaf.value.from_numpy(np.array(7, np.float32))
+                assert model.read() == expected + 2
 
 
 @test_utils.test(arch=[ti.cpu, ti.cuda], offline_cache=False)
@@ -1433,7 +1525,7 @@ class Model:
 
 
 @test_utils.test(arch=ti.cuda, offline_cache=False)
-@pytest.mark.parametrize('value_kind', ['scalar', 'vector', 'struct', 'model_tensor'])
+@pytest.mark.parametrize('value_kind', ['scalar', 'vector', 'struct', 'model_tensor', 'nested_tuple'])
 def test_package_library_keeps_local_template_references_inline(tmp_path, monkeypatch, value_kind):
     from taichi_forge.aot._package_compilation import PackageCompilation
 
@@ -1442,6 +1534,7 @@ def test_package_library_keeps_local_template_references_inline(tmp_path, monkey
         'vector': ('cursor = ti.Vector([i, 0])', 'cursor[0]'),
         'struct': ('cursor = ti.Struct(value=i)', 'cursor.value'),
         'model_tensor': ('cursor = ti.Vector.zero(ti.i32, self.width)\n            cursor[0] = i', 'cursor[0]'),
+        'nested_tuple': ('cursor = ((ti.Vector([i, 0]),),)', 'cursor[0][0][0]'),
     }[value_kind]
     source = '''import taichi_forge as ti
 @ti.func
@@ -2890,10 +2983,12 @@ class Model:
 
 
 @test_utils.test(arch=ti.cuda, offline_cache=False)
-@pytest.mark.parametrize('value_kind', ['scalar', 'vector', 'matrix'])
+@pytest.mark.parametrize('value_kind', ['scalar', 'cast', 'cast_keyword', 'vector', 'matrix'])
 def test_package_library_prepares_copies_into_numeric_locals(tmp_path, monkeypatch, value_kind):
     initial, field, reduction = {
         'scalar': ('0.0', 'field(ti.f32', 'result'),
+        'cast': ('ti.cast(0, ti.f32)', 'field(ti.f32', 'result'),
+        'cast_keyword': ('ti.cast(0, dtype=ti.f32)', 'field(ti.f32', 'result'),
         'vector': ('ti.Vector.zero(ti.f32, 3)', 'vector_field(3, ti.f32', 'result.sum()'),
         'matrix': ('ti.Matrix.zero(ti.f32, 2, 2)', 'matrix_field(2, 2, ti.f32', 'result.sum()'),
     }[value_kind]
@@ -2936,14 +3031,14 @@ class Model:
                   for n, enabled in ((3, False), (9, True))]
         for aot, jit in owners:
             for value in (2, -3):
-                shape = (aot.n, *{'scalar': (), 'vector': (3,), 'matrix': (2, 2)}[value_kind])
+                shape = (aot.n, *{'scalar': (), 'cast': (), 'cast_keyword': (), 'vector': (3,), 'matrix': (2, 2)}[value_kind])
                 data = np.full(shape, value, dtype=np.float32)
                 aot.values.from_numpy(data)
                 jit.values.from_numpy(data)
                 aot.step()
                 jit.step()
                 np.testing.assert_array_equal(aot.out.to_numpy(), jit.out.to_numpy())
-                factor = {'scalar': 1, 'vector': 3, 'matrix': 4}[value_kind]
+                factor = {'scalar': 1, 'cast': 1, 'cast_keyword': 1, 'vector': 3, 'matrix': 4}[value_kind]
                 expected = np.full(aot.n, value * factor) if aot.enabled else (np.arange(aot.n) > 0) * factor
                 np.testing.assert_array_equal(aot.out.to_numpy(), expected)
 
@@ -2955,6 +3050,9 @@ class Model:
     ('0', 'for result in ti.static(range(3)):\n            point += result\n        result = point'),
     ('0', 'result: ti.i32 = 1\n        result = point'),
     ('self.values; result = 0', 'result = point'),
+    ('custom.cast(0, ti.f32)', 'result = point'),
+    ('ti.cast(0, self.dtype)', 'result = point'),
+    ('ti.cast(0, ti.f64 if self.wide else ti.f32)', 'result = point'),
 ])
 def test_package_static_copy_proof_keeps_python_rebindings(initial, body):
     from taichi_forge.aot._package_static import StaticPreparation
@@ -2971,6 +3069,98 @@ def selected(self, point):
     tree = ast.parse(source)
     proof = StaticPreparation([('model', None, None, source, tree, decorator_resolver(tree), None, None)])
     assert proof.entry_uses('model.selected')['flag'] != {'prepare_condition'}
+
+
+@pytest.mark.parametrize('name', ['name', "'has_' + name + '_table'", "f'has_{name}_table'"])
+def test_package_query_projection_keeps_computed_member_dependencies(name):
+    from taichi_forge.aot._package_static import StaticPreparation
+    from taichi_forge.tools._compiled_host import decorator_resolver
+
+    source = '''import taichi_forge as ti
+@ti.func
+def selected(self, name: ti.template()):
+    return getattr(self, NAME)[None]
+'''.replace('NAME', name)
+    tree = ast.parse(source)
+    proof = StaticPreparation([('model', None, None, source, tree, decorator_resolver(tree), None, None)])
+    uses = proof.schema_uses({'table': ('has_color_table',), 'other': ('unrelated_layout',)}, 'model.selected')
+    if name == 'name':
+        assert uses['*'] == {'reflective_use'}
+    else:
+        assert uses['has_color_table'] == {'non_condition_use'}
+        assert 'unrelated_layout' not in uses and '*' not in uses
+
+
+@test_utils.test(arch=ti.cuda, offline_cache=False)
+def test_package_query_computed_members_share_presence_with_unused_layout(tmp_path, monkeypatch):
+    source = '''import taichi_forge as ti
+@ti.data_oriented
+class Query:
+    def __init__(self, enabled: bool, wide: bool, extra=None):
+        self.has_color_table, self.wide = enabled, wide
+        scope = ti.experimental.ResourceScope(self)
+        scope.static('has_color_table', choices=(False, True))
+        scope.static('wide', choices=(False, True))
+        scope.borrow('extra', extra, external=True, dtype=ti.f32, shape=(), optional=True)
+        scope.scratch = scope.field(ti.f64 if self.wide else ti.f32, shape=(), initialization='zero')
+        if self.has_color_table:
+            scope.color_values = scope.field(ti.f32, shape=(), initialization='zero')
+    @ti.func
+    def read(self, channel: ti.template()):
+        value = ti.cast(2, ti.f32)
+        if ti.static(getattr(self, 'has_' + channel + '_table')):
+            value += getattr(self, channel + '_values')[None]
+        if ti.static(self.extra is not None):
+            value += self.extra[None]
+        return value
+@ti.data_oriented
+class Model:
+    def __init__(self, query: Query = None):
+        self.enabled = query is not None
+        scope = ti.experimental.ResourceScope(self)
+        scope.static('enabled', choices=(False, True))
+        if self.enabled:
+            scope.owner_reference('query', query)
+        else:
+            scope.owner_reference('query', None, optional=True)
+    @ti.kernel
+    def read(self) -> ti.f32:
+        value = 1.0
+        if ti.static(self.enabled):
+            value += self.query.read('color')
+        return value
+'''
+    package = _source_package(tmp_path, monkeypatch, source)
+    references = []
+    for wide, enabled in ((False, False), (False, True), (True, False), (True, True)):
+        query = package.model.Query(enabled, wide)
+        if enabled:
+            query.color_values[None] = 5
+        references.append(package.Model(query).read())
+    extra = ti.field(ti.f32, shape=())
+    extra.from_numpy(np.array(11, np.float32))
+    extra_reference = package.Model(package.model.Query(False, False, extra)).read()
+    output = tmp_path / 'sdk'
+    manifest = ti.aot.export_package(package, output, artifact_format='bc-library')
+    entries = [e for e in manifest['entries'].values() if e['definition'].endswith('Model.read')]
+    assert len(entries) == 1
+    with Runtime(manifest['target']) as runtime, load_package(runtime, output) as code:
+        assert code.host.Model().read() == 1
+        for expected, (wide, enabled) in zip(references, ((False, False), (False, True), (True, False), (True, True))):
+            query = code.host.model.Query(enabled, wide)
+            if enabled:
+                query.color_values.from_numpy(np.array(5, np.float32))
+            model = code.host.Model(query)
+            assert model.read() == expected
+            if enabled:
+                query.color_values.from_numpy(np.array(7, np.float32))
+                assert model.read() == expected + 2
+        extra = runtime.ndarray('f32', shape=())
+        extra.from_numpy(np.array(11, np.float32))
+        model = code.host.Model(code.host.model.Query(False, False, extra))
+        assert model.read() == extra_reference
+        extra.from_numpy(np.array(13, np.float32))
+        assert model.read() == extra_reference + 2
 
 
 @test_utils.test(arch=ti.cuda, offline_cache=False)
@@ -14818,7 +15008,69 @@ def test_package_external_dtype_choice_preserves_layout_and_live_data(tmp_path, 
             load_package(runtime, tmp_path / 'sdk')
 
 
-@pytest.mark.parametrize('change', ['kernel_only', 'model_condition', 'vector_branch'])
+@pytest.mark.parametrize('tensor', ['vector', 'matrix'])
+@test_utils.test(arch=[ti.cpu, ti.cuda], offline_cache=False)
+def test_package_external_tensor_dtype_choice_keeps_shape_and_live_data(tmp_path, monkeypatch, tensor):
+    # A preparation-time dtype is legal under the same predicate as its port.
+    source = '''
+import taichi_forge as ti
+@ti.data_oriented
+class Model:
+    def __init__(self, n: int, batched: bool):
+        self.n, self.batched, self.enabled = n, batched, True
+        scope = ti.experimental.ResourceScope(self)
+        scope.static('enabled', choices=(False, True))
+        scope.static('batched', choices=(False, True))
+        scope.out = scope.field(ti.types.vector(3, ti.f32), shape=scope.dim('n'))
+    def prepare(self, values):
+        scope = ti.experimental.ResourceScope(self)
+        if self.enabled:
+            self.wide = values.dtype == ti.f64
+            scope.static('wide', choices=(False, True))
+            shape = (2, scope.dim('n')) if self.batched else (scope.dim('n'),)
+            element = ti.types.vector(3, ti.f64) if self.wide else ti.types.vector(3, ti.f32)
+            scope.borrow('values', values, external=True, dtype=element, shape=shape)
+    @ti.kernel
+    def update(self, gain: ti.f32):
+        if ti.static(self.enabled):
+            for i in range(self.n):
+                if ti.static(self.batched):
+                    self.out[i] = gain * self.values[1, i]
+                else:
+                    self.out[i] = gain * self.values[i]
+'''
+    factory = 'ti.types.vector(3, {})' if tensor == 'vector' else 'ti.types.matrix(2, 3, {})'
+    for dtype in ('ti.f32', 'ti.f64'):
+        source = source.replace('ti.types.vector(3, ' + dtype + ')', factory.format(dtype))
+    package = _source_package(tmp_path, monkeypatch, source)
+    shape = (3,) if tensor == 'vector' else (2, 3)
+    references = []
+    for n, dtype, batched in ((5, ti.f32, False), (7, ti.f64, True)):
+        extent = (2, n) if batched else (n,)
+        data = np.arange(np.prod((*extent, *shape)), dtype=np.float64 if dtype == ti.f64 else np.float32).reshape((*extent, *shape))
+        field = ti.Vector.field(3, dtype, extent) if tensor == 'vector' else ti.Matrix.field(2, 3, dtype, extent)
+        field.from_numpy(data)
+        model = package.model.Model(n, batched)
+        model.prepare(field)
+        model.update(2)
+        references.append((n, batched, data, model.out.to_numpy()))
+    output = tmp_path / 'sdk'
+    options = {'artifact_format': 'bc-library'} if ti.cfg.arch == ti.cuda else {}
+    ti.aot.export_package(package, output, **options)
+    with Runtime(ti.cfg.arch.name) as runtime, load_package(runtime, output) as code:
+        for n, batched, data, expected in references:
+            model = code.host.Model(n, batched)
+            values = runtime.ndarray('f64' if batched else 'f32', data.shape[:-len(shape)], element_shape=shape)
+            values.from_numpy(data)
+            model.prepare(values)
+            model.update(2)
+            np.testing.assert_array_equal(model.out.to_numpy(), expected)
+            values.from_numpy(data + 3)
+            model.update(2)
+            np.testing.assert_array_equal(model.out.to_numpy(), expected + 6)
+
+
+@pytest.mark.parametrize('change', ['kernel_only', 'model_condition', 'vector_branch', 'tensor_shape'])
 @test_utils.test(arch=ti.cpu, offline_cache=False)
 def test_package_external_dtype_rejects_unproved_choice(tmp_path, monkeypatch, change):
     source = EXTERNAL_DTYPE_CHOICE_SOURCE
@@ -14827,8 +15079,11 @@ def test_package_external_dtype_rejects_unproved_choice(tmp_path, monkeypatch, c
                                 "scope.static('integer', choices=(False, True), kernel_only=True)")
     elif change == 'model_condition':
         source = source.replace('if not self.integer else', 'if self.n > 4 else')
-    else:
+    elif change == 'vector_branch':
         source = source.replace('else ti.i32', 'else ti.types.vector(3, ti.i32)')
+    else:
+        source = source.replace('ti.f32 if not self.integer else ti.i32',
+                                'ti.types.vector(3, ti.f32) if not self.integer else ti.types.vector(4, ti.f64)')
     package = _source_package(tmp_path, monkeypatch, source)
     with pytest.raises(ValueError, match='Field dtype (selection|choices)'):
         ti.aot.export_package(package, tmp_path / 'sdk')
@@ -29527,6 +29782,36 @@ def unknown_alias(self):
     for method, parameter in [('dynamic', 'provider'), ('unknown', 'provider'), ('shadowed', 'provider'),
                               ('rebound', 'provider'), ('literal_caller', 'self')]:
         assert () in reader.parameter('Owner', method, parameter)
+
+
+def test_package_entry_query_paths_respect_selected_owner_and_unknown_override():
+    from taichi_forge.aot._package_owner_graph import OwnerGraph
+
+    graph = object.__new__(OwnerGraph)
+    graph._device_methods = {
+        'Root': {'entry': {('query', 'read'), ('other', 'value')}},
+        'First': {'read': {('value',)}},
+        'Second': {'read': {('different',)}},
+        'HostOverride': {},
+    }
+    schema = {
+        'query': dict(kind='owner_input', owner_type='First'),
+        'value': dict(kind='dense_field'),
+        'different': dict(kind='dense_field'),
+        'other': dict(kind='owner_input', owner_type='First'),
+        'other_value': dict(kind='dense_field'),
+    }
+    paths = {'query': ('query',), 'value': ('query', 'value'), 'different': ('query', 'different'),
+             'other': ('other',), 'other_value': ('other', 'value')}
+    reads, unknown = graph.entry_query_paths('Root', 'entry', schema, paths)
+    assert ('query', 'value') in reads and ('query', 'different') not in reads and not unknown
+    schema['query']['owner_type'] = 'Second'
+    reads, unknown = graph.entry_query_paths('Root', 'entry', schema, paths)
+    assert ('query', 'different') in reads and ('query', 'value') not in reads and not unknown
+    schema['query']['owner_type'] = 'HostOverride'
+    reads, unknown = graph.entry_query_paths('Root', 'entry', schema, paths)
+    assert ('other', 'value') in reads and unknown == {('query',)}
+    assert graph.entry_query_paths('Root', 'unresolved', schema, paths) is None
 
 
 @test_utils.test(arch=ti.cuda, offline_cache=False)

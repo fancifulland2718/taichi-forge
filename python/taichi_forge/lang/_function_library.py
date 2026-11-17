@@ -95,16 +95,29 @@ class FunctionLibrary:
         from taichi_forge.types import primitive_types
         from taichi_forge.types.annotations import template
 
+        def caller_owned_template(value):
+            pending, visited = [value], set()
+            while pending:
+                item = pending.pop()
+                if isinstance(item, (AnyArray, SharedArray, Expr, Matrix, Struct, ModelTensor)):
+                    return True
+                if isinstance(item, (tuple, list, dict)) and id(item) not in visited:
+                    visited.add(id(item))
+                    pending.extend(item)
+                    if isinstance(item, dict):
+                        pending.extend(item.values())
+            return False
+
         arguments = list(source.arguments)
         signature = []
         for index, (argument, value) in enumerate(zip(arguments, args)):
-            if isinstance(argument.annotation, template) and isinstance(
-                value, (AnyArray, SharedArray, Expr, Matrix, Struct, ModelTensor)
-            ):
+            if isinstance(argument.annotation, template) and caller_owned_template(value):
                 # Templates have no callee ABI slot. These operands refer to
                 # caller IR, local allocations or array argument indices,
                 # unlike resources recaptured through an owner. In particular,
                 # copying a local template would lose its reference semantics.
+                # Containers do not change that ownership: e.g. a resource
+                # and caller loop indices packed in a visibility tuple.
                 # Keep ordinary inline lowering until it can be rebound.
                 return None
             if argument.annotation is not inspect.Parameter.empty:

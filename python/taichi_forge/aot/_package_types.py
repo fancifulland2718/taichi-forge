@@ -21,19 +21,25 @@ def producer_static(value):
     return value
 
 
-def resolve_scalar_dtype_policy(policy, namespace, module, *, owner_dtype=None):
-    """Resolve one declared scalar ABI choice for Fields and owned arrays."""
+def resolve_scalar_dtype_policy(policy, namespace, module, *, owner_dtype=None, allow_tensor=False):
+    """Resolve scalar precision choices, retaining a fixed external tensor shape."""
     if "native_ids" in policy:
         return dict(policy)
     types = {key: resolve_type(policy[key], namespace, owner_dtype=owner_dtype) for key in ("if_true", "if_false")}
     alternatives = {key: type_spec(dtype, module) for key, dtype in types.items()}
-    if any(element["kind"] != "scalar" for element in alternatives.values()):
-        raise ValueError("Field dtype selection requires scalar element alternatives")
+    layouts = {(element["kind"], tuple(element.get("element_shape", ()))) for element in alternatives.values()}
+    if len(layouts) != 1 or any(
+        element["kind"] not in (("scalar", "tensor") if allow_tensor else ("scalar",))
+        for element in alternatives.values()
+    ):
+        raise ValueError("Field dtype selection requires scalar alternatives or a fixed external tensor shape")
+    import taichi_forge as ti
+
     return {
         "condition": policy["condition"],
         **({"condition_path": policy["condition_path"]} if "condition_path" in policy else {}),
         **{key: element["dtype"] for key, element in alternatives.items()},
-        "native_ids": {key: dtype.__getstate__()[0] for key, dtype in types.items()},
+        "native_ids": {key: getattr(ti, element["dtype"]).__getstate__()[0] for key, element in alternatives.items()},
     }
 
 

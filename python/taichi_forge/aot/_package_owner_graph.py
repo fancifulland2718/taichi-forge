@@ -399,6 +399,49 @@ class OwnerGraph:
         self._numerical_path_cache[key] = result
         return result
 
+    def entry_query_paths(self, identity, method, schema, paths):
+        """Resolve existing method summaries against this selected owner ABI.
+
+        Keep unknown receiver escapes as subtree prefixes. They are not proof
+        that unmentioned members are unused. The result only narrows query
+        projection; it never changes an owner's allocation contract.
+        """
+        if method not in self._device_methods.get(identity, {}):
+            return None
+        owners = {tuple(paths[key]): item['owner_type'] for key, item in schema.items()
+                  if item['kind'] in ('owner', 'owner_input')}
+        declared = {tuple(paths[key]) for key, item in schema.items()
+                    if item['kind'] not in ('owner', 'owner_input')}
+        pending, visited = [(identity, (), (method,))], set()
+        reads, unknown = set(), set()
+        while pending:
+            owner, prefix, path = pending.pop()
+            token = owner, prefix, path
+            if token in visited:
+                continue
+            visited.add(token)
+            if not path:
+                unknown.add(prefix)
+                continue
+            methods = self._device_methods.get(owner, {})
+            if len(path) == 1 and path[0] in methods:
+                pending.extend((owner, prefix, member) for member in methods[path[0]])
+                continue
+            absolute = prefix + path
+            children = [child for child in owners if len(child) > len(prefix)
+                        and absolute[:len(child)] == child]
+            if children:
+                child = max(children, key=len)
+                reads.add(child)
+                pending.append((owners[child], child, absolute[len(child):]))
+            elif any(absolute[:len(member)] == member for member in declared):
+                reads.add(absolute)
+            else:
+                # Host overrides, reflection and unresolved attributes cannot
+                # borrow the proof for another implementation with the same name.
+                unknown.add(prefix)
+        return frozenset(reads), frozenset(unknown)
+
     def input_field_type(self, identity, path):
         """Use the declared field ABI without constructing a consumer owner."""
         key = identity, tuple(path)
@@ -826,7 +869,9 @@ class OwnerGraph:
                 if "dtype_policy" in item:
                     from ._package_types import resolve_scalar_dtype_policy
 
-                    item["dtype_policy"] = resolve_scalar_dtype_policy(item["dtype_policy"], namespace, self.module)
+                    item["dtype_policy"] = resolve_scalar_dtype_policy(
+                        item["dtype_policy"], namespace, self.module, allow_tensor=item.get("external", False)
+                    )
                 if "type_node" in item:
                     dtype = resolve_type(item.pop("type_node"), namespace)
                 else:

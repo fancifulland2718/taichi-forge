@@ -1437,9 +1437,10 @@ def scope_declarations(
             and declaration.get("kind") == "static"
             and {tuple(value) for value in declaration["choices"]} == {("bool", False), ("bool", True)}
             and not declaration.get("kernel_only")
-            and not declaration.get("conditions")
+            and all(current_conditions.get(key) is value
+                    for key, value in declaration.get("conditions", {}).items())
         ):
-            fail(module, choice, "Scalar Field dtype selection requires an unconditional declared boolean static")
+            fail(module, choice, "Field dtype selection requires a declared boolean static on this branch")
         branches = [choice.body, choice.orelse]
         if invert:
             branches.reverse()

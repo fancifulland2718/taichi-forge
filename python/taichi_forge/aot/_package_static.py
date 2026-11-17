@@ -7,6 +7,7 @@ Unproven structural uses keep the ordinary finite specialization contract.
 
 import ast
 import copy
+import re
 
 from taichi_forge.lang.ast._uniform_schedule import (
     helper_call_name, scalar_statement, uniform_range_schedule, uniform_range_statements,
@@ -185,6 +186,29 @@ class StaticPreparation:
                         for threaded, context in uses.items():
                             reasons = self._use(node, parents, kind, threaded) if declared_read else {'reflective_use'}
                             context.setdefault(node.args[1].value, set()).update(reasons)
+                    elif (isinstance(node.func, ast.Name) and callee in ('getattr', 'hasattr')):
+                        # Keep every possible match of a computed member name.
+                        # A texture-table suffix does not make unrelated model
+                        # layouts part of this query; an unknown name still
+                        # retains the complete schema.
+                        def member_pattern(value):
+                            if isinstance(value, ast.Constant) and isinstance(value.value, str):
+                                return re.escape(value.value)
+                            if isinstance(value, ast.BinOp) and isinstance(value.op, ast.Add):
+                                return member_pattern(value.left) + member_pattern(value.right)
+                            if isinstance(value, ast.JoinedStr):
+                                return ''.join(member_pattern(part) for part in value.values)
+                            return '.*'
+
+                        declared_read = (callee == 'getattr' and callee not in self._ambiguous_names
+                                         and len(node.args) in (2, 3) and not node.keywords
+                                         and isinstance(node.args[0], (ast.Name, ast.Attribute))
+                                         and (len(node.args) == 2 or isinstance(node.args[2], ast.Constant)))
+                        pattern = member_pattern(node.args[1]) if declared_read else '.*'
+                        key = '*' if pattern == '.*' else 'getattr:' + pattern
+                        for threaded, context in uses.items():
+                            reasons = self._use(node, parents, kind, threaded) if key != '*' else {'reflective_use'}
+                            context.setdefault(key, set()).update(reasons)
                 if isinstance(node, ast.Attribute) and isinstance(node.ctx, ast.Load):
                     for threaded, context in uses.items():
                         context.setdefault(node.attr, set()).update(self._use(node, parents, kind, threaded))
@@ -353,6 +377,19 @@ class StaticPreparation:
                 continue
             name, value = statement.targets[0].id, statement.value
             numeric = isinstance(value, ast.Constant) and type(value.value) in (bool, int, float)
+            if isinstance(value, ast.Call) and kind(value.func) == 'cast':
+                cast_root = value.func
+                while isinstance(cast_root, ast.Attribute):
+                    cast_root = cast_root.value
+                dtype = value.args[1] if len(value.args) == 2 and not value.keywords else (
+                    value.keywords[0].value if len(value.args) == 1 and len(value.keywords) == 1
+                    and value.keywords[0].arg == 'dtype' else None)
+                # An explicit primitive cast materializes a DSL scalar just
+                # like a literal initializer. Later `result = input` copies
+                # its value; it does not select a Python resource/type alias.
+                numeric = (isinstance(cast_root, ast.Name) and cast_root.id not in parameters | stores.keys()
+                           and dtype is not None and kind(dtype) in (
+                               'i8', 'i16', 'i32', 'i64', 'u8', 'u16', 'u32', 'u64', 'f16', 'f32', 'f64'))
             if isinstance(value, ast.Call) and not value.keywords:
                 shape_count = ({'Vector': 1, 'Matrix': 2}.get(kind(value.func.value))
                                if isinstance(value.func, ast.Attribute) and value.func.attr == 'zero' else None)
@@ -601,7 +638,22 @@ class StaticPreparation:
             return {"non_condition_use"}
         return {"non_condition_use"}
 
-    def classify(self, schema, paths, identity=None):
+    def schema_uses(self, paths, identity=None):
+        uses = self.entry_uses(identity) if identity else self.uses
+        patterns = [(re.compile(key[len('getattr:'):], re.DOTALL), reasons)
+                    for key, reasons in uses.items() if key.startswith('getattr:')]
+        if not patterns and '*' not in uses:
+            return uses
+        uses = {key: set(reasons) for key, reasons in uses.items()}
+        for name in {path[-1] for path in paths.values()}:
+            if '*' in uses:
+                uses.setdefault(name, set()).add('reflective_use')
+            for pattern, reasons in patterns:
+                if pattern.fullmatch(name):
+                    uses.setdefault(name, set()).update(reasons)
+        return uses
+
+    def classify(self, schema, paths, identity=None, *, uses=None):
         """Read-only facts; useful before allocating a producer witness."""
         protected = set()
         for item in schema.values():
@@ -613,7 +665,7 @@ class StaticPreparation:
             for choice in item.get("owner_alternatives", ()):
                 protected.update(choice.get("conditions", {}))
         facts = {}
-        uses = self.entry_uses(identity) if identity else self.uses
+        uses = self.schema_uses(paths, identity) if uses is None else uses
         for name, item in schema.items():
             if item["kind"] != "static" or item.get("dynamic_storage_condition"):
                 continue
@@ -640,10 +692,13 @@ class StaticPreparation:
             facts[name] = reason
         return facts
 
-    def project(self, environment, schema, kernel):
+    def project(self, environment, schema, kernel, *, query_paths=None):
         identity = kernel.func.__module__ + "." + kernel.func.__qualname__
         # Retain the environment identity for this build. An integer id alone
         # could be recycled while visiting another owner's layout alternatives.
+        # Capture establishes this entry's projection for the selected witness.
+        # Manifest assembly reuses it, including the exact query readset, rather
+        # than resolving the same owner graph once per emitted code variant.
         key = environment, identity
         cached = self._contexts.get(key)
         if cached is not None:
@@ -651,7 +706,8 @@ class StaticPreparation:
         from taichi_forge.types import primitive_types
         from ._component import RuntimeValue
 
-        facts = self.classify(schema, environment._paths, identity)
+        uses = self.schema_uses(environment._paths, identity)
+        facts = self.classify(schema, environment._paths, identity, uses=uses)
         declarations, projected = dict(environment.declarations), dict(schema)
         for name, reason in facts.items():
             if reason == "prepare_condition":
@@ -663,9 +719,8 @@ class StaticPreparation:
 
         # Query input eligibility depends on this entry's numeric predicates.
         # Producer-only configuration must not force query presence variants.
-        uses = self.entry_uses(identity)
         project_query_groups(result, projected, uses)
         project_owned_records(result, projected, borrowed=True, uses=uses)
-        project_nested_query_records(result, projected, uses)
+        project_nested_query_records(result, projected, uses, query_paths=query_paths)
         self._contexts[key] = result, projected, facts
         return result, projected, facts

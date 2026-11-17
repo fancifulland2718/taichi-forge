@@ -37,7 +37,7 @@ def _static_reference_aliases(schema, domains):
 
 
 def compile_static_variants(environment, entry, arguments, owner, schema, *, template_args=None, fixed=None,
-                            on_compiled=None, rejected=None, validate_capture=None):
+                            on_compiled=None, rejected=None, validate_capture=None, query_paths=None):
     """Cover a kernel's finite declaration domain without multiplying owners.
 
     A compiled contract covers every assignment of unread configuration values.
@@ -47,7 +47,8 @@ def compile_static_variants(environment, entry, arguments, owner, schema, *, tem
     """
     compilation = getattr(entry._primal, "_package_compilation", None)
     if compilation is not None and compilation.static_preparation is not None:
-        environment, schema, facts = compilation.static_preparation.project(environment, schema, entry._primal)
+        environment, schema, facts = compilation.static_preparation.project(
+            environment, schema, entry._primal, query_paths=query_paths)
         compilation.static_policies[entry._primal.func.__qualname__] = facts
     domains = {
         name: tuple(read_static_key(value) for value in item["choices"])
@@ -242,6 +243,7 @@ def compile_owner_variants(graph, identity, entry, arguments, *, template_args=N
             on_compiled=on_compiled,
             rejected=rejected,
             validate_capture=validate_capture,
+            query_paths=graph.entry_query_paths(identity, entry._primal.func.__name__, schema, environment._paths),
         )
         dependencies = []
         for code in codes:
