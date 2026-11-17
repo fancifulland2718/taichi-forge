@@ -3,7 +3,10 @@
 from contextlib import contextmanager, ExitStack
 import ctypes as C
 from pathlib import Path
+import os
+import subprocess
 import sys
+import textwrap
 
 import numpy as np
 import pytest
@@ -15,6 +18,65 @@ from taichi_forge.lang import impl
 from tests import test_utils
 from tests.python.test_hardware_optix import _FakeOptixLibrary
 from tests.python.test_hardware_optix_faces import _array, _geometry, _provider, _RAYS, _TRIANGLES
+
+
+@pytest.mark.parametrize("operation", ["storage", "scope"])
+@test_utils.test(arch=ti.cuda, offline_cache=False)
+def test_external_cuda_preparation_waits_without_holding_gil(tmp_path, operation):
+    from taichi_forge._lib import core, utils
+    import taichi_forge_runtime
+
+    # A deadlock must fail this child, not hang the test process or its CUDA
+    # teardown. The parent already owns the qualified Runtime/shim provenance.
+    probe = tmp_path / "external_cuda_gil.py"
+    probe.write_text(textwrap.dedent('''
+        import sys, threading, time, types
+        shim = types.ModuleType('taichi_forge._lib.core')
+        shim.__path__ = [sys.argv[1]]
+        sys.modules[shim.__name__] = shim
+        import taichi_forge as ti
+        from taichi_forge.lang import impl
+        ti.init(arch=ti.cuda, enable_fallback=False, offline_cache=False)
+        program = impl.get_runtime().prog
+        transaction = program._begin_runtime_submission_transaction()
+        entered, finished, failures = threading.Event(), threading.Event(), []
+        def prepare():
+            entered.set()
+            try:
+                if sys.argv[2] == 'storage':
+                    packet = program._prepare_external_cuda_storage((), ())
+                    assert not packet.pointers
+                else:
+                    scope = program._begin_external_cuda_submission()
+                    del scope
+            except BaseException as error:
+                failures.append(error)
+            finally:
+                finished.set()
+        worker = threading.Thread(target=prepare, daemon=True)
+        worker.start()
+        assert entered.wait(5)
+        time.sleep(.05)
+        assert not finished.is_set(), 'preparation bypassed the active submission owner'
+        del transaction
+        assert finished.wait(5), 'preparation did not resume after submission retirement'
+        worker.join(5)
+        assert not worker.is_alive() and not failures, failures
+        ti.reset()
+        print('EXTERNAL_CUDA_PREPARATION_PASSED')
+    '''), encoding='utf8')
+    environment = dict(os.environ,
+        PYTHONPATH=os.pathsep.join((str(Path(ti.__file__).resolve().parents[1]),
+                                   str(Path(taichi_forge_runtime.__file__).resolve().parents[1]))),
+        TAICHI_NATIVE_RUNTIME_DIR=str(Path(utils._loaded_native_runtime_path).parent),
+        TAICHI_RUNTIME_DIR=utils._runtime_bitcode_dir())
+    # Use the interpreter itself, not Windows' venv launcher: timeout must
+    # terminate the process holding CUDA resources rather than just its parent.
+    interpreter = getattr(sys, "_base_executable", sys.executable)
+    result = subprocess.run([interpreter, '-u', str(probe), str(Path(core.__file__).parent), operation],
+                            env=environment, capture_output=True, text=True, timeout=15)
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert 'EXTERNAL_CUDA_PREPARATION_PASSED' in result.stdout
 
 
 @contextmanager

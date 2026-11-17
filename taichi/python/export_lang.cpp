@@ -2638,9 +2638,13 @@ void export_lang(py::module &m) {
            py::arg("gpu_timing") = false,
            py::arg("cuda_concurrent_batch") = false)
       .def("_begin_external_cuda_submission",
-           &Program::begin_external_cuda_submission)
+           &Program::begin_external_cuda_submission,
+           py::call_guard<py::gil_scoped_release>())
       .def("_prepare_external_cuda_storage",
            &Program::prepare_external_cuda_storage,
+           // An active Python submission owner must be able to regain the
+           // GIL and retire its transaction while these native guards wait.
+           py::call_guard<py::gil_scoped_release>(),
            py::arg("descriptors"), py::arg("writable"),
            py::arg("textures") = std::vector<const Texture *>{})
       .def("_invoke_external_cuda_prepared",
