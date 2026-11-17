@@ -9,6 +9,7 @@
 #include "taichi/codegen/llvm/compiled_kernel_data.h"
 #include "taichi/runtime/llvm/llvm_module_options.h"
 #include "taichi/runtime/llvm/aot_ir_finalizer.h"
+#include "taichi/runtime/llvm/aot_prepared_range.h"
 #include "taichi/runtime/llvm/function_code_cache.h"
 
 namespace taichi::lang {
@@ -213,7 +214,7 @@ TEST(LLVMAotFinalization, SpecializesHelpersBeforeArchivingDynamicEntries) {
   EXPECT_EQ(sealed, snapshot(*enabled));
   finalizer.finalize_root(enabled, true);
   EXPECT_FALSE(llvm::verifyModule(*enabled));
-  EXPECT_NE(enabled->getNamedMetadata("taichi.aot.helper_specialization.v2"), nullptr);
+  EXPECT_NE(enabled->getNamedMetadata("taichi.aot.helper_specialization.v3"), nullptr);
   int reads = 0, writes = 0, calls = 0;
   for (auto &block : *enabled->getFunction("entry")) {
     for (auto &instruction : block) {
@@ -235,9 +236,63 @@ TEST(LLVMAotFinalization, SpecializesHelpersBeforeArchivingDynamicEntries) {
   auto disabled = llvm::CloneModule(*source);
   finalizer.export_units(*disabled, false, false);
   finalizer.finalize_root(disabled, false);
-  EXPECT_EQ(disabled->getNamedMetadata("taichi.aot.helper_specialization.v2"), nullptr);
+  EXPECT_EQ(disabled->getNamedMetadata("taichi.aot.helper_specialization.v3"), nullptr);
   ASSERT_NE(disabled->getNamedMetadata(LLVM::kCodeUnits), nullptr);
   EXPECT_EQ(disabled->getNamedMetadata(LLVM::kCodeUnits)->getNumOperands(), 1);
+}
+
+TEST(LLVMAotFinalization, HelperInliningPreservesPreparedRangeProof) {
+  for (bool physical_thread : {false, true}) {
+    llvm::LLVMContext context;
+    llvm::SMDiagnostic error;
+    auto module = llvm::parseAssemblyString(std::string(R"(
+      target datalayout = "e-p:64:64-i64:64-n16:32:64"
+      target triple = "nvptx64-nvidia-cuda"
+      declare i32 @llvm.nvvm.read.ptx.sreg.tid.x()
+      define void @gpu_parallel_range_for_with_tls(
+          ptr %ctx, i32 %begin, i32 %end, ptr %pre, ptr %body, ptr %post, ptr %tls) alwaysinline {
+        %work = icmp slt i32 %begin, %end
+        br i1 %work, label %run, label %done
+      run:
+        call void %body(ptr %ctx, ptr %tls, i32 %begin)
+        br label %done
+      done:
+        ret void
+      }
+      define internal i32 @helper(i32 %x) alwaysinline "taichi.aot.real_function" {
+        %next = add i32 %x, 1
+        ret i32 %next
+      }
+      define internal void @body(ptr %ctx, ptr %tls, i32 %i) {
+        %next = call i32 @helper(i32 %i)
+    )") + (physical_thread ? "%physical = call i32 @llvm.nvvm.read.ptx.sreg.tid.x()\n"
+                              "store volatile i32 %physical, ptr %ctx\n" : "") + R"(
+        store volatile i32 %next, ptr %ctx
+        ret void
+      }
+      define void @entry(ptr %ctx) {
+        %end = load i32, ptr %ctx
+        call void @gpu_parallel_range_for_with_tls(
+            ptr %ctx, i32 0, i32 %end, ptr null, ptr @body, ptr null, ptr null)
+        ret void
+      }
+    )", error, context);
+    ASSERT_NE(module, nullptr);
+    LLVM::AotIRFinalizer finalizer;
+    finalizer.export_units(*module, true, false);
+    finalizer.finalize_root(module, true);
+    EXPECT_FALSE(llvm::verifyModule(*module));
+    auto *dispatch = module->getFunction("gpu_parallel_range_for_with_tls");
+    ASSERT_NE(dispatch, nullptr);
+    EXPECT_TRUE(dispatch->hasFnAttribute(llvm::Attribute::AlwaysInline));
+    EXPECT_FALSE(dispatch->hasFnAttribute(llvm::Attribute::NoInline));
+    EXPECT_EQ(module->getFunction("helper"), nullptr);
+    AotPreparedRangeAnalysis analysis;
+    const auto proof = analysis.inspect(module->getFunction("entry"));
+    EXPECT_TRUE(proof.empty_has_no_effects);
+    EXPECT_EQ(proof.independent_iterations, !physical_thread);
+    EXPECT_FALSE(proof.cuda_block_collective);
+  }
 }
 
 TEST(LLVMAotFinalization, SharesUnitsAndPrunesDeadTransitiveDependencies) {

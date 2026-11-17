@@ -201,6 +201,15 @@ before device-code generation only when every bound input is a permitted fixed f
 range is empty. A currently zero live range cannot be deleted; Graph mutable-bound restrictions
 remain in force. This does not change persisted IR, public ABI, producer inlining or per-step
 execution paths.
+Producer helper finalization preserves range-dispatch call boundaries until
+consumer argument-context and launch proofs have run. The dispatcher's backend
+inline attributes are restored before archiving; final device compilation can
+still inline it. Applying the numerical helper inliner must not erase an ABI
+that consumption still needs.
+Stable package binding guards observe declared presence predicates before
+inactive input members, and resolve dimension symbols through their declared
+attribute paths. They retain rebind, optional-presence and mutable Host-value
+invalidation without reading device contents.
 Generations, close and in-flight retirement retain existing ownership/lease rules.
 Runtime/provider dependencies need not be embedded in TCM, but must resolve under their contracts.
 

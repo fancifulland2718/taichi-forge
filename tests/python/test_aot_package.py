@@ -2037,8 +2037,9 @@ class Model:
             assert ready.prepared is not None and ready.specialize
 
 
+@pytest.mark.parametrize('helper_decorator', ['real_func', 'func'])
 @test_utils.test(arch=ti.cuda, offline_cache=False)
-def test_package_prepared_library_range_refines_linked_helpers(tmp_path, monkeypatch):
+def test_package_prepared_library_range_refines_linked_helpers(tmp_path, monkeypatch, helper_decorator):
     from taichi_forge._lib import core
 
     source = '''import taichi_forge as ti
@@ -2063,6 +2064,7 @@ class Model:
         for i in range(live_count):
             self.out[i] += 11
 '''
+    source = source.replace('@ti.real_func', '@ti.' + helper_decorator)
     package = _source_package(tmp_path, monkeypatch, source)
     ti.aot.export_package(package, tmp_path / 'sdk', artifact_format='bc-library')
     with Runtime('cuda') as runtime, load_package(runtime, tmp_path / 'sdk') as code:
@@ -5631,6 +5633,77 @@ def test_package_binding_guard_observes_optional_parent_and_live_host_values():
         assert guard.matches(owner)
         update()
         assert not guard.matches(owner)
+
+
+def test_package_binding_guard_uses_dimension_paths_and_observes_deleted_attributes():
+    from types import SimpleNamespace
+    from taichi_forge_runtime.aot._package_calls import OwnerGuard
+
+    class Owner(SimpleNamespace):
+        alias_reads = 0
+
+        def __getattribute__(self, name):
+            if name == 'symbol_n':
+                type(self).alias_reads += 1
+            return super().__getattribute__(name)
+
+    owner = Owner(child=SimpleNamespace(n=4), extent=4, live=7)
+    package = SimpleNamespace(manifest={'owners': {}})
+    contract = dict(captures=[
+        dict(name='symbol_extent', kind='dimension', dimension_relations={
+            'symbol_extent': dict(path=['extent'], kind='extent', expression=['dim', 'symbol_n']),
+            'symbol_n': dict(path=['child', 'n'], kind='active', expression=[])}),
+        dict(name='live', kind='value'), dict(name='optional', kind='value')])
+    guard = OwnerGuard.for_graph(package, owner, [contract])
+    Owner.alias_reads = 0
+    assert guard.matches(owner)
+    assert Owner.alias_reads == 0
+    owner.child.n = 5
+    assert not guard.matches(owner)
+    owner.child.n = 4
+    assert guard.matches(owner)
+    del owner.live  # The batched present accessor must retain invalidation.
+    assert not guard.matches(owner)
+    owner.live = 7
+    assert guard.matches(owner)
+    owner.optional = object()  # A previously missing value must still be read.
+    assert not guard.matches(owner)
+    del owner.optional
+    del owner.child.n
+    assert not guard.matches(owner)
+
+
+def test_package_binding_guard_short_circuits_inactive_inputs():
+    from types import SimpleNamespace
+    from taichi_forge_runtime.aot._package_calls import OwnerGuard
+
+    class Inactive:
+        def __getattr__(self, name):
+            raise AssertionError('Inactive owner metadata must not be read')
+
+        @property
+        def data(self):
+            raise AssertionError('Inactive numerical input must not be read')
+
+    owner = SimpleNamespace(enabled=False, nested=Inactive())
+    package = SimpleNamespace(manifest={'owners': {}})
+    contract = dict(captures=[dict(name='data', kind='value', path=['nested', 'data'],
+                                 nullable_booleans=[dict(path=['enabled'])])],
+                    admission=dict(
+                        external_resources=dict(data=dict(
+                            path=['nested', 'data'], presence_conditions=[dict(path=['enabled'])])),
+                        owner_bindings=dict(nested=dict(
+                            path=['nested'], presence_conditions=[dict(path=['enabled'])]))))
+    guard = OwnerGuard.for_graph(package, owner, [contract])
+    assert guard.matches(owner)
+    owner.nested = SimpleNamespace(data=7)
+    assert guard.matches(owner)  # Data below a false predicate cannot be consumed.
+    owner.enabled = True
+    assert not guard.matches(owner)
+    guard = OwnerGuard.for_graph(package, owner, [contract])
+    assert guard.matches(owner)
+    owner.nested.data = 8
+    assert not guard.matches(owner)
 
 
 @pytest.mark.parametrize('template_output', [False, True])

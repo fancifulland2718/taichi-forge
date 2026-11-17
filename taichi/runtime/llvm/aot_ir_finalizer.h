@@ -154,7 +154,7 @@ class AotIRFinalizer {
   // Streaming seal and ordinary dump share this stage. The marker prevents a
   // sealed root from paying for it again at archive time.
   static void specialize_helpers(llvm::Module &module) {
-    constexpr auto marker = "taichi.aot.helper_specialization.v2";
+    constexpr auto marker = "taichi.aot.helper_specialization.v3";
     if (module.getNamedMetadata(marker))
       return;
     const bool needed =
@@ -192,9 +192,26 @@ class AotIRFinalizer {
       llvm::FunctionPassManager preparation;
       preparation.addPass(llvm::PromotePass());
       run_functions(preparation);
+      // Range dispatch is also marked alwaysinline, but its callback ABI is
+      // consumed by prepare's argument-context and empty-group proofs. Keep
+      // that boundary until those proofs have run. Numerical helper inlining
+      // and scalar cleanup still happen here; restore backend attributes on
+      // the private artifact so final device compilation can inline dispatch.
+      std::vector<std::pair<llvm::Function *, llvm::AttributeList>> dispatchers;
+      for (auto &function : module) {
+        const auto name = function.getName();
+        if (name.starts_with("gpu_parallel_range_for") ||
+            name.starts_with("cpu_parallel_range_for")) {
+          dispatchers.emplace_back(&function, function.getAttributes());
+          function.removeFnAttr(llvm::Attribute::AlwaysInline);
+          function.addFnAttr(llvm::Attribute::NoInline);
+        }
+      }
       llvm::ModulePassManager inline_pipeline;
       inline_pipeline.addPass(llvm::AlwaysInlinerPass());
       inline_pipeline.run(module, mam);
+      for (auto &[function, attributes] : dispatchers)
+        function->setAttributes(attributes);
       // Inlining can expose new promotable slots; clean those before SROA.
       llvm::FunctionPassManager cleanup;
       cleanup.addPass(llvm::PromotePass());
@@ -207,7 +224,7 @@ class AotIRFinalizer {
     }
     module.getOrInsertNamedMetadata(marker)->addOperand(llvm::MDNode::get(
         module.getContext(),
-        {llvm::MDString::get(module.getContext(), "promote-inline-promote-sroa-v2"),
+        {llvm::MDString::get(module.getContext(), "promote-inline-preserve-dispatch-v3"),
          llvm::MDString::get(module.getContext(), LLVM_VERSION_STRING)}));
   }
 

@@ -145,28 +145,60 @@ class OwnerGuard:
             if isinstance(value, (tuple, list)) and all(isinstance(x, str) for x in value):
                 paths.add(tuple(value))
 
-        def visit(value):
+        def visit(value, dimensions=None):
             if isinstance(value, dict):
+                # Match capture/admission's declared short circuit. An inactive
+                # input observes its enabling predicates, not unreachable
+                # fields or layout dependencies. A predicate change rebuilds
+                # the guard through ordinary admission before using the input.
+                predicates = [(item["path"], False) for item in
+                              (*value.get("presence_conditions", ()), *value.get("nullable_booleans", ()))]
+                if value.get("nullable_record"):
+                    predicates.append((value["nullable_record"], True))
+                if value.get("nullable_boolean"):
+                    predicates.append((value["nullable_boolean"], False))
+                for parts, record in predicates:
+                    path(parts)
+                    actual = owner
+                    for part in parts:
+                        actual = getattr(actual, part, _MISSING)
+                        if actual is _MISSING or actual is None:
+                            break
+                    if actual is _MISSING or (actual is None if record else not actual):
+                        return False
+                dimensions = {**(dimensions or {}),
+                              **value.get("dimensions", {}),
+                              **value.get("dimension_relations", {}),
+                              **value.get("model_dimension_relations", {})}
                 for key, child in value.items():
-                    if key in _PATH_KEYS:
+                    if key == "owner_bindings":
+                        for binding in child.values():
+                            if visit(binding, dimensions):
+                                for name in ("_forge_package_contract", "_forge_package_type", "_forge_package_owner"):
+                                    path((*binding["path"], name))
+                    elif key in _PATH_KEYS:
                         path(child)
                     else:
-                        visit(child)
+                        visit(child, dimensions)
             elif isinstance(value, (tuple, list)):
                 if len(value) == 2 and value[0] == "dim" and isinstance(value[1], str):
-                    path(getattr(owner, "_forge_package_dimension_paths", {}).get(value[1], (value[1],)))
+                    # Relation symbols are ABI names, not necessarily owner
+                    # attributes. Observe the same path capture_value reads;
+                    # recursive relation declarations are visited separately.
+                    declaration = (dimensions or {}).get(value[1])
+                    path(declaration["path"] if declaration else
+                         getattr(owner, "_forge_package_dimension_paths", {}).get(value[1], (value[1],)))
                 for child in value:
-                    visit(child)
+                    visit(child, dimensions)
+            return True
 
         captures = []
         for contract in contracts:
             visit(contract.get("admission", {}))
-            for binding in contract.get("admission", {}).get("owner_bindings", {}).values():
-                for name in ("_forge_package_contract", "_forge_package_type", "_forge_package_owner"):
-                    path((*binding["path"], name))
             captures.extend(contract["captures"])
         for spec in captures:
-            visit(spec)
+            if not visit(spec):
+                continue
             if spec["kind"] != "local_tensor_workspace" and not spec.get("dimension_relations"):
                 path(spec.get("path", (spec["name"],)))
             if owner is not None:
@@ -213,13 +245,44 @@ class OwnerGuard:
                     break
             else:
                 reachable.add(parts)
-        self.readers = tuple(operator.attrgetter(".".join(p)) for p in sorted(reachable) if p)
+        names = [".".join(p) for p in sorted(reachable) if p]
+        self.readers = tuple(operator.attrgetter(name) for name in names)
         self.values = self.read(owner)
+        # Batch present attributes in the C accessor. Missing top-level names
+        # use getattr's default instead of raising/catching in Python each step.
+        # Keep the individual readers for changed/deleted optional paths.
+        present = [name for name, value in zip(names, self.values) if value is not _MISSING]
+        missing = [name for name, value in zip(names, self.values) if value is _MISSING]
+        ordered = present + missing
+        if ordered != names:
+            by_name = dict(zip(names, self.values))
+            self.readers = tuple(operator.attrgetter(name) for name in ordered)
+            self.values = tuple(by_name[name] for name in ordered)
+        self._present_reader = operator.attrgetter(*present) if present else None
+        self._present_count = len(present)
+        self._missing_readers = tuple((name, operator.attrgetter(name)) for name in missing)
         self.tokens = tuple(_token(x) for x in self.values)
         self.identity_safe = tuple(type(x) not in (tuple, list, dict) and not isinstance(x, HostTensor)
                                    for x in self.values)
 
     def read(self, owner):
+        if hasattr(self, "_present_count"):
+            try:
+                current = self._present_reader(owner) if self._present_count else ()
+                values = list(current if self._present_count != 1 else (current,))
+                for name, reader in self._missing_readers:
+                    if "." not in name:
+                        values.append(getattr(owner, name, _MISSING))
+                    else:
+                        try:
+                            values.append(reader(owner))
+                        except AttributeError:
+                            values.append(_MISSING)
+                return tuple(values)
+            except AttributeError:
+                # A formerly present path disappeared. Preserve normal guard
+                # invalidation, including optional parents and descriptors.
+                pass
         values = []
         for reader in self.readers:
             try:
