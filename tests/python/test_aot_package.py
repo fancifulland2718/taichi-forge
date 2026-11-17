@@ -476,6 +476,81 @@ class Model:
         assert present.leaf is leaf and present.read() == 7
 
 
+@test_utils.test(arch=[ti.cpu, ti.cuda], offline_cache=False)
+def test_package_optional_owner_forwarding_keeps_absent_template_case(tmp_path, monkeypatch):
+    package = _source_package(tmp_path, monkeypatch, '''
+import taichi_forge as ti
+@ti.data_oriented
+class Leaf:
+    def __init__(self):
+        scope = ti.experimental.ResourceScope(self)
+        scope.value = scope.field(ti.f32, shape=(), initialization='zero')
+    @ti.kernel
+    def sample(self, gain: ti.f32) -> ti.f32:
+        return self.value[None] + gain
+    def read(self, gain):
+        return self.sample(gain)
+@ti.data_oriented
+class Model:
+    def __init__(self, leaf: Leaf = None):
+        scope = ti.experimental.ResourceScope(self)
+        if leaf is not None:
+            scope.owner_reference('leaf', leaf)
+        else:
+            scope.owner_reference('leaf', None, optional=True)
+    @ti.kernel
+    def query(self, leaf: ti.template(), gain: ti.f32) -> ti.f32:
+        result = gain
+        if ti.static(leaf is not None):
+            result += leaf.value[None]
+        return result
+    def read(self, gain):
+        source = self.leaf
+        return self.query(source, gain)
+    def via_method(self, gain):
+        if self.leaf is not None:
+            return self.leaf.read(gain)
+        return gain
+    def select(self, enabled):
+        if enabled:
+            return self.leaf
+        return None
+    def selected(self, enabled, gain):
+        return self.query(self.select(enabled), gain)
+    @ti.kernel
+    def required(self, leaf: ti.template(), gain: ti.f32) -> ti.f32:
+        return leaf.value[None] + gain
+    def guarded(self, gain):
+        source = self.leaf
+        if source is not None:
+            return self.required(source, gain)
+        return gain
+''')
+    normal_leaf = package.model.Leaf()
+    normal_leaf.value[None] = 3.5
+    assert package.Model().read(2.) == 2.
+    assert package.Model(normal_leaf).read(2.) == 5.5
+    manifest = ti.aot.export_package(package, tmp_path / 'sdk')
+    with Runtime(manifest['target']) as runtime, load_package(runtime, tmp_path / 'sdk') as code:
+        leaf = code.host.model.Leaf()
+        leaf.value.from_numpy(np.array(3.5, np.float32))
+        absent, present = code.host.Model(), code.host.Model(leaf)
+        assert absent.read(2.) == 2.
+        assert present.read(2.) == 5.5
+        leaf.value.from_numpy(np.array(6.25, np.float32))
+        assert present.read(-2.) == 4.25
+        assert absent.read(-2.) == -2.
+        assert present.via_method(-2.) == 4.25
+        assert absent.via_method(-2.) == -2.
+        assert present.selected(True, -2.) == 4.25
+        assert present.selected(False, -2.) == -2.
+        assert absent.selected(True, -2.) == -2.
+        assert present.guarded(-2.) == 4.25
+        assert absent.guarded(-2.) == -2.
+        with pytest.raises(ValueError, match='definition-proven domain'):
+            absent.query(present, 2.)
+
+
 def test_package_nested_presence_checks_dependencies_before_members():
     from types import SimpleNamespace
     from taichi_forge.aot._package_optional import ordered_presence_conditions

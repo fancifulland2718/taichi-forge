@@ -208,6 +208,11 @@ class _Choice:
     alternatives: tuple
 
 
+@dataclass(frozen=True)
+class _AbsentMember:
+    """No member/call exists on the absent arm of an optional owner."""
+
+
 def _callable_fact(item):
     return (all(_callable_fact(arm) for arm in item.alternatives)
             if isinstance(item, _Choice) else isinstance(item, (_Host, _Kernel)))
@@ -216,6 +221,8 @@ def _callable_fact(item):
 def _choice_contexts(arguments):
     """Keep repeated reads of one declared owner choice correlated."""
     def expand(value, selected):
+        if isinstance(value, _AbsentMember):
+            return
         if isinstance(value, _Choice):
             indices = (selected[value.source],) if value.source in selected else range(len(value.alternatives))
             for index in indices:
@@ -765,10 +772,20 @@ def discover(sources, imported, *, preparation_receivers=None, resource_inventor
         if not isinstance(owner, _Owner):
             return None
         item = owners[owner.identity].get(name, {})
+        def owner_fact(kinds):
+            root, path = owner.root or owner.identity, (*owner.path, name)
+            choices = tuple(_Owner(kind, root, path) for kind in kinds)
+            # A conditional owner binding has an absent arm in its resource
+            # contract. Forwarding it through Host aliases must retain that
+            # legal None input instead of publishing only the present type.
+            # Read inventories still describe the present allocation itself.
+            if resource_inventory is None and item.get('conditions'):
+                choices += (_Literal(None),)
+            return choices[0] if len(choices) == 1 else _Choice((root, path), choices)
+
         family = input_families.get((owner.identity, name))
         if family:
-            root, path = owner.root or owner.identity, (*owner.path, name)
-            return _Choice((root, path), tuple(_Owner(kind, root, path) for kind in family))
+            return owner_fact(family)
         alternatives = tuple(dict.fromkeys(choice.get('owner_type') for choice in item.get('owner_alternatives', ())))
         if resource_inventory is not None and len(alternatives) > 1 and all(kind in owners for kind in alternatives):
             root, path = owner.root or owner.identity, (*owner.path, name)
@@ -784,7 +801,7 @@ def discover(sources, imported, *, preparation_receivers=None, resource_inventor
         if item.get("kind") in ("owner", "owner_input") and item.get("owner_type") in owners:
             if len({choice["owner_type"] for choice in item.get("owner_alternatives", ())}) > 1:
                 return None  # A choice is not evidence for its first receiver type.
-            return _Owner(item["owner_type"], owner.root or owner.identity, (*owner.path, name))
+            return owner_fact((item["owner_type"],))
         if item.get("kind") in ("dense_field", "model_tensor_field", "borrowed_field", "fixed_snode_field") or (
             resource_inventory is not None and item.get("kind") == "field_like"
         ):
@@ -792,6 +809,11 @@ def discover(sources, imported, *, preparation_receivers=None, resource_inventor
         return None
 
     def attribute(receiver, name):
+        if isinstance(receiver, _AbsentMember) or isinstance(receiver, _Literal) and receiver.value is None:
+            # None remains a valid argument in its own right. It cannot supply
+            # a Field or a bound method, so this arm contributes no call-site
+            # signature. Unknown receivers still return an unproven fact below.
+            return _AbsentMember()
         if isinstance(receiver, _UnboundInput):
             return receiver
         if isinstance(receiver, _CallableMetadata):
@@ -974,6 +996,47 @@ def discover(sources, imported, *, preparation_receivers=None, resource_inventor
                             for child in selected if isinstance(selected, list) else [selected]:
                                 walk(child)
                             return
+                        if resource_inventory is None:
+                            # Narrow declared optional owners only on a branch
+                            # whose explicit presence test proves that arm. Do
+                            # not enumerate unrelated Host configuration axes.
+                            tests = (statement.test.values if isinstance(statement.test, ast.BoolOp)
+                                     and isinstance(statement.test.op, ast.And) else [statement.test])
+                            selections = {}
+                            for test in tests:
+                                if not (isinstance(test, ast.Compare) and len(test.ops) == 1
+                                        and isinstance(test.ops[0], ast.IsNot)):
+                                    continue
+                                left, right = value(test.left), value(test.comparators[0])
+                                if isinstance(left, _Literal) and left.value is None:
+                                    left, right = right, left
+                                if not (isinstance(right, _Literal) and right.value is None
+                                        and isinstance(left, _Choice)):
+                                    continue
+                                present = [i for i, arm in enumerate(left.alternatives) if isinstance(arm, _Owner)]
+                                if len(present) == 1 and all(isinstance(arm, _Owner) or
+                                        isinstance(arm, _Literal) and arm.value is None for arm in left.alternatives):
+                                    selections[left.source] = present[0]
+                            if selections:
+                                class SelectPresent(ast.NodeTransformer):
+                                    def visit(self, part):
+                                        if isinstance(part, (ast.Name, ast.Attribute)) and isinstance(part.ctx, ast.Load):
+                                            original = value(part)
+                                            selected = original
+                                            for source, index in selections.items():
+                                                selected = _select_source_fact(selected, source, index)
+                                            if selected != original:
+                                                part._package_input_fact = selected
+                                                return part
+                                        return super().visit(part)
+                                walk(statement.test)
+                                body = statement.body if isinstance(statement.body, list) else [statement.body]
+                                for child in body:
+                                    walk(SelectPresent().visit(_copy_call_sites(child)))
+                                other = statement.orelse if isinstance(statement.orelse, list) else [statement.orelse]
+                                for child in other:
+                                    walk(child)
+                                return
                     for child in ast.iter_child_nodes(statement):
                         walk(child)
 
@@ -1415,12 +1478,14 @@ def discover(sources, imported, *, preparation_receivers=None, resource_inventor
                                 with build_context(callee, return_inputs, (*return_chain, callee)) as context:
                                     evaluate, _, returned_nodes, _, _ = context
                                     results = [evaluate(part.value) for part in returned_nodes if isinstance(part, ast.Return)]
+                                result_domain = [context['result'] for result in results
+                                                 for context in _choice_contexts({'result': result})]
                                 if results and all(item == results[0] for item in results):
                                     returned = results[0]
-                                elif (any(isinstance(item, (_Record, _Owner)) for item in results)
+                                elif (any(isinstance(item, (_Record, _Owner)) for item in result_domain)
                                       and all(isinstance(item, (_Record, _Owner))
-                                              or isinstance(item, _Literal) and item.value is None for item in results)
-                                      and len({item for item in results if isinstance(item, (_Record, _Owner))}) == 1):
+                                              or isinstance(item, _Literal) and item.value is None for item in result_domain)
+                                      and len({item for item in result_domain if isinstance(item, (_Record, _Owner))}) == 1):
                                     # Declared owner and frozen record returns retain
                                     # their sources. Presence stays a Host choice;
                                     # distinct source contracts are still checked below.
@@ -1459,6 +1524,15 @@ def discover(sources, imported, *, preparation_receivers=None, resource_inventor
                                 return item.function, item.receiver
                         if isinstance(expression, ast.Attribute):
                             receiver = value(expression.value, visiting, bindings)
+                            if isinstance(receiver, _Choice):
+                                # A missing optional owner cannot be the receiver
+                                # of a Host method. Preserve its present source
+                                # for forwarding/sequence projection, without
+                                # turning None arguments into present owners.
+                                present = {item for item in receiver.alternatives
+                                           if not (isinstance(item, _Literal) and item.value is None)}
+                                if len(present) == 1 and all(isinstance(item, _Owner) for item in present):
+                                    receiver = next(iter(present))
                             if isinstance(receiver, _Owner):
                                 cls = classes[receiver.identity]
                                 method = static_member(cls, expression.attr, None)
