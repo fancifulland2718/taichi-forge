@@ -109,9 +109,20 @@ def scalar_statement(statement, kind, helpers=(), *, returns=False):
             and scalar_expression(value, kind, helpers))
 
 
-def uniform_range_statements(statements, kind, helpers=(), scalar_helpers=()):
+def uniform_range_statements(statements, kind, helpers=(), scalar_helpers=(), *, select_static=None):
+    def selected(body):
+        for statement in body:
+            test = statement.test if isinstance(statement, ast.If) else None
+            fixed = (select_static(test.args[0]) if select_static is not None
+                     and isinstance(test, ast.Call) and kind(test.func) == 'static'
+                     and len(test.args) == 1 and not test.keywords else None)
+            if fixed is None:
+                yield statement
+            else:
+                yield from selected(statement.body if fixed else statement.orelse)
+
     pending_config = False
-    for statement in statements:
+    for statement in selected(statements):
         if scalar_statement(statement, kind, scalar_helpers):
             if pending_config:
                 return False
@@ -126,7 +137,7 @@ def uniform_range_statements(statements, kind, helpers=(), scalar_helpers=()):
                     return False
                 condition = condition.args[0]
             if pending_config or not _bound(condition) or not uniform_range_schedule(
-                    statement, kind, helpers, scalar_helpers):
+                    statement, kind, helpers, scalar_helpers, select_static=select_static):
                 return False
             continue
         if isinstance(statement, ast.Expr) and isinstance(statement.value, ast.Call):
@@ -164,10 +175,11 @@ def uniform_range_statements(statements, kind, helpers=(), scalar_helpers=()):
     return not pending_config
 
 
-def uniform_range_schedule(node, kind, helpers=(), scalar_helpers=()):
+def uniform_range_schedule(node, kind, helpers=(), scalar_helpers=(), *, select_static=None):
     """Prove both arms without evaluating source or mutating compiler state."""
     if not isinstance(node, ast.If):
         return False
     return bool(node.body) and all(
-        uniform_range_statements(statements, kind, helpers, scalar_helpers) for statements in (node.body, node.orelse)
+        uniform_range_statements(statements, kind, helpers, scalar_helpers, select_static=select_static)
+        for statements in (node.body, node.orelse)
     )

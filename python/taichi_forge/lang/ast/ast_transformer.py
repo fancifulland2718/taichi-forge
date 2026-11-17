@@ -1971,7 +1971,34 @@ class ASTTransformer(Builder):
         ) else ()
         scalar_helpers = compilation.static_preparation.scalar_functions if (
             compilation is not None and compilation.static_preparation is not None) else ()
-        if uniform_range_schedule(node, kind, helpers, scalar_helpers):
+        from taichi_forge.aot._package_targets import backend_constant, backend_query, target_condition
+
+        target_config = impl.current_cfg()
+        targets = (('lang.impl.current_cfg', impl.current_cfg), ('cfg', target_config),
+                   *((name, getattr(_ti_core, name)) for name in ('x64', 'arm64', 'cuda', 'vulkan')))
+
+        def target_kind(expression):
+            expression = expression.func if isinstance(expression, ast.Call) else expression
+            root = expression
+            while isinstance(root, ast.Attribute):
+                root = root.value
+            if not isinstance(root, ast.Name) or ctx.is_var_declared(root.id):
+                return None
+            for role, target in targets:
+                if ASTResolver.resolve_to(expression, target, ctx.global_vars):
+                    return role
+            return None
+
+        def target_value(expression):
+            if backend_query(expression, target_kind):
+                return target_config.arch.name
+            return backend_constant(expression, target_kind)
+
+        # Package classification already selected these exact backend guards.
+        # Prove the original numerical syntax against the same target facts;
+        # actual lowering still visits the static arm in its lexical scope.
+        if uniform_range_schedule(node, kind, helpers, scalar_helpers,
+                                  select_static=lambda test: target_condition(test, target_value)):
             for branch, truth in ((node.body, True), (node.orelse, False)):
                 if not branch:
                     continue

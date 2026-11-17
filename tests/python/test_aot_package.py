@@ -2050,6 +2050,85 @@ class Model:
 
 
 @test_utils.test(arch=ti.cuda, offline_cache=False)
+@pytest.mark.parametrize('target_guard', (
+    'ti.lang.impl.current_cfg().arch in (ti.cuda, ti.vulkan)',
+    'not ti.cfg.arch != ti.cuda',
+))
+def test_package_target_guard_keeps_prepared_schedule_parallel(tmp_path, monkeypatch, target_guard):
+    from time import perf_counter
+    from taichi_forge.aot._component import _ComponentCode
+
+    source = '''import taichi_forge as ti
+@ti.data_oriented
+class Model:
+    def __init__(self, n: int, block: int, enabled: bool):
+        self.n, self.block, self.enabled = n, block, enabled
+        scope = ti.experimental.ResourceScope(self)
+        scope.dim('block')
+        scope.static('enabled', choices=(False, True))
+        scope.out = scope.field(ti.i32, shape=scope.dim('n'))
+    @ti.kernel
+    def step(self, gain: ti.i32):
+        if ti.static(self.enabled):
+            for i in range(self.n):
+                self.out[i] = -2
+            if ti.static(TARGET_GUARD):
+                ti.loop_config(block_dim=self.block)
+            for work in range(self.n * self.block):
+                values = ti.simt.block.SharedArray((64,), ti.i32)
+                lane, group = work % self.block, work // self.block
+                values[lane] = work * 3 + gain
+                ti.simt.block.sync()
+                if lane == 0:
+                    self.out[group] = values[1]
+                ti.simt.block.sync()
+        else:
+            for i in range(self.n):
+                self.out[i] = -1
+'''.replace('TARGET_GUARD', target_guard)
+    package = _source_package(tmp_path, monkeypatch, source)
+    cases = ((7, 32, False), (7, 32, True), (257, 64, True))
+    references = []
+    for n, block, enabled in cases:
+        owner = package.model.Model(n, block, enabled)
+        owner.step(9)
+        result = owner.out.to_numpy()
+        np.testing.assert_array_equal(result, (np.arange(n) * block + 1) * 3 + 9
+                                      if enabled else np.full(n, -1))
+        for _ in range(10):
+            owner.step(9)
+        ti.sync()
+        started = perf_counter()
+        for _ in range(200):
+            owner.step(9)
+        ti.sync()
+        print('target_guard_jit_seconds', (n, block, enabled), (perf_counter() - started) / 200)
+        references.append(result)
+
+    tasks = []
+    original = _ComponentCode.export
+    def observe(code, module, name):
+        result = original(code, module, name)
+        if code.entry_definition[1] == 'Model.step':
+            tasks.extend(code.runtime.prog._kernel_task_manifest(code.kernel.compiled_kernels[code.key]))
+        return result
+    monkeypatch.setattr(_ComponentCode, 'export', observe)
+    manifest = ti.aot.export_package(package, tmp_path / 'sdk', artifact_format='bc-library')
+    entries = [e for e in manifest['entries'].values() if e['definition'].endswith('.Model.step')]
+    assert len(entries) == 1
+    assert {v['name'] for v in entries[0]['captures'] if 'prepare_static' in v} == {'enabled'}
+    assert len([task for task in tasks if task['task_type'] == 'range_for']) == 3, tasks
+    with Runtime('cuda') as runtime, load_package(runtime, tmp_path / 'sdk') as code:
+        owners = [code.host.Model(*case) for case in cases]
+        for gain in (9, 2, 9):
+            for owner in reversed(owners):
+                owner.step(gain)
+            for owner, reference in zip(owners, references):
+                np.testing.assert_array_equal(owner.out.to_numpy(),
+                                              reference + (gain - 9 if owner.enabled else 0))
+
+
+@test_utils.test(arch=ti.cuda, offline_cache=False)
 def test_package_library_guards_live_device_range_bounds(tmp_path, monkeypatch):
     from itertools import product
     from taichi_forge.aot._component import _ComponentCode

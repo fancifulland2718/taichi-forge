@@ -32,6 +32,35 @@ def backend_query(node, kind):
     )
 
 
+def target_condition(node, value):
+    """Evaluate only the explicit target predicates shared with AST lowering."""
+    if isinstance(node, ast.UnaryOp) and isinstance(node.op, ast.Not):
+        result = target_condition(node.operand, value)
+        return None if result is None else not result
+    if isinstance(node, ast.BoolOp):
+        items = [target_condition(item, value) for item in node.values]
+        if any(item is None for item in items):
+            return None
+        return all(items) if isinstance(node.op, ast.And) else any(items)
+    if not isinstance(node, ast.Compare) or len(node.ops) != 1:
+        return None
+    left = value(node.left)
+    right = node.comparators[0]
+    op = node.ops[0]
+    if left is None:
+        return None
+    if isinstance(op, (ast.In, ast.NotIn)) and isinstance(right, (ast.Tuple, ast.List)):
+        choices = [value(item) for item in right.elts]
+        if any(item is None for item in choices):
+            return None
+        result = left in choices
+        return result if isinstance(op, ast.In) else not result
+    right = value(right)
+    if right is None or not isinstance(op, (ast.Eq, ast.NotEq)):
+        return None
+    return (left == right) if isinstance(op, ast.Eq) else (left != right)
+
+
 def select_target_branches(tree, kind, target, module, fail, *, include_host=False):
     selections = []
 
@@ -90,31 +119,7 @@ def select_target_branches(tree, kind, target, module, fail, *, include_host=Fal
                 return None
 
             def condition(node):
-                if isinstance(node, ast.UnaryOp) and isinstance(node.op, ast.Not):
-                    result = condition(node.operand)
-                    return None if result is None else not result
-                if isinstance(node, ast.BoolOp):
-                    items = [condition(item) for item in node.values]
-                    if any(item is None for item in items):
-                        return None
-                    return all(items) if isinstance(node.op, ast.And) else any(items)
-                if not isinstance(node, ast.Compare) or len(node.ops) != 1:
-                    return None
-                left = value(node.left)
-                right = node.comparators[0]
-                op = node.ops[0]
-                if left is None:
-                    return None
-                if isinstance(op, (ast.In, ast.NotIn)) and isinstance(right, (ast.Tuple, ast.List)):
-                    choices = [value(item) for item in right.elts]
-                    if any(item is None for item in choices):
-                        return None
-                    result = left in choices
-                    return result if isinstance(op, ast.In) else not result
-                right = value(right)
-                if right is None or not isinstance(op, (ast.Eq, ast.NotEq)):
-                    return None
-                return (left == right) if isinstance(op, ast.Eq) else (left != right)
+                return target_condition(node, value)
 
             def statements(body):
                 output = []
