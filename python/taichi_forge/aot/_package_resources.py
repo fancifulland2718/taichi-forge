@@ -956,6 +956,18 @@ def scope_declarations(
         if isinstance(node, (ast.Tuple, ast.List)):
             values = tuple(dimension(item, bindings) for item in node.elts)
             return values if all(isinstance(v, Extent) for v in values) else None
+        if isinstance(node, ast.Subscript):
+            # Project an already proven extent tuple. Never evaluate an owner
+            # array or a consumer-selected index while discovering layouts.
+            index, sign = node.slice, 1
+            if isinstance(index, ast.UnaryOp) and isinstance(index.op, ast.USub):
+                index, sign = index.operand, -1
+            if isinstance(index, ast.Constant) and type(index.value) is int:
+                values = dimension(node.value, bindings)
+                offset = sign * index.value
+                if isinstance(values, tuple) and -len(values) <= offset < len(values):
+                    return values[offset]
+            return None
         if isinstance(node, ast.Dict):
             result = {}
             for key, value in zip(node.keys, node.values):

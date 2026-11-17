@@ -1277,6 +1277,59 @@ class Model:
             assert set(runtime._resources) == registered
 
 
+@test_utils.test(arch=[ti.cpu, ti.cuda], offline_cache=False)
+def test_package_extent_tuple_projection_keeps_consumer_dimensions(tmp_path, monkeypatch):
+    source = '''
+import taichi_forge as ti
+@ti.data_oriented
+class Model:
+    def __init__(self, n, m):
+        self.n, self.m = n, m
+        scope = ti.experimental.ResourceScope(self)
+        tiles = tuple((scope.dim(name) + 7) // 8 for name in ('n', 'm'))
+        scope.output = scope.field(ti.i32, shape=tiles[0] * tiles[-1])
+    @ti.kernel
+    def step(self, value: ti.i32):
+        for i in self.output:
+            self.output[i] = i + value
+'''
+    package = _source_package(tmp_path, monkeypatch, source)
+    arch = ti.cfg.arch.name
+    ti.aot.export_package(package.model, tmp_path / 'sdk',
+        **({'artifact_format': 'bc-library'} if arch == 'cuda' else {}))
+    with Runtime(arch) as runtime, load_package(runtime, tmp_path / 'sdk') as code:
+        for n, m in ((9, 17), (33, 7)):
+            original, loaded = package.Model(n, m), code.host.Model(n, m)
+            for value in (3, 19):
+                original.step(value)
+                loaded.step(value)
+                assert loaded.output.shape == (((n + 7) // 8) * ((m + 7) // 8),)
+                np.testing.assert_array_equal(loaded.output.to_numpy(), original.output.to_numpy())
+
+
+@test_utils.test(arch=ti.cpu, offline_cache=False)
+@pytest.mark.parametrize('index', ['2', '-3', 'n', 'True'])
+def test_package_extent_tuple_projection_rejects_unproven_index(tmp_path, monkeypatch, index):
+    package = _source_package(tmp_path, monkeypatch, '''
+import taichi_forge as ti
+@ti.data_oriented
+class Model:
+    def __init__(self, n, m):
+        self.n, self.m = n, m
+        scope = ti.experimental.ResourceScope(self)
+        axes = (scope.dim('n'), scope.dim('m'))
+        scope.output = scope.field(ti.i32, shape=axes[INDEX])
+    @ti.kernel
+    def clear(self):
+        for i in self.output:
+            self.output[i] = 0
+'''.replace('INDEX', index))
+    before = ti.lang.impl.get_runtime().get_num_compiled_functions()
+    with pytest.raises(ti.aot.PackageExportError, match='shape requires declared dimensions'):
+        ti.aot.export_package(package.model, tmp_path / 'sdk')
+    assert ti.lang.impl.get_runtime().get_num_compiled_functions() == before
+
+
 @test_utils.test(arch=ti.cpu, offline_cache=False)
 def test_package_type_only_import_does_not_enter_runtime_closure(tmp_path, monkeypatch):
     source_root = tmp_path / 'src'
