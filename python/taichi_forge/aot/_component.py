@@ -1307,7 +1307,14 @@ class Component:
                 borrowed.append((path, field, declaration, root_id))
                 roots.setdefault(root_id, set()).add("borrow:" + ".".join((*prefix, declaration["group"])))
             for name, declaration in registry.get("typed_inputs", {}).items():
-                typed_inputs.append(((*prefix, name), _member(current, name),
+                value = _member(current, name)
+                if value is None and declaration.get("optional"):
+                    # An absent typed port still carries a semantic fact. Keep
+                    # it in this component's admission instead of dropping the
+                    # name and rejecting a legitimate `is None` branch later.
+                    members[name] = StaticValue(choices=(None,))
+                    continue
+                typed_inputs.append(((*prefix, name), value,
                                      tuple(qualify(axis) for axis in declaration["shape"])))
             for name, source in registry.get("records", {}).items():
                 sources[_capture_id((*prefix, name))] = source

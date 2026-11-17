@@ -1051,9 +1051,9 @@ void register_query(NativeOperationRegistry &registry) {
           fields(p, {"occlusion", "any_hit", "front_only", "graph_fixed_query"});
         else if constexpr (Description::version == 3)
           fields(p, {"ray_count", "occlusion", "any_hit", "face_rules",
-                     "face_table_count", "alpha_masks", "mask_count"});
+                     "face_table_count", "alpha_masks", "mask_count", "graph_fixed_query"});
         else if constexpr (Description::version == 2)
-          fields(p, {"ray_count", "occlusion", "any_hit", "face_rules", "face_table_count"});
+          fields(p, {"ray_count", "occlusion", "any_hit", "face_rules", "face_table_count", "graph_fixed_query"});
         else
           fields(p, {"ray_count", "occlusion", "any_hit", "front_only"});
         const auto rays = [&]() -> uint32_t {
@@ -1119,6 +1119,8 @@ void register_query(NativeOperationRegistry &registry) {
           op.rays = b.at("rays").array();
           op.hits = b.at("hits").array();
           op.ray_count = rays;
+          if constexpr (Description::version == 2 || Description::version == 3)
+            op.graph_fixed_query = optional_bool(p, "graph_fixed_query", true);
           if constexpr (Description::version >= 4) {
             if (op.rays.shape.empty() || !op.rays.shape[0] ||
                 op.rays.shape[0] > std::numeric_limits<uint32_t>::max())

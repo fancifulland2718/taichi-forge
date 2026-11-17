@@ -131,8 +131,10 @@ def test_optix_alpha_recording_export(tmp_path, monkeypatch):
                         for uv, tex in (("uva", "alpha_a"), ("uvb", "alpha_b"))
                     )
                     rules = (ti.hardware.ray.OptixFaceRuleTable("faces"), "front_only")
-                    main = scene.record_typed(4, hit_indices="ids", alpha_masks=masks, face_rules=rules)
-                    shadow = scene.record_occlusion(4, alpha_masks=masks, face_rules=rules)
+                    main = scene.record_typed(4, hit_indices="ids", alpha_masks=masks, face_rules=rules,
+                                              graph_fixed_query=False)
+                    shadow = scene.record_occlusion(4, alpha_masks=masks, face_rules=rules,
+                                                     graph_fixed_query=False)
                     definitions.extend((main._query_definition.native, shadow._query_definition.native))
                     builder.append_native(main, admission="explicit")
                     builder.append_native(shadow, admission="explicit")
@@ -226,6 +228,10 @@ def test_optix_alpha_recording_export(tmp_path, monkeypatch):
                         )
                     )
                     description = json.loads(plan.to_json())
+                    queries = [op for op in description["operations"]
+                               if op.get("provider") == "optix" and op["operation"] == "query"]
+                    assert len(queries) == 2
+                    assert all(op["parameters"]["graph_fixed_query"] is False for op in queries)
                     images = [
                         r
                         for r in description["resources"]

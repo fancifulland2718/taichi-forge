@@ -171,6 +171,8 @@ class _ModuleBinding:
     def __init__(self, package):
         from ._package_graph import Arg, ArgKind, GraphBuilder
         from ._package_algorithms import Algorithms
+        from ._package_ray import RayAPI
+        from ._c_api import AotError
 
         self.package = package
         self.target = _BACKENDS[package.runtime.arch]
@@ -201,6 +203,8 @@ class _ModuleBinding:
             ndarray=self.ndarray,
             sync=package.runtime.wait,
             algorithms=Algorithms(package),
+            hardware=_HostAPI(ray=RayAPI(package)),
+            TaichiRuntimeError=AotError,
             graph=SimpleNamespace(
                 Arg=Arg,
                 ArgKind=ArgKind,
@@ -2011,6 +2015,7 @@ class LoadedPackage:
                 94,
                 95,
                 96,
+                97,
             )
             or self.manifest.get("kind") != "forge_definition_package_prototype"
         ):

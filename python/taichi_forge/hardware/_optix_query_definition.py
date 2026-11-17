@@ -39,6 +39,7 @@ class OptixQueryDefinition:
             any_hit=self.any_hit,
             face_rules=rules,
             face_table_count=rules.count("table"),
+            graph_fixed_query=self.graph_fixed_query,
         )
         if mask_count:
             parameters.update(alpha_masks=masks, mask_count=mask_count)

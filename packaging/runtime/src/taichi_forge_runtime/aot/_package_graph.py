@@ -128,6 +128,8 @@ class GraphBuilder:
         self._admissions = []
         self._range_checks = []
         self._plan_values = {}
+        self._native_effects = {}
+        self._native_extents = {}
 
     def _record_plan_values(self, owner):
         if owner is None:
@@ -307,6 +309,11 @@ class GraphBuilder:
         for key, binding in sequence._plan_values.items():
             if key in self._plan_values and _plan_key(self._plan_values[key][2]) != _plan_key(binding[2]):
                 raise ValueError("Graph sequences recorded different plan parameters")
+        extents = dict(self._native_extents)
+        for name, extent in sequence._native_extents.items():
+            if name in extents and extents[name] != extent:
+                raise ValueError("Native operations require incompatible array extents")
+            extents[name] = extent
         self.operations.extend(sequence.operations)
         self.arguments = combined
         self._captures.update(sequence._captures)
@@ -314,12 +321,57 @@ class GraphBuilder:
         self._admissions.extend(sequence._admissions)
         self._range_checks.extend(sequence._range_checks)
         self._plan_values.update(sequence._plan_values)
+        self._native_effects.update(sequence._native_effects)
+        self._native_extents = extents
         return self
 
-    def append_native(self, sequence, *, prewarm=False):
+    def append_native(self, sequence, *, prewarm=False, admission="explicit"):
         from ._package_algorithms import PrimitiveSequence, sort_inputs
+        from ._package_native import NativeRecording, NativeObject
 
         self.package._check()
+        if type(prewarm) is not bool or admission not in ("explicit", "auto"):
+            raise ValueError("Invalid native recording policy")
+        if isinstance(sequence, NativeRecording):
+            if sequence.package is not self.package:
+                raise ValueError("Native recording belongs to another package")
+            operation = copy.deepcopy(sequence.description)
+            kind = operation["provider"] + "_" + operation["operation"]
+            modes = self.package.runtime.native_operation_capabilities(kind, version=operation["version"])
+            if not modes or (admission == "auto" and not modes & {"cuda_ordered", "cuda_capture", "vulkan_inline"}):
+                raise ValueError(f"Native operation {kind} has no qualified Graph execution mode: {sorted(modes)}")
+            arguments, captures, effects = dict(self.arguments), {}, {}
+            for port, value in sequence.bindings.items():
+                schema = sequence.schemas[port]
+                if isinstance(value, str):
+                    name = value
+                    if name.startswith("_forge_package_"):
+                        raise ValueError("Graph argument uses a reserved package binding name")
+                    if name in arguments and arguments[name] != schema:
+                        raise ValueError("Native port conflicts with a Graph argument")
+                    arguments[name] = schema
+                else:
+                    if isinstance(value, NativeObject):
+                        value._check()
+                    holder = self._bindings.native_resources.setdefault(id(value), SimpleNamespace(value=value))
+                    name, binding = self._bindings.capture(holder, dict(name="value", **schema))
+                    captures[name] = binding
+                operation["bindings"][port] = name
+                effects[name] = effects.get(name, False) or sequence.effects[port] != "read"
+            extents = dict(self._native_extents)
+            for port, extent in getattr(sequence, "extents", {}).items():
+                name = operation["bindings"][port]
+                previous = extents.get(name, extent)
+                if previous != extent:
+                    raise ValueError("Native operations require incompatible array extents")
+                extents[name] = extent
+            self.operations.append(operation)
+            self.arguments = arguments
+            self._captures.update(captures)
+            key = json.dumps(operation, sort_keys=True)
+            self._native_effects[key] = effects
+            self._native_extents = extents
+            return self
         if not isinstance(sequence, PrimitiveSequence) or sequence.package is not self.package:
             raise ValueError("Package native recording requires its own primitive sequence")
         if type(prewarm) is not bool:
@@ -402,6 +454,10 @@ class GraphBuilder:
         # neither a masked fallback nor per-iteration Host observation is inserted.
         return self.append(merged)
 
+    def freeze(self):
+        from ._package_native import NativeGraphDefinition
+        return NativeGraphDefinition(self.compile())
+
     def compile(self, *, workspace_lanes=1, workspace_saturation="wait"):
         if type(workspace_lanes) is not int or workspace_lanes < 1:
             raise ValueError("Graph workspace_lanes must be a positive integer")
@@ -417,6 +473,8 @@ class GraphBuilder:
             list(self._admissions),
             list(self._range_checks),
             dict(self._plan_values),
+            native_effects=copy.deepcopy(self._native_effects),
+            native_extents=dict(self._native_extents),
             workspace_lanes=workspace_lanes,
             workspace_saturation=workspace_saturation,
         )
@@ -424,17 +482,20 @@ class GraphBuilder:
 
 class Graph:
     def __init__(self, package, plan, arguments, captures=None, admissions=None, range_checks=None, plan_values=None,
-                 *, workspace_lanes=1, workspace_saturation="wait"):
+                 *, workspace_lanes=1, workspace_saturation="wait", native_effects=None, native_extents=None):
         self.package, self.plan, self.arguments = package, plan, arguments
         self.captures = captures or {}
         self.admissions = admissions or []
         self.range_checks = range_checks or []
         self.plan_values = plan_values or {}
+        self.native_effects = native_effects or {}
+        self.native_extents = native_extents or {}
         self._cached_call = None
         self._cached_values = ()
         self._cached_tokens = ()
         self._cached_guards = ()
         self._ordered_replay_required = False
+        self._closed = False
         self._workspace_lanes = workspace_lanes
         self._workspace_saturation = workspace_saturation
         self._parameter_frames = []
@@ -472,6 +533,12 @@ class Graph:
                         visit(operation["body"])
                     continue
                 if operation["kind"] != "kernel":
+                    if operation["kind"] == "native":
+                        effects = self.native_effects.get(json.dumps(operation, sort_keys=True))
+                        if effects is None:
+                            raise ValueError("Native operation has no recorded effect contract")
+                        written.update(name for name, writes in effects.items() if writes)
+                        continue
                     if operation["kind"] == "sort":
                         written.update(value for key, value in operation.items() if key != "kind")
                         continue
@@ -522,6 +589,12 @@ class Graph:
     def bind(self, arguments):
         return self.prepare(arguments)
 
+    def close(self):
+        if not self._closed:
+            self._clear_cached()
+            self._closed = True
+            self.package._graphs.discard(self)
+
     def prepare(self, arguments, *, execution_domain=None, mutable_parameters=()):
         """Prepare the recorded package plan with optional live submission values.
 
@@ -530,6 +603,9 @@ class Graph:
         an independent execution domain's parameter-update protocol.
         """
         from ._parameters import SubmissionParameters
+
+        if self._closed:
+            raise RuntimeError("Package Graph is closed")
 
         mutable_parameters = SubmissionParameters(mutable_parameters).names
         if any(name not in self.arguments for name in mutable_parameters):
@@ -581,6 +657,9 @@ class Graph:
         plan = self.plan.with_argument_resources(resources) if resources else self.plan
         plan = self._specialized_plan(plan)
         values = {name: self.package.runtime._adapt_package_array(value) for name, value in values.items()}
+        for name, extent in self.native_extents.items():
+            if not isinstance(values[name], NdArray) or values[name].shape[0] != extent:
+                raise ValueError("Native whole-array extent differs from its recording")
         prepared = plan.prepare(self.package._module, values, execution_domain=execution_domain,
                                 mutable_parameters=mutable_parameters)
         # A cached call must not create Graph -> call -> Graph ownership cycles.
@@ -702,6 +781,8 @@ class Graph:
 
     def _prepared(self, arguments):
         self.package._check()
+        if self._closed:
+            raise RuntimeError("Package Graph is closed")
         if isinstance(arguments, PreparedCall):
             if getattr(arguments, "_forge_package_graph", lambda: None)() is not self:
                 raise ValueError("Prepared Graph arguments belong to another recording")
@@ -720,7 +801,7 @@ class Graph:
         # Keep at most the current implicit binding. Explicit bind() continues
         # to create independent snapshots and workspaces for its caller.
         guards = self._binding_guards()
-        reusable = all(spec['kind'] == 'ndarray' or reusable_value(value)
+        reusable = all(spec['kind'] in ('ndarray', 'native_resource') or reusable_value(value)
                        for spec, value in zip(self.arguments.values(), values))
         reusable = reusable and all(
             spec['kind'] not in ('value', 'dimension') or reusable_value(capture_value(owner, spec))

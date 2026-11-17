@@ -143,11 +143,11 @@ def test_optix_instance_recording_export_and_retained_geometry(tmp_path, monkeyp
                 )
             )
             builder.append_native(
-                scene.record_typed(len(RAYS), hit_indices="ids", face_rules=rules),
+                scene.record_typed(len(RAYS), hit_indices="ids", face_rules=rules, graph_fixed_query=False),
                 admission="explicit",
             )
             builder.append_native(
-                scene.record_occlusion(len(RAYS), face_rules=rules),
+                scene.record_occlusion(len(RAYS), face_rules=rules, graph_fixed_query=False),
                 admission="explicit",
             )
             dloss = builder.private_ndarray("dloss", ti.f32, 1)
@@ -173,6 +173,9 @@ def test_optix_instance_recording_export_and_retained_geometry(tmp_path, monkeyp
             )
             timings[policy + "_export_ms"] = (time.perf_counter() - start) * 1000
             resources = [r for r in json.loads(plan.to_json())["resources"] if r["kind"] == "native"]
+            queries = [op for op in json.loads(plan.to_json())["operations"]
+                       if op.get("provider") == "optix" and op["operation"] == "query"]
+            assert len(queries) == 2 and all(op["parameters"]["graph_fixed_query"] is False for op in queries)
             timings[policy + "_plan_bytes"] = len(plan.to_json().encode())
             assert len(resources) == 4  # One context, two GAS and one IAS.
             ias = next(r for r in resources if r["operation"] == "instance_scene")

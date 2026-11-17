@@ -39,8 +39,8 @@ graph = builder.compile()
 
 源码对象使用普通 JIT builder；同一个加载包的对象使用该包的完整原生 Plan
 录制、准备和消费期特化。JIT/AOT 混合对象及独立加载包之间的组合明确拒绝，
-该工厂不增加跨模块链接或逐 Kernel Python 提交。前端 recipe 与 workspace lanes
-选项仍只属于前端 builder。hybrid 模式中，保留的 Host 代码共享当前 Program 的
+该工厂不增加跨模块链接或逐 Kernel Python 提交。前端 recipe 搜索仍属于前端
+builder；包内物化支持下述保留队列策略。hybrid 模式中，保留的 Host 代码共享当前 Program 的
 `SubmissionPacer`、`SubmissionTicket` 和 `CompletionSet`；独立部署不会为了
 提供这些调度接口而导入前端。
 Host 集成可在准备期确认不可变固定 CUDA Plan 的顺序重放资格，使用已有队列
@@ -52,6 +52,19 @@ u8/f32 标量及一至四通道向量，在设备端打包。首次绑定编译�
 像素回读到 CPU。图像必须属于从当前 Program 借用的 AOT Runtime。
 这条普通 Canvas 路径包含一次设备复制；共享图像直接呈现仍使用显式显示帧
 的所有权协议。
+
+格式 97 补充 CUDA 包的 OptiX Host 投影：context、三角形 GAS、固定拓扑实例场景、
+姿态 refit、typed 交点及紧凑遮挡查询。统一面策略和活的逐图元面规则表复用已有
+native resource/ExecutionPlan 目录；几何初值来自消费者。adapter 与 vendor 库仍是
+外部依赖。此投影不代表其他 `ti.hardware` 家族、alpha-mask 工厂或自定义 OptiX
+program 已取得定义包资格。
+
+原生 recording 可直接执行，或通过 `append_native` 与包内 Kernel 组成 Graph。
+`freeze().select_execution_recipe(queue="preserve", binding_reuse="prefer")` 与
+`materialize(selection)` 保留既有顺序执行器和绑定租约，不调用前端 recipe 搜索，
+也不宣称设备 stream 并发。射线、姿态和面规则内容更新复用原准备绑定；尺寸、类型
+及资源寿命检查仍在准备边界执行。显式 `graph_fixed_query` 策略保留到导出产物，
+包括 query schema 2、3。
 
 格式 96 将可证明不分配资源、也不被数值定义捕获的简单 Host 组合对象保留为普通 Python。
 原声明仍供生产期证明独立输入类型，组合对象不再固定子对象的某个数值实现族；数值 owner、

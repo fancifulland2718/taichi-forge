@@ -6,6 +6,40 @@ from taichi_forge.aot._component import Component
 from tests import test_utils
 
 
+@test_utils.test(arch=[ti.cpu, ti.cuda], offline_cache=False)
+def test_component_keeps_absent_typed_port_and_rejects_changed_presence():
+    @ti.data_oriented
+    class Model:
+        def __init__(self, present):
+            scope = ti.experimental.ResourceScope(self)
+            scope.output = scope.field(ti.i32, shape=1)
+            scope.input_storage = scope.field(ti.i32, shape=1)
+            scope.borrow("input", self.input_storage if present else None,
+                         external=True, dtype=ti.i32, shape=(1,), optional=True)
+
+        @ti.kernel
+        def run(self):
+            self.output[0] = 7
+            if ti.static(self.input is not None):
+                self.output[0] = self.input[0] + 1
+
+    absent = Model(False)
+    absent.run()
+    expected = absent.output.to_numpy()
+    environment = Component.from_owner(absent)
+    code = environment.compile(absent.run)
+    absent.output.fill(0)
+    code.run(environment, absent)
+    np.testing.assert_array_equal(absent.output.to_numpy(), expected)
+    present = Model(True)
+    present.input_storage[0] = 23
+    present_environment = Component.from_owner(present)
+    with pytest.raises((ValueError, ti.TaichiCompilationError)):
+        code.run(present_environment, present)
+    present_environment.compile(present.run).run(present_environment, present)
+    np.testing.assert_array_equal(present.output.to_numpy(), [24])
+
+
 @ti.data_oriented
 class _Declared:
     def __init__(self, count):

@@ -41,6 +41,36 @@ class Model:
 
 
 @test_utils.test(arch=ti.cuda, offline_cache=False)
+def test_package_optix_host_graph_and_live_refit(tmp_path, monkeypatch):
+    adapter = os.environ.get("TAICHI_FORGE_TEST_OPTIX_PROVIDER")
+    library = os.environ.get("GP_OPTIX_LIBRARY")
+    if not adapter or not library:
+        pytest.skip("requires real OptiX adapter and vendor library")
+    package = _source_package(tmp_path, monkeypatch, '''
+import taichi_forge as ti
+@ti.data_oriented
+class Model:
+    def __init__(self):
+        scope = ti.experimental.ResourceScope(self)
+        scope.out = scope.field(ti.f32, shape=1)
+    @ti.kernel
+    def publish(self, hits: ti.types.ndarray(ti.f32, 2)):
+        self.out[0] = hits[0, 0]
+    def provider(self, adapter, library):
+        return ti.hardware.ray.load_optix_provider(provider_path=adapter, library_path=library,
+            required_features=('instances',))
+    def scene(self, provider, geometry, transform):
+        return provider.instance_scene([ti.hardware.ray.OptixRayInstance(geometry, transform=transform)])
+''')
+    output = tmp_path / "sdk"
+    manifest = ti.aot.export_package(package.model, output, artifact_format="bc-library")
+    assert manifest["version"] == 97
+    result = subprocess.run([sys.executable, "-I", str(Path(__file__).with_name("aot_package_optix_probe.py")),
+                             str(output), adapter, library], capture_output=True, text=True, timeout=90)
+    assert result.returncode == 0, result.stdout + result.stderr
+
+
+@test_utils.test(arch=ti.cuda, offline_cache=False)
 def test_package_build_cache_skips_witnesses_and_rejects_changed_inputs(tmp_path, monkeypatch):
     from taichi_forge.aot._package_compilation import PackageCompilation
     from taichi_forge.aot._package_owner_graph import OwnerGraph

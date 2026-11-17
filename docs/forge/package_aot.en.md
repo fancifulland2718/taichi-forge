@@ -52,8 +52,9 @@ Source owners select the ordinary JIT builder. Owners from one loaded definition
 package select that package's complete native Plan recorder, preserving preparation
 and consumer specialization. Mixed JIT/AOT owners and independently loaded packages
 are rejected; this factory does not add cross-module linking or per-kernel Python
-submission. Frontend recipe/workspace-lane options remain specific to the frontend
-builder. In hybrid mode, retained Host code also shares the current Program's
+submission. Frontend recipe search remains specific to the frontend builder;
+package materialization supports the preserved-queue policy described below.
+In hybrid mode, retained Host code also shares the current Program's
 `SubmissionPacer`, `SubmissionTicket` and `CompletionSet`. Standalone packages do
 not import the frontend to supply those scheduling APIs.
 The host integration can qualify an immutable fixed CUDA Plan for ordered
@@ -68,6 +69,22 @@ engine definitions, export another package, or read pixels back to the CPU.
 The image must belong to an AOT Runtime borrowed from the current Program.
 This legacy Canvas route includes a device copy; direct shared-image presentation
 still requires the explicit display-frame ownership protocol.
+
+Format 97 adds a CUDA package Host projection for OptiX contexts, triangle GAS,
+fixed-topology instance scenes, transform refits, typed intersections and compact
+occlusion. Uniform face policies and live per-primitive face tables use the existing
+native resource/ExecutionPlan catalog; instance seeds come from the consumer.
+The adapter and vendor library remain external dependencies. Other `ti.hardware`
+families, alpha-mask factories and custom OptiX programs are not qualified by this
+package projection.
+
+Native recordings can execute directly or join package kernels with `append_native`.
+`freeze().select_execution_recipe(queue="preserve", binding_reuse="prefer")` and
+`materialize(selection)` retain the existing ordered executor and binding leases;
+they do not invoke frontend recipe search or promise device-stream concurrency.
+Changing ray, transform or face-table contents reuses the same prepared binding.
+Array extent/type and resource lifetime checks remain at preparation. The explicit
+`graph_fixed_query` policy survives export, including query schemas 2 and 3.
 
 Format 96 retains simple Host composition objects as ordinary Python when export
 proves that they allocate no resources and are not captured by numerical definitions.

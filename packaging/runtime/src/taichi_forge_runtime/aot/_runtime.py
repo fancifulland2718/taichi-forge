@@ -529,6 +529,12 @@ class Runtime:
             self._pending.clear()
 
     def _adapt_package_array(self, value):
+        from ._package_native import NativeObject
+        if isinstance(value, NativeObject):
+            value._check()
+            if value.resource._runtime is not self:
+                raise ValueError("Native object belongs to another runtime")
+            return value.resource
         adapter = getattr(self, "_package_array_adapter", None)
         return value if adapter is None else adapter(value)
 
