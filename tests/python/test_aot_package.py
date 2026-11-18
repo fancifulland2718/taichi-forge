@@ -15351,6 +15351,10 @@ def test_package_fixed_policy_requires_matching_scalar_declaration():
     assert specialization_constant_args(contract, nested, {'Settings': settings}) == (1, 2)
     settings['mode']['dtype'] = 'u32'
     assert specialization_constant_args(contract, nested, {'Settings': settings}) == (1,)
+    settings['mode'] = dict(kind='value', dtype='i32', input_presence=True)
+    assert specialization_constant_args(contract, nested, {'Settings': settings}) == (1, 2)
+    settings['mode']['input_presence'] = False
+    assert specialization_constant_args(contract, nested, {'Settings': settings}) == (1,)
 
 
 @pytest.mark.parametrize('graph', [False, True])
@@ -16373,9 +16377,16 @@ class Model:
                     model.query()
                     assert model.out.to_numpy()[0] == int(pa)
                 model.prepare(a,b)
-                with model.graph().bind({}) as previous:
+                graph = model.graph()
+                with graph.bind({}) as previous:
+                    graph.run({})
+                    av = av + 1
+                    a.write(av.tobytes())
+                    graph.run({})
+                    np.testing.assert_array_equal(model.out.to_numpy(), av+2*bv)
                     model.prepare(None,None)
-                    model.graph().run({})
+                    graph.run({})
+                    np.testing.assert_array_equal(model.out.to_numpy(), np.zeros_like(av))
                     previous.run()
                     np.testing.assert_array_equal(model.out.to_numpy(), av+2*bv)
                 a.close(); b.close()

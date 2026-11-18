@@ -50,10 +50,10 @@ def specialization_entries(path, target, entries):
 def specialization_constant_args(contract, owner_schema, owners=None):
     """Select fixed scalar facts from the existing declaration and entry ABI.
 
-    Plan-affecting integer captures are model policy, observed by OwnerGuard
-    (or snapshotted by Graph.bind). Ordinary arguments, unmarked values and
-    device contents remain live. A declaration with a different path or dtype
-    cannot authorize specialization of a similarly named capture.
+    OwnerGuard observes plan policy and typed optional input presence. An
+    explicit Graph.bind snapshots both. Ordinary arguments, unmarked values
+    and device contents remain live. The declaration must match the capture's
+    path and dtype.
     """
     result = []
     for index, capture in enumerate(contract["captures"], len(contract["arguments"])):
@@ -85,7 +85,8 @@ def specialization_constant_args(contract, owner_schema, owners=None):
                 # qualify only this local view, never mutate the shared schema.
                 declaration = {**declaration, "path": capture_path}
         if (capture["kind"] == declaration.get("kind") == "value"
-                and declaration.get("affects_plan") is True
+                and (declaration.get("affects_plan") is True
+                     or declaration.get("input_presence") is True)
                 and capture.get("dtype") in ("i8", "i16", "i32", "i64", "u8", "u16", "u32", "u64")
                 and capture["dtype"] == declaration.get("dtype")
                 and not capture.get("element_shape")
