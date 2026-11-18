@@ -1568,8 +1568,7 @@ def _host_projection(
         namespace = builder = host_contexts = construction_schema = entries = deferred_entries = None
 
 
-def _preflight_package(package, *, arch=None, source_root=None):
-    """The declaration phase shared by inspection and production export."""
+def _package_source_inputs(package, arch, source_root):
     import taichi_forge as ti
 
     packages = package_roots(package, source_root)
@@ -1593,7 +1592,7 @@ def _preflight_package(package, *, arch=None, source_root=None):
         raise PackageExportError("Initialize the Runtime or select an export backend")
     target_arch = ti.lang.impl.current_cfg().arch
     application_modules = set(paths) | set(namespaces) if source_root is not None else None
-    sources, failures, imported_modules = [], [], {}
+    source_files, imported_modules = [], {}
     selected_modules = {item.__name__: item for item in packages}
     for name, (path, relative) in paths.items():
         text = path.read_text(encoding="utf8")
@@ -1603,6 +1602,18 @@ def _preflight_package(package, *, arch=None, source_root=None):
         if Path(imported.__file__).resolve() != path:
             raise PackageExportError(f"Module origin differs from scanned source: {name}")
         imported_modules[name] = imported
+        source_files.append((name, path, relative, text))
+    return source_files, namespaces, dependency_report, application_modules, imported_modules, target_arch, packages
+
+
+def _preflight_package(package, *, arch=None, source_root=None, inputs=None):
+    """Resolve declarations once the current sources and imported bindings are known."""
+    source_files, namespaces, dependency_report, application_modules, imported_modules, target_arch, packages = (
+        inputs if inputs is not None else _package_source_inputs(package, arch, source_root)
+    )
+    sources, failures = [], []
+    for name, path, relative, text in source_files:
+        imported = imported_modules[name]
         try:
             tree, kind, owners, definitions = _analyze(name, text, vars(imported), target_arch.name, defer_owners=True)
         except PackageExportError as error:
@@ -1782,19 +1793,40 @@ def export_package(package, output, *, arch=None, caps=None, source_root=None, a
     ``build_cache=directory`` opts into producer warm start for CUDA bc-library,
     CPU bc, and Vulkan default artifacts.
     Unchanged source-driven builds reuse the previous complete package before
-    resource witnesses and numerical capture. Changed/opaque inputs use the
-    ordinary compiler (including its existing offline cache). The directory
-    holds a small index; keep its referenced output until the next build.
+    declaration analysis. With CPU offline caching, unchanged free scalar
+    kernels with tracked numerical dependencies can also reuse their compiled
+    objects after a local edit. Keep the referenced output for full-package
+    hits. A missing optional object takes the ordinary compile path.
     """
     from ._package_compilation import PackageCompilation
 
+    output = Path(output).resolve()
+    if output.exists():
+        raise FileExistsError(output)
+    if source_root is not None and output.is_relative_to(Path(source_root).resolve()):
+        raise ValueError("Package output must be outside its application source root")
+    if build_cache is not None and Path(build_cache).resolve().is_relative_to(output):
+        raise ValueError("Build cache index must be outside the package output")
+    inputs = _package_source_inputs(package, arch, source_root)
+    cache = None
+    if build_cache is not None:
+        from ._package_build_cache import PackageBuildCache
+
+        source_files, _, dependencies, _, imported_modules, _, packages = inputs
+        cache = PackageBuildCache(build_cache, source_files, imported_modules, packages, caps, artifact_format,
+                                  discovery=dependencies)
+        del source_files
+        cached = cache.reuse(output, _publish_package)
+        if cached is not None:
+            cache.record(output)
+            return cached
+    declarations = _preflight_package(package, inputs=inputs)
+    del inputs
     with PackageCompilation() as compilation:
-        return _export_package(package, output, arch=arch, caps=caps, source_root=source_root,
-                               compilation=compilation, artifact_format=artifact_format, build_cache=build_cache)
+        return _export_package(output, declarations, source_root, caps, artifact_format, compilation, cache)
 
 
-def _export_package(package, output, *, arch, caps, source_root, compilation, artifact_format=None,
-                    build_cache=None):
+def _export_package(output, declarations, source_root, caps, artifact_format, compilation, cache):
     import taichi_forge as ti
     from taichi_forge.aot._component import Component
     from taichi_forge_runtime._static_values import static_key, read_static_key
@@ -1805,26 +1837,10 @@ def _export_package(package, output, *, arch, caps, source_root, compilation, ar
     from taichi_forge.lang.struct import StructType
     from ._package_closures import materialize as materialize_closure
 
-    output = Path(output).resolve()
-    if output.exists():
-        raise FileExistsError(output)
-    if source_root is not None and output.is_relative_to(Path(source_root).resolve()):
-        raise ValueError("Package output must be outside its application source root")
-    if build_cache is not None and Path(build_cache).resolve().is_relative_to(output):
-        raise ValueError("Build cache index must be outside the package output")
     (
         sources, namespaces, dependency_report, application_modules, imported_modules,
         host_contexts, function_inputs, factory_calls, target_arch, packages,
-    ) = _preflight_package(package, arch=arch, source_root=source_root)
-    cache = None
-    if build_cache is not None:
-        from ._package_build_cache import PackageBuildCache
-
-        cache = PackageBuildCache(build_cache, sources, imported_modules, packages, caps, artifact_format)
-        cached = cache.reuse(output, _publish_package)
-        if cached is not None:
-            cache.record(output)
-            return cached
+    ) = declarations
     package = packages[0]
     module = Module(caps=caps, artifact_format=artifact_format)
     compilation.attach(module, function_library=artifact_format == "bc-library")
@@ -2367,8 +2383,20 @@ def _export_package(package, output, *, arch, caps, source_root, compilation, ar
             kernel = getattr(entry, "_primal", None)
             if kernel is None:
                 _fail(name, node, "decorated definition did not resolve to a Forge kernel")
+            object_key = None
+            if (cache is not None and owner_name is None and definition["kind"] == "kernel"
+                    and "function_kernel" not in definition and "closure_kernel" not in definition
+                    and (kernel.func.__module__, kernel.func.__qualname__) == (name, definition["name"])):
+                object_key = cache.scalar_object_key(kernel)
+                if object_key:
+                    restored = cache.restore_object(object_key, module)
+                    if restored is not None:
+                        manifest["entries"][restored["symbol"]] = restored
+                        entries[definition["name"]] = restored
+                        continue
             entry = compilation.entry(entry)
             kernel = entry._primal
+            compilation.object_kernel = kernel if object_key else None
             arguments = (
                 [
                     argument
@@ -2870,6 +2898,8 @@ def _export_package(package, output, *, arch, caps, source_root, compilation, ar
                     shared_entries[identity] = entry_manifest
                 if admission:
                     entry_manifest["admission"] = admission
+                if object_key and getattr(code, "_cpu_build_object_key", None):
+                    cache.record_object(object_key, code._cpu_build_object_key, entry_manifest, module)
                 variants.append(
                     dict(
                         selection={

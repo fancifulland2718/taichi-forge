@@ -477,15 +477,61 @@ void LlvmAotModuleBuilder::add_with_launch_abi_per_backend(
   add_kernel_impl(identifier, kernel, launch_abi);
 }
 
-void LlvmAotModuleBuilder::add_kernel_impl(const std::string &identifier,
-                                         Kernel *kernel,
-                                         const std::string &launch_abi) {
+KernelCompileRequest LlvmAotModuleBuilder::build_request(Kernel *kernel) const {
   auto config = compile_config_;
   config.llvm_aot_relocatable_roots =
       arch_is_cpu(config.arch) || config.arch == Arch::cuda;
-  const auto request = resolve_kernel_compile_request(
+  return resolve_kernel_compile_request(
       config, caps_, kernel->get_compile_tier_override(), CompilePurpose::aot,
       compile_options_);
+}
+
+std::string LlvmAotModuleBuilder::cpu_build_object_key(
+    const std::string &name, Kernel *kernel) const {
+  if (!arch_is_cpu(compile_config_.arch) || !compile_config_.offline_cache ||
+      artifact_format_ != "bc" || !streaming_compilation_manager_ ||
+      kernel->get_offload_execution_plan() || value_parameters_.count(name) ||
+      argument_origins_.count(name) || !kernel_snode_tree_ids(name).empty())
+    return {};
+  const auto request = build_request(kernel);
+  return kernel->get_or_create_kernel_key_for_cache(request.config(),
+                                                    request.device_caps());
+}
+
+bool LlvmAotModuleBuilder::restore_cpu_build_object(const std::string &name,
+                                                    const std::string &key) {
+  if (!arch_is_cpu(compile_config_.arch) || !compile_config_.offline_cache ||
+      artifact_format_ != "bc" || !streaming_compilation_manager_ ||
+      kernel_names_.count(name))
+    return false;
+  auto object = streaming_compilation_manager_->load_build_object(
+      key, compile_config_.arch);
+  auto *llvm_object = dynamic_cast<LLVM::CompiledKernelData *>(object.get());
+  if (!llvm_object || llvm_object->has_snode_tree_dependencies())
+    return false;
+  llvm_object->set_kernel_identity(key);
+  const auto &data = llvm_object->get_internal_data();
+  const auto &body = data.compiled_data;
+  const auto identity = key + "\nordinary\n" +
+      liong::json::print(liong::json::serialize(body));
+  const auto existing = kernel_identities_.find(identity);
+  record_sealed_kernel_export(name, data.graph_metadata);
+  if (existing != kernel_identities_.end()) {
+    kernel_names_.emplace(name, existing->second);
+  } else {
+    // Use the same LLVM module clone as a fresh export. Moving a deserialized
+    // module directly changes bitcode ordering and its published content hash.
+    store_physical_kernel(name, identity, data);
+    object.reset();
+    seal_kernel_export_per_backend(name);
+  }
+  return true;
+}
+
+void LlvmAotModuleBuilder::add_kernel_impl(const std::string &identifier,
+                                         Kernel *kernel,
+                                         const std::string &launch_abi) {
+  const auto request = build_request(kernel);
   const auto request_key = kernel->get_or_create_kernel_key_for_cache(
       request.config(), request.device_caps());
   const LLVM::CompiledKernelData *artifact = nullptr;
@@ -553,6 +599,14 @@ void LlvmAotModuleBuilder::add_kernel_impl(const std::string &identifier,
     compiled.compiled_data =
         LLVM::make_cuda_graph_gated_kernel(compiled.compiled_data);
   }
+  store_physical_kernel(identifier, identity, std::move(compiled));
+  if (!range_tasks.empty())
+    range_selections_.emplace(identifier, std::move(range_tasks));
+}
+
+void LlvmAotModuleBuilder::store_physical_kernel(
+    const std::string &identifier, const std::string &identity,
+    LLVM::CompiledKernelData::InternalData compiled) {
   const std::string compiled_launch_abi =
       LLVM::compiled_kernel_launch_abi(*compiled.compiled_data.module);
   LlvmOfflineCache::KernelCacheData kcache(std::move(compiled));
@@ -570,8 +624,6 @@ void LlvmAotModuleBuilder::add_kernel_impl(const std::string &identifier,
   cache_.kernels[identifier] = std::move(kcache);
   kernel_names_.emplace(identifier, identifier);
   kernel_identities_.emplace(identity, identifier);
-  if (!range_tasks.empty())
-    range_selections_.emplace(identifier, std::move(range_tasks));
   if (compiled_launch_abi == "ordinary")
     kernel_launch_abis_.erase(identifier);
   else

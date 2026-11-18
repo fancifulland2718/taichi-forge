@@ -40,6 +40,7 @@ class PackageCompilation(FunctionLibrary):
         self._automatic_gc = None
         self._retained_functions = {}
         self._released = False
+        self.object_kernel = None
 
     def __enter__(self):
         return self
@@ -155,6 +156,9 @@ class PackageCompilation(FunctionLibrary):
             raise RuntimeError("Package compilation cannot retire a caller-owned kernel")
         symbol = definition_symbol(code)
         code.export(self.module, symbol)
+        if self.object_kernel is code.kernel:
+            code._cpu_build_object_key = self.module._aot_builder._cpu_build_object_key(
+                symbol, code.kernel.compiled_kernels[code.key])
         self.resource_effects[identity] = self.module._aot_builder._kernel_resource_effects(symbol)
         self.module._aot_builder._seal_kernel_export(symbol)
         self.exported[identity] = symbol

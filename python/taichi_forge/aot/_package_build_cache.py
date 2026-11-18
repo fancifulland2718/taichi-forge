@@ -1,10 +1,7 @@
-"""Optional producer warm start; completed packages remain the artifact owners.
+"""Producer warm start and dependency-based reuse of CPU scalar kernel objects."""
 
-The first stage reuses an unchanged complete export before witnesses/capture.
-It does not pretend to reuse a changed entry's frontend or to compose independently
-compiled resource contracts. Cache misses follow the ordinary compiler pipeline.
-"""
-
+import ast
+import builtins
 import hashlib
 import inspect
 import json
@@ -13,8 +10,9 @@ from pathlib import Path
 import shutil
 import sys
 import tempfile
+import textwrap
 from types import ModuleType
-from typing import Final
+from typing import Final, get_args, get_origin
 import warnings
 
 from taichi_forge.lang._build_cache import BuildIdentity, file_digest, unchanged_file_digest, value_digest
@@ -22,6 +20,67 @@ from taichi_forge.lang._build_cache import BuildIdentity, file_digest, unchanged
 
 class _UntrackedInput(Exception):
     pass
+
+
+def _scalar_kernel_inputs(kernel, modules):
+    """Dependency identity for free, lexically closed scalar numerical code.
+
+    Inspect syntax as well as live code: Python bytecode can fold a branch
+    that the Taichi frontend still reads. A Host callable, arbitrary attribute
+    lookup or closure needs a richer dependency contract and uses capture.
+    """
+    from taichi_forge._lib import core
+    from taichi_forge.aot._component import _code_definition, _final_global
+    from taichi_forge.lang.exception import TaichiCompilationError
+
+    seen = {}
+
+    def visit(function, annotations):
+        if (function.__module__ not in modules or function.__closure__
+                or function.__globals__ is not vars(modules[function.__module__])
+                or function.__qualname__ != function.__name__
+                or function.__defaults__ or function.__kwdefaults__):
+            raise _UntrackedInput()
+        if function in seen:
+            return
+        node = ast.parse(textwrap.dedent(inspect.getsource(function))).body[0]
+        if not isinstance(node, ast.FunctionDef) or node.name != function.__name__:
+            raise _UntrackedInput()
+        if not all(isinstance(item, core.DataType) for item in annotations):
+            raise _UntrackedInput()
+        facts = {}
+        seen[function] = (function.__module__, function.__qualname__, ast.dump(node),
+                          _code_definition(function.__code__), list(map(str, annotations)), facts)
+        local = set(function.__code__.co_varnames)
+        for statement in node.body:
+            for use in ast.walk(statement):
+                if isinstance(use, (ast.Attribute, ast.Import, ast.ImportFrom, ast.Global, ast.Nonlocal)):
+                    raise _UntrackedInput()
+                if not isinstance(use, ast.Name) or not isinstance(use.ctx, ast.Load) or use.id in local:
+                    continue
+                name = use.id
+                value = function.__globals__.get(name, function.__builtins__.get(name))
+                if inspect.isfunction(value) and getattr(value, "_is_taichi_function", False):
+                    helper = value.func
+                    if helper.is_real_function or helper.pyfunc:
+                        raise _UntrackedInput()
+                    target = helper.func
+                    facts[name] = (target.__module__, target.__qualname__)
+                    visit(target, [arg.annotation for arg in helper.arguments] + list(helper.return_type or ()))
+                elif type(value) in (int, bool, str, float) and name in function.__globals__:
+                    facts[name] = (type(value).__name__, repr(value), _final_global(function, name))
+                elif name in ("range", "int", "float", "abs", "min", "max") and value is getattr(builtins, name):
+                    facts[name] = ("builtin", name)
+                else:
+                    raise _UntrackedInput()
+
+    try:
+        if kernel.template_slot_locations:
+            return None
+        visit(kernel.func, [arg.annotation for arg in kernel.arguments] + list(kernel.return_type or ()))
+        return value_digest([kernel.opt_level, list(seen.values())])
+    except (_UntrackedInput, TaichiCompilationError, OSError, TypeError, SyntaxError, ValueError):
+        return None
 
 
 def _namespace_inputs(modules):
@@ -46,6 +105,8 @@ def _namespace_inputs(modules):
     def encode(value):
         if value is Final:
             return ("declaration", "typing.Final")
+        if get_origin(value) is Final:
+            return ("final", encode(get_args(value)))
         if value is None or type(value) in (bool, int, str):
             return (type(value).__name__, value)
         if type(value) is float:
@@ -112,7 +173,7 @@ def _namespace_inputs(modules):
             active.remove(id(value))
 
     return {name: value_digest({key: encode(value) for key, value in vars(module).items()
-                               if not (key.startswith("__") and key.endswith("__"))})
+                               if key == "__annotations__" or not (key.startswith("__") and key.endswith("__"))})
             for name, module in modules.items()}
 
 
@@ -143,7 +204,7 @@ def _producer_inputs(previous, current):
 
 
 class PackageBuildCache:
-    def __init__(self, directory, sources, modules, packages, caps, artifact_format):
+    def __init__(self, directory, sources, modules, packages, caps, artifact_format, *, discovery=None):
         from taichi_forge._lib import core
         from taichi_forge.lang import impl
 
@@ -151,6 +212,8 @@ class PackageBuildCache:
         self.identity = None
         self.inputs = None
         self.modules = modules
+        self.objects = {}
+        self.object_context = None
         self.toolchain_files = {}
         try:
             self.previous = json.loads((self.directory / "latest.json").read_text(encoding="utf8"))
@@ -167,21 +230,72 @@ class PackageBuildCache:
         )
         if not supported:
             raise ValueError("build_cache requires CUDA bc-library, CPU bc, or Vulkan default export")
+        self.cpu_objects_enabled = arch in (core.x64, core.arm64) and impl.current_cfg().offline_cache
+        self.build_settings = dict(
+            config=core._build_cache_config_key(impl.current_cfg(), impl.get_runtime().prog.get_device_caps(), True),
+            option_sources=core._get_compile_option_sources(impl.current_cfg()),
+            caps=sorted(caps or ()), artifact_format=artifact_format,
+        )
         try:
+            namespaces = _namespace_inputs(modules)
             self.inputs = dict(
+                **self._compiler_inputs(),
                 sources={name: (str(path), str(relative), hashlib.sha256(text.encode("utf8")).hexdigest())
                          for name, path, relative, text, *_ in sources},
-                namespaces=_namespace_inputs(modules),
-                producer=_producer_inputs(self.previous.get("toolchain_files", {}), self.toolchain_files),
-                config=core._build_cache_config_key(impl.current_cfg(), impl.get_runtime().prog.get_device_caps(), True),
-                option_sources=core._get_compile_option_sources(impl.current_cfg()),
+                namespaces=namespaces,
                 roots=[item.__name__ for item in packages],
-                caps=sorted(caps or ()), artifact_format=artifact_format,
+                discovery=discovery,
             )
             self.identity = BuildIdentity.create("aot-package", 1,
                                                  {key: value_digest(value) for key, value in self.inputs.items()})
         except _UntrackedInput as error:
             self.reason = "untracked input: " + str(error)
+
+    def _compiler_inputs(self):
+        producer = _producer_inputs(self.previous.get("toolchain_files", {}), self.toolchain_files)
+        context = dict(producer=producer, **self.build_settings)
+        self.object_context = value_digest(context)
+        return context
+
+    def scalar_object_key(self, kernel):
+        if not self.cpu_objects_enabled:
+            return None
+        dependencies = _scalar_kernel_inputs(kernel, self.modules)
+        if dependencies is None:
+            return None
+        if self.object_context is None:
+            try:
+                self._compiler_inputs()
+            except _UntrackedInput:
+                self.cpu_objects_enabled = False
+                return None
+        return value_digest((self.object_context, dependencies))
+
+    def restore_object(self, key, module):
+        objects = self.previous.get("objects")
+        if not isinstance(objects, dict) or key not in objects:
+            return None
+        record = objects[key]
+        try:
+            native, entry, component = record["payload"]
+            symbol = entry["symbol"]
+            if record["digest"] != value_digest((key, record["payload"])):
+                return None
+            if entry["definitions"] != [entry["definition"]]:
+                return None  # Recompute aliases against this build's declarations.
+        except (KeyError, TypeError, ValueError):
+            return None
+        if not module._aot_builder._restore_cpu_build_object(symbol, native):
+            return None
+        module._component_entries[symbol] = component
+        module._exported_kernels[symbol] = key
+        module._content.extend(("kernel:" + symbol, "component_entry:" + symbol))
+        self.objects[key] = record
+        return entry
+
+    def record_object(self, key, native, entry, module):
+        payload = (native, entry, module._component_entries[entry["symbol"]])
+        self.objects[key] = dict(payload=payload, digest=value_digest((key, payload)))
 
     def reuse(self, output, publish):
         if self.identity is None:
@@ -237,16 +351,17 @@ class PackageBuildCache:
             complete = True
             publish(staging, output)
             self.reason = "hit"
+            self.objects = record.get("objects", {})
             return manifest
         finally:
             if not complete:
                 shutil.rmtree(staging)
 
     def record(self, output):
-        if self.identity is None:
+        if self.identity is None and not self.objects:
             return
         try:
-            if _namespace_inputs(self.modules) != self.inputs["namespaces"]:
+            if self.identity is not None and _namespace_inputs(self.modules) != self.inputs["namespaces"]:
                 return  # Construction changed an input; do not cache that run.
             self._record(output)
         except _UntrackedInput:
@@ -259,8 +374,9 @@ class PackageBuildCache:
         self.directory.mkdir(parents=True, exist_ok=True)
         # One pointer, published only after a complete package. No duplicate
         # artifact store or mutable frontend object survives the transaction.
-        record = dict(version=1, key=self.identity.key, output=str(output),
-                      inputs=dict(self.identity.inputs), toolchain_files=self.toolchain_files,
+        record = dict(version=1, key=self.identity.key if self.identity else None, output=str(output),
+                      inputs=dict(self.identity.inputs) if self.identity else {}, toolchain_files=self.toolchain_files,
+                      objects=self.objects,
                       manifest_sha256=file_digest(output / "package.json"))
         fd, temporary = tempfile.mkstemp(prefix=".latest-", suffix=".json", dir=self.directory)
         try:

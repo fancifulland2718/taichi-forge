@@ -5970,6 +5970,12 @@ void export_lang(py::module &m) {
       .def("set_compile_options", &AotModuleBuilder::set_compile_options)
       .def("set_artifact_format", &AotModuleBuilder::set_artifact_format)
 #if TI_WITH_LLVM
+      .def("_cpu_build_object_key", [](AotModuleBuilder &builder, const std::string &name, Kernel *kernel) {
+        return dynamic_cast<LlvmAotModuleBuilder &>(builder).cpu_build_object_key(name, kernel);
+      })
+      .def("_restore_cpu_build_object", [](AotModuleBuilder &builder, const std::string &name, const std::string &key) {
+        return dynamic_cast<LlvmAotModuleBuilder &>(builder).restore_cpu_build_object(name, key);
+      })
       .def("_set_ir_cleanup_for_testing",
            [](AotModuleBuilder &builder, bool enabled) {
              auto *llvm_builder =

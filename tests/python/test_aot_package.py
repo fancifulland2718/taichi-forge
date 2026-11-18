@@ -224,6 +224,73 @@ def compute(x: ti.i32) -> ti.i32:
     assert not (tmp_path / 'failed').exists()
 
 
+@test_utils.test(arch=ti.cpu, offline_cache=True)
+def test_package_build_cache_reuses_independent_cpu_object(tmp_path, monkeypatch):
+    from taichi_forge.aot import _package
+    from taichi_forge.aot._package_compilation import PackageCompilation
+
+    ti.lang.impl.current_cfg().offline_cache_file_path = str(tmp_path / 'native')
+    source = '''import taichi_forge as ti
+@ti.func
+def leaf(x: ti.i32) -> ti.i32:
+    return x * 3
+@ti.func
+def forward(x: ti.i32) -> ti.i32:
+    return leaf(x)
+@ti.kernel
+def left(x: ti.i32) -> ti.i32:
+    return forward(x) + 2
+@ti.kernel
+def right(x: ti.i32) -> ti.i32:
+    return leaf(x) - 2
+@ti.kernel
+def separate(x: ti.i32) -> ti.i32:
+    return x + 19
+'''
+    path = tmp_path / 'inputs' / 'scalar_objects.py'
+    path.parent.mkdir()
+    path.write_text(source, encoding='utf8')
+    monkeypatch.syspath_prepend(str(path.parent))
+    monkeypatch.delitem(sys.modules, 'scalar_objects', raising=False)
+    model = importlib.import_module('scalar_objects')
+    captures = []
+    compile_entry = PackageCompilation.compile
+
+    def track_compile(self, code):
+        captures.append(code.kernel.func.__name__)
+        return compile_entry(self, code)
+
+    def export(name):
+        captures.clear()
+        output = tmp_path / name
+        ti.aot.export_package(model, output, artifact_format='bc', build_cache=tmp_path / 'cache')
+        return output
+
+    monkeypatch.setattr(PackageCompilation, 'compile', track_compile)
+    cold = export('cold')
+    assert sorted(captures) == ['left', 'right', 'separate']
+    with monkeypatch.context() as guard:
+        guard.setattr(_package, '_preflight_package', lambda *a, **kw: pytest.fail('warm declaration analysis'))
+        warm = export('warm')
+        assert not captures
+        assert (warm / 'code.tcm').read_bytes() == (cold / 'code.tcm').read_bytes()
+
+    edited = source.replace('x * 3', 'x * 7')
+    path.write_text(edited, encoding='utf8')
+    exec(compile(edited, str(path), 'exec'), vars(model))
+    changed = export('changed')
+    assert sorted(captures) == ['left', 'right']
+    with zipfile.ZipFile(cold / 'code.tcm') as before, zipfile.ZipFile(changed / 'code.tcm') as after:
+        unchanged = [name for name in before.namelist() if name.endswith('.bc') and name in after.namelist()]
+        assert len(unchanged) == 1
+        assert before.read(unchanged[0]) == after.read(unchanged[0])
+    with Runtime(ti.lang.impl.current_cfg().arch.name) as runtime:
+        with load_package(runtime, changed) as code:
+            for x in (0, 7):
+                for name in ('left', 'right', 'separate'):
+                    assert getattr(code.host, name)(x) == getattr(model, name)(x)
+
+
 def test_build_cache_toolchain_digest_reuses_only_unchanged_files(tmp_path, monkeypatch):
     from taichi_forge.lang import _build_cache
 

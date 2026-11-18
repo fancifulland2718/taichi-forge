@@ -121,6 +121,11 @@ class KernelCompilationManager final {
   // retaining only metadata for already-published disk assets until dump().
   void release_build_cache();
 
+  // For a producer with a verified frontend dependency record. A missing
+  // optional object returns nullptr so the caller can perform normal capture.
+  std::unique_ptr<CompiledKernelData> load_build_object(const std::string &key,
+                                                        Arch arch);
+
   // Retire in-memory compiled artifacts that contain a static binding to the
   // specified SNodeTree. Explicit tree destruction is a cold transaction, so
   // this waits for outstanding compilation before removing matching entries.

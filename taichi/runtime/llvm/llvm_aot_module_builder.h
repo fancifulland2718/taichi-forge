@@ -25,6 +25,8 @@ class LlvmAotModuleBuilder : public AotModuleBuilder {
   // Internal comparison override. CUDA bc-library enables cleanup by default;
   // other artifact formats retain their existing production policy.
   void set_ir_cleanup_for_testing(bool enabled);
+  std::string cpu_build_object_key(const std::string &name, Kernel *kernel) const;
+  bool restore_cpu_build_object(const std::string &name, const std::string &key);
   void enable_streaming_exports() override;
   std::map<std::string, std::uint64_t> streaming_export_statistics() override;
   std::map<int, int> exported_snode_tree_bindings() const override {
@@ -58,6 +60,10 @@ class LlvmAotModuleBuilder : public AotModuleBuilder {
       std::shared_ptr<llvm::LLVMContext> &context_owner) const;
   const LLVM::CompiledKernelData &compile_kernel(
       Kernel *kernel, const KernelCompileRequest &request);
+  KernelCompileRequest build_request(Kernel *kernel) const;
+  void store_physical_kernel(const std::string &identifier,
+                             const std::string &identity,
+                             LLVM::CompiledKernelData::InternalData compiled);
   void add_kernel_impl(const std::string &identifier,
                         Kernel *kernel,
                         const std::string &launch_abi);

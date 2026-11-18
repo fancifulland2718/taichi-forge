@@ -107,6 +107,12 @@ class AotModuleBuilder {
     // successful retry must replace facts recorded before that rejection.
     kernel_resource_effects_.insert_or_assign(identifier, metadata);
   }
+  void record_sealed_kernel_export(const std::string &name,
+                                   const GraphKernelMetadata &effects) {
+    kernel_exports_.emplace(name, ExportIdentity{nullptr, "ordinary", {}});
+    record_kernel_resource_effects(name, effects);
+    compile_options_frozen_ = true;
+  }
 
   /**
    * Intended to be overridden by each backend's implementation.

@@ -914,6 +914,29 @@ KernelCompilationManager::install_compiled_kernel_locked(
   return kernel_data;
 }
 
+std::unique_ptr<CompiledKernelData> KernelCompilationManager::load_build_object(
+    const std::string &key, Arch arch) {
+  if (key.size() != 65 || key.front() != 'T' ||
+      key.find_first_not_of("0123456789abcdef", 1) != std::string::npos)
+    return nullptr;
+  {
+    std::lock_guard<std::mutex> guard(cache_mutex_);
+    ensure_metadata_loaded_locked(arch);
+  }
+  auto object = load_ckd(key, arch);
+  if (object) {
+    record_if_enabled(executable_lifecycle_telemetry_.enabled,
+                      executable_lifecycle_telemetry_.disk_loads);
+    std::lock_guard<std::mutex> guard(cache_mutex_);
+    auto found = cached_data_.kernels.find(key);
+    if (found != cached_data_.kernels.end()) {
+      found->second.last_used_at = std::time(nullptr);
+      updated_data_.push_back(&found->second);
+    }
+  }
+  return object;
+}
+
 std::unique_ptr<CompiledKernelData> KernelCompilationManager::load_ckd(
     const std::string &kernel_key,
     Arch arch) {
