@@ -276,9 +276,9 @@ class Canvas:
     def set_image(self, img):
         """Set the content of this canvas to an `img`.
 
-        CUDA images allocated by an AOT Runtime borrowed from this Program are
+        Images allocated by an AOT Runtime borrowed from this Program are
         also accepted (2D u8/f32 scalar or vector with one to four channels).
-        Packing stays on device and reuses the ordinary display converter;
+        CUDA and Vulkan packing stays on device and reuses the ordinary display converter;
         the first binding compiles that converter, without reading engine source.
 
         Args:

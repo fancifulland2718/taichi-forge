@@ -212,7 +212,7 @@ def copy_image_f32_to_rgba8_np(
     num_components: ti.template(),
     gray_scale: ti.template(),
 ):
-    for I in ti.grouped(src):
+    for I in ti.grouped(dst):
         i, j = I[0], I[1]
         px = ti.Vector([0, 0, 0, 0xFF], dt=u32)
         if ti.static(gray_scale):
@@ -261,7 +261,7 @@ def copy_image_u8_to_rgba8_np(
     num_components: ti.template(),
     gray_scale: ti.template(),
 ):
-    for I in ti.grouped(src):
+    for I in ti.grouped(dst):
         i, j = I[0], I[1]
         px = ti.Vector([0, 0, 0, 0xFF], dt=u32)
         if ti.static(gray_scale):
@@ -655,19 +655,23 @@ class _RuntimeImageStaging:
         prepared.run()
 
 
-def _pack_runtime_image(image, destination):
-    from taichi_forge.lang._storage_view import DenseNdarrayView
-
+def _check_runtime_image(image):
     runtime = image._memory._runtime
     if getattr(runtime, '_frontend_program', None) is not ti.lang.impl.get_runtime().prog:
         raise ValueError('Runtime display images must borrow the current Program')
     image._descriptor(runtime)
-    if runtime.arch != 'cuda':
-        raise ValueError('Runtime display staging currently requires CUDA')
     if (image.dtype not in ('f32', 'u8') or len(image.shape) != 2
             or len(image.element_shape) > 1
             or (image.element_shape and not 1 <= image.element_shape[0] <= 4)):
         raise ValueError('Runtime display image requires a 2D u8/f32 scalar or one-to-four-channel vector')
+
+
+def _pack_runtime_image(image, destination):
+    from taichi_forge.lang._storage_view import DenseNdarrayView
+
+    _check_runtime_image(image)
+    if image._memory._runtime.arch not in ('cuda', 'vulkan'):
+        raise ValueError('Device display staging requires CUDA or Vulkan')
     shape = tuple(image.shape)
     if destination is not None:
         dtype = destination._element_type if isinstance(destination, DenseNdarrayView) else destination.dtype
@@ -687,6 +691,24 @@ def _pack_runtime_image(image, destination):
 
 
 def to_rgba8(image):
+    from taichi_forge_runtime.aot._runtime import NdArray as RuntimeArray
+
+    if isinstance(image, RuntimeArray):
+        _check_runtime_image(image)
+        buffers = _image_object_field_cache.get(image)
+        if buffers is None:
+            source = np.empty(image.shape + image.element_shape, dtype=np.float32 if image.dtype == "f32" else np.uint8)
+            buffers = source, np.empty(image.shape, dtype=np.uint32)
+            _image_object_field_cache[image] = buffers
+        source, packed = buffers
+        image.read_into(source)
+        channels = image.element_shape[0] if image.element_shape else 1
+        if _should_pack_taichi_image_on_host(image):
+            _copy_numpy_image_to_rgba8(source, packed, channels, not image.element_shape)
+        else:
+            converter = copy_image_f32_to_rgba8_np if image.dtype == "f32" else copy_image_u8_to_rgba8_np
+            converter(source, packed, channels, not image.element_shape)
+        return packed
     is_texture = isinstance(image, Texture)
     is_grayscale = not hasattr(image, "n") and len(image.shape) == 2
     is_numpy = isinstance(image, np.ndarray)

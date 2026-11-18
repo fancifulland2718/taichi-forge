@@ -10,6 +10,22 @@ from taichi_forge.ui.staging_buffer import copy_image_f32_to_rgba8_ti_ndarray, r
 from tests import test_utils
 
 
+@pytest.mark.parametrize("dtype,element", [("u8", ()), ("f32", (1,)), ("f32", (3,)), ("u8", (4,))])
+@test_utils.test(arch=ti.cpu, offline_cache=False)
+def test_cpu_runtime_display_reads_live_pixels(dtype, element):
+    from taichi_forge.ui.staging_buffer import to_rgba8
+
+    # Exercise the normal large-image converter with a non-square framebuffer.
+    shape = (257, 129)
+    values = np.arange(np.prod(shape + element)).reshape(shape + element) % 256
+    values = values.astype(np.float32) / 255 if dtype == "f32" else values.astype(np.uint8)
+    with ti.aot.borrow_runtime() as runtime:
+        image = runtime.ndarray(dtype, shape, element_shape=element)
+        for frame in (values, values[::-1].copy()):
+            image.from_numpy(frame)
+            np.testing.assert_array_equal(to_rgba8(image), to_rgba8(frame))
+
+
 @pytest.mark.parametrize('dtype,channels', [('f32', 3), ('f32', 4), ('u8', 1)])
 @test_utils.test(arch=ti.cuda, offline_cache=False)
 def test_runtime_image_staging_reuses_device_code_and_releases_source(monkeypatch, dtype, channels):
