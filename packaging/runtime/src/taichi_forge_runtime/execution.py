@@ -33,6 +33,9 @@ class _PackageImports(importlib.abc.MetaPathFinder, importlib.abc.Loader):
         if self.session.mode == "hybrid":
             if fullname not in self.session._module_names:
                 return None
+            if (fullname in self.session._jit_dependencies
+                    and importlib.machinery.PathFinder.find_spec(fullname, path) is not None):
+                return None
         elif fullname.split(".")[0] not in self.session._roots:
             return None
         spec = importlib.util.spec_from_loader(fullname, self, is_package=self.session._is_package(fullname))
@@ -169,6 +172,7 @@ class ExecutionSession:
         self._index = None
         self._roots = set()
         self._module_names = set()
+        self._jit_dependencies = set()
         self._active = self._closed = False
 
     @property
@@ -222,7 +226,8 @@ class ExecutionSession:
                         existing = sorted(
                             name
                             for name in sys.modules
-                            if name in self._module_names and (name in exported or not self._is_package(name))
+                            if name in self._module_names and name not in self._jit_dependencies
+                            and (name in exported or not self._is_package(name))
                         )
                     else:
                         existing = sorted(name for name in sys.modules if name.split(".")[0] in self._roots)
@@ -271,6 +276,8 @@ class ExecutionSession:
                 if file.name == "package.json":
                     candidates.add(Path(distribution.locate_file(file)).resolve())
         index = []
+        jit_dependencies = set()
+        package_owned = set()
         for path in sorted(candidates):
             try:
                 manifest = json.loads(path.read_text(encoding="utf8"))
@@ -287,6 +294,15 @@ class ExecutionSession:
             ):
                 raise ValueError(f"Package has no valid module import boundary: {path}")
             module_names = frozenset(modules) | {root}
+            if self.mode == "hybrid" and manifest.get("target") == self.arch:
+                helpers = manifest.get("jit_dependency_modules", [])
+                if not isinstance(helpers, list) or not all(isinstance(name, str) for name in helpers):
+                    raise ValueError(f"Invalid JIT dependency module list: {path}")
+                helpers = set(helpers)
+                if not helpers <= module_names or helpers.intersection(manifest.get("module_roots", [root])):
+                    raise ValueError(f"Invalid JIT dependency module list: {path}")
+                jit_dependencies.update(helpers)
+                package_owned.update(module_names.difference(helpers))
             packages = frozenset(
                 name
                 for name in module_names
@@ -294,6 +310,7 @@ class ExecutionSession:
             )
             index.append((path.parent, manifest.get("target"), root, module_names, packages))
         self._index = tuple(index)
+        self._jit_dependencies = jit_dependencies - package_owned
 
     def _is_package(self, name):
         return any(name in item[4] or any(m.startswith(name + ".") for m in item[3]) for item in self._index)

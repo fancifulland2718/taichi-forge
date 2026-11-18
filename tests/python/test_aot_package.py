@@ -13613,16 +13613,20 @@ def __getattr__(name):
     source_root = tmp_path / 'source'
     source_root.mkdir()
     package = _source_package(source_root, monkeypatch, '''import taichi_forge as ti
+from .device_helpers import scale
 @ti.kernel
 def value(x: ti.i32) -> ti.i32:
-    return x * 3
+    return scale(x, 3)
 ''', initializer=initializer)
     parent = Path(package.__file__).parent
     (parent / 'caller.py').write_text(
-        'from .model import value\ndef call(x):\n    return value(x) + 1\n', encoding='utf8')
+        'import taichi_forge as ti\nfrom .device_helpers import scale\nfrom .model import value\n'
+        '@ti.kernel\ndef double(x: ti.i32) -> ti.i32:\n    return scale(x, 2)\n'
+        'def call(x):\n    return value(x) + double(1)\n', encoding='utf8')
     core = importlib.import_module('definition_fixture.model')
     manifest = ti.aot.export_package(core, tmp_path / 'sdk', source_root=source_root)
     assert 'definition_fixture.caller' not in manifest['application_modules']
+    assert 'definition_fixture.device_helpers' in manifest['jit_dependency_modules']
     with Runtime(manifest['target']) as runtime, load_package(runtime, tmp_path / 'sdk') as code:
         root = code.module('definition_fixture')
         # The standalone/private namespace must not borrow caller-side source.
@@ -13637,7 +13641,7 @@ def value(x: ti.i32) -> ti.i32:
     try:
         public = importlib.import_module('definition_fixture')
         assert public.value(5) == 15
-        assert public.caller(7) == 22
+        assert public.caller(7) == 23
         loaded = public.value.package
         session = ti.lang.impl.get_runtime()._package_execution_session
         assert tuple(session._packages.values()) == (loaded,)

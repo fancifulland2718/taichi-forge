@@ -1966,6 +1966,7 @@ def _export_package(package, output, *, arch, caps, source_root, compilation, ar
         raise PackageExportError("Package Host projection failed before numerical compilation:\n"
                                  + "\n".join(host_failures))
     shared_entries, pyfunc_kernels, closure_kernels = {}, {}, {}
+    factory_modules = {fact["definition"].rpartition(".")[0] for fact in manifest["declaration_factories"]}
     for source_index, (name, source_path, relative, text, tree, kind, schemas, definitions) in enumerate(sources):
         imported = imported_modules[name]
         if any(getattr(node, "_package_inherited_resource_dependencies", False) for node in tree.body):
@@ -3013,6 +3014,16 @@ def _export_package(package, output, *, arch, caps, source_root, compilation, ar
             manifest["entry_families"][symbol] = dict(arguments=contract["arguments"], owner_inputs=methods)
             entries[definition["name"]] = dict(symbol=symbol)
         projected, minimum_version, producer_only, runtime_requirements = host_projections.pop(name)
+        # The private package retains its projection. An unpackaged JIT caller
+        # may independently need the original device helpers or Field factory.
+        # Never divert an exported root, numerical entry, or resource owner.
+        if application_modules is not None and not entries and not schemas:
+            free_helpers = all(d["kind"] in ("func", "real_func") and not d.get("owner")
+                               and not d.get("error_interface") for d in definitions)
+            helper_module = bool(definitions) and not any(isinstance(node, ast.ClassDef) for node in tree.body)
+            if (free_helpers and (helper_module or name in factory_modules)
+                    and not any(name == root or name.startswith(root + ".") for root in manifest["module_roots"])):
+                manifest.setdefault("jit_dependency_modules", []).append(name)
         host_source = projected.bind(entries)
         payloads["host/" + relative.as_posix()] = host_source.encode("utf8")
         manifest["version"] = max(manifest["version"], minimum_version)
