@@ -182,7 +182,11 @@ class Offloader {
             OffloadedStmt::TaskType::range_for, arch, kernel);
         // offloaded->body is an empty block now.
         offloaded->grid_dim = config.saturating_grid_dim;
-        if (kernel && (arch == Arch::cuda || arch == Arch::vulkan)) {
+        const bool prepared_cpu_range =
+            arch_is_cpu(arch) && config.llvm_aot_relocatable_roots &&
+            config.make_cpu_multithreading_loop && !s->one_to_one;
+        if (kernel && (arch == Arch::cuda || arch == Arch::vulkan ||
+                       prepared_cpu_range)) {
           offloaded->host_launch_range =
               describe_host_range_bounds(s->begin, s->end, kernel->args_type);
         }

@@ -1,4 +1,5 @@
 #include "taichi/codegen/cpu/codegen_cpu.h"
+#include "taichi/runtime/llvm/aot_cpu_range.h"
 
 #include "taichi/runtime/program_impls/llvm/llvm_program.h"
 #include "taichi/runtime/llvm/llvm_opt_pipeline.h"
@@ -224,6 +225,18 @@ class TaskCodeGenCPU : public TaskCodeGenLLVM {
            tlctx->get_constant(1), tlctx->get_constant(1), tls_prologue, body,
            epilogue, tlctx->get_constant(stmt->tls_size));
     } else {
+      // Only the ordinary CPU chunk transform owns this outer [0, workers)
+      // range. TLS and block callbacks may have effects even in empty chunks.
+      if (compile_config.llvm_aot_relocatable_roots &&
+          compile_config.make_cpu_multithreading_loop &&
+          stmt->host_launch_range && !stmt->reversed && !stmt->tls_prologue &&
+          !stmt->tls_epilogue && !stmt->bls_prologue && !stmt->bls_epilogue &&
+          stmt->const_begin && stmt->begin_value == 0 && stmt->const_end &&
+          stmt->end_value == compile_config.cpu_max_num_threads &&
+          (stmt->host_launch_range->begin.has_inputs() ||
+           stmt->host_launch_range->end.has_inputs())) {
+        end = LLVM::emit_cpu_chunk_count(*builder, *func, stmt->end_value);
+      }
       call(scheduler, get_arg(0), tlctx->get_constant(stmt->num_cpu_threads),
            begin, end, tlctx->get_constant(step),
            tlctx->get_constant(stmt->block_dim), tls_prologue, body, epilogue,
@@ -522,6 +535,8 @@ void KernelCodeGenCPU::optimize_module(llvm::Module *module) {
     opts.run_post_gep_passes = true;
     run_module_opt_pipeline(*module, target_machine.get(), opts);
   }
+  if (compile_config.llvm_aot_relocatable_roots)
+    LLVM::seal_cpu_chunk_counts(*module);
 
   if (compile_config.print_kernel_asm) {
     // Generate assembly code if necessary. Codegen still uses the

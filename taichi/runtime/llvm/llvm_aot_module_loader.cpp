@@ -20,6 +20,7 @@
 #include "taichi/runtime/llvm/aot_artifact_integrity.h"
 #include "taichi/runtime/llvm/aot_kernel_contract.h"
 #include "taichi/runtime/llvm/aot_prepared_range.h"
+#include "taichi/runtime/llvm/aot_cpu_range.h"
 #include "taichi/runtime/llvm/aot_snode_relocation.h"
 #include "taichi/runtime/llvm/aot_snode_resources.h"
 #include "taichi/codegen/llvm/cuda_graph_gate.h"
@@ -509,6 +510,22 @@ aot::Kernel *LlvmAotModule::specialize_kernel(
   }
   for (auto it = tasks.begin(); it != tasks.end();) {
     auto &range = it->range_bounds;
+    if (arch_is_cpu(arch())) {
+      if (range && range->host_launch &&
+          it->task_type == OffloadedTaskType::range_for && !it->one_to_one) {
+        const auto &bounds = *range->host_launch;
+        if (fixed_bound(bounds.begin) && fixed_bound(bounds.end)) {
+          auto *entry = module.getFunction(it->name);
+          const auto *args = context.get_context().arg_buffer;
+          const auto begin = bounds.begin.evaluate(args, kernel.args_size);
+          const auto end = bounds.end.evaluate(args, kernel.args_size);
+          if (entry && begin && end)
+            specialize_cpu_chunk_count(*entry, *range, *begin, *end);
+        }
+      }
+      ++it;
+      continue;
+    }
     bool empty_has_no_effects = false;
     if (arch() == Arch::cuda && it->task_type == OffloadedTaskType::range_for &&
         range && range->host_launch &&

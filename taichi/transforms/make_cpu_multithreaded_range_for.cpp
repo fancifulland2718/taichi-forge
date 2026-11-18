@@ -1,11 +1,9 @@
+#include "taichi/codegen/cpu/range_partition.h"
 #include "taichi/ir/ir.h"
 #include "taichi/ir/statements.h"
 #include "taichi/ir/transforms.h"
 #include "taichi/ir/visitors.h"
 #include "taichi/transforms/utils.h"
-
-#include <algorithm>
-#include <limits>
 
 namespace taichi::lang {
 
@@ -62,24 +60,7 @@ int static_chunk_count(const OffloadedStmt *task, int num_threads) {
       return num_threads;
     }
   }
-  const int64_t extent =
-      int64_t(task->end_value) - int64_t(task->begin_value);
-  const int64_t rounded = extent + num_threads - 1;
-  // The existing generated partition uses i32 arithmetic. Only trim it when
-  // that arithmetic is proven representable; never change the productive
-  // partition or infer bounds from the first runtime call.
-  const auto lo = std::numeric_limits<int32_t>::min();
-  const auto hi = std::numeric_limits<int32_t>::max();
-  if (extent < lo || extent > hi || rounded < lo ||
-      extent + num_threads > hi) {
-    return num_threads;
-  }
-  const int64_t chunk = std::max<int64_t>(512, rounded / num_threads);
-  if (chunk * num_threads > hi ||
-      int64_t(task->begin_value) + chunk * num_threads > hi) {
-    return num_threads;
-  }
-  return extent <= 0 ? 0 : int((extent + chunk - 1) / chunk);
+  return cpu_range_chunk_count(task->begin_value, task->end_value, num_threads);
 }
 
 class MakeCPUMultithreadedRangeFor : public BasicStmtVisitor {
@@ -112,8 +93,9 @@ class MakeCPUMultithreadedRangeFor : public BasicStmtVisitor {
     auto offloaded_body = std::make_unique<Block>();
     auto one = offloaded_body->insert(
         Stmt::make_typed<ConstStmt>(TypedConstant(PrimitiveType::i32, 1)));
-    auto minimal_block_range = offloaded_body->insert(
-        Stmt::make_typed<ConstStmt>(TypedConstant(PrimitiveType::i32, 512)));
+    auto minimal_block_range =
+        offloaded_body->insert(Stmt::make_typed<ConstStmt>(
+            TypedConstant(PrimitiveType::i32, kCpuMinChunkSize)));
     auto num_threads = offloaded_body->insert(Stmt::make_typed<ConstStmt>(
         TypedConstant(PrimitiveType::i32, config.cpu_max_num_threads)));
     auto thread_index =

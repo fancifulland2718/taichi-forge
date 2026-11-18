@@ -90,6 +90,60 @@ def test_jit_aot_function_contract_matches_values_effects_and_static_inputs(tmp_
             loaded.kernel("update_0").bind(wrong, ledger, Scalar("i32", delta)).prepare(specialize=True)
 
 
+@test_utils.test(arch=ti.cpu, cpu_max_num_threads=8, offline_cache=False)
+def test_cpu_prepare_specializes_only_fixed_range_chunks(tmp_path):
+    from taichi_forge.profiler.cpu_scheduler import (
+        query_cpu_scheduler_telemetry, set_cpu_scheduler_telemetry,
+    )
+    from taichi_forge_runtime.aot import Scalar
+
+    @ti.kernel
+    def fill(data: ti.types.ndarray(ti.i32, 1), start: ti.i32, stop: ti.i32,
+             active: ti.types.ndarray(ti.i32, 1)):
+        for i in range(start, stop):
+            data[i] += 1
+        for i in range(data.shape[0]):
+            data[i] += 2
+        for i in range(active[0]):
+            data[i] += 4
+
+    module = ti.aot.Module(artifact_format="bc")
+    module.add_kernel(fill)
+    artifact = tmp_path / "cpu_chunks.tcm"
+    module.archive(str(artifact))
+    with ti.aot.borrow_runtime() as runtime, runtime.load_module(artifact) as loaded, ExitStack() as stack:
+        entry = loaded.kernel("fill")
+        size = 1031
+        data = stack.enter_context(closing(runtime.ndarray("i32", (size,))))
+        active = stack.enter_context(closing(runtime.ndarray("i32", (1,))))
+        active.write(np.zeros(1, np.int32))
+        cases = []
+        for start, stop, fixed, chunks in (
+            (11, 13, (1, 2), 1), (5, 518, (1, 2), 2),
+            (3, 3, (1, 2), 0), (10, 9, (1, 2), 0),
+            (0, 2, (1,), 8), (0, 1025, (1,), 8),
+        ):
+            bound = entry.bind(data, Scalar("i32", start), Scalar("i32", stop), active)
+            ready = stack.enter_context(closing(bound.prepare(specialize=True, constant_args=fixed)))
+            cases.append((ready, start, stop, chunks))
+        set_cpu_scheduler_telemetry(True)
+        try:
+            for ready, start, stop, chunks in reversed(cases):
+                active.write(np.array([stop], np.int32))
+                data.write(np.zeros(size, np.int32))
+                query_cpu_scheduler_telemetry(reset=True)
+                ready.run()
+                runtime.wait()
+                # Shape takes three chunks; the live array load keeps all eight.
+                assert query_cpu_scheduler_telemetry()["tasks_requested"] == chunks + 3 + 8
+                expected = np.full(size, 2, dtype=np.int32)
+                expected[start:stop] += 1
+                expected[:stop] += 4
+                np.testing.assert_array_equal(np.frombuffer(data.read(), np.int32), expected)
+        finally:
+            set_cpu_scheduler_telemetry(False, reset=True)
+
+
 @test_utils.test(arch=[ti.cpu, ti.cuda, ti.vulkan], offline_cache=False)
 @pytest.mark.parametrize("fold_dimensions", [False, True])
 def test_prepared_bitcode_specialization_keeps_shapes_and_instances_independent(tmp_path, fold_dimensions):

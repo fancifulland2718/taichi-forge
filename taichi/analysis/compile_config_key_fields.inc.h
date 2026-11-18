@@ -54,6 +54,9 @@
     CACHE_FIELD(make_cpu_multithreading_loop);
     if (config.make_cpu_multithreading_loop) {
       CACHE_VALUE(std::string("cpu-static-productive-chunks-v1"));
+      if (config.llvm_aot_relocatable_roots) {
+        CACHE_VALUE(std::string("cpu-aot-prepared-chunks-v1"));
+      }
     }
   } else if (arch_is_gpu(config.arch)) {
     CACHE_FIELD(default_gpu_block_dim);
