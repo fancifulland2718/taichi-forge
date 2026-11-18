@@ -150,6 +150,10 @@ def test_package_owner_frontier_deduplicates_shared_child_choices(monkeypatch):
     kernel = object()
 
     class Graph:
+        def entry_query_paths(self, identity, method, schema, paths):
+            assert (identity, method) == ("Parent", "step")
+            return frozenset(), frozenset()
+
         def context(self, identity, selection):
             calls.append(dict(selection))
             selected = selection.get(("flag",), False)
@@ -168,6 +172,7 @@ def test_package_owner_frontier_deduplicates_shared_child_choices(monkeypatch):
 
     def compile_choices(environment, entry, arguments, owner, schema, **kwargs):
         # Several numerical implementations discover the same owner choices.
+        assert kwargs["owner_type"] == "Parent"
         return [
             SimpleNamespace(kernel=kernel, key=(owner.flag, i), static={"flag": static_key(owner.flag)},
                             objects={}, used={"child_value"})
@@ -176,10 +181,11 @@ def test_package_owner_frontier_deduplicates_shared_child_choices(monkeypatch):
 
     monkeypatch.setattr(variants, "deque", UniqueFrontier)
     monkeypatch.setattr(variants, "compile_static_variants", compile_choices)
-    results = variants.compile_owner_variants(Graph(), "Parent", object(), ())
-    assert calls == [{}, {("flag",): False}, {("flag",): True}]
+    entry = SimpleNamespace(_primal=SimpleNamespace(func=SimpleNamespace(__name__="step")))
+    results = variants.compile_owner_variants(Graph(), "Parent", entry, ())
+    assert calls == [{}, {("flag",): True}]  # The default already selected False.
     assert {code.key for code, *_ in results} == {(value, i) for value in (False, True) for i in range(3)}
-    assert len(results) == 6 and len(queued) == 3
+    assert len(results) == 6 and len(queued) == 2
 
 
 @test_utils.test(arch=ti.cpu, offline_cache=False)

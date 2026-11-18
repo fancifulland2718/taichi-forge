@@ -14,8 +14,20 @@ from taichi_forge.lang.ast._uniform_schedule import (
 )
 
 
+def _receiver_path(expression, receiver):
+    """Return the member path from an instance parameter, or None for an unknown receiver."""
+    path = []
+    while isinstance(expression, ast.Attribute):
+        path.append(expression.attr)
+        expression = expression.value
+    if isinstance(expression, ast.Name) and expression.id == receiver:
+        return tuple(reversed(path))
+    return None
+
+
 class StaticPreparation:
-    def __init__(self, sources):
+    def __init__(self, sources, *, method_implementations=None):
+        self._method_implementations = method_implementations or {}
         self.uses = {}
         self._contexts = {}
         self._entry_uses = {}
@@ -161,10 +173,22 @@ class StaticPreparation:
             nodes, parents = function_syntax[id(function)]
             uses = {False: {}, True: {}}
             edges = set()
+            parameters = (*function.args.posonlyargs, *function.args.args)
+            receiver = parameters[0].arg if parameters and identity in self._task_context_methods else None
+            if receiver and any(
+                (isinstance(n, (ast.FunctionDef, ast.Lambda)) and n is not function)
+                or (isinstance(n, (ast.Name, ast.Attribute)) and isinstance(n.ctx, (ast.Store, ast.Del))
+                    and _receiver_path(n, receiver) is not None)
+                for n in nodes
+            ):
+                receiver = None
             for node in nodes:
                 if isinstance(node, ast.Call):
                     callee = getattr(node.func, "attr", getattr(node.func, "id", ""))
-                    edges.add((callee, self._threaded(node, parents, kind)))
+                    if callee in self._names:
+                        path = (_receiver_path(node.func.value, receiver)
+                                if receiver and isinstance(node.func, ast.Attribute) else None)
+                        edges.add((callee, self._threaded(node, parents, kind), path))
                     if (
                         isinstance(node.func, ast.Name)
                         and callee in ("getattr", "hasattr")
@@ -243,23 +267,33 @@ class StaticPreparation:
                 return True
         return False
 
-    def entry_uses(self, identity):
-        if identity in self._entry_uses:
+    def entry_uses(self, identity, owners=None):
+        if not owners and identity in self._entry_uses:
             return self._entry_uses[identity]
         if identity not in self._functions:
             return self.uses
-        pending, visited, result = [(identity, False)], set(), {}
+        pending, visited, result = [(identity, False, () if owners else None)], set(), {}
         while pending:
-            key, threaded = pending.pop()
-            if (key, threaded) in visited:
+            state = pending.pop()
+            if state in visited:
                 continue
-            visited.add((key, threaded))
+            visited.add(state)
+            key, threaded, prefix = state
             contexts, edges = self._functions[key]
             for name, reasons in contexts[threaded].items():
                 result.setdefault(name, set()).update(reasons)
-            for callee, local in edges:
-                pending.extend((target, threaded or local) for target in self._names.get(callee, ()))
-        self._entry_uses[identity] = result
+            for callee, local, relative in edges:
+                if prefix is not None and relative is not None:
+                    path = prefix + relative
+                    target = self._method_implementations.get(owners.get(path), {}).get(callee)
+                    if target in self._names[callee]:
+                        pending.append((target, threaded or local, path))
+                        continue
+                # Unknown dispatch cannot transfer the caller's binding proof
+                # to another function's first argument.
+                pending.extend((target, threaded or local, None) for target in self._names[callee])
+        if not owners:
+            self._entry_uses[identity] = result
         return result
 
     def requires_task_context(self, source, args):
@@ -638,8 +672,8 @@ class StaticPreparation:
             return {"non_condition_use"}
         return {"non_condition_use"}
 
-    def schema_uses(self, paths, identity=None):
-        uses = self.entry_uses(identity) if identity else self.uses
+    def schema_uses(self, paths, identity=None, *, owners=None):
+        uses = self.entry_uses(identity, owners) if identity else self.uses
         patterns = [(re.compile(key[len('getattr:'):], re.DOTALL), reasons)
                     for key, reasons in uses.items() if key.startswith('getattr:')]
         if not patterns and '*' not in uses:
@@ -692,7 +726,7 @@ class StaticPreparation:
             facts[name] = reason
         return facts
 
-    def project(self, environment, schema, kernel, *, query_paths=None):
+    def project(self, environment, schema, kernel, *, query_paths=None, owner_type=None):
         from taichi_forge.types.ray_type import AccelerationStructureType
         from taichi_forge.types.texture_type import TextureType, RWTextureType
 
@@ -709,14 +743,21 @@ class StaticPreparation:
         # Capture establishes this entry's projection for the selected witness.
         # Manifest assembly reuses it, including the exact query readset, rather
         # than resolving the same owner graph once per emitted code variant.
-        key = environment, identity
+        key = environment, identity, owner_type
         cached = self._contexts.get(key)
         if cached is not None:
             return cached
         from taichi_forge.types import primitive_types
         from ._component import RuntimeValue
 
-        uses = self.schema_uses(environment._paths, identity)
+        owners = None
+        if self._method_implementations.get(owner_type, {}).get(kernel.func.__name__) == identity:
+            # construct() has already selected this environment's declared
+            # child implementations, including conditional and borrowed ones.
+            owners = {tuple(environment._paths[name]): item['owner_type'] for name, item in schema.items()
+                      if item['kind'] in ('owner', 'owner_input') and name in environment._paths}
+            owners[()] = owner_type
+        uses = self.schema_uses(environment._paths, identity, owners=owners)
         facts = self.classify(schema, environment._paths, identity, uses=uses)
         declarations, projected = dict(environment.declarations), dict(schema)
         for name, reason in facts.items():

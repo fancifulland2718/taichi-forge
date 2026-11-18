@@ -1844,6 +1844,9 @@ def _export_package(output, declarations, source_root, caps, artifact_format, co
     package = packages[0]
     module = Module(caps=caps, artifact_format=artifact_format)
     compilation.attach(module, function_library=artifact_format == "bc-library")
+    from ._package_owner_graph import OwnerGraph, owner_bindings, layout_owner
+
+    owner_graph = OwnerGraph(sources, imported_modules, module, field_trees=compilation.field_trees)
     # Configuration classification belongs to the definition producer, not
     # the CUDA function-library storage format. All specialization-capable IR
     # routes must project the same numeric predicates and query resources
@@ -1851,10 +1854,8 @@ def _export_package(output, declarations, source_root, caps, artifact_format, co
     if artifact_format in ("bc", "bc-library") or module._arch == ti.vulkan:
         from ._package_static import StaticPreparation
 
-        compilation.static_preparation = StaticPreparation(sources)
-    from ._package_owner_graph import OwnerGraph, owner_bindings, layout_owner
-
-    owner_graph = OwnerGraph(sources, imported_modules, module, field_trees=compilation.field_trees)
+        compilation.static_preparation = StaticPreparation(
+            sources, method_implementations=owner_graph.method_implementations)
     manifest = dict(
         version=(
             3
@@ -2514,6 +2515,8 @@ def _export_package(output, declarations, source_root, caps, artifact_format, co
                             f"Conditional resource {attribute!r} requires its declared static guard in the numerical entry",
                         )
 
+            owner_type = (name + "." + owner_name
+                          if owner_name is not None and "closure_environment" not in definition else None)
             try:
                 if "closure_environment" not in definition and any(
                     item.get("owner_alternatives")
@@ -2540,9 +2543,10 @@ def _export_package(output, declarations, source_root, caps, artifact_format, co
                             on_compiled=compilation.compile,
                             validate_capture=validate_capture,
                             query_paths=(owner_graph.entry_query_paths(
-                                name + "." + owner_name, entry._primal.func.__name__,
+                                owner_type, entry._primal.func.__name__,
                                 compilation_schema, environment._paths)
-                                if owner_name is not None and "closure_environment" not in definition else None),
+                                if owner_type is not None else None),
+                            owner_type=owner_type,
                         )
                     ]
             except Exception as error:
@@ -2555,7 +2559,7 @@ def _export_package(output, declarations, source_root, caps, artifact_format, co
                 contract = code.contract
                 if compilation.static_preparation is not None:
                     environment, compilation_schema, _ = compilation.static_preparation.project(
-                        environment, compilation_schema, code.kernel)
+                        environment, compilation_schema, code.kernel, owner_type=owner_type)
                 if any(item["kind"] in ("owner", "owner_input") and item.get("dynamic_input_record")
                        for item in compilation_schema.values()):
                     # Reuses the optional typed-owner and nullable resource

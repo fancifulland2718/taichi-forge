@@ -3,7 +3,8 @@
 import ast
 import builtins
 import copy
-from types import MappingProxyType, ModuleType, SimpleNamespace
+import inspect
+from types import FunctionType, MappingProxyType, ModuleType, SimpleNamespace
 
 
 def _member_paths(node, receiver, forwarded=None, method_reads=None, nodes=None, aliases=None, alias_values=()):
@@ -351,9 +352,22 @@ class OwnerGraph:
         # indices do not. They do not own or construct application resources.
         reads = _MethodInputPaths(methods, node_modules, device_functions, static)
         self._method_input_paths = {}
+        self.method_implementations = {}
         for identity, nodes in methods.items():
+            name, cls_name, _ = self.definitions[identity]
+            cls = getattr(imported[name], cls_name)
+            implementations = self.method_implementations[identity] = {}
             summaries = self._device_methods.setdefault(identity, {})
             for method, node in nodes.items():
+                # Only a normal bound DSL method proves the identity of its
+                # receiver. Look up descriptors without executing Host code.
+                wrapper = inspect.getattr_static(cls, method, None)
+                if isinstance(wrapper, FunctionType) and (
+                    getattr(wrapper, '_is_taichi_function', False) or getattr(wrapper, '_is_wrapped_kernel', False)
+                ):
+                    original = getattr(wrapper, '__wrapped__', None)
+                    if isinstance(original, FunctionType) and original.__name__ == method:
+                        implementations[method] = original.__module__ + '.' + original.__qualname__
                 parameters = (*node.args.posonlyargs, *node.args.args, *node.args.kwonlyargs)
                 for parameter in parameters:
                     self._method_input_paths[identity, id(node), parameter.arg] = reads.parameter(

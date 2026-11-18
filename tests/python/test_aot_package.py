@@ -6357,6 +6357,83 @@ class Model:
 """
 
 
+@test_utils.test(arch=[ti.cpu, ti.cuda], offline_cache=False)
+def test_package_protocol_method_uses_follow_the_bound_query(tmp_path, monkeypatch):
+    source = """import taichi_forge as ti
+@ti.data_oriented
+class Offset:
+    def __init__(self, level: int):
+        self.level = level
+        ti.experimental.ResourceScope(self).static('level', choices=(1, 2))
+    @ti.func
+    def lookup(self, value):
+        if ti.static(self.level == 2):
+            value += 7
+        return value
+@ti.data_oriented
+class Unrolled:
+    def __init__(self, level: int):
+        self.level = level
+        ti.experimental.ResourceScope(self).static('level', choices=(1, 2))
+    @ti.func
+    def lookup(self, value):
+        for i in ti.static(range(self.level)):
+            value += 3
+        return value
+@ti.data_oriented
+class Model:
+    def __init__(self, source: Offset | Unrolled):
+        scope = ti.experimental.ResourceScope(self)
+        scope.owner_reference('source', source)
+    @ti.func
+    def sample(self, value):
+        return self.source.lookup(value)
+    @ti.kernel
+    def run(self, value: ti.i32) -> ti.i32:
+        return self.sample(value)
+"""
+    package = _source_package(tmp_path, monkeypatch, source, initializer='from .model import Model, Offset, Unrolled\n')
+    artifact_format = 'bc-library' if ti.cfg.arch == ti.cuda else 'bc'
+    manifest = ti.aot.export_package(package, tmp_path / 'sdk', artifact_format=artifact_format)
+    entries = [e for e in manifest['entries'].values() if e['definition'].endswith('.run')]
+    assert len(entries) == 3  # One numeric condition and two genuine unroll counts.
+    assert sum(any('prepare_static' in capture for capture in e['captures']) for e in entries) == 1
+    with Runtime(manifest['target']) as runtime, load_package(runtime, tmp_path / 'sdk') as code:
+        for name in ('Offset', 'Unrolled'):
+            for level in (1, 2):
+                original = package.Model(getattr(package, name)(level))
+                loaded = code.host.Model(getattr(code.host, name)(level))
+                for value in (4, -8):
+                    assert loaded.run(value) == original.run(value)
+
+
+def test_package_unresolved_protocol_call_keeps_other_method_uses():
+    from taichi_forge.aot._package_static import StaticPreparation
+    from taichi_forge.tools._compiled_host import decorator_resolver
+
+    source = """import taichi_forge as ti
+class First:
+    @ti.func
+    def lookup(self):
+        return self.offset
+class Second:
+    @ti.func
+    def lookup(self):
+        return self.scale
+class Reader:
+    @ti.kernel
+    def run(self, other: ti.template()):
+        return self.source.lookup() + other.lookup()
+"""
+    tree = ast.parse(source)
+    proof = StaticPreparation(
+        [('model', None, None, source, tree, decorator_resolver(tree), None, None)],
+        method_implementations={'model.First': {'lookup': 'model.First.lookup'}},
+    )
+    uses = proof.entry_uses('model.Reader.run', {(): 'model.Reader', ('source',): 'model.First'})
+    assert {'offset', 'scale'} <= uses.keys()
+
+
 @pytest.mark.parametrize("quoted", [False, True])
 @test_utils.test(arch=[ti.cpu, ti.cuda], offline_cache=False)
 def test_package_owner_union_uses_declared_types_without_constructor_samples(tmp_path, monkeypatch, quoted):
