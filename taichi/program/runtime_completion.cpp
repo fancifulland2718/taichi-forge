@@ -446,8 +446,9 @@ class CudaEventCompletion final : public CompletionPrimitive {
   }
 
   bool is_ready() override {
-    auto context_guard = CUDAContext::get_instance().get_guard();
-    auto &driver = CUDADriver::get_instance();
+    // Event observation addresses the retained CUevent directly. The polling
+    // thread may have no current context or be submitting to another one.
+    auto &driver = CUDADriver::get_instance_without_context();
     const std::uint32_t result = driver.event_query.call(event_);
     if (result == CUDA_SUCCESS) {
       reusable_ = true;
@@ -461,8 +462,7 @@ class CudaEventCompletion final : public CompletionPrimitive {
   }
 
   void wait() override {
-    auto context_guard = CUDAContext::get_instance().get_guard();
-    auto &driver = CUDADriver::get_instance();
+    auto &driver = CUDADriver::get_instance_without_context();
     const std::uint32_t result = driver.event_synchronize.call_concurrent(event_);
     if (result != CUDA_SUCCESS) {
       throw BackendRuntimeError(
