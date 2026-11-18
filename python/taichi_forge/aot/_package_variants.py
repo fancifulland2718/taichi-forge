@@ -50,6 +50,9 @@ def compile_static_variants(environment, entry, arguments, owner, schema, *, tem
         environment, schema, facts = compilation.static_preparation.project(
             environment, schema, entry._primal, query_paths=query_paths, owner_type=owner_type)
         compilation.static_policies[entry._primal.func.__qualname__] = facts
+    if compilation is not None and compilation.capture_cache is not None:
+        compilation.capture_scope = (None if compilation.object_kernel is entry._primal else
+                                     compilation.capture_cache.capture_scope(entry._primal, schema, environment))
     domains = {
         name: tuple(read_static_key(value) for value in item["choices"])
         for name, item in schema.items()

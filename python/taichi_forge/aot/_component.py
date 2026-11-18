@@ -1876,6 +1876,13 @@ class Component:
                         bound = code.rebind_dense_slots(self, owner, layouts=layouts)
                         if bound is not None:
                             return bound
+            if compilation is not None and compilation.capture_scope is not None:
+                code = compilation.capture_cache.restore_capture(
+                    compilation, self, owner, kernel, signature, resource_templates, layouts)
+                if code is not None:
+                    kernel._component_candidates.append(code)
+                    index.add(code)
+                    return code
             context = _Capture(self, owner, kernel, signature, entry_path)
             # No self identity or runtime value enters the template mapper.
             key = (kernel.func, "component_" + str(len(kernel._component_candidates)), kernel.autodiff_mode)
@@ -1888,6 +1895,8 @@ class Component:
                     raise _DefinitionMissingResource(context.missing_resource, context) from error
                 raise
             code = _ComponentCode(kernel, key, context)
+            if compilation is not None and compilation.capture_scope is not None:
+                code._cache_facts = compilation.capture_cache.capture_facts(code, self, owner)
             kernel._component_candidates.append(code)
             if index is not None:
                 index.add(code)
@@ -3237,11 +3246,15 @@ class _ComponentCode:
         self.resource_templates = dict(context.resource_templates)
         self.static_templates = frozenset(context.static_templates)
         self._contract = json.dumps(context.contract)
+        self._bind_arguments(context.declarations)
+
+    def _bind_arguments(self, declarations):
+        kernel = self.kernel
         self.explicit_arguments = tuple(
             arg for i, arg in enumerate(kernel.arguments) if i not in kernel.template_slot_locations
         )
         self.arguments = self.explicit_arguments + tuple(
-            kernel_arguments.KernelArgument(context.declarations[name].annotation, "__capture_" + name)
+            kernel_arguments.KernelArgument(declarations[name].annotation, "__capture_" + name)
             for name in self.dynamic
         )
 

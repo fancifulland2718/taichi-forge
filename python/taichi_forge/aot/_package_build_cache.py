@@ -1,6 +1,7 @@
-"""Producer warm start and dependency-based reuse of CPU scalar kernel objects."""
+"""Producer warm start and dependency-based reuse of CPU package objects."""
 
 import ast
+import base64
 import builtins
 import hashlib
 import inspect
@@ -14,6 +15,7 @@ import textwrap
 from types import ModuleType
 from typing import Final, get_args, get_origin
 import warnings
+import zlib
 
 from taichi_forge.lang._build_cache import BuildIdentity, file_digest, unchanged_file_digest, value_digest
 
@@ -213,6 +215,8 @@ class PackageBuildCache:
         self.inputs = None
         self.modules = modules
         self.objects = {}
+        self.captures = {}
+        self.capture_syntax = {}
         self.object_context = None
         self.toolchain_files = {}
         try:
@@ -293,6 +297,91 @@ class PackageBuildCache:
         self.objects[key] = record
         return entry
 
+    def capture_scope(self, kernel, schema, environment):
+        # A schema change may introduce a new branch, resource or receiver.
+        # Traverse the current declaration domain even on a warm build.
+        from ._package_capture_cache import _body, _callable
+
+        fn = kernel.func
+        if (not self.cpu_objects_enabled or fn.__module__ not in self.modules
+                or environment._lexical_bindings):
+            return None
+        try:
+            if _body(_callable(fn.__module__, fn.__qualname__)) is not fn:
+                return None
+            if self.object_context is None:
+                self._compiler_inputs()
+            def syntax(node):
+                if isinstance(node, ast.AST):
+                    return ast.dump(node)
+                raise TypeError("Untracked producer declaration")
+
+            declaration = json.dumps(schema, sort_keys=True, default=syntax)
+            return value_digest((self.object_context, fn.__module__, fn.__qualname__, kernel.opt_level,
+                                 declaration, environment._symbolic_dimensions, dict(environment._source_scope_paths)))
+        except (TypeError, ValueError, AttributeError, _UntrackedInput):
+            return None
+
+    def capture_facts(self, code, component, owner):
+        from taichi_forge.lang.exception import TaichiCompilationError
+        from ._package_capture_cache import freeze
+
+        try:
+            return freeze(code, self.capture_syntax, component, owner)
+        except (KeyError, AttributeError, OSError, ValueError, TypeError, TaichiCompilationError):
+            return None
+
+    def remember_capture(self, scope, code, module, symbol):
+        facts = vars(code).pop("_cache_facts", None)
+        if facts is None:
+            return
+        native = module._aot_builder._cpu_build_object_key(symbol, code.kernel.compiled_kernels[code.key])
+        if not native:
+            return
+        payload = json.dumps((native, module._component_entries[symbol], facts), separators=(",", ":"))
+        # Per-object compression leaves unrelated owners opaque during lookup
+        # and preserves the original declaration traversal order on recovery.
+        packed = base64.b64encode(zlib.compress(payload.encode("utf8"), 1)).decode("ascii")
+        self.captures.setdefault(scope, {})[symbol] = dict(object=packed, digest=value_digest((scope, symbol, packed)))
+
+    def restore_capture(self, compilation, component, owner, kernel, signature, resources, layouts):
+        from taichi_forge.lang.exception import TaichiCompilationError
+        from ._package_capture_cache import matches, thaw
+
+        scope = compilation.capture_scope
+        history = self.previous.get("captures")
+        records = history.get(scope) if isinstance(history, dict) else None
+        if not isinstance(records, dict):
+            return None
+        module = compilation.module
+        for symbol, record in records.items():
+            if symbol in module._exported_kernels:
+                continue
+            try:
+                packed = record["object"]
+                if record["digest"] != value_digest((scope, symbol, packed)):
+                    continue
+                native, entry, facts = json.loads(zlib.decompress(base64.b64decode(packed, validate=True)))
+                key = kernel.func, "component_" + str(len(kernel._component_candidates)), kernel.autodiff_mode
+                code = thaw(facts, kernel, key, entry)
+                if not matches(code, facts, self.capture_syntax, component, owner, signature, resources, layouts):
+                    continue
+                code.validate_bindings(component, owner)
+                code._bind_arguments(component.declarations)
+            except (KeyError, AttributeError, OSError, ValueError, TypeError, zlib.error, TaichiCompilationError):
+                continue
+            if not module._aot_builder._restore_cpu_build_object(symbol, native):
+                continue
+            identity = kernel, key
+            module._component_entries[symbol] = entry
+            module._exported_kernels[symbol] = identity
+            module._content.extend(("kernel:" + symbol, "component_entry:" + symbol))
+            compilation.exported[identity] = symbol
+            compilation.resource_effects[identity] = module._aot_builder._kernel_resource_effects(symbol)
+            self.captures.setdefault(scope, {})[symbol] = record
+            return code
+        return None
+
     def record_object(self, key, native, entry, module):
         payload = (native, entry, module._component_entries[entry["symbol"]])
         self.objects[key] = dict(payload=payload, digest=value_digest((key, payload)))
@@ -352,13 +441,14 @@ class PackageBuildCache:
             publish(staging, output)
             self.reason = "hit"
             self.objects = record.get("objects", {})
+            self.captures = record.get("captures", {})
             return manifest
         finally:
             if not complete:
                 shutil.rmtree(staging)
 
     def record(self, output):
-        if self.identity is None and not self.objects:
+        if self.identity is None and not (self.objects or self.captures):
             return
         try:
             if self.identity is not None and _namespace_inputs(self.modules) != self.inputs["namespaces"]:
@@ -377,11 +467,13 @@ class PackageBuildCache:
         record = dict(version=1, key=self.identity.key if self.identity else None, output=str(output),
                       inputs=dict(self.identity.inputs) if self.identity else {}, toolchain_files=self.toolchain_files,
                       objects=self.objects,
+                      captures=self.captures,
                       manifest_sha256=file_digest(output / "package.json"))
         fd, temporary = tempfile.mkstemp(prefix=".latest-", suffix=".json", dir=self.directory)
         try:
             with os.fdopen(fd, "w", encoding="utf8") as stream:
-                json.dump(record, stream, sort_keys=True)
+                # Warm candidate lookup follows the producer's discovery order.
+                json.dump(record, stream)
             os.replace(temporary, self.directory / "latest.json")
         finally:
             Path(temporary).unlink(missing_ok=True)

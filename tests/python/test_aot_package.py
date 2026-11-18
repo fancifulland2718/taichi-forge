@@ -291,6 +291,78 @@ def separate(x: ti.i32) -> ti.i32:
                     assert getattr(code.host, name)(x) == getattr(model, name)(x)
 
 
+@test_utils.test(arch=ti.cpu, offline_cache=True)
+def test_package_build_cache_recovers_bound_vector_entry_before_capture(tmp_path, monkeypatch):
+    from taichi_forge.lang.kernel_impl import Kernel
+
+    ti.lang.impl.current_cfg().offline_cache_file_path = str(tmp_path / "native")
+    source = """import taichi_forge as ti
+@ti.data_oriented
+class Model:
+    def __init__(self, n):
+        self.n = n
+        scope = ti.experimental.ResourceScope(self)
+        scope.cells = scope.field(ti.i32, shape=scope.dim('n'), initialization='zero')
+    @ti.func
+    def scale(self, x):
+        return 2 * x
+    @ti.kernel
+    def update(self, delta: ti.types.vector(2, ti.i32)) -> ti.i32:
+        self.cells[0] += delta[0] - delta[1]
+        return ti.cast(self.cells[0], ti.i32)
+    @ti.kernel
+    def evaluate(self, x: ti.i32) -> ti.i32:
+        return self.scale(x)
+"""
+    root = tmp_path / "src"
+    root.mkdir()
+    path = root / "bound_objects.py"
+    path.write_text(source, encoding="utf8")
+    monkeypatch.syspath_prepend(str(root))
+    monkeypatch.delitem(sys.modules, "bound_objects", raising=False)
+    model = importlib.import_module("bound_objects")
+    captures = []
+    materialize = Kernel.materialize
+
+    def track(kernel, *args, **kwargs):
+        if getattr(kernel, "_package_compilation", None) is not None:
+            captures.append(kernel.func.__name__)
+        return materialize(kernel, *args, **kwargs)
+
+    def export(label, text):
+        path.write_text(text, encoding="utf8")
+        exec(compile(text, str(path), "exec"), vars(model))
+        captures.clear()
+        out = tmp_path / label
+        ti.aot.export_package(model, out, artifact_format="bc", build_cache=tmp_path / "cache")
+        return out
+
+    monkeypatch.setattr(Kernel, "materialize", track)
+    cold = export("seed", source)
+    assert set(captures) == {"update", "evaluate"}
+    edited = source.replace("2 * x", "3 * x")
+    warm = export("edited", edited)
+    assert captures == ["evaluate"]
+    with zipfile.ZipFile(cold / "code.tcm") as a, zipfile.ZipFile(warm / "code.tcm") as b:
+        assert json.loads(a.read("value_parameters.json")) == json.loads(b.read("value_parameters.json"))
+    with Runtime(ti.cfg.arch.name) as runtime, load_package(runtime, warm) as package:
+        left, right = package.host.Model(2), package.host.Model(4)
+        assert left.update([4, 1]) == 3
+        assert right.update([1, 8]) == -7
+        assert left.update([2, 1]) == 4
+        assert left.evaluate(6) == 18
+    index = tmp_path / "cache" / "latest.json"
+    records = json.loads(index.read_bytes())
+    update = next(symbol for symbol, entry in json.loads((warm / "package.json").read_bytes())["entries"].items()
+                  if entry["definition"].endswith(".update"))
+    next(bucket[update] for bucket in records["captures"].values() if update in bucket)["object"] = "damaged"
+    index.write_text(json.dumps(records), encoding="utf8")
+    export("recovered", edited + "\n# Host-only edit\n")
+    assert captures == ["update"]
+    export("layout", edited.replace("scope.field(ti.i32", "scope.field(ti.f32"))
+    assert "update" in captures
+
+
 def test_build_cache_toolchain_digest_reuses_only_unchanged_files(tmp_path, monkeypatch):
     from taichi_forge.lang import _build_cache
 

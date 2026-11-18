@@ -1793,9 +1793,10 @@ def export_package(package, output, *, arch=None, caps=None, source_root=None, a
     ``build_cache=directory`` opts into producer warm start for CUDA bc-library,
     CPU bc, and Vulkan default artifacts.
     Unchanged source-driven builds reuse the previous complete package before
-    declaration analysis. With CPU offline caching, unchanged free scalar
-    kernels with tracked numerical dependencies can also reuse their compiled
-    objects after a local edit. Keep the referenced output for full-package
+    declaration analysis. With CPU offline caching, free scalar kernels and
+    owner-bound entries with matching source, bindings and resource contracts
+    can reuse their compiled objects before capture after a local edit.
+    Keep the referenced output for full-package
     hits. A missing optional object takes the ordinary compile path.
     """
     from ._package_compilation import PackageCompilation
@@ -1844,6 +1845,8 @@ def _export_package(output, declarations, source_root, caps, artifact_format, co
     package = packages[0]
     module = Module(caps=caps, artifact_format=artifact_format)
     compilation.attach(module, function_library=artifact_format == "bc-library")
+    if cache is not None and cache.cpu_objects_enabled:
+        compilation.capture_cache = cache
     from ._package_owner_graph import OwnerGraph, owner_bindings, layout_owner
 
     owner_graph = OwnerGraph(sources, imported_modules, module, field_trees=compilation.field_trees)

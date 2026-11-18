@@ -490,20 +490,33 @@ std::string LlvmAotModuleBuilder::cpu_build_object_key(
     const std::string &name, Kernel *kernel) const {
   if (!arch_is_cpu(compile_config_.arch) || !compile_config_.offline_cache ||
       artifact_format_ != "bc" || !streaming_compilation_manager_ ||
-      kernel->get_offload_execution_plan() || value_parameters_.count(name) ||
+      kernel->get_offload_execution_plan() ||
       argument_origins_.count(name) || !kernel_snode_tree_ids(name).empty())
     return {};
   const auto request = build_request(kernel);
-  return kernel->get_or_create_kernel_key_for_cache(request.config(),
-                                                    request.device_caps());
+  auto key = kernel->get_or_create_kernel_key_for_cache(request.config(),
+                                                        request.device_caps());
+  const auto values = value_parameters_.find(name);
+  if (values != value_parameters_.end()) {
+    // Package component arguments are top-level slots. A nested argument pack
+    // needs its own physical contract before it can use this recovery path.
+    for (const auto &[indices, type] : values->second)
+      if (indices.size() != 1)
+        return {};
+    key += "\n" + liong::json::print(liong::json::serialize(
+                      aot::make_value_parameter_artifact({*values})));
+  }
+  return key;
 }
 
 bool LlvmAotModuleBuilder::restore_cpu_build_object(const std::string &name,
-                                                    const std::string &key) {
+                                                    const std::string &record) {
   if (!arch_is_cpu(compile_config_.arch) || !compile_config_.offline_cache ||
       artifact_format_ != "bc" || !streaming_compilation_manager_ ||
       kernel_names_.count(name))
     return false;
+  const auto separator = record.find('\n');
+  const auto key = record.substr(0, separator);
   auto object = streaming_compilation_manager_->load_build_object(
       key, compile_config_.arch);
   auto *llvm_object = dynamic_cast<LLVM::CompiledKernelData *>(object.get());
@@ -511,6 +524,24 @@ bool LlvmAotModuleBuilder::restore_cpu_build_object(const std::string &name,
     return false;
   llvm_object->set_kernel_identity(key);
   const auto &data = llvm_object->get_internal_data();
+  if (separator != std::string::npos) {
+    try {
+      auto types = aot::parse_value_parameter_artifact(
+          liong::json::parse_complete(record.substr(separator + 1)));
+      const auto values = types.find(name);
+      if (types.size() != 1 || values == types.end() || !data.args_type)
+        return false;
+      const auto &slots = data.args_type->elements();
+      for (const auto &[indices, logical] : values->second) {
+        if (indices.size() != 1 || indices.front() >= slots.size())
+          return false;
+        aot::validate_value_parameter_type(logical, slots[indices.front()].type);
+      }
+      value_parameters_.emplace(name, std::move(values->second));
+    } catch (const std::exception &) {
+      return false;
+    }
+  }
   const auto &body = data.compiled_data;
   const auto identity = key + "\nordinary\n" +
       liong::json::print(liong::json::serialize(body));
