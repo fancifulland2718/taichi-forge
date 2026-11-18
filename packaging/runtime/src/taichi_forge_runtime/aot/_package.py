@@ -416,7 +416,18 @@ class _ModuleBinding:
     def import_from(self, origin, name):
         module = self.import_module(origin)
         try:
-            return getattr(module, name)
+            if not (self.package._public_hybrid_imports and name not in vars(module) and "__getattr__" in vars(module)):
+                return getattr(module, name)
+            # A projected Host method can import a lazy public export long
+            # after its module was loaded. Use the same scope as public
+            # attribute lookup, just for the duration of that lookup.
+            from ..execution import _hybrid_public_import
+
+            token = _hybrid_public_import.set(True)
+            try:
+                return getattr(module, name)
+            finally:
+                _hybrid_public_import.reset(token)
         except AttributeError:
             if not hasattr(module, "__path__"):
                 raise ImportError(f"Cannot import {name} from {origin}") from None
@@ -1922,6 +1933,7 @@ class LoadedPackage:
 
     def __init__(self, runtime, directory):
         self.runtime, self.directory = runtime, Path(directory).resolve(strict=True)
+        self._public_hybrid_imports = False
         self.manifest = json.loads((self.directory / "package.json").read_text(encoding="utf8"))
         if (
             self.manifest.get("version")

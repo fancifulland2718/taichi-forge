@@ -13819,7 +13819,7 @@ def test_package_multiple_roots_share_code_and_normal_hybrid_imports(tmp_path, m
 @test_utils.test(arch=ti.cpu, offline_cache=False)
 def test_package_hybrid_public_lazy_exports_allow_caller_siblings(tmp_path, monkeypatch):
     initializer = '''from importlib import import_module
-_EXPORTS = {'value': ('.model', 'value'), 'caller': ('.caller', 'call')}
+_EXPORTS = {'value': ('.model', 'value'), 'caller': ('.caller', 'call'), 'call_sibling': ('.caller', 'call')}
 def __getattr__(name):
     if name not in _EXPORTS:
         raise AttributeError(name)
@@ -13833,6 +13833,9 @@ from .device_helpers import scale
 @ti.kernel
 def value(x: ti.i32) -> ti.i32:
     return scale(x, 3)
+def use_caller(x):
+    from definition_fixture import call_sibling
+    return call_sibling(x)
 ''', initializer=initializer)
     parent = Path(package.__file__).parent
     (parent / 'caller.py').write_text(
@@ -13848,6 +13851,8 @@ def value(x: ti.i32) -> ti.i32:
         # The standalone/private namespace must not borrow caller-side source.
         with pytest.raises(ImportError):
             root.caller
+        with pytest.raises(ImportError):
+            code.module('definition_fixture.model').use_caller(7)
     ti.reset()
     for name in tuple(sys.modules):
         if name == 'definition_fixture' or name.startswith('definition_fixture.'):
@@ -13858,6 +13863,7 @@ def value(x: ti.i32) -> ti.i32:
         public = importlib.import_module('definition_fixture')
         assert public.value(5) == 15
         assert public.caller(7) == 23
+        assert importlib.import_module('definition_fixture.model').use_caller(7) == 23
         loaded = public.value.package
         session = ti.lang.impl.get_runtime()._package_execution_session
         assert tuple(session._packages.values()) == (loaded,)

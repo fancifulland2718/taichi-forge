@@ -370,6 +370,7 @@ class ExecutionSession:
                         self.runtime = self._stack.enter_context(Runtime(self.arch, **self.runtime_options))
                     if directory not in self._packages:
                         package = self._stack.enter_context(load_package(self.runtime, directory))
+                        package._public_hybrid_imports = self.mode == "hybrid" and self._finder is not None
                         self._packages[directory] = package
                     module = self._packages[directory].module(name)
                 self._modules[name] = module
