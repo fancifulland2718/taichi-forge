@@ -10,20 +10,59 @@ from taichi_forge.ui.staging_buffer import copy_image_f32_to_rgba8_ti_ndarray, r
 from tests import test_utils
 
 
-@pytest.mark.parametrize("dtype,element", [("u8", ()), ("f32", (1,)), ("f32", (3,)), ("u8", (4,))])
+@pytest.mark.parametrize("dtype,element", [
+    ("u8", ()), ("f32", (1,)), ("f32", (2,)), ("f32", (3,)), ("f32", (4,)), ("u8", (4,)),
+])
 @test_utils.test(arch=ti.cpu, offline_cache=False)
-def test_cpu_runtime_display_reads_live_pixels(dtype, element):
+def test_cpu_runtime_display_reads_live_pixels(dtype, element, monkeypatch):
     from taichi_forge.ui.staging_buffer import to_rgba8
 
     # Exercise the normal large-image converter with a non-square framebuffer.
     shape = (257, 129)
     values = np.arange(np.prod(shape + element)).reshape(shape + element) % 256
     values = values.astype(np.float32) / 255 if dtype == "f32" else values.astype(np.uint8)
+    if dtype == "f32":
+        values.flat[:6] = [-0.25, 0.0, 0.125, 0.5, 1.0, 1.25]
+    frames = (values, values[::-1].copy())
+    expected = [to_rgba8(frame).copy() for frame in frames]
     with ti.aot.borrow_runtime() as runtime:
         image = runtime.ndarray(dtype, shape, element_shape=element)
-        for frame in (values, values[::-1].copy()):
+
+        def unexpected_copy(*args):
+            pytest.fail("Displaying an owned CPU framebuffer copied its source pixels")
+
+        def unexpected_compile(*args, **kwargs):
+            pytest.fail("CPU mapping reentered frontend compilation while holding the submission guard")
+
+        monkeypatch.setattr(image, "read_into", unexpected_copy)
+        monkeypatch.setattr(Kernel, "ensure_compiled", unexpected_compile)
+        for frame, reference in zip(frames, expected):
             image.from_numpy(frame)
-            np.testing.assert_array_equal(to_rgba8(image), to_rgba8(frame))
+            np.testing.assert_array_equal(to_rgba8(image), reference)
+
+
+@test_utils.test(arch=ti.cpu, offline_cache=False)
+def test_cpu_runtime_display_mapping_cleanup_and_imported_view():
+    from taichi_forge.ui.staging_buffer import to_rgba8
+
+    values = np.arange(24, dtype=np.uint8).reshape(4, 6)
+    field = ti.ndarray(ti.u8, values.shape)
+    field.from_numpy(values)
+    with ti.aot.borrow_runtime() as runtime:
+        image = runtime.ndarray("u8", values.shape)
+        image.from_numpy(values)
+
+        def failed_conversion(_buffer):
+            raise ValueError("conversion interrupted")
+
+        with pytest.raises(ValueError, match="conversion interrupted"):
+            image._with_cpu_read_buffer(failed_conversion)
+        np.testing.assert_array_equal(to_rgba8(image), to_rgba8(values))
+        view = runtime.import_dense_view(ti.experimental.ndarray_view(field, slices=(slice(1, 3), slice(None))))
+        np.testing.assert_array_equal(to_rgba8(view), to_rgba8(values[1:3]))
+        image.close()
+        with pytest.raises(RuntimeError, match="closed"):
+            to_rgba8(image)
 
 
 @pytest.mark.parametrize('dtype,channels', [('f32', 3), ('f32', 4), ('u8', 1)])

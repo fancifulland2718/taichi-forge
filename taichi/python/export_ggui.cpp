@@ -1,4 +1,6 @@
 
+#include <algorithm>
+#include <cstdint>
 #include <vector>
 #include "pybind11/pybind11.h"
 #include <pybind11/numpy.h>
@@ -8,6 +10,62 @@
 #include "taichi/common/core.h"
 
 namespace py = pybind11;
+
+namespace {
+uint32_t display_channel(uint8_t value) {
+  return value;
+}
+
+uint32_t display_channel(float value) {
+  return static_cast<int>(std::max(0.0f, std::min(1.0f, value)) * 255.0f);
+}
+
+// A mapped borrowed Runtime holds the Program submission guard. This CPU
+// converter must not launch a frontend kernel or acquire a tree lifecycle lock.
+template <int Channels, typename T>
+void pack_display_pixels(const T *src, uint32_t *dst, py::ssize_t pixels) {
+  for (py::ssize_t i = 0; i < pixels; ++i) {
+    if constexpr (Channels == 0) {  // Scalar grayscale, as distinct from vec1.
+      dst[i] = 0xff000000u | (display_channel(src[i]) * 0x010101u);
+    } else {
+      uint32_t pixel = Channels == 4 ? 0u : 0xff000000u;
+      for (int k = 0; k < Channels; ++k) {
+        pixel |= display_channel(src[i * Channels + k]) << (8 * k);
+      }
+      dst[i] = pixel;
+    }
+  }
+}
+
+template <typename T>
+void pack_cpu_display(const py::array_t<T, py::array::c_style> &src,
+                      py::array_t<uint32_t, py::array::c_style> dst) {
+  if ((src.ndim() != 2 && src.ndim() != 3) || dst.ndim() != 2 ||
+      src.shape(0) != dst.shape(0) || src.shape(1) != dst.shape(1) ||
+      (src.ndim() == 3 && (src.shape(2) < 1 || src.shape(2) > 4))) {
+    throw py::value_error("Expected matching 2D images with one to four channels");
+  }
+  const auto *input = src.data();
+  auto *output = dst.mutable_data();
+  const auto pixels = dst.size();
+  const auto channels = src.ndim() == 2 ? 0 : src.shape(2);
+  py::gil_scoped_release release;
+  switch (channels) {
+    case 0: return pack_display_pixels<0>(input, output, pixels);
+    case 1: return pack_display_pixels<1>(input, output, pixels);
+    case 2: return pack_display_pixels<2>(input, output, pixels);
+    case 3: return pack_display_pixels<3>(input, output, pixels);
+    case 4: return pack_display_pixels<4>(input, output, pixels);
+  }
+}
+
+void export_cpu_display_packing(py::module &m) {
+  m.def("_pack_cpu_display_rgba8", &pack_cpu_display<float>,
+        py::arg("src").noconvert(), py::arg("dst").noconvert());
+  m.def("_pack_cpu_display_rgba8", &pack_cpu_display<uint8_t>,
+        py::arg("src").noconvert(), py::arg("dst").noconvert());
+}
+}  // namespace
 
 #ifdef TI_WITH_GGUI
 
@@ -1285,6 +1343,7 @@ void export_ggui(py::module &m) {
 namespace taichi {
 
 void export_ggui(py::module &m) {
+  export_cpu_display_packing(m);
   ui::export_ggui(m);
 }
 
@@ -1295,6 +1354,7 @@ void export_ggui(py::module &m) {
 namespace taichi {
 
 void export_ggui(py::module &m) {
+  export_cpu_display_packing(m);
   m.attr("GGUI_AVAILABLE") = py::bool_(false);
 }
 

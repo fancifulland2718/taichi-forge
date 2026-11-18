@@ -874,10 +874,12 @@ class _Memory(_Resource):
 
     def __init__(self, runtime, size, usage=("storage",)):
         self.size = size
+        self.owns_allocation = True
         usage_bits = _array_usage(usage)
         # Empty logical arrays still need a valid native binding token. Reserve
         # one physical byte; no transfer or array access uses that byte.
-        info = abi.MemoryAllocateInfo(max(size, 1), False, False, False, usage_bits)
+        host_read = runtime.arch in ("x64", "arm64")
+        info = abi.MemoryAllocateInfo(max(size, 1), False, host_read, False, usage_bits)
         handle = runtime._api.call(runtime._api.ti_allocate_memory, runtime._handle, C.byref(info))
         super().__init__(runtime, handle)
 
@@ -885,6 +887,7 @@ class _Memory(_Resource):
     def _from_import(cls, runtime, handle, size):
         result = cls.__new__(cls)
         result.size = size
+        result.owns_allocation = False
         _Resource.__init__(result, runtime, handle)
         return result
 
@@ -980,6 +983,24 @@ class NdArray:
 
     def read_into(self, buffer):
         self._transfer(buffer, to_device=False)
+
+    def _with_cpu_read_buffer(self, consume):
+        """Consume bytes synchronously under the submission guard, without launching other work."""
+        memory = self._memory
+        runtime = memory._runtime
+        if runtime.arch not in ("x64", "arm64") or not memory.owns_allocation or not self.nbytes:
+            return False
+        with runtime._lock:
+            memory._check()
+            api = runtime._api
+            runtime.wait()
+            pointer = api.call(api.ti_map_memory, runtime._handle, memory._handle)
+            try:
+                data = (C.c_ubyte * self.nbytes).from_address(pointer)
+                consume(memoryview(data).toreadonly())
+            finally:
+                api.call(api.ti_unmap_memory, runtime._handle, memory._handle)
+        return True
 
     def read(self):
         result = bytearray(self.nbytes)

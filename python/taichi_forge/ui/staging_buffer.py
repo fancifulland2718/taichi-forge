@@ -2,6 +2,7 @@ import weakref
 from collections import OrderedDict
 
 import numpy as np
+from taichi_forge._lib import core as _ti_core
 from taichi_forge.types import ndarray as ndarray_type
 from taichi_forge.lang import ops
 from taichi_forge.lang._texture import Texture
@@ -697,17 +698,31 @@ def to_rgba8(image):
         _check_runtime_image(image)
         buffers = _image_object_field_cache.get(image)
         if buffers is None:
-            source = np.empty(image.shape + image.element_shape, dtype=np.float32 if image.dtype == "f32" else np.uint8)
-            buffers = source, np.empty(image.shape, dtype=np.uint32)
+            buffers = None, np.empty(image.shape, dtype=np.uint32)
             _image_object_field_cache[image] = buffers
         source, packed = buffers
-        image.read_into(source)
+        shape = image.shape + image.element_shape
+        dtype = np.float32 if image.dtype == "f32" else np.uint8
         channels = image.element_shape[0] if image.element_shape else 1
-        if _should_pack_taichi_image_on_host(image):
-            _copy_numpy_image_to_rgba8(source, packed, channels, not image.element_shape)
-        else:
-            converter = copy_image_f32_to_rgba8_np if image.dtype == "f32" else copy_image_u8_to_rgba8_np
-            converter(source, packed, channels, not image.element_shape)
+        small = _should_pack_taichi_image_on_host(image)
+
+        def pack(buffer):
+            pixels = np.frombuffer(buffer, dtype=dtype).reshape(shape)
+            if small:
+                _copy_numpy_image_to_rgba8(pixels, packed, channels, not image.element_shape)
+            else:
+                _ti_core._pack_cpu_display_rgba8(pixels, packed)
+
+        if not image._with_cpu_read_buffer(pack):
+            if source is None:
+                source = np.empty(shape, dtype=dtype)
+                _image_object_field_cache[image] = source, packed
+            image.read_into(source)
+            if small:
+                _copy_numpy_image_to_rgba8(source, packed, channels, not image.element_shape)
+            else:
+                converter = copy_image_f32_to_rgba8_np if image.dtype == "f32" else copy_image_u8_to_rgba8_np
+                converter(source, packed, channels, not image.element_shape)
         return packed
     is_texture = isinstance(image, Texture)
     is_grayscale = not hasattr(image, "n") and len(image.shape) == 2

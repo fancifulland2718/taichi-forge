@@ -341,6 +341,8 @@ class Api:
             "ti_wait": ([Handle], None),
             "ti_allocate_memory": ([Handle, C.POINTER(MemoryAllocateInfo)], Handle),
             "ti_free_memory": ([Handle, Handle], None),
+            "ti_map_memory": ([Handle, Handle], C.c_void_p),
+            "ti_unmap_memory": ([Handle, Handle], None),
             "ti_copy_memory_from_host_ext": (
                 [Handle, C.POINTER(MemorySlice), C.c_void_p],
                 None,
