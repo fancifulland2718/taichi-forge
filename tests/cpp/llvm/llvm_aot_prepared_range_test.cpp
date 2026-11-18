@@ -93,15 +93,17 @@ TEST(AotPreparedRange, CollectiveTlsIndirectAndAssemblyStayUnproved) {
   }
 }
 
-TEST(AotPreparedRange, LinkedBlockBarrierUsesOnlyAlignedWholeGroups) {
+TEST(AotPreparedRange, LinkedWarpShuffleAndBarrierUseOnlyAlignedWholeGroups) {
   llvm::LLVMContext context;
   auto module = range_module(context, "call void @helper(i32 %i)", R"(
     @shared = internal addrspace(3) global [32 x i32] undef
     declare void @llvm.nvvm.barrier0()
+    declare i32 @llvm.nvvm.shfl.sync.down.i32(i32, i32, i32, i32)
     define internal void @helper(i32 %i) {
       %lane = and i32 %i, 31
       %p = getelementptr [32 x i32], ptr addrspace(3) @shared, i32 0, i32 %lane
-      store i32 %i, ptr addrspace(3) %p
+      %v = call i32 @llvm.nvvm.shfl.sync.down.i32(i32 -1, i32 %i, i32 1, i32 31)
+      store i32 %v, ptr addrspace(3) %p
       call void @llvm.nvvm.barrier0()
       ret void
     })");

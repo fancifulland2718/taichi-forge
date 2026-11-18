@@ -14,14 +14,15 @@ namespace taichi::lang {
 inline bool is_cuda_local_collective(const InternalFuncStmt &call) {
   if (call.with_runtime_context)
     return false;
-  const auto &name = call.func_name;
-  return name == "block_barrier" || name == "block_barrier_and_i32" ||
-         name == "block_barrier_or_i32" || name == "block_barrier_count_i32" ||
-         name == "warp_barrier" || name == "cuda_ballot_i32" ||
-         name == "cuda_all_sync_i32" || name == "cuda_shfl_sync_i32" ||
-         name == "cuda_shfl_sync_f32" || name == "cuda_shfl_up_sync_i32" ||
-         name == "cuda_shfl_up_sync_f32" || name == "cuda_shfl_down_sync_i32" ||
-         name == "cuda_shfl_down_sync_f32" || name == "cuda_shfl_xor_sync_i32";
+  static constexpr const char *names[] = {
+#define PER_CUDA_LOCAL_COLLECTIVE(op, intrinsic) #op,
+#include "taichi/inc/cuda_local_collectives.inc.h"
+#undef PER_CUDA_LOCAL_COLLECTIVE
+  };
+  for (const auto *name : names)
+    if (call.func_name == name)
+      return true;
+  return false;
 }
 
 // A code-generation fact, independent of whether a caller selects device range

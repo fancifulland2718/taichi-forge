@@ -91,15 +91,10 @@ class AotPreparedRangeAnalysis {
   enum class BodyProof { unproven, independent, block_collective };
 
   static bool local_collective(const llvm::Function &function) {
-    // The same block/warp barrier family admitted by the producer. Do not
-    // include grid/cluster barriers, register queries or arbitrary convergent
-    // calls. Removing empty blocks preserves all lanes in productive blocks.
     switch (function.getIntrinsicID()) {
-      case llvm::Intrinsic::nvvm_barrier0:
-      case llvm::Intrinsic::nvvm_barrier0_and:
-      case llvm::Intrinsic::nvvm_barrier0_or:
-      case llvm::Intrinsic::nvvm_barrier0_popc:
-      case llvm::Intrinsic::nvvm_bar_warp_sync:
+#define PER_CUDA_LOCAL_COLLECTIVE(op, intrinsic) case llvm::Intrinsic::intrinsic:
+#include "taichi/inc/cuda_local_collectives.inc.h"
+#undef PER_CUDA_LOCAL_COLLECTIVE
         return true;
       default:
         return false;

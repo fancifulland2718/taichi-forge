@@ -1,0 +1,16 @@
+// Forge operations and their LLVM forms that communicate only within an
+// existing CUDA block. Used for whole-empty-block elision at produce/prepare.
+PER_CUDA_LOCAL_COLLECTIVE(block_barrier, nvvm_barrier0)
+PER_CUDA_LOCAL_COLLECTIVE(block_barrier_and_i32, nvvm_barrier0_and)
+PER_CUDA_LOCAL_COLLECTIVE(block_barrier_or_i32, nvvm_barrier0_or)
+PER_CUDA_LOCAL_COLLECTIVE(block_barrier_count_i32, nvvm_barrier0_popc)
+PER_CUDA_LOCAL_COLLECTIVE(warp_barrier, nvvm_bar_warp_sync)
+PER_CUDA_LOCAL_COLLECTIVE(cuda_ballot_i32, nvvm_vote_ballot_sync)
+PER_CUDA_LOCAL_COLLECTIVE(cuda_all_sync_i32, nvvm_vote_all_sync)
+PER_CUDA_LOCAL_COLLECTIVE(cuda_shfl_sync_i32, nvvm_shfl_sync_idx_i32)
+PER_CUDA_LOCAL_COLLECTIVE(cuda_shfl_sync_f32, nvvm_shfl_sync_idx_f32)
+PER_CUDA_LOCAL_COLLECTIVE(cuda_shfl_up_sync_i32, nvvm_shfl_sync_up_i32)
+PER_CUDA_LOCAL_COLLECTIVE(cuda_shfl_up_sync_f32, nvvm_shfl_sync_up_f32)
+PER_CUDA_LOCAL_COLLECTIVE(cuda_shfl_down_sync_i32, nvvm_shfl_sync_down_i32)
+PER_CUDA_LOCAL_COLLECTIVE(cuda_shfl_down_sync_f32, nvvm_shfl_sync_down_f32)
+PER_CUDA_LOCAL_COLLECTIVE(cuda_shfl_xor_sync_i32, nvvm_shfl_sync_bfly_i32)
