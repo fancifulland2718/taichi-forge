@@ -19321,6 +19321,45 @@ class Model:
 
 
 @test_utils.test(arch=[ti.cpu, ti.cuda], offline_cache=False)
+def test_package_nested_model_guard_keeps_serial_helper_conditional(tmp_path, monkeypatch):
+    source = """
+import taichi_forge as ti
+@ti.data_oriented
+class Model:
+    def __init__(self, n: int, parallel: bool):
+        scope = ti.experimental.ResourceScope(self)
+        self.n, self.parallel = n, parallel
+        scope.static('parallel', choices=(False, True), kernel_only=True)
+        scope.values = scope.field(ti.i32, shape=scope.dim('n'))
+    @ti.func
+    def update_serial(self):
+        for i in range(self.n):
+            self.values[i] += 3
+    @ti.kernel
+    def step(self):
+        if ti.static(self.parallel):
+            for i in range(self.n):
+                self.values[i] += 1
+        for once in range(1):
+            if ti.static(not self.parallel):
+                self.update_serial()
+"""
+    package = _source_package(tmp_path, monkeypatch, source)
+    fmt = "bc-library" if ti.cfg.arch == ti.cuda else "bc"
+    manifest = ti.aot.export_package(package, tmp_path / "sdk", artifact_format=fmt)
+    steps = [entry for entry in manifest["entries"].values() if entry["definition"].endswith(".Model.step")]
+    assert len(steps) == 1
+    with ti.aot.borrow_runtime() as runtime, load_package(runtime, tmp_path / "sdk") as code:
+        for parallel in (True, False):
+            reference, packaged = package.Model(7, parallel), code.host.Model(7, parallel)
+            for count in (1, 2):
+                reference.step()
+                packaged.step()
+                np.testing.assert_array_equal(reference.values.to_numpy(), count * (1 if parallel else 3))
+                np.testing.assert_array_equal(packaged.values.to_numpy(), reference.values.to_numpy())
+
+
+@test_utils.test(arch=[ti.cpu, ti.cuda], offline_cache=False)
 def test_package_uniform_model_conditions_preserve_parallel_loops(tmp_path, monkeypatch):
     source = """
 import taichi_forge as ti

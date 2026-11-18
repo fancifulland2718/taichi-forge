@@ -1964,8 +1964,13 @@ class ASTTransformer(Builder):
     @staticmethod
     def build_uniform_loop_branch(ctx, node):
         """Preserve separate scalar and parallel regions of a model branch."""
-        kind = lambda expression: ASTTransformer.schedule_kind(ctx, expression)
         compilation = getattr(ctx.deployment.kernel, "_package_compilation", None)
+        # Only a kernel-level schedule can pass its predicate to an offloaded
+        # helper loop. Inside a task the caller must guard the call itself.
+        if (ctx.is_real_function or any(not scope.is_static for scope in ctx.loop_scopes)
+                or compilation is not None and compilation.thread_local_call):
+            return False
+        kind = lambda expression: ASTTransformer.schedule_kind(ctx, expression)
         helpers = compilation.static_preparation.schedule_functions if (
             compilation is not None and compilation.static_preparation is not None
         ) else ()
@@ -2004,8 +2009,7 @@ class ASTTransformer(Builder):
                     continue
                 guard = node.test.ptr if truth else ti_ops.logical_not(node.test.ptr)
                 previous = compilation.schedule_guard if compilation is not None else None
-                if (previous is not None and not compilation.thread_local_call and not ctx.is_real_function
-                        and not any(not scope.is_static for scope in ctx.loop_scopes)):
+                if previous is not None:
                     guard = ti_ops.logical_and(previous, guard)
                 if compilation is not None:
                     compilation.schedule_guard = guard
