@@ -908,7 +908,7 @@ class Graph:
                 return ticket, None
         return None, self._parameter_frames[start]
 
-    def submit(self, arguments, *, pacer=None, lane=None, on_saturation="wait"):
+    def submit(self, arguments, *, pacer=None, lane=None, on_saturation="wait", telemetry=False):
         """Replay a prepared binding and return a completion ticket.
 
         Multiple workspace lanes reuse explicit scalar parameter frames on the
@@ -918,6 +918,8 @@ class Graph:
         A hybrid package may share its JIT runtime's SubmissionPacer. Admission
         precedes binding; standalone Runtime submission needs no frontend.
         """
+        if telemetry is not False:
+            raise ValueError("Package Graph.submit does not support submission telemetry")
         if pacer is not None:
             submit = getattr(pacer, "_submit_package_graph", None)
             if submit is None:

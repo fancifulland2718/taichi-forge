@@ -27637,7 +27637,9 @@ def test_package_external_host_selects_complete_graph_by_owners(tmp_path, monkey
         graph.run({'gain': 3})
         np.testing.assert_array_equal(first.values.to_numpy(), reference)
         np.testing.assert_array_equal(second.values.to_numpy(), 3 * (np.arange(11) + 11))
-        graph.submit({'gain': 7}).wait()
+        with pytest.raises(ValueError, match="submission telemetry"):
+            graph.submit({'gain': 99}, telemetry=True)
+        graph.submit({'gain': 7}, telemetry=False).wait()
         np.testing.assert_array_equal(first.values.to_numpy(), 7 * (np.arange(5) + 5))
         np.testing.assert_array_equal(second.values.to_numpy(), 7 * (np.arange(11) + 11))
         assert code.host.model.ti.graph.GraphBuilder.for_owners(first).package is code
