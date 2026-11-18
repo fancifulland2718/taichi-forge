@@ -102,6 +102,7 @@ class NativeGraphDefinition:
         return _Materialized(Graph(source.package, source.plan, dict(source.arguments),
             dict(source.captures), list(source.admissions), list(source.range_checks), dict(source.plan_values),
             native_effects=dict(source.native_effects), native_extents=dict(source.native_extents),
+            native_owners=dict(source.native_owners),
             workspace_lanes=source._workspace_lanes, workspace_saturation=source._workspace_saturation))
 
 

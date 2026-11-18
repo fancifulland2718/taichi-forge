@@ -1,4 +1,4 @@
-"""OptiX Host factories backed by the existing Runtime native catalog.
+"""Ray acceleration structure Host factories backed by the Runtime native catalog.
 
 No numerical frontend or producer scene is loaded. Geometry seeds are consumer
 inputs; contexts, acceleration structures and calls retain the native leases.
@@ -44,15 +44,108 @@ class OptixRayInstance:
             raise TypeError("OptiX instance opaque must be a bool")
 
 
+class _VulkanBLAS(NativeObject):
+    pass
+
+
+@dataclass(frozen=True)
+class RayInstance:
+    blas: _VulkanBLAS
+    transform: tuple = (1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0)
+    mask: int = 255
+    custom_index: int = 0
+    sbt_record_offset: int = 0
+
+    def __post_init__(self):
+        import numpy as np
+        if not isinstance(self.blas, _VulkanBLAS):
+            raise TypeError("Vulkan instance requires a triangle BLAS")
+        for name, maximum in (("mask", 255), ("custom_index", 0xffffff), ("sbt_record_offset", 0xffffff)):
+            value = getattr(self, name)
+            if isinstance(value, bool) or not isinstance(value, int):
+                raise TypeError(f"Vulkan instance {name} must be an integer")
+            if not 0 <= value <= maximum:
+                raise ValueError(f"Vulkan instance {name} is outside its native range")
+        transform = np.asarray(self.transform, dtype=np.float32)
+        if transform.shape not in ((12,), (3, 4)) or not np.isfinite(transform).all():
+            raise ValueError("Vulkan instance requires a finite row-major 3 by 4 transform")
+        object.__setattr__(self, "transform", tuple(transform.ravel()))
+
+
+class _VulkanTLAS(NativeObject):
+    def __init__(self, package, resource, count):
+        super().__init__(package, resource)
+        self.instance_count = count
+
+    def record_refit_transforms(self, *, transforms="transforms", scene=None):
+        self._check()
+        if not isinstance(transforms, str) or not transforms or "\0" in transforms:
+            raise ValueError("Vulkan transform binding requires a nonempty name")
+        if scene is not None and (not isinstance(scene, str) or not scene or "\0" in scene or scene == transforms):
+            raise ValueError("Vulkan scene binding requires a distinct nonempty name")
+        recording = NativeRecording(self.package, "vulkan_ray", "instance_refit",
+            bindings=dict(scene=self if scene is None else scene, transforms=transforms),
+            schemas=dict(scene=dict(kind="acceleration_structure"), transforms=_array("f32", 3)),
+            effects=dict(scene="read_write", transforms="read"))
+        recording.extents = {"transforms": (self.instance_count, 3, 4)}
+        if scene is not None:
+            recording.fixed_owners = {"scene": self.resource}
+        return recording
+
+    def memory_report(self):
+        return SimpleNamespace(to_dict=lambda: dict(complete=False, known_resident_requested_bytes=0,
+            unknown_components=["Vulkan acceleration structures"]))
+
+
 class RayAPI:
+    RayInstance = RayInstance
+
     def __init__(self, package):
         self.package = package
         self.OptixRayInstance = OptixRayInstance
         self.OptixFaceRuleTable = OptixFaceRuleTable
 
     def is_available(self):
-        # This predicate denotes Vulkan inline ray queries, not OptiX.
-        return False
+        runtime = self.package.runtime
+        return runtime.arch == "vulkan" and bool(runtime.device_capabilities().get("spirv_has_ray_query"))
+
+    def TriangleBLAS(self, vertices, indices, *, opaque=None):
+        self.package._check()
+        if opaque is not None and not isinstance(opaque, bool):
+            raise TypeError("opaque must be a bool or None")
+        runtime = self.package.runtime
+        vertices, indices = (runtime._adapt_package_array(x) for x in (vertices, indices))
+        for array, dtype in ((vertices, "f32"), (indices, "i32")):
+            shape, element = tuple(array.shape), tuple(array.element_shape)
+            triples = (len(shape) == 1 and element == (3,)) or (len(shape) == 2 and shape[1] == 3 and not element)
+            if array.dtype != dtype or not triples or shape[0] <= 0:
+                raise ValueError(f"Vulkan triangles require nonempty scalar or packed triples of {dtype}")
+        resource = runtime.native_resource("vulkan_ray", "triangle_blas",
+            parameters=dict(vertex_count=vertices.shape[0], triangle_count=indices.shape[0], opaque=opaque is not False),
+            bindings=dict(vertices=vertices, indices=indices))
+        return _VulkanBLAS(self.package, resource)
+
+    def InstanceTLAS(self, instances):
+        import numpy as np
+        self.package._check()
+        instances = tuple(instances)
+        runtime = self.package.runtime
+        if not instances or any(not isinstance(x, RayInstance) or x.blas.resource._runtime is not runtime
+                                for x in instances):
+            raise ValueError("Vulkan instances require geometry from this Runtime")
+        transforms = np.asarray([x.transform for x in instances], dtype=np.float32).reshape(-1, 3, 4)
+        poses = runtime.ndarray("f32", transforms.shape)
+        try:
+            poses.write(transforms.tobytes())
+            resource = runtime.native_resource("vulkan_ray", "instance_tlas",
+                parameters=dict(instance_count=len(instances), custom_indices=[x.custom_index for x in instances],
+                                visibility_masks=[x.mask for x in instances],
+                                sbt_record_offsets=[x.sbt_record_offset for x in instances]),
+                bindings=dict(transforms=poses, **{f"blas_{i}": x.blas.resource for i, x in enumerate(instances)}))
+        except BaseException:
+            poses.close()
+            raise
+        return _VulkanTLAS(self.package, resource, len(instances))
 
     def load_optix_provider(self, library_path=None, *, validation=False,
                             provider_path=None, required_features=()):

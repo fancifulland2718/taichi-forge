@@ -127,8 +127,17 @@ class _Bindings:
         if key not in self.captures:
             self.captures[key] = (self.name(), owner, dict(item))
         name, previous_owner, previous = self.captures[key]
+        # The same field can be unconditional in one dispatch and bind an
+        # empty descriptor in another. Share identical captures as usual and
+        # separate only the binding whose presence contract actually differs.
+        if (previous_owner is owner and previous != item and entry is None
+                and ("optional_array" in previous or "optional_array" in item)):
+            nullable = {"nullable_boolean", "nullable_booleans", "nullable_record", "optional_array"}
+            if ({k: v for k, v in previous.items() if k not in nullable}
+                    == {k: v for k, v in item.items() if k not in nullable}):
+                return self.capture(owner, item, entry=("conditional", json.dumps(item, sort_keys=True)))
         if previous_owner is not owner or previous != item:
-            raise ValueError("Owner capture has incompatible Graph uses")
+            raise ValueError(f"Owner capture {item['name']!r} has incompatible Graph uses")
         return name, (owner, previous)
 
 
@@ -144,6 +153,7 @@ class GraphBuilder:
         self._plan_values = {}
         self._native_effects = {}
         self._native_extents = {}
+        self._native_owners = {}
 
     def _record_plan_values(self, owner):
         if owner is None:
@@ -328,6 +338,10 @@ class GraphBuilder:
             if name in extents and extents[name] != extent:
                 raise ValueError("Native operations require incompatible array extents")
             extents[name] = extent
+        owners = dict(self._native_owners)
+        for name, owner in sequence._native_owners.items():
+            if owners.setdefault(name, owner) is not owner:
+                raise ValueError(f"Native recordings require different owners for {name!r}")
         self.operations.extend(sequence.operations)
         self.arguments = combined
         self._captures.update(sequence._captures)
@@ -337,6 +351,7 @@ class GraphBuilder:
         self._plan_values.update(sequence._plan_values)
         self._native_effects.update(sequence._native_effects)
         self._native_extents = extents
+        self._native_owners = owners
         return self
 
     def append_native(self, sequence, *, prewarm=False, admission="explicit"):
@@ -373,6 +388,11 @@ class GraphBuilder:
                 operation["bindings"][port] = name
                 effects[name] = effects.get(name, False) or sequence.effects[port] != "read"
             extents = dict(self._native_extents)
+            owners = dict(self._native_owners)
+            for port, owner in getattr(sequence, "fixed_owners", {}).items():
+                name = operation["bindings"][port]
+                if owners.setdefault(name, owner) is not owner:
+                    raise ValueError(f"Native recordings require different owners for {name!r}")
             for port, extent in getattr(sequence, "extents", {}).items():
                 name = operation["bindings"][port]
                 previous = extents.get(name, extent)
@@ -385,6 +405,7 @@ class GraphBuilder:
             key = json.dumps(operation, sort_keys=True)
             self._native_effects[key] = effects
             self._native_extents = extents
+            self._native_owners = owners
             return self
         if not isinstance(sequence, PrimitiveSequence) or sequence.package is not self.package:
             raise ValueError("Package native recording requires its own primitive sequence")
@@ -489,6 +510,7 @@ class GraphBuilder:
             dict(self._plan_values),
             native_effects=copy.deepcopy(self._native_effects),
             native_extents=dict(self._native_extents),
+            native_owners=dict(self._native_owners),
             workspace_lanes=workspace_lanes,
             workspace_saturation=workspace_saturation,
         )
@@ -496,7 +518,8 @@ class GraphBuilder:
 
 class Graph:
     def __init__(self, package, plan, arguments, captures=None, admissions=None, range_checks=None, plan_values=None,
-                 *, workspace_lanes=1, workspace_saturation="wait", native_effects=None, native_extents=None):
+                 *, workspace_lanes=1, workspace_saturation="wait", native_effects=None, native_extents=None,
+                 native_owners=None):
         self.package, self.plan, self.arguments = package, plan, arguments
         self.captures = captures or {}
         self.admissions = admissions or []
@@ -504,6 +527,7 @@ class Graph:
         self.plan_values = plan_values or {}
         self.native_effects = native_effects or {}
         self.native_extents = native_extents or {}
+        self.native_owners = native_owners or {}
         self._cached_call = None
         self._cached_values = ()
         self._cached_tokens = ()
@@ -671,8 +695,13 @@ class Graph:
         plan = self.plan.with_argument_resources(resources) if resources else self.plan
         plan = self._specialized_plan(plan)
         values = {name: self.package.runtime._adapt_package_array(value) for name, value in values.items()}
+        for name, owner in self.native_owners.items():
+            if values[name] is not owner:
+                raise ValueError(f"Native argument {name!r} belongs to a different recording owner")
         for name, extent in self.native_extents.items():
-            if not isinstance(values[name], NdArray) or values[name].shape[0] != extent:
+            array = values[name]
+            shape = extent if isinstance(extent, tuple) else (extent,)
+            if not isinstance(array, NdArray) or array.shape[:len(shape)] != shape:
                 raise ValueError("Native whole-array extent differs from its recording")
         prepared = plan.prepare(self.package._module, values, execution_domain=execution_domain,
                                 mutable_parameters=mutable_parameters)
