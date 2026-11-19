@@ -13772,6 +13772,34 @@ def _source_package(
     return importlib.import_module("definition_fixture")
 
 
+@test_utils.test(arch=ti.vulkan)
+def test_package_caches_referenced_host_shader_bytes(tmp_path, monkeypatch):
+    package = _source_package(tmp_path, monkeypatch, """
+        from pkgutil import get_data
+        import taichi_forge as ti
+
+        def read_shader():
+            return get_data(__package__, "shaders/pass.spv")
+
+        @ti.kernel
+        def value() -> ti.i32:
+            return 17
+    """, initializer="from .model import read_shader\n")
+    shaders = Path(package.__file__).parent / "shaders"
+    shaders.mkdir()
+    (shaders / "unused.spv").write_bytes(b"unreferenced")
+    assets = Path(__file__).parent / "assets"
+    for index, name in enumerate(("hardware_graphics_depth_only.frag.spv", "hardware_graphics_blend.frag.spv")):
+        expected = (assets / name).read_bytes()
+        (shaders / "pass.spv").write_bytes(expected)
+        output = tmp_path / f"package-{index}"
+        manifest = ti.aot.export_package(package, output, build_cache=tmp_path / "cache")
+        assert [key for key in manifest["files"] if key.endswith(".spv")] == ["host/shaders/pass.spv"]
+        device = int(os.environ.get("TI_TEST_VULKAN_DEVICE_INDEX", 0))
+        with Runtime("vulkan", device_index=device) as runtime, load_package(runtime, output) as loaded:
+            assert loaded.host.read_shader() == expected
+
+
 @test_utils.test(arch=ti.cpu, offline_cache=False)
 @pytest.mark.parametrize("resource_owners", [False, True])
 def test_package_check_shares_export_preflight_without_compilation(tmp_path, monkeypatch, resource_owners):

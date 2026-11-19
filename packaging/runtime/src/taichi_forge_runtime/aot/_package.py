@@ -172,6 +172,7 @@ class _ModuleBinding:
         from ._package_graph import Arg, ArgKind, GraphBuilder
         from ._package_algorithms import Algorithms
         from ._package_ray import RayAPI
+        from ._package_graphics import GraphicsAPI
         from ._package_texture import Texture, SamplerConfig
         from ._c_api import AotError
 
@@ -204,7 +205,8 @@ class _ModuleBinding:
             ndarray=self.ndarray,
             sync=package.runtime.wait,
             algorithms=Algorithms(package),
-            hardware=_HostAPI(ray=RayAPI(package), sampling=SimpleNamespace(SamplerConfig=SamplerConfig)),
+            hardware=_HostAPI(ray=RayAPI(package), graphics=GraphicsAPI(package),
+                              sampling=SimpleNamespace(SamplerConfig=SamplerConfig)),
             Texture=functools.partial(Texture, package),
             Format=SimpleNamespace(**{arg["fmt"]: arg["fmt"]
                 for entry in package.manifest["entries"].values() for arg in entry["arguments"]
@@ -275,7 +277,9 @@ class _ModuleBinding:
                 dtype = self.package._module.ndarray_layout(dtype.spec["layout"])
             else:
                 element_shape, dtype = dtype.spec["element_shape"], dtype.spec["dtype"]
-        value = self.package.runtime.ndarray(dtype, shape, element_shape=element_shape)
+        # Match Program ndarray usage for zero-copy Vulkan draw bindings.
+        usage = ("storage", "uniform", "vertex", "index", "indirect") if self.package.runtime.arch == "vulkan" else ("storage",)
+        value = self.package.runtime.ndarray(dtype, shape, element_shape=element_shape, usage=usage)
         self.package._arrays.append(value)
         construction = _construction.get()
         if construction is not None and construction[0] is self.package:

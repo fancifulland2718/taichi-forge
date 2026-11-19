@@ -22,6 +22,18 @@ from .._static_values import static_key
 _MISSING_PLAN_VALUE = object()
 
 
+def _declare_argument(arguments, name, schema):
+    previous = arguments.get(name)
+    if previous is not None and previous != schema:
+        # A vertex port describes a raw byte range. A kernel using the same
+        # array supplies the element and rank for the combined declaration.
+        if schema == {"kind": "ndarray"} and previous["kind"] == "ndarray":
+            return
+        if previous != {"kind": "ndarray"} or schema["kind"] != "ndarray":
+            raise ValueError(f"Graph argument {name!r} has conflicting declarations")
+    arguments[name] = schema
+
+
 def graph_builder_for_owners(owners, default_factory):
     """Select one recording owner before creating any Graph resources.
 
@@ -256,9 +268,7 @@ class GraphBuilder:
                 continue
             if arg.name.startswith("_forge_package_"):
                 raise ValueError("Graph argument uses a reserved package binding name")
-            if arg.name in arguments and arguments[arg.name] != schema:
-                raise ValueError(f"Graph argument {arg.name!r} has conflicting declarations")
-            arguments[arg.name] = schema
+            _declare_argument(arguments, arg.name, schema)
         captured = {
             item["name"]: self._bindings.capture(owner, item)
             for item in kernel.contract["captures"]
@@ -327,9 +337,7 @@ class GraphBuilder:
             raise ValueError("Graph sequence belongs to another loaded package")
         combined = dict(self.arguments)
         for name, schema in sequence.arguments.items():
-            if name in combined and combined[name] != schema:
-                raise ValueError(f"Graph argument {name!r} has conflicting declarations")
-            combined[name] = schema
+            _declare_argument(combined, name, schema)
         for key, binding in sequence._plan_values.items():
             if key in self._plan_values and _plan_key(self._plan_values[key][2]) != _plan_key(binding[2]):
                 raise ValueError("Graph sequences recorded different plan parameters")
@@ -376,9 +384,7 @@ class GraphBuilder:
                     name = value
                     if name.startswith("_forge_package_"):
                         raise ValueError("Graph argument uses a reserved package binding name")
-                    if name in arguments and arguments[name] != schema:
-                        raise ValueError("Native port conflicts with a Graph argument")
-                    arguments[name] = schema
+                    _declare_argument(arguments, name, schema)
                 else:
                     if isinstance(value, NativeObject):
                         value._check()

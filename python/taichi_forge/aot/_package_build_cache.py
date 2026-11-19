@@ -206,7 +206,7 @@ def _producer_inputs(previous, current):
 
 
 class PackageBuildCache:
-    def __init__(self, directory, sources, modules, packages, caps, artifact_format, *, discovery=None):
+    def __init__(self, directory, sources, modules, packages, caps, artifact_format, *, discovery=None, assets=None):
         from taichi_forge._lib import core
         from taichi_forge.lang import impl
 
@@ -250,6 +250,8 @@ class PackageBuildCache:
                 roots=[item.__name__ for item in packages],
                 discovery=discovery,
             )
+            if assets:
+                self.inputs["assets"] = {name: hashlib.sha256(data).hexdigest() for name, data in assets.items()}
             self.identity = BuildIdentity.create("aot-package", 1,
                                                  {key: value_digest(value) for key, value in self.inputs.items()})
         except _UntrackedInput as error:

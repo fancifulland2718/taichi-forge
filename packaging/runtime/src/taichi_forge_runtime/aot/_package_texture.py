@@ -35,6 +35,7 @@ class Texture(NativeObject):
         storage = package.runtime.arch == "vulkan" and not fmt.startswith("depth")
         resource = package.runtime.native_resource("image", "texture", parameters=dict(
             shape=shape, format=fmt, storage=storage, mip_levels=mip_levels,
+            attachment=package.runtime.arch == "vulkan" and len(shape) == 2,
             sampler=asdict(sampler)))
         super().__init__(package, resource)
         self.fmt, self.shape, self.num_dims = fmt, shape, len(shape)

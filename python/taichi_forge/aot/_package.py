@@ -22,7 +22,7 @@ from types import SimpleNamespace
 from taichi_forge.tools._compiled_host import decorator_resolver
 from ._package_types import qualified_kind, resolve_type, type_expression, type_spec
 from ._package_fields import field_declarations, field_allocation
-from ._package_sources import collect_sources, package_roots
+from ._package_sources import collect_sources, package_roots, shader_assets
 from ._package_owners import resolve_owners
 from ._package_errors import is_error_interface, project_error_interface
 from ._package_resources import scope_declarations
@@ -1791,6 +1791,9 @@ def export_package(package, output, *, arch=None, caps=None, source_root=None, a
     CPU/CUDA bitcode and Vulkan SPIR-V retain eligible typed helper calls for
     consumer specialization and backend inlining. CUDA ``artifact_format="bc-library"``
     also stores compatible bitcode units once across entry points.
+    Vulkan Host code can load compiled shader assets with
+    ``from pkgutil import get_data`` and ``get_data(__package__, "path/to/shader.spv")``.
+    Literal package-relative paths are included in the export and its cache identity.
     ``build_cache=directory`` opts into producer warm start for CUDA bc-library,
     CPU bc, and Vulkan default artifacts.
     Unchanged source-driven builds reuse the previous complete package before
@@ -1810,25 +1813,25 @@ def export_package(package, output, *, arch=None, caps=None, source_root=None, a
     if build_cache is not None and Path(build_cache).resolve().is_relative_to(output):
         raise ValueError("Build cache index must be outside the package output")
     inputs = _package_source_inputs(package, arch, source_root)
+    source_files, _, dependencies, _, imported_modules, target_arch, packages = inputs
+    assets = shader_assets(source_files, imported_modules) if target_arch.name == "vulkan" else {}
     cache = None
     if build_cache is not None:
         from ._package_build_cache import PackageBuildCache
 
-        source_files, _, dependencies, _, imported_modules, _, packages = inputs
         cache = PackageBuildCache(build_cache, source_files, imported_modules, packages, caps, artifact_format,
-                                  discovery=dependencies)
-        del source_files
+                                  discovery=dependencies, assets=assets)
         cached = cache.reuse(output, _publish_package)
         if cached is not None:
             cache.record(output)
             return cached
     declarations = _preflight_package(package, inputs=inputs)
-    del inputs
+    del inputs, source_files, imported_modules
     with PackageCompilation() as compilation:
-        return _export_package(output, declarations, source_root, caps, artifact_format, compilation, cache)
+        return _export_package(output, declarations, source_root, caps, artifact_format, compilation, cache, assets)
 
 
-def _export_package(output, declarations, source_root, caps, artifact_format, compilation, cache):
+def _export_package(output, declarations, source_root, caps, artifact_format, compilation, cache, assets):
     import taichi_forge as ti
     from taichi_forge.aot._component import Component
     from taichi_forge_runtime._static_values import static_key, read_static_key
@@ -1927,7 +1930,7 @@ def _export_package(output, declarations, source_root, caps, artifact_format, co
             if definition.get("error_interface")
         ],
     )
-    payloads = {}
+    payloads = assets.copy()
     if manifest["input_families"]:
         manifest["version"] = 43
     if manifest["preparation_owners"]:

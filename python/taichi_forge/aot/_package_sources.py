@@ -1,9 +1,40 @@
 """Source boundaries for the existing decorator-driven package compiler."""
 
+import ast
 from pathlib import Path
+from pkgutil import get_data
 from types import ModuleType
 
 from taichi_forge.tools._host_inventory import audit_source_imports, source_inventory
+
+
+def shader_assets(sources, modules):
+    """Collect compiled shaders read by package Host code via pkgutil.get_data."""
+    payloads = {}
+    for name, source, relative, text in sources:
+        if ".spv" not in text:
+            continue
+        aliases = {key for key, value in vars(modules[name]).items() if value is get_data}
+        if not aliases:
+            continue
+        for call in ast.walk(ast.parse(text)):
+            if not (isinstance(call, ast.Call) and isinstance(call.func, ast.Name)
+                    and call.func.id in aliases and len(call.args) == 2
+                    and isinstance(call.args[0], ast.Name) and call.args[0].id == "__package__"
+                    and isinstance(call.args[1], ast.Constant) and isinstance(call.args[1].value, str)):
+                continue
+            path = Path(call.args[1].value)
+            if path.suffix != ".spv":
+                continue
+            resolved = (source.parent / path).resolve()
+            if path.anchor or ".." in path.parts or not resolved.is_relative_to(source.parent.resolve()):
+                raise ValueError(f"Shader asset outside package {name}: {path}")
+            key = "host/" + (relative.parent / path).as_posix()
+            data = resolved.read_bytes()
+            if len(data) < 20 or len(data) % 4 or data[:4] != b"\x03\x02\x23\x07":
+                raise ValueError(f"Invalid SPIR-V shader asset: {resolved}")
+            payloads[key] = data
+    return payloads
 
 
 def package_roots(package, source_root):
