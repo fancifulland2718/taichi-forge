@@ -227,6 +227,13 @@ class Canvas:
             self._set_image_info_cache[key] = info
         return info
 
+    def _submit_packed_image(self, info, *, try_shared_cuda):
+        if try_shared_cuda:
+            submit = getattr(self.canvas, "_set_image_shared_cuda", None)
+            if submit is not None and submit(info):
+                return
+        self.canvas.set_image(info)
+
     def _acquire_shared_cuda_vulkan_view(self, width, height):
         acquire = getattr(
             self.canvas, "_acquire_shared_cuda_vulkan_image", None
@@ -322,9 +329,8 @@ class Canvas:
             return True
         else:
             if prog_arch in (_ti_core.Arch.cuda, _ti_core.Arch.vulkan):
-                # Runtime conversion uses its existing ordered queue. Shared
-                # writable display memory requires an explicit execution domain;
-                # keep the ordinary packed device copy for this legacy API.
+                # The borrowed Runtime packs into ordinary Program storage.
+                # GGUI owns the semaphore handoff from that buffer to Vulkan.
                 if (prog_arch == _ti_core.Arch.cuda and hasattr(img, "shape")
                         and not isinstance(img, RuntimeArray)):
                     shared_view = self._acquire_shared_cuda_vulkan_view(
@@ -341,7 +347,10 @@ class Canvas:
                             return True
                 packed_img = to_rgba8_packed_ndarray(img)
                 if packed_img is not None:
-                    self.canvas.set_image(self._get_set_image_info(packed_img))
+                    self._submit_packed_image(
+                        self._get_set_image_info(packed_img),
+                        try_shared_cuda=prog_arch == _ti_core.Arch.cuda and isinstance(img, RuntimeArray),
+                    )
                     self._record_display_frame_accepted(
                         packed_img.shape[0], packed_img.shape[1]
                     )
@@ -444,14 +453,10 @@ class Canvas:
                     set_transpose(frame.transpose)
                 self._record_display_frame_accepted(frame.width, frame.height)
                 return DisplayCompletion(self.canvas._track_display_frame()) if track_completion else True
-            shared_submit = getattr(self.canvas, "_set_image_shared_cuda", None)
-            shared = (
-                impl.pytaichi.prog.config().arch == _ti_core.Arch.cuda
-                and shared_submit is not None
-                and shared_submit(frame.field_info)
+            self._submit_packed_image(
+                frame.field_info,
+                try_shared_cuda=impl.pytaichi.prog.config().arch == _ti_core.Arch.cuda,
             )
-            if not shared:
-                self.canvas.set_image(frame.field_info)
         elif frame.kind == DisplayFrame.TEXTURE:
             self.canvas.set_image_texture(frame.texture.tex)
         else:

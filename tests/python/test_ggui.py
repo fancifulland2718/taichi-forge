@@ -1211,6 +1211,32 @@ def test_set_image_display_frame_packed_u32_ndarray_non_square():
 
 
 @pytest.mark.skipif(not _ti_core.GGUI_AVAILABLE, reason="GGUI Not Available")
+@test_utils.test(arch=ti.cuda)
+def test_borrowed_runtime_image_uses_packed_display_path():
+    width, height = 32, 48
+    window = ti.ui.Window("test", (width, height), show_window=False)
+    try:
+        canvas = window.get_canvas()
+        assert canvas.submit_frame(_make_solid_packed_frame(width, height, (255, 0, 0, 255)))
+        _assert_solid_rgba(window.get_image_buffer_as_numpy(), (255, 0, 0, 255))
+        shared = window.get_display_stats()["last_render_zero_copy"]
+        with ti.aot.borrow_runtime() as runtime:
+            image = runtime.ndarray("f32", (width, height), element_shape=(3,))
+            values = np.zeros((width, height, 3), dtype=np.float32)
+            values[:width // 2, :, 0] = 1
+            values[:, height // 3:, 1] = 1
+            for frame in (values, values[::-1].copy()):
+                image.write(frame.tobytes())
+                assert canvas.set_image(image)
+                rgba = window.get_image_buffer_as_numpy()
+                np.testing.assert_allclose(rgba[..., :3], frame, atol=1 / 255)
+                np.testing.assert_allclose(rgba[..., 3], 1, atol=1 / 255)
+                assert window.get_display_stats()["last_render_zero_copy"] == shared
+    finally:
+        window.destroy()
+
+
+@pytest.mark.skipif(not _ti_core.GGUI_AVAILABLE, reason="GGUI Not Available")
 @test_utils.test(arch=[ti.cpu, ti.cuda, ti.vulkan])
 def test_set_image_display_frame_packed_u32_ndarray_resize_sequence():
     window = ti.ui.Window("test", (64, 64), show_window=False)
