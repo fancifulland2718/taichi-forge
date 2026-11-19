@@ -4581,6 +4581,29 @@ class Model:
         np.testing.assert_array_equal(c.out.to_numpy(), expected)
 
 
+def test_portable_helper_checks_optional_field_behind_static_branch():
+    from taichi_forge.lang._jit_function_library import FunctionDependencyAnalysis
+
+    @ti.data_oriented
+    class Mesh:
+        def __init__(self):
+            self.mixed = False
+            self.sidedness = None
+
+        @ti.func
+        def sided(self, i: ti.i32) -> ti.i32:
+            value = 1
+            if ti.static(self.mixed):
+                value = self.sidedness[i]
+            return value
+
+    mesh = Mesh()
+    source = Mesh.sided.func
+    args = (mesh, 0)
+    assert FunctionDependencyAnalysis(allow_fields=True).dependencies(source, args) is not None
+    assert FunctionDependencyAnalysis(allow_fields=False).dependencies(source, args) is None
+
+
 @test_utils.test(arch=[ti.cpu, ti.cuda, ti.vulkan], offline_cache=False)
 def test_package_defers_value_helper_until_materialization(tmp_path, monkeypatch):
     package = _source_package(tmp_path, monkeypatch, """

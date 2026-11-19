@@ -94,8 +94,9 @@ def _literal(node, scope, *, objects=False):
 
 
 class FunctionSyntax(InlineSyntax):
-    def __init__(self, tree, scope, bindings):
+    def __init__(self, tree, scope, bindings, static_scope):
         self.scope = scope
+        self.static_scope = static_scope
         self.bindings = bindings
         self.calls = {}
         self.forwarded = set()
@@ -139,7 +140,7 @@ class FunctionSyntax(InlineSyntax):
             and not node.test.keywords
             and _resolve(_path(node.test.func), self.scope)[0] is impl.static
         ):
-            value = _literal(node.test.args[0], self.scope)
+            value = _literal(node.test.args[0], self.static_scope)
             if type(value) in (bool, int, float):
                 for statement in node.body if value else node.orelse:
                     self.visit(statement)
@@ -180,7 +181,10 @@ class FunctionDependencyAnalysis:
             self._syntax[source], _ = source._definition.acquire(cache=True)
         scope = source._definition.scope()
         scope.update(bindings)
-        syntax = FunctionSyntax(self._syntax[source], scope, bindings)
+        # JIT specializes the bound object. In a portable package the same
+        # owner property can become a live scalar and guard an array capture.
+        # Only literal predicates can prune that resource-use proof.
+        syntax = FunctionSyntax(self._syntax[source], scope, bindings, scope if self.allow_fields else {})
         if not syntax.safe or any(name in scope for name in syntax.assigned):
             return None
         dependencies = []
@@ -238,6 +242,10 @@ class FunctionDependencyAnalysis:
             elif id(value) in primitive_types.type_ids:
                 key = ("dtype", value)
             else:
+                if not self.allow_fields and value is None and receiver is not None:
+                    # An absent optional field in the producer witness does
+                    # not establish a scalar parameter in the portable ABI.
+                    return None
                 key = scalar_key(value)
                 if key is None:
                     return None
