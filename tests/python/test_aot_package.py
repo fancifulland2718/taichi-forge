@@ -19878,7 +19878,8 @@ class Model:
     manifest = ti.aot.export_package(package, tmp_path / "sdk", arch=arch)
     roots = [entry for entry in manifest["entries"].values() if entry["definition"].endswith("Model.step")]
     assert len(roots) == 1 and roots[0]["model_blocks"]
-    with Runtime(manifest["target"]) as runtime, load_package(runtime, tmp_path / "sdk") as code:
+    device_index = int(os.environ.get("TI_TEST_VULKAN_DEVICE_INDEX", 0)) if arch == ti.vulkan else 0
+    with Runtime(manifest["target"], device_index=device_index) as runtime, load_package(runtime, tmp_path / "sdk") as code:
         models = [code.host.Model(7, width, scratch) for width, scratch in ((8, 8), (64, 64), (8, 13))]
         for model in models:
             for gain in (3, 4):
