@@ -466,7 +466,7 @@ def discover(sources, imported, *, preparation_receivers=None, resource_inventor
                                 functions[descriptor.func] = (module, method)
                                 cached_sources.add(descriptor.func)
         for definition in definitions:
-            if definition.get("error_interface"):
+            if definition.get("error_interface") and resource_inventory is None:
                 continue
             if definition["kind"] != "kernel" and resource_inventory is None:
                 continue
@@ -661,6 +661,11 @@ def discover(sources, imported, *, preparation_receivers=None, resource_inventor
     def record(callee, inputs, call, module, chain=()):
         call_site = getattr(call, '_package_call_site', id(call))
         if resource_inventory is not None:
+            # A target-projected, literal-only NoReturn interface cannot write
+            # device resources. Preserve its identity through Host dispatch so
+            # it stays distinguishable from an unresolved Kernel.
+            if kernels[callee][1].get("error_interface"):
+                return
             if any(inputs.get(name) is None for name in kernels[callee][2]):
                 missing = ', '.join(name for name in kernels[callee][2] if inputs.get(name) is None)
                 failures.append(f"{module}:{call.lineno}: write inventory Kernel {callee.__qualname__} "

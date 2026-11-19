@@ -8787,6 +8787,27 @@ def test_package_write_inventory_proves_scope_factory_metadata(tmp_path, monkeyp
     assert ti.lang.impl.get_runtime().get_num_compiled_functions() == before
 
 
+@test_utils.test(arch=ti.cpu, offline_cache=False)
+def test_package_write_inventory_tracks_dispatch_with_terminal_alternative(tmp_path, monkeypatch):
+    source = CYCLIC_WRITE_INVENTORY_SOURCE.replace("constructors = 0", """
+from typing import NoReturn
+def unsupported(reason) -> NoReturn:
+    raise RuntimeError(reason)
+constructors = 0
+""").replace("    builder.dispatch(solver.step)", """
+    selected = solver.unavailable if solver.n > 8 else solver.step
+    builder.dispatch(selected)
+""").replace("    @ti.kernel\n    def unrelated(self):", """
+    @ti.kernel
+    def unavailable(self):
+        unsupported("unavailable target")
+    @ti.kernel
+    def unrelated(self):""")
+    package = _source_package(tmp_path, monkeypatch, source)
+    assert ti.aot.check_package(package)["declaration_check"] == "passed"
+    assert package.model.constructors == 0
+
+
 @test_utils.test(arch=[ti.cpu, ti.cuda], offline_cache=False)
 @pytest.mark.parametrize('predicate', ['attribute', 'method'])
 def test_package_write_inventory_joins_conditional_local_sequences(tmp_path, monkeypatch, predicate):
