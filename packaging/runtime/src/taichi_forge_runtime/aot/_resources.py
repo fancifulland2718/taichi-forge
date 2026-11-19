@@ -119,6 +119,10 @@ def external_arguments(resources, gradients, arguments):
                 allocators[name] = resource["allocator"]
             if "usage" in resource:
                 _array_usage(resource["usage"])
+                if "local_tensor" in resource["usage"] and (
+                    "layout" in resource or "initial_data" in resource or resource.get("zero_initialize")
+                ):
+                    raise ValueError("Local tensor scratch requires uninitialized primitive storage")
             if kind == "ndarray_view":
                 _name(resource["array"])
                 refs.append(resource["array"])

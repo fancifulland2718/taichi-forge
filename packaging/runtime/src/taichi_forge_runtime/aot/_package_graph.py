@@ -680,7 +680,10 @@ class Graph:
         for name, (owner, schema) in self.captures.items():
             if schema["kind"] == "local_tensor_workspace":
                 shape = local_workspace_shape(schema["shape"], lambda dim: captured[schema["inputs"][dim]])
-                resources.append(dict(kind="ndarray", name=name, dtype=schema["dtype"], shape=list(shape)))
+                resource = dict(kind="ndarray", name=name, dtype=schema["dtype"], shape=list(shape))
+                if self.package.runtime.arch == "cuda":
+                    resource["usage"] = ["storage", "local_tensor"]
+                resources.append(resource)
                 continue
             value = captured[name]
             if schema["kind"] in ("value", "dimension"):

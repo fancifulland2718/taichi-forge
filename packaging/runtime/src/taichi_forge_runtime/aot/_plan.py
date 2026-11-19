@@ -7,10 +7,13 @@ import json
 import math
 from pathlib import Path
 
-_MAX_EXECUTION_PLAN_VERSION = 28
+_MAX_EXECUTION_PLAN_VERSION = 29
 
 
 def _resource_version(resources):
+    if any(isinstance(r, dict) and isinstance(r.get("usage"), (tuple, list)) and "local_tensor" in r["usage"]
+           for r in resources):
+        return 29
     if any(isinstance(r, dict) and r.get("kind") == "ndarray_member" and "component" in r for r in resources):
         return 25
     if any(isinstance(r, dict) and (

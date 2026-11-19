@@ -639,7 +639,8 @@ class AotModuleImpl : public aot::Module {
 #ifdef TI_WITH_VULKAN
   aot::Kernel *specialize_kernel(aot::Kernel &kernel,
                                  LaunchContextBuilder &context,
-                                 const std::vector<uint32_t> &constant_args) override {
+                                 const std::vector<uint32_t> &constant_args,
+                                 const std::vector<uint32_t> & /*private_workspaces*/) override {
     auto *source = dynamic_cast<KernelImpl *>(&kernel);
     TI_ERROR_IF(device_api_backend_ != Arch::vulkan || !source ||
                     &source->runtime() != runtime_ || !source->device_range_tasks().empty() ||

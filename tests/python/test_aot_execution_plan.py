@@ -819,6 +819,21 @@ def test_execution_zero_initialization_is_a_strict_resource_policy():
             ExecutionPlan([operation], resources=[dict(resource, zero_initialize=invalid)])
 
 
+def test_execution_plan_local_tensor_has_invocation_lifetime():
+    resource = dict(kind="ndarray", name="scratch", dtype="i32", shape=[32, 4],
+                    usage=["storage", "local_tensor"])
+    operation = dict(kind="kernel", entry="update", arguments=["scratch", "out"])
+    plan = ExecutionPlan([operation], resources=[resource])
+    document = json.loads(plan.to_json())
+    assert document["version"] == 29
+    assert ExecutionPlan.from_json(plan.to_json()).argument_names == ("out",)
+    with pytest.raises(ValueError, match="version 29"):
+        ExecutionPlan.from_json(json.dumps(dict(document, version=28)))
+    for patch in (dict(zero_initialize=True), dict(initial_data="f" * 64), dict(usage=["local_tensor"])):
+        with pytest.raises(ValueError, match="Local tensor"):
+            ExecutionPlan([operation], resources=[dict(resource, **patch)])
+
+
 def test_binding_constraints_snapshot_closure_and_validation():
     operations = [
         dict(kind="copy", source="x", destination="scratch"),

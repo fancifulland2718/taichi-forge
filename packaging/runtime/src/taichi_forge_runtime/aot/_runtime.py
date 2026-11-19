@@ -858,14 +858,16 @@ class NativeResource(_Resource):
 
 
 def _array_usage(usage):
-    flags = {"storage": 1, "uniform": 2, "vertex": 4, "index": 8, "indirect": 16}
+    flags = {"storage": 1, "uniform": 2, "vertex": 4, "index": 8, "indirect": 16, "local_tensor": 32}
     if not isinstance(usage, (tuple, list)) or not usage or any(
         not isinstance(item, str) or item not in flags for item in usage
     ):
-        raise ValueError("Array usage must be a nonempty sequence of storage/uniform/vertex/index/indirect names")
+        raise ValueError("Array usage must be a nonempty sequence of valid usage names")
     bits = 0
     for item in usage:
         bits |= flags[item]
+    if bits & flags["local_tensor"] and bits != (flags["storage"] | flags["local_tensor"]):
+        raise ValueError("Local tensor scratch requires private storage")
     return bits
 
 

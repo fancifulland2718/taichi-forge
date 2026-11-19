@@ -626,6 +626,9 @@ typedef enum TiMemoryUsageFlagBits {
   TI_MEMORY_USAGE_INDEX_BIT = 1 << 3,
   // The memory can supply indirect draw commands or a device draw count.
   TI_MEMORY_USAGE_INDIRECT_BIT = 1 << 4,
+  // Compiler-owned local tensor scratch. Contents are undefined on entry to
+  // each kernel and unobservable on exit. Combine only with STORAGE.
+  TI_MEMORY_USAGE_LOCAL_TENSOR_EXT_BIT = 1 << 5,
 } TiMemoryUsageFlagBits;
 typedef TiFlags TiMemoryUsageFlags;
 

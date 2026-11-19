@@ -1266,6 +1266,13 @@ own reachable workspace closure. Invalid extents and inconsistent contracts
 reject before execution. CPU/CUDA checks cover new sizes, changed integer inputs,
 local value copies, interleaved prepares, independent closure and reset.
 
+For CUDA definition packages, both an ordinary prepared call and a package Graph
+identify invocation-private local tensor storage when binding the kernel. If the
+prepared shape is fixed and each iteration accesses only its own bounded row,
+the LLVM backend can place that row in thread-private storage. Other accesses
+keep their ndarray backing. The prepare cache distinguishes private scratch
+from a caller's array even when their shapes and strides match.
+
 
 ### Declared Host owner sequences
 

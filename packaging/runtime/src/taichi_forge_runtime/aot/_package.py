@@ -1773,7 +1773,8 @@ class entry:
                         # the descriptor keeps the actual current logical shape.
                         value = NdArray(value._memory, value.dtype, value._code, tuple(shape), value.element_shape)
                     else:
-                        value = package.runtime.ndarray(item["dtype"], shape)
+                        usage = ("storage", "local_tensor") if package.runtime.arch == "cuda" else ("storage",)
+                        value = package.runtime.ndarray(item["dtype"], shape, usage=usage)
                         allocated_workspaces.append(value)
                     workspaces.append(value)
                 else:

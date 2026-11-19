@@ -326,7 +326,7 @@ TiMemory Runtime::register_memory(taichi::lang::DeviceAllocation allocation,
     memories_.emplace(
         handle, MemoryAllocation{
                     allocation, size, base_offset, storage_owner, byte_offset,
-                    owns_allocation && !storage_owner && !borrowed, borrowed,
+                    owns_allocation && !storage_owner && !borrowed, false, borrowed,
                     std::move(dense_layout)});
     return handle;
   } catch (...) {
@@ -336,6 +336,13 @@ TiMemory Runtime::register_memory(taichi::lang::DeviceAllocation allocation,
       get().dealloc_memory(allocation);
     throw;
   }
+}
+
+void Runtime::mark_local_tensor_workspace(TiMemory memory) {
+  std::lock_guard<std::mutex> lock(memory_mutex_);
+  // Called only for a fresh unpublished allocation. Imported memory and views
+  // keep their normal, observable contents.
+  memories_.at(memory).local_tensor_workspace = true;
 }
 
 Runtime::MemoryAllocation Runtime::get_memory(
@@ -691,6 +698,13 @@ TiMemory ti_allocate_memory(TiRuntime runtime,
   TI_CAPI_ARGUMENT_NULL_RV(runtime);
   TI_CAPI_ARGUMENT_NULL_RV(create_info);
 
+  const bool local_tensor = create_info->usage & TI_MEMORY_USAGE_LOCAL_TENSOR_EXT_BIT;
+  if (local_tensor && (create_info->usage !=
+          (TI_MEMORY_USAGE_STORAGE_BIT | TI_MEMORY_USAGE_LOCAL_TENSOR_EXT_BIT) ||
+          create_info->export_sharing)) {
+    ti_set_last_error(TI_ERROR_INVALID_ARGUMENT, "Local tensor scratch requires private storage");
+    return TI_NULL_HANDLE;
+  }
   taichi::lang::AllocUsage usage{};
   if (create_info->usage & TI_MEMORY_USAGE_STORAGE_BIT) {
     usage = usage | taichi::lang::AllocUsage::Storage;
@@ -717,6 +731,8 @@ TiMemory ti_allocate_memory(TiRuntime runtime,
 
   try {
     out = ((Runtime *)runtime)->allocate_memory(params);
+    if (local_tensor && out)
+      reinterpret_cast<Runtime *>(runtime)->mark_local_tensor_workspace(out);
   } catch (const std::bad_alloc &e) {
     ti_set_last_error(TI_ERROR_OUT_OF_MEMORY, "allocate_memory");
     return TI_NULL_HANDLE;
@@ -1445,7 +1461,7 @@ void launch_kernel_result(Runtime &rt,
     throw MemoryBindingError("Return storage must match the compiled buffer size");
   if (constant_args)
     bound->kernel = bound->owner->get().specialize_kernel(
-        *bound->kernel, *bound->context, *constant_args);
+        *bound->kernel, *bound->context, *constant_args, bound->private_workspaces);
   if (!bound->context->result_buffer_size) {
     bound->kernel->launch(*bound->context);
     return;

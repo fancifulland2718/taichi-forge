@@ -169,7 +169,8 @@
                         "uniform": 1,
                         "vertex": 2,
                         "index": 3,
-                        "indirect": 4
+                        "indirect": 4,
+                        "local_tensor_ext": 5
                     }
                 },
                 {

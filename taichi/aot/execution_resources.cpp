@@ -175,6 +175,12 @@ ExecutionResources ExecutionResources::parse(const JsonValue &root) {
           array.usage = AllocUsage::None;
           for (const auto &item : usage->second.arr.inner) {
             const auto label = name(item);
+            if (label == "local_tensor") {
+              if (integer(root["version"]) < 29)
+                throw std::invalid_argument("Local tensor scratch requires plan version 29");
+              array.local_tensor_workspace = true;
+              continue;
+            }
             const auto flag = label == "storage"    ? AllocUsage::Storage
                               : label == "uniform"  ? AllocUsage::Uniform
                               : label == "vertex"   ? AllocUsage::Vertex
@@ -184,6 +190,12 @@ ExecutionResources ExecutionResources::parse(const JsonValue &root) {
             if (flag == AllocUsage::None)
               throw std::invalid_argument("Unknown array usage: " + label);
             array.usage = array.usage | flag;
+          }
+          if (array.local_tensor_workspace &&
+              (array.usage != AllocUsage::Storage || structured ||
+               value.obj.inner.count("initial_data") ||
+               optional_bool(value, "zero_initialize"))) {
+            throw std::invalid_argument("Local tensor scratch requires uninitialized primitive storage");
           }
         }
         array.shape = shape(value["shape"]);

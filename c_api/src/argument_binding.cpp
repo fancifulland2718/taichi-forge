@@ -665,6 +665,8 @@ std::unique_ptr<BoundKernelArguments> bind_kernel_arguments(
 
         const auto memory =
             runtime2.get_memory(ndarray.memory, prepared_external_access);
+        if (memory.local_tensor_workspace && !gradient_args[i])
+          result->private_workspaces.push_back(i);
         const auto gradient_memory =
             gradient_args[i]
                 ? std::optional{runtime2.get_memory(gradient_args[i]->memory,

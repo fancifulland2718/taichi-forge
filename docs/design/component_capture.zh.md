@@ -959,6 +959,11 @@ ExecutionPlan 分配器接入私有 ndarray。同一实例的不同 prepared cal
 非法 extent 或不一致合同在执行前拒绝。CPU/CUDA 检查覆盖新尺寸、变化的整数输入、
 局部值副本、交错 prepare、独立关闭和 reset。
 
+CUDA 定义包的普通调用和包内 Graph 都在绑定时标明调用私有的局部张量工作区。
+若 prepare 已确定形状，并确认每次迭代只访问自己一行内的元素，LLVM 可将该行
+放在线程私有存储中。其余访问沿用 ndarray。即使形状和步长相同，prepare 缓存也
+区分私有工作区和调用方传入的数组，保留后者的写回。
+
 
 ### 正常 Host 所有者序列
 

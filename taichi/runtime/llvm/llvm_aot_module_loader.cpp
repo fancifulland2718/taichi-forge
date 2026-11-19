@@ -20,6 +20,7 @@
 #include "taichi/runtime/llvm/aot_artifact_integrity.h"
 #include "taichi/runtime/llvm/aot_kernel_contract.h"
 #include "taichi/runtime/llvm/aot_prepared_range.h"
+#include "taichi/runtime/llvm/aot_prepared_local_tensor.h"
 #include "taichi/runtime/llvm/aot_prepared_schedule.h"
 #include "taichi/runtime/llvm/aot_cpu_range.h"
 #include "taichi/runtime/llvm/aot_snode_relocation.h"
@@ -389,7 +390,8 @@ void LlvmAotModule::verify_metadata_unchanged() const {
 
 aot::Kernel *LlvmAotModule::specialize_kernel(
     aot::Kernel &kernel, LaunchContextBuilder &context,
-    const std::vector<uint32_t> &constant_args) {
+    const std::vector<uint32_t> &constant_args,
+    const std::vector<uint32_t> &private_workspaces) {
   auto *source = dynamic_cast<llvm_aot::KernelImpl *>(&kernel);
   TI_ERROR_IF((!arch_is_cpu(arch()) && arch() != Arch::cuda) || !is_llvm_aot_bitcode_format(metadata_.kernel_format) || !source ||
                   !source->device_range_tasks().empty(),
@@ -410,6 +412,7 @@ aot::Kernel *LlvmAotModule::specialize_kernel(
     int64_t displacement;
   };
   std::map<int, PointerRelation> pointers;
+  std::set<int> shared_slots;
   std::map<std::pair<Device *, DeviceAllocationId>, std::pair<int, uint64_t>> roots;
   for (const auto &[path, parameter] : kernel.nested_parameters) {
     if (parameter.ptype != ParameterType::kNdarray)
@@ -447,6 +450,10 @@ aot::Kernel *LlvmAotModule::specialize_kernel(
           std::make_pair(slot, byte_offset));
       if (inserted)
         continue;
+      if (!private_workspaces.empty()) {
+        shared_slots.insert(root->second.first);
+        shared_slots.insert(slot);
+      }
       const auto base_offset = root->second.second;
       const auto distance = byte_offset >= base_offset ? byte_offset - base_offset
                                                      : base_offset - byte_offset;
@@ -461,6 +468,61 @@ aot::Kernel *LlvmAotModule::specialize_kernel(
   }
   for (const auto &[slot, relation] : pointers)
     key += fmt::format("|p:{}:{}:{}", slot, relation.base_slot, relation.displacement);
+  prepared_local_tensor::Workspaces private_rows;
+  if (arch() == Arch::cuda) {
+    for (auto index : private_workspaces) {
+      if (index > INT_MAX)
+        continue;
+      const std::vector<int> path{static_cast<int>(index)};
+      const auto found = kernel.nested_parameters.find(path);
+      if (found == kernel.nested_parameters.end())
+        continue;
+      const auto &parameter = found->second;
+      const auto kind = context.device_allocation_type.find(path);
+      if (parameter.ptype != ParameterType::kNdarray || parameter.needs_grad ||
+          !parameter.element_shape.empty() ||
+          (parameter.total_dim != 2 && parameter.total_dim != 3) ||
+          kind == context.device_allocation_type.end() ||
+          kind->second != LaunchContextBuilder::DevAllocType::kNdarray)
+        continue;
+      const int arg = path[0];
+      const std::vector<int> data_path{arg, TypeFactory::DATA_PTR_POS_IN_NDARRAY};
+      const int slot = kernel.args_type->get_element_offset(data_path);
+      const auto allocation = context.array_ptrs.find(data_path);
+      if (shared_slots.count(slot) || allocation == context.array_ptrs.end() ||
+          !allocation->second ||
+          !static_cast<const DeviceAllocation *>(allocation->second)->device)
+        continue;
+      auto descriptor_word = [&](int member) {
+        const int offset = kernel.args_type->get_element_offset(
+            {arg, TypeFactory::SHAPE_POS_IN_NDARRAY, member});
+        return constants.at(offset).value;
+      };
+      const auto rows = descriptor_word(0);
+      if (!rows || rows > INT_MAX ||
+          descriptor_word(TypeFactory::affine_mode_pos_in_ndarray(parameter.total_dim)))
+        continue;
+      const auto element = DataType(kernel.args_type->get_element_type(data_path))
+                               .ptr_removed();
+      if (!element->is<PrimitiveType>())
+        continue;
+      unsigned bytes = data_type_size(element);
+      for (int axis = 1; axis < parameter.total_dim && bytes; ++axis) {
+        const auto extent = descriptor_word(axis);
+        if (!extent || extent > prepared_local_tensor::kPrivateBytes / bytes)
+          bytes = 0;
+        else
+          bytes *= extent;
+      }
+      if (bytes)
+        private_rows.emplace(slot, prepared_local_tensor::Workspace{
+                                       bytes, static_cast<unsigned>(rows)});
+    }
+  }
+  // Ownership is a prepare fact independent of the ordinary descriptor
+  // constants. A later caller supplying a public array must get generic code.
+  for (const auto &[slot, row] : private_rows)
+    key += fmt::format("|local:{}", slot);
   const auto cached = specialized_kernels_.find(key);
   if (cached != specialized_kernels_.end())
     return cached->second.get();
@@ -694,6 +756,9 @@ aot::Kernel *LlvmAotModule::specialize_kernel(
   if (arch() == Arch::cuda && replacements &&
       LLVMModuleOptions::read(module, executor_->get_config()).opt_level > 0)
     specialize_prepared_task_schedule(module, tasks);
+  if (!private_rows.empty() &&
+      LLVMModuleOptions::read(module, executor_->get_config()).opt_level > 0)
+    specialize_prepared_local_tensors(module, tasks, private_rows);
 
   TI_DEBUG(
       "Prepared specialization {} pruned {} of {} tasks before registration",

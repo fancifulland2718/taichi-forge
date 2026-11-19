@@ -69,6 +69,9 @@ struct BoundKernelArguments {
   std::unique_ptr<taichi::lang::LaunchContextBuilder> context;
   std::vector<std::shared_ptr<taichi::lang::NativeKernelResourceBinding>>
       kernel_resources;
+  // Only compiler-owned, per-invocation scratch grants a specialized kernel
+  // permission to discard the incoming and outgoing allocation contents.
+  std::vector<uint32_t> private_workspaces;
 };
 
 struct BoundGraphArguments {

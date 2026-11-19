@@ -1356,7 +1356,7 @@ static TiPreparedExecution prepare_kernel_impl(TiRuntime runtime,
     if (constant_count)
       indices.assign(constant_args, constant_args + constant_count);
     arguments->kernel = arguments->owner->get().specialize_kernel(
-        *arguments->kernel, *arguments->context, indices);
+        *arguments->kernel, *arguments->context, indices, arguments->private_workspaces);
   }
   auto prepared = std::make_unique<capi::PreparedExecution>();
   prepared->owner = arguments->owner;
@@ -2435,7 +2435,7 @@ static TiPreparedExecution prepare_execution_plan_impl(
               constants.push_back(index);
           }
           bound->kernel = bound->owner->get().specialize_kernel(
-              *bound->kernel, *bound->context, constants);
+              *bound->kernel, *bound->context, constants, bound->private_workspaces);
         }
         bound->context->append_dispatch_label(kernel->label);
         DevicePtr indirect_packet{kDeviceNullPtr};

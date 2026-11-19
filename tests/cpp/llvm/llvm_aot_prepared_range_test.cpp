@@ -6,6 +6,7 @@
 #include "llvm/IR/Verifier.h"
 #include "llvm/Support/SourceMgr.h"
 #include "taichi/runtime/llvm/aot_prepared_range.h"
+#include "taichi/runtime/llvm/aot_prepared_local_tensor.h"
 #include "taichi/runtime/llvm/aot_prepared_schedule.h"
 #include "taichi/codegen/range_for_bounds.h"
 
@@ -57,6 +58,86 @@ TEST(AotPreparedRange, LinkedHelperRefinesGridWithoutFreezingLiveBounds) {
   EXPECT_EQ(range.launch_grid(8160, 128, &count, sizeof(count)), 3);
   std::vector<std::pair<uint64_t, uint64_t>> mutable_args{{0, sizeof(count)}};
   EXPECT_EQ(range.launch_grid(8160, 128, &count, sizeof(count), &mutable_args), 8160);
+}
+
+TEST(AotPreparedRange, LocalTensorRequiresAnExclusiveBoundedRow) {
+  enum Scenario { local, public_array, outside_row, escape, another_task,
+                  short_outer_extent, oversized_frame, unknown_stride,
+                  wrapped_offsets, wrong_step, live_index, atomic_access };
+  for (const auto width : {1, 4, 7}) {
+    for (const auto scenario : {local, public_array, outside_row, escape,
+                                another_task, short_outer_extent,
+                                oversized_frame, unknown_stride, wrapped_offsets,
+                                wrong_step, live_index, atomic_access}) {
+      SCOPED_TRACE(::testing::Message() << "width " << width << " scenario " << scenario);
+      llvm::LLVMContext context;
+      const int bytes = scenario == oversized_frame ? 2048 : width * 4;
+      std::string body = fmt::format(R"(
+        entry:
+          %args = load ptr, ptr %ctx
+          %slot = getelementptr i8, ptr %args, i64 8
+          %array = load ptr, ptr %slot
+          %iteration = sext i32 %i to i64
+          %row = mul i64 %iteration, {}
+          br label %test
+        test:
+          %index = phi i32 [0, %entry], [%next, %loop]
+          %more = icmp slt i32 %index, {}
+          br i1 %more, label %loop, label %done
+        loop:
+          %j = sext i32 %index to i64
+          %inner = mul i64 %j, 4
+          %offset = add i64 %row, %inner
+          %p = getelementptr i8, ptr %array, i64 %offset
+          {}
+          %next = add i32 %index, {}
+          br label %test
+        done:
+      )", scenario == unknown_stride ? bytes + 4 : bytes,
+                       scenario == outside_row ? width + 1 : width,
+                       scenario == wrapped_offsets ? R"(
+                          %past = getelementptr i8, ptr %p, i64 -4
+                          %again = getelementptr i8, ptr %past, i64 4
+                          store i32 %index, ptr %again, align 4)"
+                       : scenario == live_index ? R"(
+                          %live = getelementptr i8, ptr %p, i64 %iteration
+                          store i32 %index, ptr %live, align 1)"
+                       : scenario == atomic_access
+                           ? "store atomic i32 %index, ptr %p monotonic, align 4"
+                           : "store i32 %index, ptr %p, align 4",
+                       scenario == wrong_step ? 2 : 1);
+      if (scenario == escape)
+        body += "call void @observe(ptr %array)\n";
+      auto module = range_module(context, body, R"(
+        declare void @observe(ptr)
+        define void @read_other_task(ptr %ctx) {
+          %args = load ptr, ptr %ctx
+          %slot = getelementptr i8, ptr %args, i64 8
+          %array = load ptr, ptr %slot
+          %seen = load i32, ptr %array
+          ret void
+        })");
+      ASSERT_TRUE(module);
+      LLVM::prepared_local_tensor::Workspaces spaces;
+      if (scenario != public_array)
+        spaces.emplace(8, LLVM::prepared_local_tensor::Workspace{
+                              static_cast<unsigned>(bytes),
+                              scenario == short_outer_extent ? 0u : 1u});
+      std::vector<OffloadedTask> tasks(1);
+      tasks.front().name = "entry";
+      if (scenario == another_task)
+        tasks.emplace_back().name = "read_other_task";
+      LLVM::specialize_prepared_local_tensors(*module, tasks, spaces);
+      bool has_private = false;
+      for (auto &inst : module->getFunction("body")->getEntryBlock())
+        if (auto *storage = llvm::dyn_cast<llvm::AllocaInst>(&inst)) {
+          has_private = true;
+          EXPECT_EQ(storage->getAllocatedType()->getArrayNumElements(), bytes);
+        }
+      EXPECT_EQ(has_private, scenario == local);
+      EXPECT_FALSE(llvm::verifyModule(*module, &llvm::errs()));
+    }
+  }
 }
 
 TEST(AotPreparedRange, ForwardsPrivateBoundsAndRetainsObservedWrites) {

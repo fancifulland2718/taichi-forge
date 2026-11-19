@@ -546,9 +546,9 @@ ExecutionResourceBindings bind_execution_resources(
         argument.value.ndarray.memory =
             result.storage->allocate(sizes[pos], description.usage, owner.get());
       }
-      if (std::get<Recipes::Array>(
-              resources.declarations[resources.order[pos]].value)
-              .zero_initialize)
+      if (description.local_tensor_workspace)
+        runtime.mark_local_tensor_workspace(argument.value.ndarray.memory);
+      if (description.zero_initialize)
         result.zero_initializations.push_back(
             {argument.value.ndarray.memory, sizes[pos]});
       const auto &key = std::get<Recipes::Array>(

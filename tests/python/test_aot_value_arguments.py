@@ -196,6 +196,37 @@ def test_prepared_bitcode_specialization_keeps_shapes_and_instances_independent(
             bound.prepare(constant_args=(1,))
 
 
+@test_utils.test(arch=ti.cuda, offline_cache=False)
+def test_prepared_local_tensor_keeps_public_array_writes(tmp_path):
+    from taichi_forge_runtime.aot import Scalar
+
+    @ti.kernel
+    def update(work: ti.types.ndarray(ti.i32, 2), out: ti.types.ndarray(ti.i32, 1), gain: ti.i32):
+        for i in range(out.shape[0]):
+            for j in range(work.shape[1]):
+                work[i, j] = i + j + gain
+            out[i] = work[i, work.shape[1] - 1]
+
+    module = ti.aot.Module()
+    module.add_kernel(update)
+    archive = tmp_path / "local-tensor.tcm"
+    module.archive(str(archive))
+    with ti.aot.borrow_runtime() as runtime, ExitStack() as stack:
+        entry = stack.enter_context(runtime.load_module(archive)).kernel("update")
+        shape = (17, 4)
+        scratch = stack.enter_context(closing(runtime.ndarray("i32", shape, usage=("storage", "local_tensor"))))
+        public = stack.enter_context(closing(runtime.ndarray("i32", shape)))
+        out = stack.enter_context(closing(runtime.ndarray("i32", (shape[0],))))
+        # Prime the module cache with private scratch first. The next binding
+        # has the same shape and pointer relationships but observable writes.
+        for array, gain in ((scratch, 7), (public, 3), (scratch, 2)):
+            with closing(entry.bind(array, out, Scalar("i32", gain)).prepare(specialize=True)) as call:
+                call.run()
+                np.testing.assert_array_equal(np.frombuffer(out.read(), np.int32), np.arange(17) + 3 + gain)
+        np.testing.assert_array_equal(np.frombuffer(public.read(), np.int32).reshape(shape),
+                                      np.arange(17)[:, None] + np.arange(4) + 3)
+
+
 @test_utils.test(arch=[ti.cpu, ti.cuda], offline_cache=False)
 @pytest.mark.parametrize("archive", [False, True])
 @pytest.mark.parametrize("artifact_format", ["bc", "bc-library"])

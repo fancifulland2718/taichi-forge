@@ -208,6 +208,7 @@ class Runtime {
     // Internal aliases can instead be owned by their enclosing module. That
     // lifetime is ordered by prepared retirement, not by a placeholder lease.
     bool owns_allocation{true};
+    bool local_tensor_workspace{false};
     std::shared_ptr<BorrowedMemory> borrowed;
     // Optional authoritative uniform-record layout. Its byte offset is relative
     // to this memory window; raw packed transfers must not discard its strides.
@@ -300,6 +301,7 @@ class Runtime {
   // Ordinary launch/copy/map/export paths cannot bypass the access epoch.
   MemoryAllocation get_memory(TiMemory memory,
                               bool prepared_external_access = false) const;
+  void mark_local_tensor_workspace(TiMemory memory);
   void retire_borrowed_memory(const std::shared_ptr<BorrowedMemory> &borrowed);
   static std::uintptr_t new_handle_token();
   TiKernel register_kernel(KernelBinding binding);

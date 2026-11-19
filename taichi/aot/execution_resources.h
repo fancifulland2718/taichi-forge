@@ -26,6 +26,7 @@ struct ExecutionResources {
     std::vector<std::uint32_t> element_shape;
     // Cold allocation policy; runs once before explicit initialization/replay.
     bool zero_initialize{false};
+    bool local_tensor_workspace{false};
     // SHA-256 key of packed initial bytes in the module's data directory.
     // Each materialization receives independent mutable device storage.
     std::string initial_data;

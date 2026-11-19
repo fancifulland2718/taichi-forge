@@ -127,7 +127,8 @@ class TI_DLL_EXPORT Module {
   // existing immutable arguments, resources and retirement leases.
   virtual Kernel *specialize_kernel(Kernel &kernel,
                                     LaunchContextBuilder &context,
-                                    const std::vector<uint32_t> &constant_args) {
+                                    const std::vector<uint32_t> &constant_args,
+                                    const std::vector<uint32_t> &private_workspaces = {}) {
     throw std::invalid_argument("This AOT backend cannot specialize loaded code");
   }
   KernelTemplate *get_kernel_template(const std::string &name);
