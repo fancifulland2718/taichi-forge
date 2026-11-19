@@ -1653,9 +1653,9 @@ ti_read_prepared_kernel_result_ext(TiRuntime runtime,
 // ones. Destroying a pending ticket does not wait or retire its execution.
 TI_DLL_EXPORT TiSubmissionTicket TI_API_CALL
 ti_submit_prepared_ext(TiRuntime runtime, TiPreparedExecution execution);
-// CUDA ordinary-queue live scalar frames. Preparation shares compiled code;
-// try-submit returns false while this frame's previous replay is still using
-// its parameter snapshot. Completion-handle release does not unlock the frame.
+// Ordinary-queue live scalar frames share prepared code. CUDA try-submit
+// returns false while a prior replay uses its staging frame. Vulkan records
+// live integer values on the same ordered queue as the prepared compute work.
 TI_DLL_EXPORT TiPreparedExecution TI_API_CALL
 ti_prepare_execution_plan_parameters_ext(
     TiRuntime runtime, TiAotModule module, uint64_t description_size,
@@ -1666,6 +1666,11 @@ TI_DLL_EXPORT TiBool TI_API_CALL
 ti_try_submit_prepared_ordinary_parameters_ext(
     TiRuntime runtime, TiPreparedExecution execution, uint32_t parameter_count,
     const uint64_t *parameters, TiSubmissionTicket *ticket);
+// Enqueue live integer arguments and a flat Vulkan compute Graph on the ordinary queue.
+TI_DLL_EXPORT void TI_API_CALL
+ti_launch_prepared_vulkan_parameters_ext(
+    TiRuntime runtime, TiPreparedExecution execution, uint32_t parameter_count,
+    const uint64_t *parameters);
 // Wait only this frame's previous use, without holding the submission lock.
 TI_DLL_EXPORT void TI_API_CALL
 ti_wait_prepared_parameter_frame_ext(TiRuntime runtime, TiPreparedExecution execution);

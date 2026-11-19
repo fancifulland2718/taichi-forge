@@ -3350,6 +3350,16 @@ std::unique_ptr<GraphReplayRegistration> GfxRuntime::prepare_fixed_graph(
   return registration;
 }
 
+std::unique_ptr<GraphReplayRegistration> GfxRuntime::prepare_parameterized_graph(
+    const std::vector<GraphRecordingOperation> &operations,
+    const std::shared_ptr<FixedGraphParameters> &parameters) {
+  auto registration = register_graph_replay(1);
+  std::lock_guard<std::recursive_mutex> lock(host_api_mutex_);
+  auto state = record_fixed_graph(operations, {}, {}, false, false, {}, {}, {}, parameters);
+  graph_replay_states_.emplace(registration->replay_key(), std::move(state));
+  return registration;
+}
+
 std::shared_ptr<GfxRuntime::FixedGraphWorkspace>
 GfxRuntime::create_fixed_graph_workspace() {
   std::lock_guard<std::recursive_mutex> lock(host_api_mutex_);
@@ -3691,7 +3701,8 @@ GfxRuntime::GraphReplayState GfxRuntime::record_fixed_graph(
     bool timings,
     std::shared_ptr<GraphReplayExecutable::Slot> detached,
     std::unique_ptr<CommandList> commands,
-    const std::shared_ptr<FixedGraphWorkspace> &workspace) {
+    const std::shared_ptr<FixedGraphWorkspace> &workspace,
+    const std::shared_ptr<FixedGraphParameters> &parameters) {
   std::lock_guard<std::recursive_mutex> lock(host_api_mutex_);
   TI_ERROR_IF(
       operations.empty() || profiler_ || dispatch_cache_,
@@ -4156,6 +4167,27 @@ GfxRuntime::GraphReplayState GfxRuntime::record_fixed_graph(
       commands->image_transition(image, final_layout, layout);
     }
   }
+  struct ParameterTarget {
+    DevicePtr destination;
+    std::size_t index;
+    std::size_t bytes;
+  };
+  std::vector<ParameterTarget> targets;
+  if (parameters) {
+    TI_ERROR_IF(parameters->patches.size() != prepared.size(),
+                "Vulkan Graph parameter dispatch count mismatch");
+    for (std::size_t i = 0; i < prepared.size(); ++i) {
+      for (const auto &patch : parameters->patches[i]) {
+        const auto size = slot.args_buffer_sizes[i];
+        TI_ERROR_IF(patch.slot >= parameters->values->size() ||
+                        (patch.bytes != 4 && patch.bytes != 8) || patch.argument_offset % 4 ||
+                        patch.argument_offset > size || patch.bytes > size - patch.argument_offset,
+                    "Vulkan Graph parameter is outside the compiled argument buffer");
+        targets.push_back({slot.args_buffers[i]->get_ptr(patch.argument_offset),
+                           patch.slot, patch.bytes});
+      }
+    }
+  }
   for (auto bytes : slot.args_buffer_sizes) {
     state.fixed_argument_bytes += bytes;
   }
@@ -4218,6 +4250,31 @@ GfxRuntime::GraphReplayState GfxRuntime::record_fixed_graph(
       primary_slot->completion = graphics_device
           ? submit_graphics_commands(graphics_device, primary_slot->cmdlist.get())
           : submit_compute_commands(primary_slot->cmdlist.get());
+    };
+  }
+  if (parameters) {
+    // Record values into the caller's ordered primary. A later replay can
+    // supply new bits while the previous dispatch is still reading its values.
+    // The existing secondary/primary retains the argument buffers to completion.
+    state.fixed_submit = [this, values = parameters->values, targets = std::move(targets),
+                          launch = std::move(state.fixed_submit)] {
+      ensure_current_cmdlist();
+      for (const auto &target : targets) {
+        const auto bits = (*values)[target.index];
+        auto dst = target.destination;
+        current_cmdlist_->buffer_transition(dst, target.bytes,
+            {BufferBarrierStage::Compute, BufferBarrierAccess::UniformRead,
+             BufferBarrierStage::Transfer, BufferBarrierAccess::TransferWrite});
+        current_cmdlist_->buffer_fill(dst, 4, static_cast<std::uint32_t>(bits));
+        if (target.bytes == 8) {
+          dst.offset += 4;
+          current_cmdlist_->buffer_fill(dst, 4, static_cast<std::uint32_t>(bits >> 32));
+        }
+        current_cmdlist_->buffer_transition(target.destination, target.bytes,
+            {BufferBarrierStage::Transfer, BufferBarrierAccess::TransferWrite,
+             BufferBarrierStage::Compute, BufferBarrierAccess::UniformRead});
+      }
+      launch();
     };
   }
   state.last_path = GraphReplayLastPath::record;

@@ -6,6 +6,7 @@
 #include "taichi/runtime/native_ray_admission.h"
 #include "taichi/runtime/native_resource.h"
 #include "taichi/runtime/gfx/range_dispatch.h"
+#include "taichi/runtime/submission_parameters.h"
 #include "taichi/program/runtime_completion.h"
 #include "taichi/util/lang_util.h"
 
@@ -625,6 +626,15 @@ class TI_DLL_EXPORT GfxRuntime {
       std::vector<int> snode_tree_ids = {},
       bool independent_graphics = false,
       std::shared_ptr<std::vector<std::pair<std::string, StreamGpuTiming>>> *timings = nullptr);
+  // Scalar bits are embedded in each ordinary queue submission. The recorded
+  // kernels, resource bindings and workspace remain owned by the Graph.
+  struct FixedGraphParameters {
+    std::vector<std::vector<SubmissionParameterPatch>> patches;
+    std::shared_ptr<std::vector<SubmissionParameterValue>> values;
+  };
+  std::unique_ptr<GraphReplayRegistration> prepare_parameterized_graph(
+      const std::vector<GraphRecordingOperation> &operations,
+      const std::shared_ptr<FixedGraphParameters> &parameters);
   // Cold per-instance state shared by the instance's initialization/replay
   // segments. Allocation is lazy; initialization is recorded once, after all
   // segments are prepared, and must precede their first execution.
@@ -1053,7 +1063,8 @@ class TI_DLL_EXPORT GfxRuntime {
       bool timings,
       std::shared_ptr<GraphReplayExecutable::Slot> detached = {},
       std::unique_ptr<CommandList> commands = {},
-      const std::shared_ptr<FixedGraphWorkspace> &workspace = {});
+      const std::shared_ptr<FixedGraphWorkspace> &workspace = {},
+      const std::shared_ptr<FixedGraphParameters> &parameters = {});
   void prepare_fixed_sparse_resources(
       FixedSparseReplayResources &resources,
       std::vector<std::shared_ptr<void>> &owners);

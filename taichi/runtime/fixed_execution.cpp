@@ -224,6 +224,7 @@ struct FixedExecution::State {
     }
   };
   std::shared_ptr<VulkanInstance> vulkan_instance;
+  std::shared_ptr<std::vector<SubmissionParameterValue>> vulkan_parameters;
   std::vector<std::unique_ptr<gfx::GraphReplayRegistration>> vulkan_graphs;
   gfx::GfxRuntime *vulkan_runtime{nullptr};
 #endif
@@ -1381,6 +1382,25 @@ FixedExecution::FixedExecution(
     std::shared_ptr<State::VulkanInstance> instance;
     std::vector<const Dispatch *> dispatch_sources;
     std::shared_ptr<gfx::GfxRuntime::FixedGraphWorkspace> recording_workspace;
+    std::shared_ptr<gfx::GfxRuntime::FixedGraphParameters> parameters;
+    const auto has_parameters = [](const auto &op) {
+      const auto *dispatch = std::get_if<Dispatch>(&op);
+      return dispatch && !dispatch->parameters.empty();
+    };
+    if (!vulkan_binding && std::any_of(operations.begin(), operations.end(), has_parameters)) {
+      parameters = std::make_shared<gfx::GfxRuntime::FixedGraphParameters>();
+      std::size_t count = 0;
+      for (const auto &op : operations) {
+        const auto *dispatch = std::get_if<Dispatch>(&op);
+        if (!dispatch || submission_recipe || storage_ring)
+          throw std::invalid_argument("Ordinary Vulkan parameters require flat kernel dispatches");
+        parameters->patches.push_back(dispatch->parameters);
+        for (const auto &patch : dispatch->parameters)
+          count = std::max(count, patch.slot + 1);
+      }
+      state_->vulkan_parameters = std::make_shared<std::vector<SubmissionParameterValue>>(count);
+      parameters->values = state_->vulkan_parameters;
+    }
     const auto bind_dispatch = [&](const Dispatch &dispatch) {
       auto *loaded = dynamic_cast<gfx::KernelImpl *>(dispatch.kernel);
       if (!loaded || (gfx_runtime && gfx_runtime != &loaded->runtime()))
@@ -1464,7 +1484,10 @@ FixedExecution::FixedExecution(
         native.clear();
         return;
       }
-      retain(gfx_runtime->prepare_fixed_graph(native, {}, {}, independent));
+      if (parameters)
+        retain(gfx_runtime->prepare_parameterized_graph(native, parameters));
+      else
+        retain(gfx_runtime->prepare_fixed_graph(native, {}, {}, independent));
       native.clear();
     };
     const auto record_sequence = [&](const std::vector<Operation> &region) {
@@ -2052,17 +2075,28 @@ RuntimeCompletion FixedExecution::submit(
       "Fixed execution was not prepared for an independent domain");
 }
 void FixedExecution::validate_ordinary_parameters(std::size_t count) const {
+#ifdef TI_WITH_VULKAN
+  if (state_->vulkan_parameters && state_->vulkan_parameters->size() == count)
+    return;
+#endif
 #ifdef TI_WITH_CUDA
   if (state_->cuda_graph && state_->cuda_graph->parameter_count() == count)
     return;
 #endif
   throw std::invalid_argument(
-      "Ordinary submission parameters require a fixed CUDA graph");
+      "Ordinary submission parameters require a fixed CUDA or Vulkan kernel graph");
 }
 
 void FixedExecution::run_parameters(
     const std::vector<SubmissionParameterValue> &parameters) {
   validate_ordinary_parameters(parameters.size());
+#ifdef TI_WITH_VULKAN
+  if (state_->vulkan_parameters) {
+    *state_->vulkan_parameters = parameters;
+    run();
+    return;
+  }
+#endif
 #ifdef TI_WITH_CUDA
   state_->cuda_graph->snapshot_parameters(parameters);
 #endif

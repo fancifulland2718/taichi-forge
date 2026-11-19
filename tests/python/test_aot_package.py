@@ -19130,6 +19130,63 @@ def test_package_graph_prepares_live_parameters_in_execution_domain(tmp_path, mo
             np.testing.assert_array_equal(first.values.to_numpy(), 22 * np.arange(7) + 46)
 
 
+@test_utils.test(arch=ti.vulkan, offline_cache=False)
+def test_package_vulkan_graph_updates_queued_integer_arguments(tmp_path, monkeypatch):
+    source = """
+import taichi_forge as ti
+@ti.kernel
+def write(slot: ti.i32, epoch: ti.i64, out: ti.types.ndarray(dtype=ti.i64, ndim=1)):
+    out[slot] = epoch
+
+@ti.kernel
+def mark_end(out: ti.types.ndarray(dtype=ti.i64, ndim=1), count: ti.i32, epoch: ti.i64):
+    for i in range(count):
+        if i == count - 1:
+            out[5 + i] = epoch
+
+def graph():
+    builder = ti.graph.GraphBuilder()
+    out = ti.graph.Arg(ti.graph.ArgKind.NDARRAY, "out", ti.i64, ndim=1)
+    epoch = ti.graph.Arg(ti.graph.ArgKind.SCALAR, "epoch", ti.i64)
+    builder.dispatch(write, ti.graph.Arg(ti.graph.ArgKind.SCALAR, "slot", ti.i32), epoch, out)
+    builder.dispatch(mark_end, out, ti.graph.Arg(ti.graph.ArgKind.SCALAR, "count", ti.i32), epoch)
+    return builder.compile()
+"""
+    source_package = _source_package(tmp_path, monkeypatch, source, initializer="from .model import graph, write, mark_end\n")
+    ti.aot.export_package(source_package, tmp_path / "sdk", caps=["spirv_has_int64"])
+    device = int(os.environ.get("TI_TEST_VULKAN_DEVICE_INDEX", 0))
+    with Runtime("vulkan", device_index=device) as runtime, load_package(runtime, tmp_path / "sdk") as code:
+        graph = code.host.graph()
+        first, second = (runtime.ndarray("i64", (1030,)) for _ in range(2))
+        counts = []
+        prepare = graph.prepare
+
+        def count_prepare(*args, **kwargs):
+            counts.append(tuple(kwargs.get("mutable_parameters", ())))
+            return prepare(*args, **kwargs)
+
+        monkeypatch.setattr(graph, "prepare", count_prepare)
+        epochs = [7, 2**40 + 1, -2**39, 0, -1]
+        extents = [1, 7, 1025, 0, 3]
+        for i, (epoch, count) in enumerate(zip(epochs, extents)):
+            graph.run(dict(out=first, slot=i, epoch=epoch, count=count))
+        # Tickets and fire-and-forget launches share the same ordered queue.
+        with graph.submit(dict(out=first, slot=3, epoch=19, count=0)) as ticket:
+            ticket.wait()
+        epochs[3] = 19
+        assert len(counts) == 2 and counts[0] == () and set(counts[1]) == {"slot", "epoch", "count"}
+        with pytest.raises(ValueError, match="outside"):
+            graph.run(dict(out=first, slot=0, epoch=2**63, count=0))
+        second.from_numpy(np.zeros(1030, dtype=np.int64))
+        graph.run(dict(out=second, slot=1, epoch=-(2**50), count=0))
+        assert len(counts) == 3
+        output = first.to_numpy()
+        np.testing.assert_array_equal(output[:5], epochs)
+        for i in (0, 1, 2, 4):
+            assert output[4 + extents[i]] == epochs[i]
+        np.testing.assert_array_equal(second.to_numpy()[:5], [0, -(2**50), 0, 0, 0])
+
+
 @test_utils.test(arch=ti.cuda, offline_cache=False)
 def test_package_graph_reuses_live_parameter_lanes(tmp_path, monkeypatch):
     package = _source_package(tmp_path, monkeypatch, OWNER_GRAPH_SOURCE)

@@ -557,7 +557,26 @@ class Graph:
                 if spec["kind"] == "value" and spec.get("dtype") in ("i32", "u32", "i64", "u64", "f32", "f64"))
             if not self._live_parameters:
                 raise ValueError("Package workspace lanes require explicit live scalar arguments")
+        self._vulkan_parameters = self._vulkan_integer_parameters() if package.runtime.arch == "vulkan" else ()
         package._graphs.add(self)
+
+    def _vulkan_integer_parameters(self):
+        names = tuple(name for name, spec in self.arguments.items()
+                      if spec["kind"] == "value" and spec.get("dtype") in ("i32", "u32", "i64", "u64"))
+        if not names or self.package.runtime._api.vulkan_parameter_launch() is None:
+            return ()
+        # Array owners and captured model facts retain their original admission.
+        # Mutable Python value captures need the implicit binding's value checks.
+        if (any(spec["kind"] != "ndarray" and name not in names for name, spec in self.arguments.items())
+                or any(spec["kind"] in ("compound", "value", "dimension") for _, spec in self.captures.values())):
+            return ()
+        document = json.loads(self.plan.to_json())
+        operations = document["operations"]
+        if (document.get("initialization") or self.plan.binding_strategy is not None
+                or any(op["kind"] != "kernel" or "launch" in op for op in operations)):
+            return ()
+        used = {arg for op in operations for arg in op["arguments"]}
+        return tuple(name for name in names if name in used)
 
     def written_resources(self):
         """Inspect compiled effects without allocating, preparing or submitting."""
@@ -877,14 +896,27 @@ class Graph:
             self._cached_tokens, self._cached_guards = tokens, guards
         return prepared
 
+    def _observe_vulkan_parameters(self, arguments):
+        if self._vulkan_parameters and not self._live_parameters and self._cached_call is not None:
+            from ._package_calls import _token
+            if any(name in arguments and _token(arguments[name]) != token
+                   for name, token in zip(self.arguments, self._cached_tokens) if name in self._vulkan_parameters):
+                self._live_parameters = self._vulkan_parameters
+
     def run(self, arguments):
-        if self._live_parameters and not isinstance(arguments, PreparedCall):
+        if self._live_parameters and not self._vulkan_parameters and not isinstance(arguments, PreparedCall):
             self.submit(arguments).close()
             return
         with self.package._call_lock:
+            if self._vulkan_parameters and not isinstance(arguments, PreparedCall):
+                self._observe_vulkan_parameters(arguments)
+                if self._live_parameters:
+                    frames, values = self._parameter_bindings(arguments)
+                    frames[0]._run_vulkan_parameters(values)
+                    return
             self._prepared(arguments).run()
 
-    def _submit_parameter_frame(self, arguments):
+    def _parameter_bindings(self, arguments):
         self.package._check()
         if arguments.keys() != self.arguments.keys():
             raise ValueError("Graph binding must supply exactly its declared arguments")
@@ -906,13 +938,21 @@ class Graph:
                 raise
             self._clear_cached()
             self._parameter_frames = frames
+            self._cached_values = tuple(arguments[name] for name in self.arguments if name not in self._live_parameters)
             self._frame_tokens, self._frame_guards = tokens, guards
             self._next_parameter_frame = 0
         values = {name: arguments[name] for name in self._live_parameters}
+        if self._vulkan_parameters:
+            # The implicit integer scalar ABI also accepts Python booleans.
+            values = {name: int(value) if type(value) is bool else value for name, value in values.items()}
+        return self._parameter_frames, values
+
+    def _submit_parameter_frame(self, arguments):
+        frames, values = self._parameter_bindings(arguments)
         start = self._next_parameter_frame
         for offset in range(len(self._parameter_frames)):
             index = (start + offset) % len(self._parameter_frames)
-            frame = self._parameter_frames[index]
+            frame = frames[index]
             ticket = frame.submit(values=values)
             if ticket is not None:
                 self._next_parameter_frame = (index + 1) % len(self._parameter_frames)
@@ -922,10 +962,10 @@ class Graph:
     def submit(self, arguments, *, pacer=None, lane=None, on_saturation="wait", telemetry=False):
         """Replay a prepared binding and return a completion ticket.
 
-        Multiple workspace lanes reuse explicit scalar parameter frames on the
-        ordinary CUDA queue. Other changed bindings re-enter preparation.
-        Explicit bind() retains an
-        independent snapshot; the ticket and Runtime retain resource leases.
+        CUDA workspace lanes reuse scalar parameter frames. Ordinary Vulkan
+        kernel Graphs can record changing integer arguments on the replay
+        queue. Other changed bindings re-enter preparation. Explicit bind()
+        retains an independent snapshot. The ticket and Runtime retain leases.
         A hybrid package may share its JIT runtime's SubmissionPacer. Admission
         precedes binding; standalone Runtime submission needs no frontend.
         """
@@ -942,6 +982,8 @@ class Graph:
             arguments = dict(arguments)
         while True:
             with self.package._call_lock:
+                if self._vulkan_parameters and not isinstance(arguments, PreparedCall):
+                    self._observe_vulkan_parameters(arguments)
                 if not self._live_parameters or isinstance(arguments, PreparedCall):
                     return self._prepared(arguments).submit()
                 ticket, pending = self._submit_parameter_frame(arguments)
