@@ -19,7 +19,9 @@ from taichi_forge.lang._local_tensor import LocalTensor, field_iteration_scope, 
 from taichi_forge.lang.argpack import ArgPackType
 from taichi_forge.lang.ast.ast_transformer_utils import Builder, LoopStatus, ReturnStatus
 from taichi_forge.lang.ast.symbol_resolver import ASTResolver
-from taichi_forge.lang.ast._uniform_schedule import _bound, scalar_statement, uniform_range_schedule
+from taichi_forge.lang.ast._uniform_schedule import (
+    _bound, scalar_statement, snapshot_schedule_arguments, uniform_range_schedule,
+)
 from taichi_forge.lang.exception import (
     TaichiIndexError,
     TaichiSyntaxError,
@@ -1910,6 +1912,9 @@ class ASTTransformer(Builder):
         compilation = getattr(ctx.deployment.kernel, '_package_compilation', None)
         scalar_helpers = compilation.static_preparation.scalar_functions if (
             compilation is not None and compilation.static_preparation is not None) else ()
+        if compilation is not None and compilation.static_preparation is not None:
+            statements = list(snapshot_schedule_arguments(
+                statements, compilation.static_preparation.schedule_functions, scalar_helpers))
         kind = lambda expression: ASTTransformer.schedule_kind(ctx, expression)
 
         def empty_value(value):

@@ -10,7 +10,7 @@ import copy
 import re
 
 from taichi_forge.lang.ast._uniform_schedule import (
-    helper_call_name, scalar_statement, uniform_range_schedule, uniform_range_statements,
+    helper_call_name, scalar_statement, schedule_value_parameters, uniform_range_schedule, uniform_range_statements,
 )
 
 
@@ -123,7 +123,7 @@ class StaticPreparation:
             if names <= self.scalar_functions:
                 break
             self.scalar_functions.update(names)
-        self.schedule_functions = set()
+        self.schedule_functions = {}
         while True:
             proven = {
                 identity for identity, function, kind in functions
@@ -132,9 +132,13 @@ class StaticPreparation:
             }
             names = {name for name, identities in self._names.items()
                      if name not in self._ambiguous_names and identities <= proven}
-            if names <= self.schedule_functions:
+            new_names = names - self.schedule_functions.keys()
+            if not new_names:
                 break
-            self.schedule_functions.update(names)
+            for identity, function, kind in functions:
+                if function.name in new_names:
+                    parameters = schedule_value_parameters(function, kind)
+                    self.schedule_functions.setdefault(function.name, parameters).intersection_update(parameters)
         # Inline helpers at kernel scope can contribute parallel tasks. Follow
         # their ordinary call names conservatively before moving a condition;
         # the absence of loop_config at the call site is not a legality proof.

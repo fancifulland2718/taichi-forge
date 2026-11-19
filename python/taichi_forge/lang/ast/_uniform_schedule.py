@@ -7,6 +7,8 @@ iteration and unproven control transfers retain their original boundaries.
 """
 
 import ast
+import copy
+from itertools import chain
 
 
 def _bound(node):
@@ -35,6 +37,60 @@ def helper_call_name(call):
             and call.func.value.id == "self"):
         return call.func.attr
     return None
+
+
+def schedule_value_parameters(function, kind):
+    """Keys used by callers for arguments with ordinary scalar/value semantics."""
+    positional = function.args.posonlyargs + function.args.args
+    keys = set()
+    for index, arg in enumerate(positional + function.args.kwonlyargs):
+        if arg.annotation is not None and kind(arg.annotation) not in (
+                'i8', 'i16', 'i32', 'i64', 'u8', 'u16', 'u32', 'u64', 'f16', 'f32', 'f64'):
+            continue
+        if index < len(positional):
+            keys.add(index)
+        keys.add(arg.arg)
+    return keys
+
+
+def schedule_argument_reads(call, helpers):
+    """Find direct reads of an owner's scalar slot passed by value to an inline schedule."""
+    parameters = helpers.get(helper_call_name(call))
+    if not parameters:
+        return
+    positional = enumerate(call.args, start=int(isinstance(call.func, ast.Attribute)))
+    keywords = ((kw.arg, kw.value) for kw in call.keywords)
+    for key, arg in chain(positional, keywords):
+        if (key not in parameters or not isinstance(arg, ast.Subscript) or not isinstance(arg.slice, ast.Constant)
+                or arg.slice.value is not None or not isinstance(arg.value, ast.Attribute)):
+            continue
+        owner = arg.value.value
+        while isinstance(owner, ast.Attribute):
+            owner = owner.value
+        if isinstance(owner, ast.Name) and owner.id == 'self':
+            yield arg
+
+
+def snapshot_schedule_arguments(statements, helpers, scalar_helpers):
+    """Bind device values once inside the model guard, before entering the helper's loops."""
+    for index, statement in enumerate(statements):
+        if (isinstance(statement, ast.Expr) and isinstance(statement.value, ast.Call)
+                and helper_call_name(statement.value) not in scalar_helpers):
+            call = statement.value
+            replacements = {}
+            for slot, arg in enumerate(schedule_argument_reads(call, helpers)):
+                # Not a Python identifier, so this cannot shadow a source local.
+                name = f'<schedule argument {index}.{slot}>'
+                target = ast.copy_location(ast.Name(id=name, ctx=ast.Store()), arg)
+                yield ast.copy_location(ast.Assign(targets=[target], value=arg), arg)
+                replacements[arg] = ast.copy_location(ast.Name(id=name, ctx=ast.Load()), arg)
+            if replacements:
+                call = copy.copy(call)
+                call.args = [replacements.get(arg, arg) for arg in call.args]
+                call.keywords = [ast.copy_location(ast.keyword(arg=kw.arg, value=replacements[kw.value]), kw)
+                                 if kw.value in replacements else kw for kw in call.keywords]
+                statement = ast.copy_location(ast.Expr(value=call), statement)
+        yield statement
 
 
 def guarded_range_bound(node, kind):
@@ -143,8 +199,9 @@ def uniform_range_statements(statements, kind, helpers=(), scalar_helpers=(), *,
         if isinstance(statement, ast.Expr) and isinstance(statement.value, ast.Call):
             call = statement.value
             if helper_call_name(call) in helpers:
-                if pending_config or not all(_bound(arg) for arg in call.args) or any(
-                    kw.arg is None or not _bound(kw.value) for kw in call.keywords
+                reads = set(schedule_argument_reads(call, helpers))
+                if pending_config or not all(arg in reads or _bound(arg) for arg in call.args) or any(
+                    kw.arg is None or (kw.value not in reads and not _bound(kw.value)) for kw in call.keywords
                 ):
                     return False
                 continue

@@ -2859,6 +2859,23 @@ class Model:
         scope.static('reset', choices=(False, True))
         scope.static('add', choices=(False, True))
         scope.out = scope.field(ti.i32, shape=scope.dim('n'))
+        scope.gain = scope.field(ti.i32, shape=())
+    @ti.func
+    def add_and_scale(self, offset, factor: ti.i32):
+        for i in range(self.n):
+            self.out[i] += offset
+        self.gain[None] = 0
+        for i in range(self.n):
+            self.out[i] *= factor
+    @ti.func
+    def fill_from_reference(self, gain: ti.template()):
+        self.gain[None] = 12
+        for i in range(self.n):
+            self.out[i] = gain
+    @ti.kernel
+    def reference_step(self):
+        if ti.static(self.add):
+            self.fill_from_reference(self.gain[None])
     @ti.kernel
     def step(self, value: ti.i32):
         if ti.static(self.reset):
@@ -2872,10 +2889,7 @@ class Model:
             for i in range(self.n):
                 self.out[i] = value - i
         if ti.static(self.add):
-            for i in range(self.n):
-                self.out[i] += 7
-            for i in range(self.n):
-                self.out[i] *= 3
+            self.add_and_scale(self.gain[None], factor=self.gain[None])
 '''
     tasks = []
     original = _ComponentCode.export
@@ -2901,9 +2915,18 @@ class Model:
             for n in (1, 3, 513):
                 aot, jit = code.host.Model(n, *flags), package.model.Model(n, *flags)
                 for value in (2, 11):
+                    gain = np.asarray(value + 1, dtype=np.int32)
+                    aot.gain.from_numpy(gain)
+                    jit.gain.from_numpy(gain)
                     aot.step(value)
                     jit.step(value)
                     np.testing.assert_array_equal(aot.out.to_numpy(), jit.out.to_numpy())
+                    assert aot.gain.to_numpy().item() == (0 if flags[1] else gain.item())
+                aot.reference_step()
+                jit.reference_step()
+                np.testing.assert_array_equal(aot.out.to_numpy(), jit.out.to_numpy())
+                if flags[1]:
+                    np.testing.assert_array_equal(aot.out.to_numpy(), np.full(n, 12))
 
 
 @test_utils.test(arch=[ti.cpu, ti.cuda], offline_cache=False)
