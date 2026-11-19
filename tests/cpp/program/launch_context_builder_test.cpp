@@ -4,6 +4,7 @@
 #define TI_RUNTIME_HOST
 #include "taichi/program/context.h"
 #undef TI_RUNTIME_HOST
+#include "taichi/aot/specialization.h"
 #include "taichi/program/kernel.h"
 #include "taichi/program/launch_context_builder.h"
 #include "taichi/program/program.h"
@@ -82,6 +83,39 @@ TEST(LaunchContextBuilderTest, VulkanAffineOffsetsUseTheActualSignedRange) {
       }
     }
   }
+}
+
+TEST(LaunchContextBuilderTest, PrepareCapturesCompactAndStridedLayoutModes) {
+  struct TestKernel : aot::Kernel {
+    void launch(LaunchContextBuilder &) override {
+    }
+  } kernel;
+  auto &types = TypeFactory::get_instance();
+  auto shape = types.get_struct_type({{PrimitiveType::i32, "extent", 0},
+                                      {PrimitiveType::i32, "stride", 4},
+                                      {PrimitiveType::i32, "affine", 8}});
+  auto array = types.get_struct_type(
+      {{shape, "shape", 0},
+       {types.get_pointer_type(PrimitiveType::f32), "data", 16}});
+  kernel.args_type = types.get_struct_type({{array, "x", 0}})->as<StructType>();
+  kernel.args_size = 24;
+  auto &param = kernel.nested_parameters[{0}];
+  param.ptype = ParameterType::kNdarray;
+  param.total_dim = 1;
+  LaunchContextBuilder context(&kernel);
+  context.set_struct_arg<int32_t>({0, 0, 0}, 7);
+  context.set_struct_arg<int32_t>({0, 0, 1}, 4);
+  context.set_struct_arg<int32_t>({0, 0, 2}, 0);
+  auto compact = aot::specialization_constants(kernel, context, {});
+  EXPECT_EQ(compact.at(8).value, 0u);
+  EXPECT_EQ(compact.count(4), 0u);
+
+  kernel.runtime_affine_arrays = {{0}};
+  context.set_struct_arg<int32_t>({0, 0, 1}, 16);
+  context.set_struct_arg<int32_t>({0, 0, 2}, 1);
+  auto strided = aot::specialization_constants(kernel, context, {});
+  EXPECT_EQ(strided.at(8).value, 1u);
+  EXPECT_EQ(strided.at(4).value, 16u);
 }
 
 void set_test_execution_plan(Kernel &kernel,

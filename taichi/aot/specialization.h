@@ -47,9 +47,11 @@ inline ArgumentConstants specialization_constants(
         member.back() = TypeFactory::stride_pos_in_ndarray(rank, axis);
         add(member, 32);
       }
-      member.back() = TypeFactory::affine_mode_pos_in_ndarray(rank);
-      add(member, 32);
     }
+    // Compact-only arrays also carry a bound layout mode. Generic code can
+    // still use it to select between canonical and explicit byte strides.
+    member.back() = TypeFactory::affine_mode_pos_in_ndarray(rank);
+    add(member, 32);
   }
   for (uint32_t index : constant_args) {
     const auto parameter = kernel.nested_parameters.find({static_cast<int>(index)});
