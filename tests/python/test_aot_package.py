@@ -4554,20 +4554,16 @@ class Model:
         return
     manifest = ti.aot.export_package(package, tmp_path / 'sdk', artifact_format='bc-library')
     assert retired and all(native._definition_retired() for native in retired)
-    # With finalization disabled, the generic parent/leaf remain shared units.
-    # Otherwise their ti.func inline policy is applied after generic codegen;
-    # the separate reuse test verifies that frontend/body work is still shared.
-    assert max(sealed_units) == (2 if cleanup is False else 0)
+    # Function-local cleanup preserves both shared bodies for consumption.
+    assert max(sealed_units) == 2
     assert all(not f.is_real_function and not f.taichi_functions for f in functions)
     with zipfile.ZipFile(tmp_path / 'sdk/code.tcm') as archive:
         units = [n for n in archive.namelist() if n.startswith('code_units/')]
-        assert len(units) == (2 if cleanup is False else 0)
-        if cleanup is False:
-            import re
-            # Retained generic units use references, not duplicated closures.
-            references = [set(re.findall(rb'__ti_unit_[0-9a-f]{64}', archive.read(n))) for n in units]
-            assert sorted(map(len, references)) == [1, 2]
-            assert len(set.union(*references)) == 2
+        assert len(units) == 2
+        import re
+        references = [set(re.findall(rb'__ti_unit_[0-9a-f]{64}', archive.read(n))) for n in units]
+        assert sorted(map(len, references)) == [1, 2]
+        assert len(set.union(*references)) == 2
     normal.first(4)
     np.testing.assert_array_equal(normal.out.to_numpy(), 12 + np.arange(5))
     with Runtime('cuda') as runtime, load_package(runtime, tmp_path / 'sdk') as code:
@@ -4583,6 +4579,79 @@ class Model:
         c.parallel()
         expected = np.arange(64) // 32 * 32 + (np.arange(64) + 1) % 32
         np.testing.assert_array_equal(c.out.to_numpy(), expected)
+
+
+@test_utils.test(arch=[ti.cpu, ti.cuda, ti.vulkan], offline_cache=False)
+def test_package_defers_value_helper_until_materialization(tmp_path, monkeypatch):
+    package = _source_package(tmp_path, monkeypatch, """
+import taichi_forge as ti
+
+@ti.func
+def deferred_adjust(value: ti.i32, bias: ti.i32) -> ti.i32:
+    return value * 3 + bias
+
+@ti.data_oriented
+class Model:
+    def __init__(self, n: int):
+        self.n = n
+        s = ti.experimental.ResourceScope(self)
+        s.dim("n")
+        s.out = s.field(ti.i32, shape=s.dim("n"))
+    @ti.kernel
+    def step(self, gain: ti.i32):
+        for i in range(self.n):
+            self.out[i] = deferred_adjust(i, gain) + deferred_adjust(gain, self.n)
+
+    @ti.func
+    def read_output(self, i: ti.i32) -> ti.i32:
+        return self.out[i]
+
+    @ti.kernel
+    def bump(self):
+        for i in range(self.n):
+            self.out[i] = self.read_output(i) + 1
+""")
+    jit = package.Model(5)
+    jit.step(3)
+    expected = jit.out.to_numpy()
+    sdk = tmp_path / 'sdk'
+    ti.aot.export_package(package, sdk)
+    with zipfile.ZipFile(sdk / 'code.tcm') as archive:
+        if ti.cfg.arch == ti.vulkan:
+            # OpFunctionCall carries the callee ID after result type and ID.
+            import struct
+
+            callees = []
+            for name in archive.namelist():
+                if name.endswith('.spv'):
+                    data = archive.read(name)
+                    words = struct.unpack(f'<{len(data) // 4}I', data)
+                    pos = 5
+                    while pos < len(words):
+                        if words[pos] & 0xffff == 57:
+                            callees.append(words[pos + 3])
+                        width = words[pos] >> 16
+                        assert width
+                        pos += width
+            assert len(callees) == 2 and callees[0] == callees[1]
+        else:
+            assert any(b'deferred_adjust_' in archive.read(name)
+                       for name in archive.namelist() if name.endswith('.bc'))
+    with Runtime(ti.cfg.arch.name) as runtime, load_package(runtime, sdk) as code:
+        a, b = code.host.Model(5), code.host.Model(11)
+        a.step(3)
+        np.testing.assert_array_equal(a.out.to_numpy(), expected)
+        binding = next(iter(a._forge_package_calls.values()))
+        assert binding.constant_args
+        with binding.call.prepare(specialize=True, constant_args=binding.constant_args) as ready:
+            b.step(2)
+            a.step(7)
+            np.testing.assert_array_equal(a.out.to_numpy(), 3 * np.arange(5) + 33)
+            ready.run()
+            np.testing.assert_array_equal(a.out.to_numpy(), expected)
+            np.testing.assert_array_equal(b.out.to_numpy(), 3 * np.arange(11) + 19)
+        b.bump()
+        np.testing.assert_array_equal(b.out.to_numpy(), 3 * np.arange(11) + 20)
 
 
 @test_utils.test(arch=ti.cpu, offline_cache=False)

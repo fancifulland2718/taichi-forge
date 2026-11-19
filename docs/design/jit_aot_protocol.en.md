@@ -95,7 +95,7 @@ Sources: [common boundary](../../python/taichi_forge/lang/_function_library.py),
 | Resources | Identify storage, layout, aliases and reads/writes; current Field contents/addresses are not generic persistent identity | JIT may use objects for local lookup; AOT uses package contracts and relocations/bindings. General resource-slot unification is incomplete |
 | Effects | Preserve write order, atomics, aliasing, synchronization and parallel scope | Existing AST admission, IR analysis and resource contracts jointly describe effects; no complete common exported summary exists |
 | Specialization | Separate production-fixed types/structure, facts current mechanisms may fix at prepare, and per-call data | JIT specializes immediately; AOT defers only what its format and dependency proof support |
-| Optimization | Extraction/inlining/optimization may not change the contract | Automatic JIT LLVM helpers use late forced inlining; AOT selectively marks proven single-use helpers during specialization; Vulkan supplies Inline hints. These policies need not match |
+| Optimization | Extraction/inlining/optimization may not change the contract | LLVM materialization applies the inline attributes on extracted numerical helpers. Prepare can also mark eligible single-use functions after binding. Vulkan supplies Inline hints at pipeline creation |
 
 Distinguish three outcomes:
 
@@ -201,11 +201,12 @@ before device-code generation only when every bound input is a permitted fixed f
 range is empty. A currently zero live range cannot be deleted; Graph mutable-bound restrictions
 remain in force. This does not change persisted IR, public ABI, producer inlining or per-step
 execution paths.
-Producer helper finalization preserves range-dispatch call boundaries until
-consumer argument-context and launch proofs have run. The dispatcher's backend
-inline attributes are restored before archiving; final device compilation can
-still inline it. Applying the numerical helper inliner must not erase an ABI
-that consumption still needs.
+Definition packages retain eligible numerical helper calls in CPU/CUDA bitcode and
+Vulkan SPIR-V. CUDA `bc-library` can share a body across entries. Plain bitcode
+keeps the body in its kernel module, and SPIR-V keeps it in the calling task.
+Prepare folds the permitted binding facts before LLVM optimization or Vulkan
+pipeline creation. Vulkan value helpers carry an Inline hint to the driver.
+Task-local operations and unsupported callable ABIs keep their ordinary lowering.
 Stable package binding guards observe declared presence predicates before
 inactive input members, and resolve dimension symbols through their declared
 attribute paths. They retain rebind, optional-presence and mutable Host-value

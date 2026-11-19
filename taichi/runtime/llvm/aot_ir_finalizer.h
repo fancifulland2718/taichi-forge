@@ -1,17 +1,14 @@
 #pragma once
 
-#include <algorithm>
 #include <cstdint>
 #include <map>
 #include <set>
 
 #include "llvm/Config/llvm-config.h"
-#include "llvm/Transforms/IPO/AlwaysInliner.h"
 #include "llvm/Transforms/InstCombine/InstCombine.h"
 #include "llvm/Transforms/Scalar/DCE.h"
 #include "llvm/Transforms/Scalar/EarlyCSE.h"
 #include "llvm/Transforms/Scalar/SimplifyCFG.h"
-#include "llvm/Transforms/Scalar/SROA.h"
 #include "llvm/Transforms/Utils/Mem2Reg.h"
 #include "taichi/runtime/llvm/aot_code_units.h"
 
@@ -25,8 +22,8 @@ class AotIRFinalizer {
   void export_units(llvm::Module &module,
                     bool optimize,
                     bool allow_resource_relocations) {
-    if (optimize)
-      specialize_helpers(module);
+    // Preserve numerical calls through extraction. The consumer links these
+    // units and applies their inline attributes after binding its inputs.
     export_code_units(
         module, [](const auto &, const auto &) {}, allow_resource_relocations,
         nullptr, true, nullptr,
@@ -147,87 +144,6 @@ class AotIRFinalizer {
   }
 
  private:
-  // Source ti.func bodies are compiled and cached as generic functions first.
-  // Apply their existing backend-inline contract only to this build-owned
-  // artifact, before extraction, hashes and publication. This exposes facts
-  // already present at the call site; it never binds an entry's scene inputs.
-  // Streaming seal and ordinary dump share this stage. The marker prevents a
-  // sealed root from paying for it again at archive time.
-  static void specialize_helpers(llvm::Module &module) {
-    constexpr auto marker = "taichi.aot.helper_specialization.v3";
-    if (module.getNamedMetadata(marker))
-      return;
-    const bool needed =
-        std::any_of(module.begin(), module.end(), [](const auto &function) {
-          return !function.isDeclaration() && !function.use_empty() &&
-                 function.hasFnAttribute(kRealFunctionUnit) &&
-                 function.hasFnAttribute(llvm::Attribute::AlwaysInline) &&
-                 !function.hasFnAttribute(llvm::Attribute::NoInline) &&
-                 !function.hasOptNone();
-        });
-    if (needed) {
-      TI_COMPILE_PROFILER("cpp.compile.llvm.aot_helper_specialization");
-      // Proxies must be destroyed before the analyses they refer to.
-      llvm::LoopAnalysisManager lam;
-      llvm::FunctionAnalysisManager fam;
-      llvm::CGSCCAnalysisManager cgam;
-      llvm::ModuleAnalysisManager mam;
-      llvm::PassBuilder passes;
-      passes.registerModuleAnalyses(mam);
-      passes.registerCGSCCAnalyses(cgam);
-      passes.registerFunctionAnalyses(fam);
-      passes.registerLoopAnalyses(lam);
-      passes.crossRegisterProxies(lam, fam, cgam, mam);
-      // This manually assembled pipeline has no optnone instrumentation.
-      // Honor per-function optimization requests explicitly, as clean() does.
-      const auto run_functions = [&](llvm::FunctionPassManager &pipeline) {
-        for (auto &function : module)
-          if (!function.isDeclaration() && !function.hasOptNone())
-            pipeline.run(function, fam);
-      };
-      // Promote each generic body's scalar temporaries before the inliner
-      // replicates them into every call site. Promoting only after inlining
-      // makes SSA construction operate on the much larger combined CFG.
-      // Escaping/private argument buffers remain for post-inline SROA.
-      llvm::FunctionPassManager preparation;
-      preparation.addPass(llvm::PromotePass());
-      run_functions(preparation);
-      // Range dispatch is also marked alwaysinline, but its callback ABI is
-      // consumed by prepare's argument-context and empty-group proofs. Keep
-      // that boundary until those proofs have run. Numerical helper inlining
-      // and scalar cleanup still happen here; restore backend attributes on
-      // the private artifact so final device compilation can inline dispatch.
-      std::vector<std::pair<llvm::Function *, llvm::AttributeList>> dispatchers;
-      for (auto &function : module) {
-        const auto name = function.getName();
-        if (name.starts_with("gpu_parallel_range_for") ||
-            name.starts_with("cpu_parallel_range_for")) {
-          dispatchers.emplace_back(&function, function.getAttributes());
-          function.removeFnAttr(llvm::Attribute::AlwaysInline);
-          function.addFnAttr(llvm::Attribute::NoInline);
-        }
-      }
-      llvm::ModulePassManager inline_pipeline;
-      inline_pipeline.addPass(llvm::AlwaysInlinerPass());
-      inline_pipeline.run(module, mam);
-      for (auto &[function, attributes] : dispatchers)
-        function->setAttributes(attributes);
-      // Inlining can expose new promotable slots; clean those before SROA.
-      llvm::FunctionPassManager cleanup;
-      cleanup.addPass(llvm::PromotePass());
-      // The generic helper ABI uses a private argument buffer. After inlining,
-      // scalarize that local storage so the ordinary final cleanup can fold
-      // fixed helper arguments while leaving dynamic entry loads intact.
-      cleanup.addPass(llvm::SROAPass(llvm::SROAOptions::ModifyCFG));
-      run_functions(cleanup);
-      llvm::GlobalDCEPass().run(module, mam);
-    }
-    module.getOrInsertNamedMetadata(marker)->addOperand(llvm::MDNode::get(
-        module.getContext(),
-        {llvm::MDString::get(module.getContext(), "promote-inline-preserve-dispatch-v3"),
-         llvm::MDString::get(module.getContext(), LLVM_VERSION_STRING)}));
-  }
-
   struct Unit {
     CodeUnitArtifact artifact;
     std::set<std::string> references;

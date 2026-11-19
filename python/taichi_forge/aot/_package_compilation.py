@@ -36,6 +36,7 @@ class PackageCompilation(FunctionLibrary):
         self.schedule_guard = None
         self.static_preparation = None
         self.static_policies = {}
+        self.spirv_dependencies = None
         self.field_trees = []
         self._automatic_gc = None
         self._retained_functions = {}
@@ -48,9 +49,17 @@ class PackageCompilation(FunctionLibrary):
         return self
 
     def attach(self, module, *, function_library=False):
+        from taichi_forge._lib import core
+
         module._aot_builder._enable_streaming_exports()
         self.module = module
         self.function_library = function_library
+
+        if function_library and module._arch == core.vulkan:
+            from taichi_forge.lang._jit_function_library import FunctionDependencyAnalysis
+
+            self.allow_spirv = True
+            self.spirv_dependencies = FunctionDependencyAnalysis(allow_fields=False)
         # Discovery has finished. Keep short-lived lowering cycles in the young
         # generations until each private definition is sealed. Otherwise the
         # automatic collector can promote them, requiring a scan of the entire
@@ -79,6 +88,14 @@ class PackageCompilation(FunctionLibrary):
         return SimpleNamespace(_primal=self.kernels[source], _kernel_owner=getattr(entry, "_kernel_owner", None))
 
     def library_function(self, source, args, *, dependencies=None):
+        if not self.function_library or not self.thread_local_call:
+            return None
+        if self.spirv_dependencies is not None:
+            # SPIR-V callable parameters are values. A package field would
+            # introduce a hidden resource argument when lowering the body.
+            dependencies = self.spirv_dependencies.dependencies(source, args)
+            if dependencies is None:
+                return None
         if (self.static_preparation is not None
                 and self.static_preparation.requires_task_context(source, args)):
             # Direct syntax checks miss SIMT operations in inline callees.
@@ -88,9 +105,8 @@ class PackageCompilation(FunctionLibrary):
         function = super().library_function(source, args, dependencies=dependencies)
         if function is not None:
             # Retain the source ti.func's backend policy, just as JIT does.
-            # Compile/cache its generic body first. AOT artifact finalization
-            # applies this policy on private IR after frontend reuse; scene
-            # parameter specialization remains a consumer operation.
+            # Archive a callable body. Materialization applies the hint after
+            # any binding-specific constants have been supplied.
             function._backend_inline_function = True
         return function
 

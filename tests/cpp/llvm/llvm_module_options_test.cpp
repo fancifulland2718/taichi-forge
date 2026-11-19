@@ -150,7 +150,7 @@ TEST(LLVMModuleOptions, CpuFastTierEliminatesPrivateAggregateTraffic) {
   EXPECT_EQ(LLVMModuleOptions::from_config(config).opt_level, 0);
 }
 
-TEST(LLVMAotFinalization, SpecializesHelpersBeforeArchivingDynamicEntries) {
+TEST(LLVMAotFinalization, ArchivesCallableHelpersWithLiveEntryArguments) {
   llvm::LLVMContext context;
   llvm::SMDiagnostic error;
   auto source = llvm::parseAssemblyString(R"(
@@ -214,7 +214,8 @@ TEST(LLVMAotFinalization, SpecializesHelpersBeforeArchivingDynamicEntries) {
   EXPECT_EQ(sealed, snapshot(*enabled));
   finalizer.finalize_root(enabled, true);
   EXPECT_FALSE(llvm::verifyModule(*enabled));
-  EXPECT_NE(enabled->getNamedMetadata("taichi.aot.helper_specialization.v3"), nullptr);
+  ASSERT_NE(enabled->getNamedMetadata(LLVM::kCodeUnits), nullptr);
+  EXPECT_EQ(enabled->getNamedMetadata(LLVM::kCodeUnits)->getNumOperands(), 1);
   int reads = 0, writes = 0, calls = 0;
   for (auto &block : *enabled->getFunction("entry")) {
     for (auto &instruction : block) {
@@ -222,13 +223,15 @@ TEST(LLVMAotFinalization, SpecializesHelpersBeforeArchivingDynamicEntries) {
         reads += load->isVolatile();
       if (auto *store = llvm::dyn_cast<llvm::StoreInst>(&instruction))
         writes += store->isVolatile();
-      calls += llvm::isa<llvm::CallBase>(instruction);
-      EXPECT_FALSE(llvm::isa<llvm::AllocaInst>(instruction));
+      if (auto *call = llvm::dyn_cast<llvm::CallBase>(&instruction)) {
+        if (call->getCalledFunction()->getName().starts_with("__ti_unit_"))
+          ++calls;
+      }
     }
   }
   EXPECT_EQ(reads, 1);
   EXPECT_EQ(writes, 1);
-  EXPECT_EQ(calls, 0);  // Known helper mode folded; scene data is still live.
+  EXPECT_EQ(calls, 1);
   EXPECT_TRUE(llvm::isa<llvm::AllocaInst>(
       enabled->getFunction("debug_entry")->front().front()));
   EXPECT_EQ(original, snapshot(*source));
@@ -236,12 +239,12 @@ TEST(LLVMAotFinalization, SpecializesHelpersBeforeArchivingDynamicEntries) {
   auto disabled = llvm::CloneModule(*source);
   finalizer.export_units(*disabled, false, false);
   finalizer.finalize_root(disabled, false);
-  EXPECT_EQ(disabled->getNamedMetadata("taichi.aot.helper_specialization.v3"), nullptr);
+  EXPECT_EQ(disabled->getNamedMetadata("taichi.aot.cleanup.v1"), nullptr);
   ASSERT_NE(disabled->getNamedMetadata(LLVM::kCodeUnits), nullptr);
   EXPECT_EQ(disabled->getNamedMetadata(LLVM::kCodeUnits)->getNumOperands(), 1);
 }
 
-TEST(LLVMAotFinalization, HelperInliningPreservesPreparedRangeProof) {
+TEST(LLVMAotFinalization, DeferredHelpersPreservePreparedRangeProof) {
   for (bool physical_thread : {false, true}) {
     llvm::LLVMContext context;
     llvm::SMDiagnostic error;
@@ -286,7 +289,13 @@ TEST(LLVMAotFinalization, HelperInliningPreservesPreparedRangeProof) {
     ASSERT_NE(dispatch, nullptr);
     EXPECT_TRUE(dispatch->hasFnAttribute(llvm::Attribute::AlwaysInline));
     EXPECT_FALSE(dispatch->hasFnAttribute(llvm::Attribute::NoInline));
-    EXPECT_EQ(module->getFunction("helper"), nullptr);
+    // Prepare inspects the linked bodies, including physical thread uses.
+    finalizer.emit_dependencies(*module, [&](const auto &name, const auto &bytes) {
+      auto unit = decode_llvm_module(llvm::MemoryBufferRef(bytes, name), context,
+                                     LLVMModuleEncoding::bitcode);
+      ASSERT_TRUE(bool(unit));
+      EXPECT_FALSE(llvm::Linker::linkModules(*module, std::move(*unit)));
+    });
     AotPreparedRangeAnalysis analysis;
     const auto proof = analysis.inspect(module->getFunction("entry"));
     EXPECT_TRUE(proof.empty_has_no_effects);

@@ -2186,7 +2186,9 @@ class _Capture:
         from taichi_forge._lib import core
         from taichi_forge.lang._local_tensor import is_model_value
 
-        if not core.arch_uses_llvm(impl.current_cfg().arch):
+        arch = impl.current_cfg().arch
+        if not core.arch_uses_llvm(arch) and not (
+                arch == core.vulkan and getattr(function, "_backend_inline_function", False)):
             raise TaichiCompilationError("real_func AOT requires an LLVM backend (CPU or CUDA)")
         args = list(args)
         for index in function.template_slot_locations:

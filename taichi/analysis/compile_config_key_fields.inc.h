@@ -14,6 +14,8 @@
     // Sparse traversal and GC now relocate their packed tree/local keys too.
     // Keep ordinary JIT cache identities unchanged.
     CACHE_VALUE(std::string("llvm-aot-snode-keys-v2"));
+    if (arch_is_cpu(config.arch))
+      CACHE_VALUE(std::string("cpu-aot-deferred-inline-v1"));
   }
   CACHE_FIELD(compile_tier);
   CACHE_FIELD(tiered_full_simplify);

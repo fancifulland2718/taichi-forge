@@ -1,5 +1,6 @@
 #include "taichi/program/kernel_compile_request.h"
 
+#include <algorithm>
 #include <utility>
 #include <limits>
 #include "taichi/rhi/cuda/cuda_capability.h"
@@ -73,6 +74,13 @@ KernelCompileRequest resolve_kernel_compile_request(
     const KernelCompileOptions &export_options) {
   CompileConfig config = base_config;
   if (purpose == CompilePurpose::aot) {
+    // SPIR-V value helpers carry an Inline hint into pipeline creation. Keep
+    // their calls in the archive through binding-specific argument folding.
+    if (config.arch == Arch::vulkan &&
+        std::find(config.spirv_disabled_passes.begin(), config.spirv_disabled_passes.end(),
+                  "InlineExhaustive") == config.spirv_disabled_passes.end())
+      config.spirv_disabled_passes.emplace_back("InlineExhaustive");
+
     // A portable target has no declared SM/CU count. Do not specialize its
     // default geometry to the producer; explicitly selected task plans still
     // carry their own geometry. Code remains valid on any admitted target.

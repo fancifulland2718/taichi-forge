@@ -533,7 +533,30 @@ void KernelCodeGenCPU::optimize_module(llvm::Module *module) {
     opts.loop_vectorize = true;
     opts.slp_vectorize = true;
     opts.run_post_gep_passes = true;
+    // Keep AOT numerical helpers callable while optimizing the CPU scheduler
+    // and sealing its range operands. IPO can replace functions, so remember
+    // the inline intent on the function rather than saving raw pointers.
+    constexpr auto deferred = "taichi.aot.deferred_inline";
+    if (compile_config.llvm_aot_relocatable_roots) {
+      for (auto &fn : *module) {
+        if (!fn.isDeclaration() && fn.hasFnAttribute("taichi.aot.real_function") &&
+            fn.hasFnAttribute(llvm::Attribute::AlwaysInline)) {
+          fn.removeFnAttr(llvm::Attribute::AlwaysInline);
+          fn.addFnAttr(llvm::Attribute::NoInline);
+          fn.addFnAttr(deferred);
+        }
+      }
+    }
     run_module_opt_pipeline(*module, target_machine.get(), opts);
+    if (compile_config.llvm_aot_relocatable_roots) {
+      for (auto &fn : *module) {
+        if (fn.hasFnAttribute(deferred)) {
+          fn.removeFnAttr(deferred);
+          fn.removeFnAttr(llvm::Attribute::NoInline);
+          fn.addFnAttr(llvm::Attribute::AlwaysInline);
+        }
+      }
+    }
   }
   if (compile_config.llvm_aot_relocatable_roots)
     LLVM::seal_cpu_chunk_counts(*module);

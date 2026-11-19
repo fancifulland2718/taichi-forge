@@ -1788,8 +1788,9 @@ def export_package(package, output, *, arch=None, caps=None, source_root=None, a
     Multiple roots share one compiler and source closure, not separate exports.
     Selects ``arch`` on a cold Runtime or validates the active backend.
     A completed package is retained at the reported staging path if publication fails.
-    Experimental CUDA ``artifact_format="bc-library"`` preserves typed function
-    boundaries in the build copy and shares their bitcode across entry points.
+    CPU/CUDA bitcode and Vulkan SPIR-V retain eligible typed helper calls for
+    consumer specialization and backend inlining. CUDA ``artifact_format="bc-library"``
+    also stores compatible bitcode units once across entry points.
     ``build_cache=directory`` opts into producer warm start for CUDA bc-library,
     CPU bc, and Vulkan default artifacts.
     Unchanged source-driven builds reuse the previous complete package before
@@ -1844,7 +1845,10 @@ def _export_package(output, declarations, source_root, caps, artifact_format, co
     ) = declarations
     package = packages[0]
     module = Module(caps=caps, artifact_format=artifact_format)
-    compilation.attach(module, function_library=artifact_format == "bc-library")
+    portable_ir = module._arch == ti.vulkan or (
+        module._arch in (ti.cpu, ti.cuda) and artifact_format in (None, "bc", "bc-library")
+    )
+    compilation.attach(module, function_library=portable_ir)
     if cache is not None and cache.cpu_objects_enabled:
         compilation.capture_cache = cache
     from ._package_owner_graph import OwnerGraph, owner_bindings, layout_owner
@@ -1854,7 +1858,7 @@ def _export_package(output, declarations, source_root, caps, artifact_format, co
     # the CUDA function-library storage format. All specialization-capable IR
     # routes must project the same numeric predicates and query resources
     # before exploring their finite domain.
-    if artifact_format in ("bc", "bc-library") or module._arch == ti.vulkan:
+    if portable_ir:
         from ._package_static import StaticPreparation
 
         compilation.static_preparation = StaticPreparation(

@@ -38,6 +38,23 @@ namespace taichi::lang {
 namespace LLVM {
 namespace {
 
+void optimize_cpu_materialization(llvm::Module &module, const CompileConfig &config) {
+  auto target = llvm::cantFail(llvm::orc::JITTargetMachineBuilder::detectHost());
+  const auto effective = LLVMModuleOptions::read(module, config);
+  auto &options = target.getOptions();
+  options.AllowFPOpFusion = effective.fast_math ? llvm::FPOpFusion::Fast : llvm::FPOpFusion::Strict;
+  options.UnsafeFPMath = effective.fast_math;
+  options.NoInfsFPMath = effective.fast_math;
+  options.NoNaNsFPMath = effective.fast_math;
+  auto machine = llvm::cantFail(target.createTargetMachine());
+  LLVMOptPipelineOptions passes;
+  passes.opt_level = llvm_opt_level_from_int(effective.opt_level);
+  passes.loop_vectorize = true;
+  passes.slp_vectorize = true;
+  passes.run_post_gep_passes = true;
+  run_module_opt_pipeline(module, machine.get(), passes);
+}
+
 std::string read_artifact(const io::VirtualDir &directory,
                           const std::string &name) {
   size_t size = 0;
@@ -785,24 +802,8 @@ aot::Kernel *LlvmAotModule::specialize_kernel(
   }
   TI_DEBUG("Prepared specialization {} folded {} ABI loads and {} storage relations",
            code, replacements, pointer_replacements);
-  if (arch_is_cpu(arch())) {
-    // CUDA reoptimizes at registration. CPU normally optimizes at export, so
-    // rerun its existing pass pipeline after introducing prepared constants.
-    auto target = llvm::cantFail(llvm::orc::JITTargetMachineBuilder::detectHost());
-    const auto effective = LLVMModuleOptions::read(module, executor_->get_config());
-    auto &options = target.getOptions();
-    options.AllowFPOpFusion = effective.fast_math ? llvm::FPOpFusion::Fast : llvm::FPOpFusion::Strict;
-    options.UnsafeFPMath = effective.fast_math;
-    options.NoInfsFPMath = effective.fast_math;
-    options.NoNaNsFPMath = effective.fast_math;
-    auto machine = llvm::cantFail(target.createTargetMachine());
-    LLVMOptPipelineOptions passes;
-    passes.opt_level = llvm_opt_level_from_int(effective.opt_level);
-    passes.loop_vectorize = true;
-    passes.slp_vectorize = true;
-    passes.run_post_gep_passes = true;
-    run_module_opt_pipeline(module, machine.get(), passes);
-  }
+  if (arch_is_cpu(arch()))
+    optimize_cpu_materialization(module, executor_->get_config());
   CompiledKernelData compiled{arch(), std::move(data).take_llvm_ckd_data()};
   KernelRegistrationState registration;
   auto handle = kernel_launcher_->register_llvm_kernel(compiled, registration);
@@ -1015,6 +1016,14 @@ std::unique_ptr<llvm_aot::KernelImpl> LlvmAotModule::load_kernel_payload(
         compiled.get_internal_data(), affine_arrays,
         [this, name] { return load_kernel_payload(name, false)->handle(); });
   }
+  // Direct CPU consumers materialize the generic body with the same inline
+  // policy as prepare. Older, already-inlined payloads skip this pass.
+  auto &module = *compiled.get_internal_data().compiled_data.module;
+  if (arch_is_cpu(arch()) && std::any_of(module.begin(), module.end(), [](const auto &fn) {
+        return !fn.isDeclaration() && fn.hasFnAttribute("taichi.aot.real_function") &&
+               fn.hasFnAttribute(llvm::Attribute::AlwaysInline);
+      }))
+    optimize_cpu_materialization(module, executor_->get_config());
   KernelLaunchHandle handle;
   KernelRegistrationState registration;
   if (gated) {

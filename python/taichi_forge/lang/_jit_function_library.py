@@ -1,4 +1,4 @@
-"""Compile-time eligibility and dependency facts for JIT function units.
+"""Compile-time dependency analysis for typed JIT and AOT function units.
 
 Unknown Python calls/objects stay on ordinary inline expansion. These facts are
 consulted only while building a kernel, never while invoking compiled code.
@@ -168,11 +168,9 @@ class FunctionSyntax(InlineSyntax):
             self.reference(node, "value")
 
 
-class JitFunctionLibrary(FunctionLibrary):
-    def __init__(self):
-        super().__init__()
-        self.function_library = True
-        self.allow_spirv = True
+class FunctionDependencyAnalysis:
+    def __init__(self, *, allow_fields):
+        self.allow_fields = allow_fields
         self._syntax = {}
 
     def _dependencies(self, source, bindings, active):
@@ -232,7 +230,7 @@ class JitFunctionLibrary(FunctionLibrary):
                     key = ("call", id(value))
                 else:
                     return None
-            elif isinstance(value, Field):
+            elif self.allow_fields and isinstance(value, Field):
                 # Identity only: device contents are live, not compile-time data.
                 key = ("field", value)
             elif isinstance(value, MatrixType):
@@ -246,16 +244,27 @@ class JitFunctionLibrary(FunctionLibrary):
             dependencies.append((path, kind, key))
         return tuple(dependencies)
 
-    def library_function(self, source, args):
-        if not self.thread_local_call or source.is_real_function or source.pyfunc:
-            return None
+    def dependencies(self, source, args):
         bindings = {
             arg.name: value for arg, value in zip(source.arguments, args) if isinstance(arg.annotation, template)
         }
         try:
-            dependencies = self._dependencies(source, bindings, set())
+            return self._dependencies(source, bindings, set())
         except RecursionError:
             return None
+
+
+class JitFunctionLibrary(FunctionLibrary):
+    def __init__(self):
+        super().__init__()
+        self.function_library = True
+        self.allow_spirv = True
+        self.analysis = FunctionDependencyAnalysis(allow_fields=True)
+
+    def library_function(self, source, args):
+        if not self.thread_local_call or source.is_real_function or source.pyfunc:
+            return None
+        dependencies = self.analysis.dependencies(source, args)
         if dependencies is None:
             return None
         function = super().library_function(source, args, dependencies=dependencies)
