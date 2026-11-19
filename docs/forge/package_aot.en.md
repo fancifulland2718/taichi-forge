@@ -2019,9 +2019,16 @@ Existing block barriers and shared atomics retain their block semantics.
 Focused checks cover one code definition across new sizes, two model-sized axes,
 mixed fixed/dynamic arrays, atomic accumulation, independent instances, frontend-free
 consumption, Graph replay and actual device-capacity rejection, including instances
-above 48 KiB on capable devices. Dynamic SharedArray on CPU/Vulkan,
-declarations inside real_func and device-determined sizes remain unsupported.
-LLVM AOT task schema is now **21** and the compiled cache schema is **101**. Older
+above 48 KiB on capable CUDA devices.
+
+Vulkan stores one SPIR-V task with specialization constants for the workgroup
+width and each model-sized shared array. Binding a direct call or recording a
+Graph resolves them from the immutable model arguments and checks the physical
+device limits. Matching dimensions reuse the task pipeline across resource views.
+CPU accepts model-sized block hints for ordinary parallel ranges and uses its own
+scheduler. SharedArray still requires a GPU workgroup. Declarations inside
+real_func and device-determined sizes remain unsupported.
+The CUDA implementation introduced LLVM AOT task schema **21** and compiled cache schema **101**. Older
 build artifacts must be rebuilt; there is no legacy task-record compatibility layer.
 Ordinary fixed-size SharedArray JIT semantics remain unchanged. These checks do not
 qualify the complete EFC solver or engine export.

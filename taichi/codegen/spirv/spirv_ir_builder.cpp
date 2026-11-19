@@ -1716,9 +1716,28 @@ void IRBuilder::image_store(Value image_var,
   make_inst(spv::OpImageWrite, image, uv, data);
 }
 
-void IRBuilder::set_work_group_size(const std::array<int, 3> group_size) {
-  Value size_x =
-      uint_immediate_number(t_uint32_, static_cast<uint64_t>(group_size[0]));
+Value IRBuilder::workgroup_spec_constant(uint32_t spec_id) {
+  auto value = new_value(t_uint32_, ValueKind::kConstant);
+  declare_global(spv::OpSpecConstant, t_uint32_, value, 1u);
+  decorate(spv::OpDecorate, value, spv::DecorationSpecId, spec_id);
+  return value;
+}
+
+SType IRBuilder::workgroup_array_type(SType element, Value length) {
+  SType array;
+  array.id = id_counter_++;
+  array.flag = TypeKind::kPtr;
+  array.element_type_id = element.id;
+  declare_global(spv::OpTypeArray, array, element, length);
+  return array;
+}
+
+void IRBuilder::set_work_group_size(const std::array<int, 3> group_size,
+                                    Value model_x) {
+  Value size_x = model_x.id
+                     ? model_x
+                     : uint_immediate_number(
+                           t_uint32_, static_cast<uint64_t>(group_size[0]));
   Value size_y =
       uint_immediate_number(t_uint32_, static_cast<uint64_t>(group_size[1]));
   Value size_z =
@@ -1727,7 +1746,8 @@ void IRBuilder::set_work_group_size(const std::array<int, 3> group_size) {
   if (gl_work_group_size_.id == 0) {
     gl_work_group_size_.id = id_counter_++;
   }
-  ib_.begin(spv::OpConstantComposite)
+  ib_.begin(model_x.id ? spv::OpSpecConstantComposite
+                       : spv::OpConstantComposite)
       .add_seq(t_v3_uint_, gl_work_group_size_, size_x, size_y, size_z)
       .commit(&global_);
   this->decorate(spv::OpDecorate, gl_work_group_size_, spv::DecorationBuiltIn,

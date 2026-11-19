@@ -1571,8 +1571,8 @@ void MeshIndexConversionExpression::flatten(FlattenContext *ctx) {
 }
 
 void DynamicSharedPtrExpression::type_check(const CompileConfig *config) {
-  TI_ASSERT_INFO(config->arch == Arch::cuda,
-                 "Model-sized SharedArray currently requires CUDA");
+  TI_ASSERT_INFO(config->arch == Arch::cuda || config->arch == Arch::vulkan,
+                 "Model-sized SharedArray requires a CUDA or Vulkan workgroup");
   TI_ASSERT_INFO(allocation_id >= 0 && !shape.exprs.empty() &&
                      element_type->is<PrimitiveType>(),
                  "Invalid model-sized SharedArray declaration");

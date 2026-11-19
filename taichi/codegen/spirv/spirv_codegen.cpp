@@ -683,6 +683,26 @@ class TaskCodegen : public IRVisitor {
     ir_->register_value(alloca->raw_name(), ptr_val);
   }
 
+  void visit(DynamicSharedPtrStmt *stmt) override {
+    const auto dt = stmt->ret_type.ptr_removed();
+    const auto element = local_storage_type(stmt, dt);
+    auto &array = model_shared_variables_[stmt->allocation_id];
+    if (!array.id) {
+      // SpecId zero is LocalSize.x. The remaining ids name allocations,
+      // independently of optimizer renumbering and debug names.
+      auto length = ir_->workgroup_spec_constant(1u + stmt->allocation_id);
+      array = ir_->alloca_workgroup_array(
+          ir_->workgroup_array_type(element, length));
+      shared_array_binds_.push_back(array);
+      task_attribs_.model_shared_arrays.push_back(stmt->layout);
+    }
+    auto pointer = ir_->get_pointer_type(element, spv::StorageClassWorkgroup);
+    ir_->register_value(
+        stmt->raw_name(),
+        ir_->make_value(spv::OpAccessChain, pointer, array,
+                        ir_->query_value(stmt->offset->raw_name())));
+  }
+
   void visit(MatrixPtrStmt *stmt) override {
     spirv::Value ptr_val;
     spirv::Value origin_val = ir_->query_value(stmt->origin->raw_name());
@@ -3403,6 +3423,15 @@ class TaskCodegen : public IRVisitor {
   }
 
   void visit(GlobalStoreStmt *stmt) override {
+    if (stmt->dest->is<DynamicSharedPtrStmt>()) {
+      auto value = ir_->query_value(stmt->val->raw_name());
+      if (uses_shared_cas_storage(stmt->dest))
+        value = ir_->make_value(
+            spv::OpBitcast, ir_->get_primitive_uint_type(stmt->val->ret_type),
+            value);
+      ir_->store_variable(ir_->query_value(stmt->dest->raw_name()), value);
+      return;
+    }
     // G9.3a (2026-04-30): bit-pointer write path for quant_array.
     // For a `place` whose parent is a quant_array, the IR pass
     // optimize_bit_struct_stores does NOT rewrite this store (it only
@@ -3422,6 +3451,16 @@ class TaskCodegen : public IRVisitor {
   }
 
   void visit(GlobalLoadStmt *stmt) override {
+    if (stmt->src->is<DynamicSharedPtrStmt>()) {
+      auto dt = stmt->element_type();
+      auto value = ir_->load_variable(ir_->query_value(stmt->src->raw_name()),
+                                      local_storage_type(stmt->src, dt));
+      if (uses_shared_cas_storage(stmt->src))
+        value =
+            ir_->make_value(spv::OpBitcast, ir_->get_primitive_type(dt), value);
+      ir_->register_value(stmt->raw_name(), value);
+      return;
+    }
     auto source_value = ir_->query_value(stmt->src->raw_name());
     if (source_value.stype.flag == TypeKind::kPtr &&
         source_value.stype.storage_class == spv::StorageClassFunction) {
@@ -4570,6 +4609,8 @@ class TaskCodegen : public IRVisitor {
   }
 
   bool uses_shared_cas_storage(const Stmt *ptr) const {
+    if (auto *dynamic = ptr->cast<DynamicSharedPtrStmt>())
+      return model_shared_cas_.count(dynamic->allocation_id) != 0;
     return !shared_cas_allocations_.empty() &&
            shared_cas_allocations_.count(shared_allocation(ptr)) != 0;
   }
@@ -4611,14 +4652,18 @@ class TaskCodegen : public IRVisitor {
     const auto ops = irpass::analysis::gather_statements(task_ir_, [&](Stmt *item) {
       if (const auto *atomic = item->cast<AtomicOpStmt>()) {
         const auto *alloca = shared_allocation(atomic->dest);
-        if (alloca) {
+        const auto *dynamic = atomic->dest->cast<DynamicSharedPtrStmt>();
+        if (alloca || dynamic) {
           const auto dt = atomic->dest->element_type().ptr_removed();
           if ((dt == PrimitiveType::f32 || dt == PrimitiveType::f64) &&
               !has_native_float_atomic(atomic->op_type, dt, true)) {
             // One allocation must use one physical element type. If any operation
             // needs integer CAS, all its loads, stores and atomics use that type.
             // Other allocations retain their native floating-point fast path.
-            shared_cas_allocations_.insert(alloca);
+            if (dynamic)
+              model_shared_cas_.insert(dynamic->allocation_id);
+            else
+              shared_cas_allocations_.insert(alloca);
           }
         }
       }
@@ -5109,7 +5154,8 @@ class TaskCodegen : public IRVisitor {
     const bool use_native_float_atomic =
         is_real(dt) &&
         has_native_float_atomic(stmt->op_type, dt,
-                                shared_allocation(stmt->dest) != nullptr) &&
+                                shared_allocation(stmt->dest) ||
+                                    stmt->dest->is<DynamicSharedPtrStmt>()) &&
         !uses_shared_cas_storage(stmt->dest);
 
     TI_ERROR_IF(
@@ -5520,7 +5566,14 @@ class TaskCodegen : public IRVisitor {
     */
     std::array<int, 3> group_size = {
         task_attribs_.advisory_num_threads_per_group, 1, 1};
-    ir_->set_work_group_size(group_size);
+    ir_->set_work_group_size(group_size, model_block_x_);
+    std::sort(task_attribs_.model_shared_arrays.begin(),
+              task_attribs_.model_shared_arrays.end(),
+              [](const auto &a, const auto &b) {
+                return a.allocation_id < b.allocation_id;
+              });
+    if (task_attribs_.has_model_workgroup())
+      task_attribs_.device_range_dispatch_version = 0;
     std::vector<spirv::Value> buffers;
     if (caps_->get(DeviceCapability::spirv_version) > 0x10300) {
       buffers = shared_array_binds_;
@@ -5681,7 +5734,11 @@ class TaskCodegen : public IRVisitor {
       total_elems = ir_->sub(end_expr_value, begin_expr_value);
       task_attribs_.advisory_total_num_threads = kMaxNumThreadsGridStrideLoop;
     }
-    task_attribs_.advisory_num_threads_per_group = stmt->block_dim;
+    task_attribs_.model_block_size = stmt->host_block_dim;
+    if (stmt->host_block_dim)
+      model_block_x_ = ir_->workgroup_spec_constant(0);
+    task_attribs_.advisory_num_threads_per_group =
+        stmt->host_block_dim ? 1 : stmt->block_dim;
     ir_->debug_name(spv::OpName, begin_expr_value, "begin_expr_value");
     ir_->debug_name(spv::OpName, total_elems, total_elems_name);
 
@@ -5699,10 +5756,13 @@ class TaskCodegen : public IRVisitor {
     // HLSL & WGSL cross compilers do not support this builtin
     spirv::Value total_invocs = ir_->cast(
         ir_->i32_type(),
-        ir_->mul(ir_->get_num_work_groups(0),
-                 ir_->uint_immediate_number(
-                     ir_->u32_type(),
-                     task_attribs_.advisory_num_threads_per_group, true)));
+        ir_->mul(
+            ir_->get_num_work_groups(0),
+            model_block_x_.id
+                ? model_block_x_
+                : ir_->uint_immediate_number(
+                      ir_->u32_type(),
+                      task_attribs_.advisory_num_threads_per_group, true)));
     /*
     const int group_x = (task_attribs_.advisory_total_num_threads +
                          task_attribs_.advisory_num_threads_per_group - 1) /
@@ -7754,6 +7814,9 @@ class TaskCodegen : public IRVisitor {
       buffer_access_map_;
   std::vector<TextureBind> texture_binds_;
   std::set<std::vector<int>> comparison_textures_;
+  spirv::Value model_block_x_;
+  std::map<int, spirv::Value> model_shared_variables_;
+  std::unordered_set<int> model_shared_cas_;
   std::unordered_set<const AllocaStmt *> shared_cas_allocations_;
   std::set<std::vector<int>> sampling_textures_;
   std::uint64_t sampled_image_descriptor_count_{0};
@@ -7883,6 +7946,8 @@ KernelCodegen::KernelCodegen(const Params &params)
   }
 
   spirv_opt_options_.set_run_validator(false);
+  // Workgroup dimensions and allocations are part of the task's binding ABI.
+  spirv_opt_options_.set_preserve_spec_constants(true);
 }
 
 namespace {

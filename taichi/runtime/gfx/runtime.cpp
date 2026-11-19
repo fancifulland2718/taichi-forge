@@ -18,6 +18,7 @@
 #include "taichi/runtime/native_kernel_result.h"
 #ifdef TI_WITH_VULKAN
 #include "taichi/rhi/vulkan/vulkan_device.h"
+#include "taichi/rhi/vulkan/shader_specialization.h"
 #endif
 
 // FIXME: (penguinliong) Special offer for `run_codegen`. Find a new home for it
@@ -73,9 +74,24 @@ void initialize_global_temporaries(CommandList &commands,
                        kGtmpBufferSize - tail_offset, 0);
 }
 
+int bound_block_size(const TaskAttributes &task, LaunchContextBuilder &ctx) {
+  if (!task.model_block_size)
+    return task.advisory_num_threads_per_group;
+  const auto &size = *task.model_block_size;
+  for (const auto &[offset, bytes] : ctx.mutable_argument_ranges)
+    TI_ERROR_IF(
+        size.reads(offset, bytes),
+        "Model workgroup size depends on a mutable submission argument");
+  auto width = size.evaluate(ctx.get_context().arg_buffer, ctx.arg_buffer_size);
+  TI_ERROR_IF(!width || *width <= 0 ||
+                  (*width % 32 != 0 && !bit::is_power_of_two(*width)),
+              "Invalid model workgroup size");
+  return *width;
+}
+
 int host_launch_groups(const TaskAttributes &task,
                        LaunchContextBuilder &ctx) {
-  const int block = task.advisory_num_threads_per_group;
+  const int block = bound_block_size(task, ctx);
   const int baseline = static_cast<int>(
       (std::int64_t(task.advisory_total_num_threads) + block - 1) / block);
   return task.range_for_attribs
@@ -1113,6 +1129,7 @@ size_t align_up_to(size_t value, size_t alignment) {
 CompiledTaichiKernel::CompiledTaichiKernel(const Params &ti_params)
     : ti_kernel_attribs_(*ti_params.ti_kernel_attribs),
       device_(ti_params.device),
+      backend_cache_(ti_params.backend_cache),
       sparse_task_resources_(ti_params.sparse_task_resources),
       sparse_tree_uses_(ti_params.sparse_tree_uses),
       sparse_tree_permit_(ti_params.sparse_tree_permit),
@@ -1127,6 +1144,7 @@ CompiledTaichiKernel::CompiledTaichiKernel(const Params &ti_params)
                         liong::json::print(liong::json::serialize(target)),
                 "GFX resource view differs from its compiled code contract");
     pipelines_ = ti_params.shared_code->pipelines_;
+    model_pipelines_ = ti_params.shared_code->model_pipelines_;
   }
   TI_ASSERT(sparse_task_resources_.empty() || sparse_task_resources_.size() ==
             ti_kernel_attribs_.tasks_attribs.size());
@@ -1253,6 +1271,15 @@ CompiledTaichiKernel::CompiledTaichiKernel(const Params &ti_params)
 
     if (ti_params.shared_code)
       continue;
+    if (task_attribs[i].has_model_workgroup()) {
+      if (model_pipelines_.empty())
+        model_pipelines_.resize(task_attribs.size());
+      auto model = std::make_shared<ModelPipelines>();
+      model->spirv = spirv_bins[i];
+      model_pipelines_[i] = std::move(model);
+      pipelines_.emplace_back();
+      continue;
+    }
     PipelineSourceDesc source_desc{PipelineSourceType::spirv_binary,
                                    (void *)spirv_bins[i].data(),
                                    spirv_bins[i].size() * sizeof(uint32_t)};
@@ -1278,8 +1305,74 @@ size_t CompiledTaichiKernel::get_ret_buffer_size() const {
   return ret_buffer_size_;
 }
 
-Pipeline *CompiledTaichiKernel::get_pipeline(int i) {
-  return pipelines_[i].get();
+void CompiledTaichiKernel::collect_pipelines(std::set<Pipeline *> &out) const {
+  for (const auto &pipeline : pipelines_)
+    if (pipeline)
+      out.insert(pipeline.get());
+  for (const auto &model : model_pipelines_)
+    if (model)
+      for (const auto &[shape, pipeline] : model->variants)
+        out.insert(pipeline.get());
+}
+
+std::vector<Pipeline *> CompiledTaichiKernel::bind_model_pipelines(
+    LaunchContextBuilder &context) {
+  std::vector<Pipeline *> bound;
+  if (!model_pipelines_.empty()) {
+    bound.reserve(num_pipelines());
+    for (int i = 0; i < num_pipelines(); ++i)
+      bound.push_back(bound_pipeline(i, context));
+  }
+  return bound;
+}
+
+Pipeline *CompiledTaichiKernel::bound_pipeline(int i,
+                                               LaunchContextBuilder &context) {
+  if (pipelines_[i])
+    return pipelines_[i].get();
+#ifdef TI_WITH_VULKAN
+  const auto &task = ti_kernel_attribs_.tasks_attribs[i];
+  auto &model = *model_pipelines_.at(i);
+  const auto *device = dynamic_cast<vulkan::VulkanDevice *>(device_);
+  TI_ERROR_IF(!device, "Model workgroups require a Vulkan device");
+  const auto &limits = device->get_vk_physical_device_props().limits;
+  const auto width = uint32_t(bound_block_size(task, context));
+  TI_ERROR_IF(width > limits.maxComputeWorkGroupSize[0] ||
+                  width > limits.maxComputeWorkGroupInvocations,
+              "Model workgroup size {} exceeds the Vulkan device limit", width);
+  const uint64_t fixed_bytes =
+      (uint64_t(task.static_shared_array_bytes) + 7) & ~uint64_t(7);
+  TI_ERROR_IF(fixed_bytes > limits.maxComputeSharedMemorySize,
+              "Static workgroup storage exceeds the Vulkan device limit");
+  std::vector<uint32_t> shape{width};
+  const auto layout = evaluate_dynamic_shared_layout(
+      task.model_shared_arrays, context.get_context().arg_buffer,
+      context.arg_buffer_size,
+      limits.maxComputeSharedMemorySize - uint32_t(fixed_bytes),
+      &context.mutable_argument_ranges, &shape);
+  TI_ERROR_IF(!layout,
+              "Invalid model shared storage dimensions or Vulkan shared-memory "
+              "limit exceeded");
+  if (auto found = model.variants.find(shape); found != model.variants.end())
+    return found->second.get();
+  std::unordered_map<uint32_t, std::string> constants;
+  if (task.model_block_size)
+    constants.emplace(0, std::to_string(width));
+  for (size_t j = 0; j < task.model_shared_arrays.size(); ++j)
+    constants.emplace(1u + task.model_shared_arrays[j].allocation_id,
+                      std::to_string(shape[j + 1]));
+  auto code = vulkan::specialize_spirv_shader(model.spirv, constants);
+  PipelineSourceDesc source{PipelineSourceType::spirv_binary, code.data(),
+                            code.size() * sizeof(uint32_t)};
+  auto [pipeline, result] =
+      device_->create_pipeline_unique(source, task.name, backend_cache_);
+  TI_ERROR_IF(result != RhiResult::success || !pipeline,
+              "Failed to materialize Vulkan model workgroup");
+  return model.variants.emplace(std::move(shape), std::move(pipeline))
+      .first->second.get();
+#else
+  TI_ERROR("Model workgroups require Vulkan support");
+#endif
 }
 
 ShaderResourceSet *CompiledTaichiKernel::get_cached_resource_set(int i) {
@@ -1920,8 +2013,7 @@ std::size_t GfxRuntime::debug_unique_pipeline_count() {
   std::lock_guard<std::recursive_mutex> lock(host_api_mutex_);
   std::set<Pipeline *> pipelines;
   for (const auto &[_, kernel] : ti_kernels_)
-    for (std::size_t i = 0; i < kernel->num_pipelines(); ++i)
-      pipelines.insert(kernel->get_pipeline(i));
+    kernel->collect_pipelines(pipelines);
   return pipelines.size();
 }
 
@@ -2143,6 +2235,7 @@ void GfxRuntime::launch_kernel(KernelHandle handle,
   preflight_kernel_images(*ti_kernel, host_ctx);
   preflight_kernel_ray_resources(*ti_kernel, host_ctx);
   ti_kernel->require_sparse_tree_access();
+  const auto model_pipelines = ti_kernel->bind_model_pipelines(host_ctx);
 
 #if defined(__APPLE__)
   if (profiler_) {
@@ -2433,7 +2526,8 @@ void GfxRuntime::launch_kernel(KernelHandle handle,
       }
       argpack_barriers_inserted = true;
     }
-    auto vp = ti_kernel->get_pipeline(i);
+    auto vp = model_pipelines.empty() ? ti_kernel->bound_pipeline(i, host_ctx)
+                                      : model_pipelines[i];
     const int group_x = host_launch_groups(attribs, host_ctx);
     std::unique_ptr<ShaderResourceSet> one_shot_bindings;
     ShaderResourceSet *bindings = nullptr;
@@ -4137,7 +4231,7 @@ GfxRuntime::GraphReplayState GfxRuntime::record_fixed_graph(
                         : slot.range_dispatches[slot.resource_sets.size()].get();
       if (range)
         range->record_controller(*commands);
-      commands->bind_pipeline(pd.kernel->get_pipeline(i));
+      commands->bind_pipeline(pd.kernel->bound_pipeline(i, *pd.host_ctx));
       TI_ERROR_IF(commands->bind_shader_resources(resources.get()) !=
                       RhiResult::success,
                   "Prepared Vulkan Graph resource binding failed");
@@ -4914,7 +5008,15 @@ bool GfxRuntime::launch_graph_impl(
     // Direct dispatch group counts are baked into the command buffer. A shape
     // or scalar update crossing a block boundary must also invalidate a
     // descriptor-only replay patch; unchanged grids reuse the recording.
-    for (const auto &task : ti_kernel->ti_kernel_attribs().tasks_attribs) {
+    const auto &tasks = ti_kernel->ti_kernel_attribs().tasks_attribs;
+    for (size_t i = 0; i < tasks.size(); ++i) {
+      const auto &task = tasks[i];
+      if (task.has_model_workgroup()) {
+        const auto pipeline = reinterpret_cast<uintptr_t>(
+            ti_kernel->bound_pipeline(i, *dispatch.host_ctx));
+        key.push_back(pipeline);
+        structure_key.push_back(pipeline);
+      }
       if (task.range_for_attribs && task.range_for_attribs->uses_host_launch_grid()) {
         const auto groups = host_launch_groups(task, *dispatch.host_ctx);
         key.push_back(groups);
@@ -6450,8 +6552,8 @@ bool GfxRuntime::launch_graph_impl(
       }
       prepare_structured_task(task);
       record_task_images(task);
-      cmdlist->bind_pipeline(
-          task.dispatch->kernel->get_pipeline(task.task_index));
+      cmdlist->bind_pipeline(task.dispatch->kernel->bound_pipeline(
+          task.task_index, *task.dispatch->host_ctx));
       RhiResult status =
           cmdlist->bind_shader_resources(task.resources);
       TI_ERROR_IF(status != RhiResult::success,
@@ -7174,7 +7276,8 @@ bool GfxRuntime::launch_graph_impl(
                                 /*patch_existing=*/false),
           "Vulkan graph replay descriptor preparation failed");
 
-      cmdlist->bind_pipeline(pd.kernel->get_pipeline(task_index));
+      cmdlist->bind_pipeline(
+          pd.kernel->bound_pipeline(task_index, *pd.host_ctx));
       RhiResult status = cmdlist->bind_shader_resources(bindings);
       TI_ERROR_IF(status != RhiResult::success,
                   "Vulkan graph resource binding error: RhiResult({})",

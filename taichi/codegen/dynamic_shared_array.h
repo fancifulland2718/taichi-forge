@@ -28,10 +28,13 @@ struct DynamicSharedLayout {
 // Alignment matches the native shared allocations. The supplied limit is a
 // backend/device admission bound, never a finite model-size specialization.
 inline std::optional<DynamicSharedLayout> evaluate_dynamic_shared_layout(
-    const std::vector<DynamicSharedArray> &arrays, const void *arguments,
-    std::uint64_t argument_bytes, std::uint32_t limit,
+    const std::vector<DynamicSharedArray> &arrays,
+    const void *arguments,
+    std::uint64_t argument_bytes,
+    std::uint32_t limit,
     const std::vector<std::pair<std::uint64_t, std::uint64_t>>
-        *mutable_arguments = nullptr) {
+        *mutable_arguments = nullptr,
+    std::vector<uint32_t> *element_counts = nullptr) {
   DynamicSharedLayout result;
   int previous_id = -1;
   for (const auto &array : arrays) {
@@ -58,6 +61,9 @@ inline std::optional<DynamicSharedLayout> evaluate_dynamic_shared_layout(
     const auto offset = (std::uint64_t(result.bytes) + 7) & ~std::uint64_t(7);
     if (offset > limit || bytes > limit - offset)
       return std::nullopt;
+    if (element_counts)
+      element_counts->push_back(
+          static_cast<uint32_t>(bytes / array.element_bytes));
     result.offsets.push_back(static_cast<std::uint32_t>(offset));
     result.bytes = static_cast<std::uint32_t>(offset + bytes);
   }

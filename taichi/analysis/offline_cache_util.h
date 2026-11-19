@@ -219,7 +219,8 @@ class Kernel;
 // 101 - Model-sized shared pointers and immutable invocation allocation contracts.
 // 103 - Retain affine array proofs through complete real-function descriptors;
 //       cached modules with the old empty proof must be regenerated.
-constexpr std::uint32_t kOfflineCacheSchemaVersion = 103;
+// 104 - Bind SPIR-V model workgroup size and shared allocations per pipeline.
+constexpr std::uint32_t kOfflineCacheSchemaVersion = 104;
 
 // Fast sufficient check for identical serialized configuration inputs. A
 // reordered disabled-pass list may conservatively return false; hashing still

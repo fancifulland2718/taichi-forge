@@ -1277,8 +1277,9 @@ class ASTBuilder {
   }
 
   void model_block_dim(const Expr &value) {
-    TI_ERROR_IF(arch_ != Arch::cuda,
-                "Model-dependent block size currently requires CUDA");
+    TI_ERROR_IF(
+        arch_ != Arch::cuda && arch_ != Arch::vulkan && !arch_is_cpu(arch_),
+        "Model-dependent block size requires a CPU, CUDA or Vulkan kernel");
     TI_ERROR_IF(!is_kernel_ || loop_state_stack_.back() != None || stack_.size() != 1,
                 "Model-dependent block size requires an outer kernel range");
     for_loop_dec_.config.model_block_dim = value;

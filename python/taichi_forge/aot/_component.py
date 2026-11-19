@@ -2107,8 +2107,8 @@ class _Capture:
         from taichi_forge._lib import core
         from taichi_forge.lang._local_tensor import extent
 
-        if impl.current_cfg().arch != core.cuda:
-            raise TaichiCompilationError("Model-sized SharedArray currently requires CUDA")
+        if impl.current_cfg().arch not in (core.cuda, core.vulkan):
+            raise TaichiCompilationError("Model-sized SharedArray requires a CUDA or Vulkan workgroup")
         if self._current_real_function is not None or self.local_tensor_scope is None:
             raise TaichiCompilationError("Model-sized SharedArray requires an inlined parallel kernel range")
         dimensions = tuple(extent(size) for size in shape)

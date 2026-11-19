@@ -543,7 +543,10 @@ class IRBuilder {
   SType value_type(const DataType &dt);
 
   // Declare gl compute shader related methods
-  void set_work_group_size(const std::array<int, 3> group_size);
+  Value workgroup_spec_constant(uint32_t spec_id);
+  SType workgroup_array_type(SType element, Value length);
+  void set_work_group_size(const std::array<int, 3> group_size,
+                           Value model_x = {});
   Value get_work_group_size(uint32_t dim_index);
   Value get_num_work_groups(uint32_t dim_index);
   Value get_local_invocation_id(uint32_t dim_index);

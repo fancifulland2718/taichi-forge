@@ -50,7 +50,8 @@ struct TaichiAotData {
   // v13 adds affine bounds and their intermediate-overflow input interval.
   // v16 preserves source-owned block geometry for cold tuning admission.
   // v17 retains compiler-proven affine array arguments, checked against SPIR-V.
-  static constexpr uint32_t kMetadataVersion = 17;
+  // v18 binds model workgroup geometry and shared allocations per pipeline.
+  static constexpr uint32_t kMetadataVersion = 18;
 
   uint32_t metadata_version{0};
   //   BufferMetaData metadata;

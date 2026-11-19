@@ -100,6 +100,11 @@ class AotModuleImpl : public aot::Module {
           if (ti_aot_data_.metadata_version < 17 && !kernel.runtime_affine_arrays.empty())
             throw std::invalid_argument("Legacy GFX metadata cannot declare affine array arguments");
           for (const auto &task : kernel.tasks_attribs) {
+            if ((task.has_model_workgroup() &&
+                 ti_aot_data_.metadata_version < 18) ||
+                !task.valid_model_workgroup(kernel.ctx_attribs.args_bytes()))
+              throw std::invalid_argument(
+                  "Invalid Vulkan model workgroup contract");
             if (!task.valid_device_range_dispatch_contract() ||
                 (ti_aot_data_.metadata_version < 10 &&
                  task.device_range_dispatch_version != 0)) {

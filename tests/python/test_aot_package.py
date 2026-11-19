@@ -19838,6 +19838,66 @@ def test_package_plain_dimension_static_alias_uses_runtime_control(tmp_path, mon
             np.testing.assert_array_equal(owner.values.to_numpy(), np.arange(owner.n) * owner.gain + 0.5)
 
 
+@test_utils.test(arch=[ti.cpu, ti.vulkan], offline_cache=False)
+def test_package_model_workgroup_binds_at_consumption(tmp_path, monkeypatch):
+    source = """
+import taichi_forge as ti
+
+@ti.data_oriented
+class Model:
+    def __init__(self, n: int, width: int, scratch: int):
+        self.n, self.width, self.scratch = n, width, scratch
+        scope = ti.experimental.ResourceScope(self)
+        scope.dim('width')
+        scope.dim('scratch')
+        scope.result = scope.field(ti.i32, shape=scope.dim('n'))
+
+    @ti.kernel
+    def step(self, gain: ti.i32):
+        width = ti.static(self.width)
+        ti.loop_config(block_dim=width)
+        for i in range(self.n * width):
+            lane, group = i % width, i // width
+            if ti.static(ti.lang.impl.current_cfg().arch == ti.vulkan):
+                values = ti.simt.block.SharedArray((2, self.scratch), ti.i32)
+                values[1, lane] = group * gain + lane
+                ti.simt.block.sync()
+                if lane == 0:
+                    self.result[group] = values[1, width - 1]
+            else:
+                if lane == width - 1:
+                    self.result[group] = group * gain + lane
+
+    def graph(self):
+        builder = ti.graph.GraphBuilder()
+        builder.dispatch(self.step, ti.graph.Arg(ti.graph.ArgKind.SCALAR, 'gain', ti.i32))
+        return builder.compile()
+"""
+    arch = ti.cfg.arch
+    package = _source_package(tmp_path, monkeypatch, source)
+    manifest = ti.aot.export_package(package, tmp_path / "sdk", arch=arch)
+    roots = [entry for entry in manifest["entries"].values() if entry["definition"].endswith("Model.step")]
+    assert len(roots) == 1 and roots[0]["model_blocks"]
+    with Runtime(manifest["target"]) as runtime, load_package(runtime, tmp_path / "sdk") as code:
+        models = [code.host.Model(7, width, scratch) for width, scratch in ((8, 8), (64, 64), (8, 13))]
+        for model in models:
+            for gain in (3, 4):
+                model.step(gain)
+                np.testing.assert_array_equal(model.result.to_numpy(), gain * np.arange(7) + model.width - 1)
+        calls = [model.graph().bind({"gain": 5}) for model in models]
+        for model, call in zip(reversed(models), reversed(calls)):
+            call.run()
+            np.testing.assert_array_equal(model.result.to_numpy(), 5 * np.arange(7) + model.width - 1)
+            call.close()
+        if arch == ti.vulkan:
+            for width, scratch, message in ((65536, 65536, "workgroup"), (8, 1048576, "shared")):
+                oversized = code.host.Model(1, width, scratch)
+                with pytest.raises((RuntimeError, ValueError), match=message):
+                    oversized.step(1)
+            models[0].step(7)
+            np.testing.assert_array_equal(models[0].result.to_numpy(), 7 * np.arange(7) + 7)
+
+
 MODEL_SHARED_SOURCE = """
 import taichi_forge as ti
 constructors = 0

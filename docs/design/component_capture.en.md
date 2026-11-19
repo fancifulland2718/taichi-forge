@@ -412,8 +412,7 @@ rejected. Direct component calls now support model-sized Vector/Matrix.zero loca
 and local copies through private invocation workspace. Package Graph uses existing
 Plan private resources; CPU/CUDA real_func forwards workspace and work-item indices.
 The older explicit Component Graph local workspace path remains unqualified.
-CUDA model-sized SharedArray now uses native block storage and launch sizes derived
-from argument snapshots; other backends and declarations inside real_func reject. Definition packages
+CUDA and Vulkan use native workgroup storage for model-sized SharedArray in inlined parallel ranges. Both bind sizes from immutable argument snapshots. CPU uses its ordinary range scheduler for model-dependent block hints. Definition packages
 infer model axes from constructor parameters and existing declarations within
 the [documented package scope](../forge/package_aot.en.md). Local tensor arithmetic
 remains pending; no application decorator is added.

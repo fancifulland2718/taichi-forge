@@ -6,6 +6,7 @@
 
 #include "taichi/ir/offloaded_task_type.h"
 #include "taichi/codegen/range_for_bounds.h"
+#include "taichi/codegen/dynamic_shared_array.h"
 #include "taichi/ir/type.h"
 #include "taichi/ir/transforms.h"
 #include "taichi/rhi/device.h"
@@ -175,6 +176,32 @@ struct TaskAttributes {
   // runtime config. This works because grid strided loop is supported.
   int advisory_total_num_threads{0};
   int advisory_num_threads_per_group{0};
+  std::optional<HostRangeBound> model_block_size;
+  std::vector<DynamicSharedArray> model_shared_arrays;
+
+  bool has_model_workgroup() const {
+    return model_block_size.has_value() || !model_shared_arrays.empty();
+  }
+
+  bool valid_model_workgroup(uint64_t argument_bytes) const {
+    if (!has_model_workgroup())
+      return true;
+    if (task_type != OffloadedTaskType::range_for ||
+        (model_block_size && !model_block_size->valid(argument_bytes)))
+      return false;
+    int previous = -1;
+    for (const auto &array : model_shared_arrays) {
+      if (array.allocation_id <= previous || array.extents.empty() ||
+          array.element_bytes <= 0 || array.element_bytes > 8 ||
+          (array.element_bytes & (array.element_bytes - 1)))
+        return false;
+      previous = array.allocation_id;
+      for (const auto &extent : array.extents)
+        if (!extent.valid(argument_bytes))
+          return false;
+    }
+    return true;
+  }
   // A range task normally grid-strides over its full logical domain. Exact
   // indirect dispatch specializes it to at most one logical index per lane.
   bool one_to_one{false};
@@ -209,9 +236,10 @@ struct TaskAttributes {
       return true;
     return device_range_dispatch_version == 1 &&
            task_type == OffloadedTaskType::range_for && range_for_attribs &&
-           range_for_attribs->supports_device_dispatch() &&
-           !one_to_one && !may_mutate_sparse_topology &&
-           !static_shared_array_bytes && cooperative_matrix_requirements.empty() &&
+           range_for_attribs->supports_device_dispatch() && !one_to_one &&
+           !may_mutate_sparse_topology && !has_model_workgroup() &&
+           !static_shared_array_bytes &&
+           cooperative_matrix_requirements.empty() &&
            sparse_list_op == kSparseListOpNone &&
            advisory_total_num_threads > 0 && advisory_num_threads_per_group > 0;
   }
@@ -239,7 +267,9 @@ struct TaskAttributes {
             sparse_list_parent_snode_id,
             may_mutate_sparse_topology,
             sparse_mutation_snode_id,
-            cooperative_matrix_requirements);
+            cooperative_matrix_requirements,
+            model_block_size,
+            model_shared_arrays);
 };
 
 /**

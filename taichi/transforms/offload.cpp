@@ -196,9 +196,12 @@ class Offloader {
           offloaded->block_dim = s->block_dim;
         }
         offloaded->source_block_dim_explicit = s->block_dim != 0;
-        if (s->model_block_dim) {
-          TI_ERROR_IF(arch != Arch::cuda || !kernel,
-                      "Model-dependent block size requires a CUDA kernel range");
+        // CPU ranges use scheduler chunks; a GPU block size does not change
+        // their logical iterations or establish a CPU workgroup.
+        if (s->model_block_dim && !arch_is_cpu(arch)) {
+          TI_ERROR_IF((arch != Arch::cuda && arch != Arch::vulkan) || !kernel,
+                      "Model-dependent block size requires a CUDA or Vulkan "
+                      "kernel range");
           offloaded->host_block_dim = describe_host_range_bound(s->model_block_dim, kernel->args_type);
           TI_ERROR_IF(!offloaded->host_block_dim,
                       "Model-dependent block size must be an immutable i32 argument expression");

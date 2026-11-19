@@ -15,8 +15,10 @@
 #include <cstdint>
 #include <chrono>
 #include <functional>
+#include <map>
 #include <memory>
 #include <mutex>
+#include <set>
 #include <string>
 #include <tuple>
 #include <unordered_map>
@@ -209,7 +211,9 @@ class CompiledTaichiKernel {
   size_t get_args_buffer_size() const;
   size_t get_ret_buffer_size() const;
 
-  Pipeline *get_pipeline(int i);
+  Pipeline *bound_pipeline(int i, LaunchContextBuilder &context);
+  std::vector<Pipeline *> bind_model_pipelines(LaunchContextBuilder &context);
+  void collect_pipelines(std::set<Pipeline *> &out) const;
   ShaderResourceSet *get_cached_resource_set(int i);
   const std::vector<RuntimeArrayArg> &runtime_array_args() const {
     return runtime_array_args_;
@@ -293,6 +297,12 @@ class CompiledTaichiKernel {
   std::shared_ptr<SparseTreeAdmission::Permit> sparse_tree_permit_;
   std::shared_ptr<const SparseDiagnosticTreeMap> diagnostic_trees_;
   std::vector<std::shared_ptr<Pipeline>> pipelines_;
+  struct ModelPipelines {
+    std::vector<uint32_t> spirv;
+    std::map<std::vector<uint32_t>, std::unique_ptr<Pipeline>> variants;
+  };
+  std::vector<std::shared_ptr<ModelPipelines>> model_pipelines_;
+  PipelineCache *backend_cache_;
   std::vector<std::unique_ptr<ShaderResourceSet>> cached_resource_sets_;
 };
 
