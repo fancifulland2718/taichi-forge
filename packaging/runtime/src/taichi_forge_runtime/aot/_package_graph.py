@@ -734,6 +734,8 @@ class Graph:
         changed = False
         ordinary = {"value", "dimension", "compound", "ndarray", "dense_field",
                     "model_tensor_field", "local_tensor_workspace"}
+        if self.package.runtime.arch == "vulkan":
+            ordinary.add("texture")
         while pending:
             operation = pending.pop()
             kind = operation["kind"]

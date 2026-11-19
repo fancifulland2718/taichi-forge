@@ -59,6 +59,7 @@ void validate_kernel_ndarray_binding(Runtime &runtime,
 // Cold ABI marshalling shared by ordinary launch and prepared execution. These
 // own the host descriptors referenced by LaunchContextBuilder, not device data.
 struct BoundKernelArguments {
+  void specialize(Runtime &runtime, const std::vector<uint32_t> &constant_args);
   AotModule *owner{nullptr};
   taichi::lang::aot::Kernel *kernel{nullptr};
   std::vector<TiMemory> memories;

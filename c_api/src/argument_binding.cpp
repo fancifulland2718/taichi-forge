@@ -10,6 +10,7 @@
 #include <optional>
 #include <unordered_set>
 #include "fp16.h"
+#include "taichi/runtime/native_image.h"
 #include "taichi/runtime/native_kernel_resource.h"
 #include "taichi/runtime/native_operation.h"
 #include "taichi/runtime/native_array_contract.h"
@@ -278,6 +279,28 @@ bool validate_gradient_parameter(
 }  // namespace
 
 namespace capi {
+void BoundKernelArguments::specialize(
+    Runtime &runtime, const std::vector<uint32_t> &constant_args) {
+  using taichi::lang::NativeImageKernelBinding;
+  for (const auto &binding : kernel_resources) {
+    const auto *image = dynamic_cast<const NativeImageKernelBinding *>(binding.get());
+    if (runtime.arch != taichi::Arch::vulkan || !image || !image->sampled_only())
+      throw MemoryBindingError("Managed kernel specialization requires Vulkan sampled images");
+  }
+  auto *selected = owner->get().specialize_kernel(
+      *kernel, *context, constant_args, private_workspaces);
+  if (selected == kernel)
+    return;
+  // Image descriptors belong to the prepared invocation and reference the
+  // exact callable they were checked against. Rebind once during prepare.
+  for (auto &binding : kernel_resources) {
+    auto image = std::static_pointer_cast<NativeImageKernelBinding>(binding);
+    binding = std::make_shared<NativeImageKernelBinding>(
+        image->image(), image->argument(), runtime.arch, runtime.get(), *selected, *context);
+  }
+  kernel = selected;
+}
+
 void validate_kernel_ndarray_binding(Runtime &runtime,
                                      const Runtime::KernelBinding &kernel,
                                      uint32_t index,

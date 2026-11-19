@@ -40,11 +40,12 @@ def specialization_entries(path, target, entries):
     else:
         aliases = {item["name"]: metadata["kernels"][item["kernel_index"]]["name"]
                    for item in metadata.get("kernel_aliases", ())}
-    # Sampled images retain the existing managed-resource kernel route. Package
-    # automatic specialization currently admits ordinary value/array bindings.
+    excluded_resources = {"rw_texture", "acceleration_structure"}
+    if target != "vulkan":
+        excluded_resources.add("texture")
     return frozenset(name for name in entries if name not in excluded and aliases.get(name, name) not in excluded
-                     and not any(item["kind"] in ("texture", "rw_texture", "acceleration_structure")
-                                 for item in entries[name]["arguments"]))
+                     and not any(item["kind"] in excluded_resources
+                                 for item in (*entries[name]["arguments"], *entries[name]["captures"])))
 
 
 def specialization_constant_args(contract, owner_schema, owners=None):

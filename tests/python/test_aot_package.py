@@ -1817,7 +1817,12 @@ def test_package_host_texture_constructs_without_frontend(tmp_path, monkeypatch)
     source = SAMPLED_TEXTURE_SOURCE.replace(
         "self.n, self.m = n, m", """self.n, self.m = n, m
         self.image = ti.Texture(ti.Format.rgba32f, (n, m),
-            sampler=ti.hardware.sampling.SamplerConfig(address_mode_u='clamp_to_edge'))""") + """
+            sampler=ti.hardware.sampling.SamplerConfig(address_mode_u='clamp_to_edge'))"""
+    ).replace("scope.output =", """self.offset_pixel = False
+        scope.static('offset_pixel', choices=(False, True))
+        scope.output =""").replace("0).x * gain", """0).x * gain
+            if ti.static(self.offset_pixel):
+                self.output[i, j] += 4""") + """
     @ti.kernel
     def write(self, image: ti.types.rw_texture(2, fmt=ti.Format.rgba32f), gain: ti.f32):
         for i, j in ti.ndrange(self.n, self.m):
@@ -1829,7 +1834,11 @@ def test_package_host_texture_constructs_without_frontend(tmp_path, monkeypatch)
     normal.publish(normal.image, 3.0)
     np.save(tmp_path / 'expected.npy', normal.output.to_numpy())
     output = tmp_path / 'sdk'
-    ti.aot.export_package(package, output)
+    manifest = ti.aot.export_package(package, output)
+    sampled = [entry for entry in manifest["entries"].values()
+               if any(arg["kind"] == "texture" for arg in entry["arguments"])]
+    assert len(sampled) == 1
+    assert any(item.get("prepare_static") for item in sampled[0]["captures"])
     probe = tmp_path / 'consume.py'
     probe.write_text(textwrap.dedent('''
         import importlib.abc
@@ -1859,6 +1868,16 @@ def test_package_host_texture_constructs_without_frontend(tmp_path, monkeypatch)
             np.testing.assert_array_equal(first.output.to_numpy(), np.load(sys.argv[2]) + 6.0)
             np.testing.assert_array_equal(second.output.to_numpy(),
                 (2 + np.arange(4)[:, None] + np.arange(7)[None, :]) * 3)
+            second.offset_pixel = True
+            second.publish(second.image, 3.0)
+            shifted = (2 + np.arange(4)[:, None] + np.arange(7)[None, :]) * 3 + 4
+            np.testing.assert_array_equal(second.output.to_numpy(), shifted)
+            second_graph = second.graph()
+            second_graph.run(dict(image=second.image, gain=3.0))
+            np.testing.assert_array_equal(second.output.to_numpy(), shifted)
+            call.run()
+            np.testing.assert_array_equal(first.output.to_numpy(), np.load(sys.argv[2]) + 6.0)
+            second_graph.close()
             call.close()
             graph.close()
             first.image.close()

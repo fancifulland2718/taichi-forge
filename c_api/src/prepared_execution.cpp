@@ -1355,8 +1355,7 @@ static TiPreparedExecution prepare_kernel_impl(TiRuntime runtime,
     std::vector<uint32_t> indices;
     if (constant_count)
       indices.assign(constant_args, constant_args + constant_count);
-    arguments->kernel = arguments->owner->get().specialize_kernel(
-        *arguments->kernel, *arguments->context, indices, arguments->private_workspaces);
+    arguments->specialize(rt, indices);
   }
   auto prepared = std::make_unique<capi::PreparedExecution>();
   prepared->owner = arguments->owner;
@@ -2422,10 +2421,10 @@ static TiPreparedExecution prepare_execution_plan_impl(
         if (kernel->specialization) {
           if ((!arch_is_cpu(rt.arch) && rt.arch != taichi::Arch::cuda &&
                rt.arch != taichi::Arch::vulkan) ||
-              family || prepared->snode_instance || !bound->kernel_resources.empty())
+              family || prepared->snode_instance)
             throw MemoryBindingError(
                 "Plan specialization requires ordinary CPU/CUDA/Vulkan bindings without "
-                "binding families, SNode instances or managed kernel resources");
+                "binding families or SNode instances");
           std::vector<std::uint32_t> constants;
           for (const auto index : *kernel->specialization) {
             // Submission parameters override fixed candidates in every region.
@@ -2434,8 +2433,7 @@ static TiPreparedExecution prepare_execution_plan_impl(
             if (!parameter_slots.count(kernel->arguments.at(index)))
               constants.push_back(index);
           }
-          bound->kernel = bound->owner->get().specialize_kernel(
-              *bound->kernel, *bound->context, constants, bound->private_workspaces);
+          bound->specialize(rt, constants);
         }
         bound->context->append_dispatch_label(kernel->label);
         DevicePtr indirect_packet{kDeviceNullPtr};

@@ -1460,8 +1460,7 @@ void launch_kernel_result(Runtime &rt,
                       (result_size && !result_data)))
     throw MemoryBindingError("Return storage must match the compiled buffer size");
   if (constant_args)
-    bound->kernel = bound->owner->get().specialize_kernel(
-        *bound->kernel, *bound->context, *constant_args, bound->private_workspaces);
+    bound->specialize(rt, *constant_args);
   if (!bound->context->result_buffer_size) {
     bound->kernel->launch(*bound->context);
     return;

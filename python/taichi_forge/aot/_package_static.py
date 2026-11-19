@@ -731,14 +731,15 @@ class StaticPreparation:
         return facts
 
     def project(self, environment, schema, kernel, *, query_paths=None, owner_type=None):
+        from taichi_forge._lib import core
+        from taichi_forge.lang import impl
         from taichi_forge.types.ray_type import AccelerationStructureType
         from taichi_forge.types.texture_type import TextureType, RWTextureType
 
-        # These managed resources retain a native qualification tied to the
-        # original kernel. Their existing ordinary/Graph route is supported,
-        # but switching to a specialized kernel needs a separate binding proof.
-        # Keep producer choices for these entries until that route is qualified.
-        if any(isinstance(arg.annotation, (AccelerationStructureType, TextureType, RWTextureType))
+        # Vulkan prepare rebinds sampled images to the specialized callable.
+        # Other managed resources still use their original callable identity.
+        if any(isinstance(arg.annotation, (AccelerationStructureType, RWTextureType))
+               or isinstance(arg.annotation, TextureType) and impl.current_cfg().arch != core.vulkan
                for arg in kernel.arguments):
             return environment, schema, {}
         identity = kernel.func.__module__ + "." + kernel.func.__qualname__
