@@ -2010,7 +2010,13 @@ class ASTTransformer(Builder):
                 guard = node.test.ptr if truth else ti_ops.logical_not(node.test.ptr)
                 previous = compilation.schedule_guard if compilation is not None else None
                 if previous is not None:
-                    guard = ti_ops.logical_and(previous, guard)
+                    if (getattr(node.test.ptr, "_uniform_extent", None) or (None,))[0] == "dim":
+                        # A direct model argument is safe to read in either arm.
+                        # Keep nested guards in SSA so offload can describe the
+                        # range to prepare, including an inactive fallback.
+                        guard = ti_ops.bit_and(ti_ops.cmp_ne(previous, 0), ti_ops.cmp_ne(guard, 0))
+                    else:
+                        guard = ti_ops.logical_and(previous, guard)
                 if compilation is not None:
                     compilation.schedule_guard = guard
                 try:

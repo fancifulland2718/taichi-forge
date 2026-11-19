@@ -2963,12 +2963,13 @@ class Model:
         scope.out = scope.field(ti.i32, shape=scope.dim('n'))
     @ti.kernel
     def step(self, live_count: ti.i32):
-        if ti.static(self.enabled):
-            for i in range(self.n):
-                self.out[i] = helper(i)
-        else:
-            for i in range(self.n):
-                self.out[i] = helper(i) + 10
+        if ti.static(self.n):
+            if ti.static(self.enabled):
+                for i in range(self.n):
+                    self.out[i] = helper(i)
+            else:
+                for i in range(self.n):
+                    self.out[i] = helper(i) + 10
         for i in range(live_count):
             self.out[i] += 11
 '''
@@ -15360,6 +15361,11 @@ def test_package_fixed_policy_requires_matching_scalar_declaration():
     settings['mode'] = dict(kind='value', dtype='i32', input_presence=True)
     assert specialization_constant_args(contract, nested, {'Settings': settings}) == (1, 2)
     settings['mode']['input_presence'] = False
+    assert specialization_constant_args(contract, nested, {'Settings': settings}) == (1,)
+    settings['mode'] = dict(kind='static', dynamic_storage_condition=True,
+                            choices=[['bool', False], ['bool', True]])
+    assert specialization_constant_args(contract, nested, {'Settings': settings}) == (1, 2)
+    settings['mode']['dynamic_storage_condition'] = False
     assert specialization_constant_args(contract, nested, {'Settings': settings}) == (1,)
 
 

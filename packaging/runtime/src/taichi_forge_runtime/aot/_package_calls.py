@@ -84,14 +84,22 @@ def specialization_constant_args(contract, owner_schema, owners=None):
                 # The input path is proven by the package's owner contracts;
                 # qualify only this local view, never mutate the shared schema.
                 declaration = {**declaration, "path": capture_path}
-        if (capture["kind"] == declaration.get("kind") == "value"
+        declared_path = tuple(declaration.get("path", (name,)))
+        if (capture["kind"] == "value" and capture.get("dtype") == "i32"
+                and not capture.get("element_shape") and capture_path == declared_path
+                and declaration.get("kind") == "static"
+                and declaration.get("dynamic_storage_condition") is True):
+            # Optional storage shares producer code across layouts. Its declared
+            # presence is fixed for this binding just like its resource handles.
+            result.append(index)
+        elif (capture["kind"] == declaration.get("kind") == "value"
                 and (declaration.get("affects_plan") is True
                      or declaration.get("input_presence") is True)
                 and capture.get("dtype") in ("i8", "i16", "i32", "i64", "u8", "u16", "u32", "u64")
                 and capture["dtype"] == declaration.get("dtype")
                 and not capture.get("element_shape")
                 and not declaration.get("element", {}).get("element_shape")
-                and capture_path == tuple(declaration.get("path", (name,)))):
+                and capture_path == declared_path):
             result.append(index)
     return tuple(result)
 
