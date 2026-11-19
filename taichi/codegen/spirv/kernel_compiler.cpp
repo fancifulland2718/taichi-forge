@@ -80,6 +80,7 @@ KernelCompiler::CKDPtr KernelCompiler::compile(
   params.compiled_structs = *config_.compiled_struct_data;
   params.arch = compile_config.arch;
   params.caps = device_caps;
+  params.omit_value_names = compile_config.spirv_omit_value_names;
   // P1.d + V1: compile_tier-aware SPIR-V opt level.
   //   "fast"     — skip the spvtools optimizer entirely (level 0, 0 passes).
   //                V1 revision: previously capped at level 1 (3 cheap passes),

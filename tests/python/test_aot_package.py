@@ -4670,10 +4670,13 @@ class Model:
                     words = struct.unpack(f'<{len(data) // 4}I', data)
                     pos = 5
                     while pos < len(words):
-                        if words[pos] & 0xffff == 57:
-                            callees.append(words[pos + 3])
-                        width = words[pos] >> 16
+                        width, opcode = divmod(words[pos], 1 << 16)
                         assert width
+                        if opcode == 5:  # OpName
+                            value_name = data[(pos + 2) * 4 : (pos + width) * 4]
+                            assert not (value_name.startswith(b'tmp') and value_name[3:4].isdigit())
+                        if opcode == 57:
+                            callees.append(words[pos + 3])
                         pos += width
             assert len(callees) == 2 and callees[0] == callees[1]
         else:

@@ -391,6 +391,7 @@ class TaskCodegen : public IRVisitor {
     bool listgen_subgroup_ballot{false};
     // VS-3: emit sparse-list metadata for GfxRuntime host-side reuse.
     bool listgen_reuse{false};
+    bool omit_value_names{false};
   };
 
   const bool use_64bit_pointers = false;
@@ -414,7 +415,7 @@ class TaskCodegen : public IRVisitor {
     fill_snode_to_root();
     collect_ray_query_result_masks();
     collect_resource_usage();
-    ir_ = std::make_shared<spirv::IRBuilder>(arch_, caps_);
+    ir_ = std::make_shared<spirv::IRBuilder>(arch_, caps_, params.omit_value_names);
   }
 
   void fill_snode_to_root() {
@@ -8080,6 +8081,7 @@ void KernelCodegen::run(TaichiKernelAttributes &kernel_attribs,
         params_.bitmasked_clear_data_on_deactivate;
     tp.listgen_subgroup_ballot = params_.listgen_subgroup_ballot;
     tp.listgen_reuse = params_.vulkan_listgen_reuse;
+    tp.omit_value_names = params_.omit_value_names;
 
     TaskCodegen cgen(tp);
     auto task_res = [&]() {

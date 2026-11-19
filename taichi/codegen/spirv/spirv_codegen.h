@@ -34,6 +34,7 @@ class KernelCodegen {
     // per-task TaskCodegen + spvtools::Optimizer::Run on a fan-out of
     // worker threads. SPIR-V output is byte-identical to the serial path.
     bool parallel_codegen{false};
+    bool omit_value_names{false};
     // Cap on workers when parallel_codegen is true. Mirrors
     // CompileConfig::num_compile_threads. Single-task kernels always run
     // serially regardless of this value.

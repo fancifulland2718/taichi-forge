@@ -125,6 +125,7 @@
     CACHE_VALUE(std::string("spirv-descriptor-array-offsets-v1"));
     CACHE_VALUE(std::string("spirv-elide-clear-and-gc-v1"));
     CACHE_FIELD(spirv_skip_loop_unroll);
+    CACHE_OPTIONAL_FLAG(spirv_omit_value_names);
   }
   // B-2.b (2026-05): the 4 vulkan_pointer_* runtime fields drive both
   // root-buffer layout and pointer-SNode SPIR-V codegen. They MUST be

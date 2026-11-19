@@ -229,8 +229,10 @@ class InstrBuilder {
 // Builder to build up a single SPIR-V module
 class IRBuilder {
  public:
-  IRBuilder(Arch arch, const DeviceCapabilityConfig *caps)
-      : arch_(arch), caps_(caps) {
+  IRBuilder(Arch arch,
+            const DeviceCapabilityConfig *caps,
+            bool omit_value_names = false)
+      : arch_(arch), omit_value_names_(omit_value_names), caps_(caps) {
   }
 
   template <typename... Args>
@@ -694,6 +696,7 @@ class IRBuilder {
   void init_random_function(Value global_tmp_);
 
   Arch arch_;
+  bool omit_value_names_;
   const DeviceCapabilityConfig *caps_;
 
   // internal instruction builder

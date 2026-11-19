@@ -169,6 +169,9 @@ struct CompileConfig {
   // listgen / clear-list tasks. Affects emitted SPIR-V and is part of the
   // offline cache key.
   bool spirv_adaptive_opt{false};
+  // Resolved by the Vulkan producer. Semantic resource and dispatch names
+  // are emitted independently of IR temporary value names.
+  bool spirv_omit_value_names{false};
   int spirv_adaptive_opt_threshold{64};
   // V7 (2026-04-26): anti double-pool oversubscription in the batched
   // Program::compile_kernels path. The outer ParallelExecutor already

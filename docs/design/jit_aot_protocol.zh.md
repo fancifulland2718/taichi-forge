@@ -152,6 +152,8 @@ LLVM 能解析 bitcode 也不证明可以安全执行。工具链版本的独立
 | CUDA JIT / AOT | JIT 可复用 LLVM 函数单元；AOT 有 bitcode、实验 `bc-library`、PTX、cubin | 格式决定可延迟的特化和链接能力；PTX/cubin 不等同于仍可改写 LLVM 的 bitcode |
 | Vulkan JIT / AOT | 自动 JIT helper 在每个任务 SPIR-V 模块内共享，以 `OpFunctionCall` 引用；AOT 有 SPIR-V 及现有消费特化 | 没有跨任务/独立模块 SPIR-V 函数库缓存；自动边界支持数值值参数、固定矩阵/向量和模板资源，数组/ref 参数保留原内联 |
 
+Vulkan AOT 在各任务中保留可提取的类型化 helper 调用，供消费时按绑定特化，并由后端在创建管线时优化。常规生产导出省略中间值的调试名称，保留资源与调度名称。启用调试、汇编输出或按代码大小选 Pass 的自适应优化时，生产端保留中间值名称。
+
 此表限定当前源码已实现的路线，不保证全部语言特性在每条路线均合格。
 可选择后端不等于当前 Module 支持跨 arch 编译；现有入口仍要求初始化与目标 arch 一致。
 

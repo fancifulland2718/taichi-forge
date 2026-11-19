@@ -169,6 +169,10 @@ and compatibility policy remain future work, without a new version system or com
 | CUDA JIT/AOT | LLVM function units; AOT bitcode, experimental `bc-library`, PTX and cubin | Formats have different deferred-specialization/linking capabilities; PTX/cubin are not editable LLVM bitcode |
 | Vulkan JIT/AOT | Automatic JIT helpers share within each task's SPIR-V module through `OpFunctionCall`; AOT SPIR-V has its existing consumption specialization | No cross-task/independent-module SPIR-V function cache. Automatic value boundaries support scalars, fixed vectors/matrices and template resources; array/ref parameters stay inline |
 
+Vulkan AOT keeps eligible typed helper calls in each task until binding-specific specialization and pipeline creation.
+Release builds omit the debug names attached to intermediate values. The producer still emits resource and dispatch
+names. Debug builds, assembly dumps and the size-based adaptive optimizer retain intermediate names.
+
 This is an implemented-path inventory, not qualification of every language feature. Selecting
 a backend does not imply cross-arch Module compilation: current Module creation requires the
 initialized arch to match the requested arch.

@@ -37,10 +37,12 @@ bool same_offline_cache_compile_config(const CompileConfig &config,
   if (!same_cache_field(config.name, other.name)) \
   return false
 #define CACHE_TYPE(name) CACHE_FIELD(name)
+#define CACHE_OPTIONAL_FLAG(name) CACHE_FIELD(name)
 #define CACHE_SORTED(name) CACHE_FIELD(name)
 #define CACHE_VALUE(value)
 #include "taichi/analysis/compile_config_key_fields.inc.h"
 #undef CACHE_VALUE
+#undef CACHE_OPTIONAL_FLAG
 #undef CACHE_SORTED
 #undef CACHE_TYPE
 #undef CACHE_FIELD
@@ -70,6 +72,9 @@ static std::vector<std::uint8_t> get_offline_cache_key_of_compile_config(
   BinaryOutputSerializer serializer;
   serializer.initialize();
 #define CACHE_FIELD(name) serializer(config.name)
+#define CACHE_OPTIONAL_FLAG(name) \
+  if (config.name)                \
+    serializer(std::string(#name))
 #define CACHE_TYPE(name) serializer(config.name.to_string())
 #define CACHE_SORTED(name)                   \
   {                                          \
@@ -80,6 +85,7 @@ static std::vector<std::uint8_t> get_offline_cache_key_of_compile_config(
 #define CACHE_VALUE(value) serializer(value)
 #include "taichi/analysis/compile_config_key_fields.inc.h"
 #undef CACHE_VALUE
+#undef CACHE_OPTIONAL_FLAG
 #undef CACHE_SORTED
 #undef CACHE_TYPE
 #undef CACHE_FIELD

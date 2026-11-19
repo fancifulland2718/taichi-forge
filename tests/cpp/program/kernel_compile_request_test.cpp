@@ -97,6 +97,10 @@ TEST(KernelCompileRequest, PortableAotDoesNotBorrowProducerLaunchHints) {
 TEST(KernelCompileRequest, PurposeAndEquivalentOriginsDoNotChangeCodeIdentity) {
   CompileConfig base;
   base.arch = Arch::vulkan;
+  base.debug = true;
+  base.spirv_disabled_passes = {"InlineExhaustive"};
+  base.gpu_compute_unit_count = 0;
+  base.gpu_subgroup_size = 32;
   base.compile_tier = "fast";
   base.advanced_optimization = false;
   DeviceCapabilityConfig caps;
@@ -113,6 +117,28 @@ TEST(KernelCompileRequest, PurposeAndEquivalentOriginsDoNotChangeCodeIdentity) {
                                                  jit.device_caps(), nullptr),
             get_hashed_offline_cache_key_context(aot.config(),
                                                  aot.device_caps(), nullptr));
+}
+
+TEST(KernelCompileRequest, VulkanReleaseAotKeepsCallableCodeWithoutValueNames) {
+  CompileConfig base;
+  base.arch = Arch::vulkan;
+  base.spirv_disabled_passes = {"InlineExhaustive"};
+  const auto release = resolve_kernel_compile_request(base, {}, {}, CompilePurpose::aot);
+  const auto jit = resolve_kernel_compile_request(base, {});
+  EXPECT_TRUE(release.config().spirv_omit_value_names);
+  EXPECT_FALSE(jit.config().spirv_omit_value_names);
+  auto named = release.config();
+  named.spirv_omit_value_names = false;
+  EXPECT_FALSE(same_offline_cache_compile_config(named, release.config()));
+  EXPECT_NE(get_hashed_offline_cache_key_context(named, {}, nullptr),
+            get_hashed_offline_cache_key_context(release.config(), {}, nullptr));
+  for (auto keep_names : {&CompileConfig::debug, &CompileConfig::print_kernel_asm,
+                          &CompileConfig::spirv_adaptive_opt}) {
+    auto config = base;
+    config.*keep_names = true;
+    EXPECT_FALSE(resolve_kernel_compile_request(config, {}, {}, CompilePurpose::aot)
+                     .config().spirv_omit_value_names);
+  }
 }
 
 TEST(KernelCompileRequest, ValidatesTheResolvedTier) {

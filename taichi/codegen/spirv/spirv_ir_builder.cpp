@@ -2095,9 +2095,10 @@ void IRBuilder::register_value(std::string name, Value value) {
   if (it != value_name_tbl_.end() && it->second.flag != ValueKind::kConstant) {
     TI_ERROR("{} already exists.", name);
   }
-  this->debug_name(
-      spv::OpName, value,
-      fmt::format("{}_{}", name, value.stype.dt.to_string()));  // Debug info
+  if (!omit_value_names_) {
+    this->debug_name(spv::OpName, value,
+                     fmt::format("{}_{}", name, value.stype.dt.to_string()));
+  }
   value_name_tbl_[name] = value;
 }
 
