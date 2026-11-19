@@ -6,6 +6,7 @@
 #include "llvm/IR/Verifier.h"
 #include "llvm/Support/SourceMgr.h"
 #include "taichi/runtime/llvm/aot_prepared_range.h"
+#include "taichi/runtime/llvm/aot_prepared_schedule.h"
 #include "taichi/codegen/range_for_bounds.h"
 
 namespace taichi::lang {
@@ -56,6 +57,113 @@ TEST(AotPreparedRange, LinkedHelperRefinesGridWithoutFreezingLiveBounds) {
   EXPECT_EQ(range.launch_grid(8160, 128, &count, sizeof(count)), 3);
   std::vector<std::pair<uint64_t, uint64_t>> mutable_args{{0, sizeof(count)}};
   EXPECT_EQ(range.launch_grid(8160, 128, &count, sizeof(count), &mutable_args), 8160);
+}
+
+TEST(AotPreparedRange, ForwardsPrivateBoundsAndRetainsObservedWrites) {
+  enum Scenario {
+    empty,
+    observed,
+    missing_inventory,
+    volatile_write,
+    live_value,
+    intervening_write,
+    conflicting,
+    nonempty
+  };
+  for (auto scenario : {empty, observed, missing_inventory, volatile_write,
+                        live_value, intervening_write, conflicting, nonempty}) {
+    llvm::LLVMContext context;
+    auto module =
+        range_module(context, "store i32 %i, ptr %ctx", R"(
+      declare ptr @RuntimeContext_get_temporary_pointer(ptr, i64)
+      define void @writer(ptr %ctx) !taichi.scratch.slots !1 {
+        %live = load i32, ptr %ctx
+        %tmp = call ptr @RuntimeContext_get_temporary_pointer(ptr %ctx, i64 4)
+        store i32 0, ptr %tmp, !taichi.scratch.store !1
+        %again = call ptr @RuntimeContext_get_temporary_pointer(ptr %ctx, i64 4)
+        store i32 0, ptr %again, !taichi.scratch.store !1
+        ret void
+      }
+      define void @observe(ptr %ctx) {
+        store i32 7, ptr %ctx
+        ret void
+      }
+      define void @mutate(ptr %ctx) !taichi.scratch.slots !1 {
+        %live = load i32, ptr %ctx
+        %tmp = call ptr @RuntimeContext_get_temporary_pointer(ptr %ctx, i64 4)
+        store i32 %live, ptr %tmp, !taichi.scratch.store !1
+        ret void
+      }
+      !0 = !{}
+      !1 = !{i32 4}
+    )",
+                     "%tmp = call ptr "
+                     "@RuntimeContext_get_temporary_pointer(ptr %ctx, i64 4)\n"
+                     "%end = load i32, ptr %tmp\n");
+    ASSERT_TRUE(module);
+    auto *writer = module->getFunction("writer");
+    auto *entry = module->getFunction("entry");
+    auto *observe = module->getFunction("observe");
+    auto *slot = writer->getMetadata("taichi.scratch.slots");
+    auto *none = llvm::MDNode::get(context, {});
+    if (scenario != missing_inventory)
+      entry->setMetadata("taichi.scratch.slots", none);
+    observe->setMetadata("taichi.scratch.slots",
+                         scenario == observed ? slot : none);
+    auto *dispatch = LLVM::prepared_range_dispatch(*entry);
+    ASSERT_TRUE(dispatch);
+    dispatch->setArgOperand(2, dispatch->getPrevNode());
+    auto *last = llvm::cast<llvm::StoreInst>(
+        writer->front().getTerminator()->getPrevNode());
+    if (scenario == volatile_write)
+      last->setVolatile(true);
+    if (scenario == live_value)
+      last->setOperand(0, &writer->front().front());
+    if (scenario == conflicting || scenario == nonempty)
+      last->setOperand(
+          0, llvm::ConstantInt::get(last->getValueOperand()->getType(), 128));
+    if (scenario == nonempty)
+      for (auto &inst : writer->front())
+        if (auto *store = llvm::dyn_cast<llvm::StoreInst>(&inst))
+          store->setOperand(0, last->getValueOperand());
+    std::vector<OffloadedTask> tasks(3);
+    tasks[0].name = "writer";
+    tasks[1].name = "entry";
+    tasks[2].name = "observe";
+    tasks[1].task_type = OffloadedTaskType::range_for;
+    auto &range = tasks[1].range_bounds.emplace();
+    range.begin = {RangeBoundKind::constant_i32, 0};
+    range.end = {RangeBoundKind::global_tmp_i32, 4};
+    if (scenario == intervening_write) {
+      OffloadedTask mutation;
+      mutation.name = "mutate";
+      tasks.insert(tasks.begin() + 1, mutation);
+    }
+    LLVM::specialize_prepared_task_schedule(*module, tasks);
+    if (scenario == intervening_write) {
+      ASSERT_GE(tasks.size(), 3u);
+      EXPECT_EQ(tasks[tasks.size() - 3].name, "mutate");
+      const auto &active = tasks[tasks.size() - 2];
+      ASSERT_EQ(active.name, "entry");
+      EXPECT_EQ(active.range_bounds->end.kind, RangeBoundKind::global_tmp_i32);
+      EXPECT_FALSE(llvm::isa<llvm::ConstantInt>(dispatch->getArgOperand(2)));
+      EXPECT_FALSE(llvm::verifyModule(*module, &llvm::errs()));
+      continue;
+    }
+    EXPECT_EQ(tasks.size(), scenario == empty ? 1u
+                            : scenario == observed || scenario == nonempty
+                                ? 2u
+                                : 3u);
+    EXPECT_EQ(tasks.back().name, "observe");
+    if (scenario == nonempty) {
+      ASSERT_EQ(tasks.front().name, "entry");
+      EXPECT_EQ(tasks.front().range_bounds->constant_size(), 128);
+      EXPECT_EQ(llvm::cast<llvm::ConstantInt>(dispatch->getArgOperand(2))
+                    ->getSExtValue(),
+                128);
+    }
+    EXPECT_FALSE(llvm::verifyModule(*module, &llvm::errs()));
+  }
 }
 
 TEST(AotPreparedRange, UnknownAndPhysicalCallsKeepNonemptyLaunch) {

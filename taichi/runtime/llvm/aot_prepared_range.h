@@ -37,6 +37,18 @@ inline bool specialize_prepared_cuda_block_bound(llvm::Function &entry,
   return false;
 }
 
+inline bool is_prepared_cuda_range_dispatch(const llvm::CallBase &call,
+                                            const llvm::Function &entry) {
+  const auto *callee = call.getCalledFunction();
+  return callee && callee->getName() == "gpu_parallel_range_for_with_tls" &&
+         entry.arg_size() == 1 && call.arg_size() == 7 &&
+         call.getArgOperand(0) == entry.getArg(0) &&
+         call.getArgOperand(1)->getType()->isIntegerTy(32) &&
+         call.getArgOperand(2)->getType()->isIntegerTy(32) &&
+         llvm::isa<llvm::ConstantPointerNull>(call.getArgOperand(3)) &&
+         llvm::isa<llvm::ConstantPointerNull>(call.getArgOperand(5));
+}
+
 // A consumer-side proof over the linked library. The producer cannot inspect
 // an extracted callee when it records unproven_call. Do not turn that absence
 // of a proof into a permanent launch policy, or assume the call is harmless.
@@ -58,12 +70,7 @@ class AotPreparedRangeAnalysis {
     llvm::CallBase *range = nullptr;
     for (auto &instruction : entry->front()) {
       if (auto *call = llvm::dyn_cast<llvm::CallBase>(&instruction)) {
-        auto *callee = call->getCalledFunction();
-        if (range || !callee ||
-            callee->getName() != "gpu_parallel_range_for_with_tls" ||
-            call->arg_size() != 7 || call->getArgOperand(0) != entry->getArg(0) ||
-            !llvm::isa<llvm::ConstantPointerNull>(call->getArgOperand(3)) ||
-            !llvm::isa<llvm::ConstantPointerNull>(call->getArgOperand(5)))
+        if (range || !is_prepared_cuda_range_dispatch(*call, *entry))
           return {};
         range = call;
       } else if (instruction.mayHaveSideEffects() ||

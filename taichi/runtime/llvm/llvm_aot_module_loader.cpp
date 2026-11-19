@@ -20,6 +20,7 @@
 #include "taichi/runtime/llvm/aot_artifact_integrity.h"
 #include "taichi/runtime/llvm/aot_kernel_contract.h"
 #include "taichi/runtime/llvm/aot_prepared_range.h"
+#include "taichi/runtime/llvm/aot_prepared_schedule.h"
 #include "taichi/runtime/llvm/aot_cpu_range.h"
 #include "taichi/runtime/llvm/aot_snode_relocation.h"
 #include "taichi/runtime/llvm/aot_snode_resources.h"
@@ -508,14 +509,15 @@ aot::Kernel *LlvmAotModule::specialize_kernel(
         specialize_prepared_cuda_block_bound(*entry, task.block_dim, *block);
     }
   }
-  for (auto it = tasks.begin(); it != tasks.end();) {
-    auto &range = it->range_bounds;
+  std::set<llvm::Function *> empty_tasks;
+  for (auto &task : tasks) {
+    auto &range = task.range_bounds;
     if (arch_is_cpu(arch())) {
       if (range && range->host_launch &&
-          it->task_type == OffloadedTaskType::range_for && !it->one_to_one) {
+          task.task_type == OffloadedTaskType::range_for && !task.one_to_one) {
         const auto &bounds = *range->host_launch;
         if (fixed_bound(bounds.begin) && fixed_bound(bounds.end)) {
-          auto *entry = module.getFunction(it->name);
+          auto *entry = module.getFunction(task.name);
           const auto *args = context.get_context().arg_buffer;
           const auto begin = bounds.begin.evaluate(args, kernel.args_size);
           const auto end = bounds.end.evaluate(args, kernel.args_size);
@@ -523,61 +525,55 @@ aot::Kernel *LlvmAotModule::specialize_kernel(
             specialize_cpu_chunk_count(*entry, *range, *begin, *end);
         }
       }
-      ++it;
       continue;
     }
     bool empty_has_no_effects = false;
-    if (arch() == Arch::cuda && it->task_type == OffloadedTaskType::range_for &&
-        range && range->host_launch &&
-        range->empty_group_elision == EmptyRangeGroupProof::unproven_call) {
-      const auto proof = range_analysis.inspect(module.getFunction(it->name));
+    const bool local_arrays =
+        range &&
+        range->empty_group_elision == EmptyRangeGroupProof::local_storage &&
+        !task.dynamic_shared_arrays.empty() && !task.external_shared_staged &&
+        !task.one_to_one && !task.thread_local_bytes &&
+        !task.may_mutate_sparse_topology &&
+        task.sparse_list_op == OffloadedTask::kSparseListOpNone;
+    if (arch() == Arch::cuda &&
+        task.task_type == OffloadedTaskType::range_for && range &&
+        range->host_launch &&
+        (range->empty_group_elision == EmptyRangeGroupProof::unproven_call ||
+         local_arrays)) {
+      const auto proof = range_analysis.inspect(module.getFunction(task.name));
       empty_has_no_effects = proof.empty_has_no_effects;
-      if (proof.independent_iterations)
-        range->empty_group_elision = EmptyRangeGroupProof::independent_iterations;
-      else if (proof.cuda_block_collective && !it->one_to_one &&
-               !it->external_shared_staged && !it->thread_local_bytes &&
-               !it->may_mutate_sparse_topology &&
-               it->sparse_list_op == OffloadedTask::kSparseListOpNone)
-        range->empty_group_elision = EmptyRangeGroupProof::cuda_block_collective;
+      if (proof.independent_iterations && !local_arrays)
+        range->empty_group_elision =
+            EmptyRangeGroupProof::independent_iterations;
+      else if (proof.cuda_block_collective && !task.one_to_one &&
+               !task.external_shared_staged && !task.thread_local_bytes &&
+               !task.may_mutate_sparse_topology &&
+               task.sparse_list_op == OffloadedTask::kSparseListOpNone)
+        range->empty_group_elision =
+            EmptyRangeGroupProof::cuda_block_collective;
     }
-    if (tasks.size() == 1 || it->task_type != OffloadedTaskType::range_for || !range ||
-        (range->empty_group_elision != EmptyRangeGroupProof::independent_iterations &&
+    if (empty_tasks.size() + 1 == tasks.size() ||
+        task.task_type != OffloadedTaskType::range_for || !range ||
+        (range->empty_group_elision !=
+             EmptyRangeGroupProof::independent_iterations &&
          !empty_has_no_effects) ||
         !range->host_launch || !fixed_bound(range->host_launch->begin) ||
         !fixed_bound(range->host_launch->end)) {
-      ++it;
       continue;
     }
     const auto &bounds = *range->host_launch;
     const auto first = bounds.begin.evaluate(context.get_context().arg_buffer, kernel.args_size);
     const auto last = bounds.end.evaluate(context.get_context().arg_buffer, kernel.args_size);
-    auto *entry = module.getFunction(it->name);
+    auto *entry = module.getFunction(task.name);
     if (!first || !last || *last > *first || !entry || !entry->use_empty() ||
-        std::count_if(tasks.begin(), tasks.end(), [&](const auto &task) {
-          return task.name == it->name;
+        std::count_if(tasks.begin(), tasks.end(), [&](const auto &other) {
+          return other.name == task.name;
         }) != 1) {
-      ++it;
       continue;
     }
-    if (auto *annotations = module.getNamedMetadata("nvvm.annotations")) {
-      std::vector<llvm::MDNode *> keep;
-      for (auto *node : annotations->operands()) {
-        const auto *value = node->getNumOperands()
-            ? llvm::dyn_cast_or_null<llvm::ValueAsMetadata>(node->getOperand(0).get()) : nullptr;
-        if (!value || value->getValue() != entry)
-          keep.push_back(node);
-      }
-      annotations->clearOperands();
-      for (auto *node : keep)
-        annotations->addOperand(node);
-    }
-    entry->eraseFromParent();
-    it = tasks.erase(it);
+    empty_tasks.insert(entry);
   }
-  // Keep one empty task when the entire invocation is empty, preserving the
-  // existing registration/launch ABI without introducing another runtime path.
-  TI_DEBUG("Prepared specialization {} pruned {} of {} tasks before registration",
-           code, original_task_count - tasks.size(), original_task_count);
+  erase_prepared_tasks(module, tasks, empty_tasks);
   const auto &layout = module.getDataLayout();
   std::set<llvm::Function *> contexts;
   for (const auto &task : data.compiled_data.tasks) {
@@ -688,6 +684,13 @@ aot::Kernel *LlvmAotModule::specialize_kernel(
       }
     }
   }
+  if (arch() == Arch::cuda && replacements &&
+      LLVMModuleOptions::read(module, executor_->get_config()).opt_level > 0)
+    specialize_prepared_task_schedule(module, tasks);
+
+  TI_DEBUG(
+      "Prepared specialization {} pruned {} of {} tasks before registration",
+      code, original_task_count - tasks.size(), original_task_count);
   // A library function receives a private argument buffer, not the entry's
   // RuntimeContext layout. Let LLVM expose those stores/loads through a legal
   // inline instead of copying entry offsets into an unrelated callee ABI.

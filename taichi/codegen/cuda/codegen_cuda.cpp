@@ -328,6 +328,17 @@ class TaskCodeGenCUDA : public TaskCodeGenLLVM {
   }
 
   void visit(GlobalStoreStmt *stmt) override {
+    auto *slot = stmt->dest->cast<GlobalTemporaryStmt>();
+    if (compile_config.llvm_aot_relocatable_roots && slot &&
+        stmt->val->ret_type == PrimitiveType::i32) {
+      auto *store =
+          builder->CreateStore(llvm_val[stmt->val], llvm_val[stmt->dest]);
+      store->setMetadata(
+          "taichi.scratch.store",
+          MDNode::get(*llvm_context, ConstantAsMetadata::get(
+                                         builder->getInt32(slot->offset))));
+      return;
+    }
     if (!emit_async_tile_copy(stmt)) {
       TaskCodeGenLLVM::visit(stmt);
     }
@@ -1094,6 +1105,44 @@ class TaskCodeGenCUDA : public TaskCodeGenLLVM {
     }
   }
 
+  // A range's implicit begin/end reads are already in RangeForBounds. Record
+  // the other uses before LLVM lowers private temporaries to ordinary pointers.
+  // Opaque or overlapping accesses leave this task without a scalar contract.
+  void record_scalar_temporaries(OffloadedStmt *task) {
+    if (!compile_config.llvm_aot_relocatable_roots || !task->body ||
+        task->tls_prologue || task->tls_epilogue || task->bls_prologue ||
+        task->bls_epilogue || task->mesh_prologue ||
+        (task->task_type != OffloadedTaskType::serial &&
+         task->task_type != OffloadedTaskType::range_for))
+      return;
+    std::set<int> offsets;
+    const bool opaque =
+        irpass::analysis::any_statement(task->body.get(), [&](Stmt *use) {
+          if (use->is<ExternalFuncCallStmt>())
+            return true;
+          for (int i = 0; i < use->num_operands(); ++i) {
+            auto *op = use->operand(i);
+            auto *slot = op ? op->cast<GlobalTemporaryStmt>() : nullptr;
+            if (!slot)
+              continue;
+            if (slot->ret_type.ptr_removed() != PrimitiveType::i32 ||
+                !(use->is<GlobalLoadStmt>() ||
+                  (use->is<GlobalStoreStmt>() &&
+                   use->as<GlobalStoreStmt>()->dest == slot)))
+              return true;
+            offsets.insert(slot->offset);
+          }
+          return false;
+        });
+    if (!opaque) {
+      std::vector<Metadata *> slots;
+      for (int offset : offsets)
+        slots.push_back(ConstantAsMetadata::get(builder->getInt32(offset)));
+      func->setMetadata("taichi.scratch.slots",
+                        MDNode::get(*llvm_context, slots));
+    }
+  }
+
   void create_bls_buffer(OffloadedStmt *stmt) {
     auto type = llvm::ArrayType::get(llvm::Type::getInt8Ty(*llvm_context),
                                      stmt->bls_size);
@@ -1134,6 +1183,7 @@ class TaskCodeGenCUDA : public TaskCodeGenLLVM {
       } else {
         TI_NOT_IMPLEMENTED
       }
+      record_scalar_temporaries(stmt);
       finalize_offloaded_task_function();
       current_task->grid_dim = stmt->grid_dim;
       if (stmt->task_type == Type::range_for &&
