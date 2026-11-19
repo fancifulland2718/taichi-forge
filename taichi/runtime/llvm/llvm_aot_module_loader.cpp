@@ -552,11 +552,16 @@ aot::Kernel *LlvmAotModule::specialize_kernel(
         range->empty_group_elision =
             EmptyRangeGroupProof::cuda_block_collective;
     }
+    // The producer's whole-block proof governs grid size. Dropping an empty
+    // launch also requires checking for effects outside the linked range body.
+    const bool check_empty_collective =
+        !empty_has_no_effects && arch() == Arch::cuda && range &&
+        range->empty_group_elision == EmptyRangeGroupProof::cuda_block_collective;
     if (empty_tasks.size() + 1 == tasks.size() ||
         task.task_type != OffloadedTaskType::range_for || !range ||
         (range->empty_group_elision !=
              EmptyRangeGroupProof::independent_iterations &&
-         !empty_has_no_effects) ||
+         !empty_has_no_effects && !check_empty_collective) ||
         !range->host_launch || !fixed_bound(range->host_launch->begin) ||
         !fixed_bound(range->host_launch->end)) {
       continue;
@@ -571,6 +576,8 @@ aot::Kernel *LlvmAotModule::specialize_kernel(
         }) != 1) {
       continue;
     }
+    if (check_empty_collective && !range_analysis.inspect(entry).empty_has_no_effects)
+      continue;
     empty_tasks.insert(entry);
   }
   erase_prepared_tasks(module, tasks, empty_tasks);

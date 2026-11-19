@@ -3065,6 +3065,7 @@ class Model:
 ))
 def test_package_target_guard_keeps_prepared_schedule_parallel(tmp_path, monkeypatch, target_guard):
     from time import perf_counter
+    from taichi_forge._lib import core
     from taichi_forge.aot._component import _ComponentCode
 
     source = '''import taichi_forge as ti
@@ -3126,9 +3127,15 @@ class Model:
     entries = [e for e in manifest['entries'].values() if e['definition'].endswith('.Model.step')]
     assert len(entries) == 1
     assert {v['name'] for v in entries[0]['captures'] if 'prepare_static' in v} == {'enabled'}
-    assert len([task for task in tasks if task['task_type'] == 'range_for']) == 3, tasks
+    ranges = [task['range_bounds'] for task in tasks if task['task_type'] == 'range_for']
+    assert len(ranges) == 3, tasks
+    assert any(r['empty_group_elision'] == 'cuda_block_collective' for r in ranges)
     with Runtime('cuda') as runtime, load_package(runtime, tmp_path / 'sdk') as code:
         owners = [code.host.Model(*case) for case in cases]
+        # The disabled instance keeps only its else branch at first preparation.
+        before = core.query_int64('cuda_artifact_entry_points_loaded')
+        owners[0].step(9)
+        assert core.query_int64('cuda_artifact_entry_points_loaded') - before == 1
         for gain in (9, 2, 9):
             for owner in reversed(owners):
                 owner.step(gain)
