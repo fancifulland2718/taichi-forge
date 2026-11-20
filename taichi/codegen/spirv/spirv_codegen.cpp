@@ -8187,14 +8187,22 @@ bool should_use_adaptive_quick_opt(const OffloadedStmt *stmt,
 }
 
 // Independently emitted tasks can assign different IDs to an identical helper
-// because their globals differ. Number IDs in helper order first so that the
-// existing exact-body archive pool can share them. Each task keeps its own
-// declarations, bindings and literal operands.
+// because their globals and the set of callees differ. Give the largest
+// helpers first choice of IDs so that a small optional callee doesn't shift
+// an entire expensive body out of the exact-byte pool. Declarations and
+// literal operands remain local to each task.
 void number_aot_function_ids(std::vector<uint32_t> &words, spv_target_env env) {
+  struct Helper {
+    size_t begin;
+    size_t end;
+    size_t word_count;
+  };
   struct Numbering {
     std::vector<uint32_t> ids;
     std::vector<size_t> offsets;
+    std::vector<Helper> helpers;
     size_t instruction_offset{5};
+    size_t helper_start{0};
     uint32_t next{1};
     uint32_t entry{0};
     bool in_helper{false};
@@ -8214,6 +8222,10 @@ void number_aot_function_ids(std::vector<uint32_t> &words, spv_target_env env) {
       s.entry = inst->words[2];
     } else if (inst->opcode == spv::OpFunction) {
       s.in_helper = inst->result_id != s.entry;
+      if (s.in_helper) {
+        s.helper_start = s.instruction_offset;
+        s.helpers.push_back({s.offsets.size(), 0, 0});
+      }
     }
     for (uint16_t n = 0; n < inst->num_operands; ++n) {
       const auto &operand = inst->operands[n];
@@ -8224,18 +8236,28 @@ void number_aot_function_ids(std::vector<uint32_t> &words, spv_target_env env) {
       if (!id || id >= s.ids.size() || operand.num_words != 1)
         return SPV_ERROR_INVALID_BINARY;
       s.offsets.push_back(s.instruction_offset + operand.offset);
-      if (s.in_helper)
-        s.assign(id);
     }
     s.instruction_offset += inst->num_words;
-    if (inst->opcode == spv::OpFunctionEnd)
+    if (inst->opcode == spv::OpFunctionEnd && s.in_helper) {
+      auto &helper = s.helpers.back();
+      helper.end = s.offsets.size();
+      helper.word_count = s.instruction_offset - s.helper_start;
       s.in_helper = false;
+    }
     return SPV_SUCCESS;
   };
   spvtools::Context context(env);
   if (spvBinaryParse(context.CContext(), &state, words.data(), words.size(),
-                     nullptr, collect, nullptr) != SPV_SUCCESS || state.next == 1)
+                     nullptr, collect, nullptr) != SPV_SUCCESS || state.helpers.empty())
     return;
+  std::stable_sort(state.helpers.begin(), state.helpers.end(),
+                   [](const Helper &a, const Helper &b) {
+                     return a.word_count > b.word_count;
+                   });
+  for (const auto &helper : state.helpers) {
+    for (size_t i = helper.begin; i < helper.end; ++i)
+      state.assign(words[state.offsets[i]]);
+  }
   for (const size_t offset : state.offsets)
     words[offset] = state.assign(words[offset]);
   words[3] = state.next;
