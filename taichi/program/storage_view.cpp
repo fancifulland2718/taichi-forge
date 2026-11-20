@@ -1296,12 +1296,17 @@ DenseStorageBuildResult describe_dense_field_storage(
   }
   std::size_t field_offset = 0;
   try {
-    // CPU/CUDA StructCompiler offsets and strides are shared with consumer
-    // Dense groups. Keep the existing GFX pointer qualification unchanged.
-    field_offset = arch_is_cpu(program.compile_config().arch) ||
-                           program.compile_config().arch == Arch::cuda
-                       ? member_layout.offset
-                       : program.get_dense_field_device_ptr(anchor).offset;
+    const auto arch = program.compile_config().arch;
+    if (arch_is_cpu(arch) || arch == Arch::cuda) {
+      field_offset = member_layout.offset;
+    } else if (arch == Arch::vulkan) {
+      // The Vulkan struct compiler records offsets for every ancestor, including
+      // ordered Dense axes. The tensor-layout proof above supplies the strides.
+      field_offset = program.get_snode_tree_device_ptr(tree_id)
+                         .get_ptr(program.get_field_in_tree_offset(tree_id, anchor)).offset;
+    } else {
+      field_offset = program.get_dense_field_device_ptr(anchor).offset;
+    }
   } catch (...) {
     invalid.reason = StorageFailureReason::kUnsupportedLayout;
     return invalid;

@@ -925,7 +925,8 @@ void transfer_ndarray(Runtime &runtime, const TiNdArray &array, void *host,
       analysis.properties.element_contiguous &&
       !analysis.properties.has_negative_stride &&
       !analysis.properties.single_record_stride_compatible &&
-      (taichi::arch_is_cpu(runtime.arch) || runtime.arch == taichi::Arch::cuda)) {
+      (taichi::arch_is_cpu(runtime.arch) || runtime.arch == taichi::Arch::cuda ||
+       runtime.arch == taichi::Arch::vulkan)) {
     // Ordered Dense axes are physically packed but logically permuted. Pack
     // once on the Host and perform one bulk transfer at this cold boundary,
     // rather than issuing one driver copy per logical element. Never use this

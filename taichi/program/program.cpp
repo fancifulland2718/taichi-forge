@@ -6034,11 +6034,17 @@ storage::ResolvedDenseBinding Program::resolve_dense_storage_descriptor(
     SNode *anchor = find_snode(tree->root(), owner.anchor_snode_id);
     TI_ERROR_IF(anchor == nullptr || anchor->type != SNodeType::place,
                 "Dense storage binding anchor is no longer available");
-    const DevicePtr field_ptr =
-        arch_is_cpu(compile_config().arch) || compile_config().arch == Arch::cuda
-            ? get_snode_tree_device_ptr(tree_id).get_ptr(
-                  dense_snode_member_layout(*anchor).offset)
-            : get_dense_field_device_ptr(anchor);
+    DevicePtr field_ptr;
+    const auto arch = compile_config().arch;
+    if (arch_is_cpu(arch) || arch == Arch::cuda) {
+      field_ptr = get_snode_tree_device_ptr(tree_id).get_ptr(
+          dense_snode_member_layout(*anchor).offset);
+    } else if (arch == Arch::vulkan) {
+      field_ptr = get_snode_tree_device_ptr(tree_id).get_ptr(
+          get_field_in_tree_offset(tree_id, anchor));
+    } else {
+      field_ptr = get_dense_field_device_ptr(anchor);
+    }
     const std::uint64_t payload_begin = owner.snode_payload_byte_begin;
     const std::uint64_t payload_end = owner.snode_payload_byte_end;
     TI_ERROR_IF(field_ptr.offset != payload_begin,
@@ -6147,8 +6153,10 @@ Program::DenseStorageBorrow Program::borrow_dense_storage(
                   owner.kind != storage::StorageOwnerKind::kExternalManaged),
       "Dense storage borrowing requires a live managed range");
   const auto &properties = descriptor.properties();
+  const auto arch = compile_config().arch;
   const bool record_view =
-      (arch_is_cpu(compile_config().arch) || compile_config().arch == Arch::cuda) &&
+      (arch_is_cpu(arch) || arch == Arch::cuda ||
+       (arch == Arch::vulkan && properties.compact_contiguous)) &&
       owner.kind == storage::StorageOwnerKind::kSNodePayload &&
       (properties.single_record_stride_compatible ||
        properties.compact_contiguous) &&

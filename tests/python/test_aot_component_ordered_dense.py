@@ -1,6 +1,7 @@
 """Ordered Dense axes preserve JIT layout and per-instance affine addressing."""
 
 import json
+import os
 
 import numpy as np
 import pytest
@@ -74,7 +75,7 @@ def _expected(count):
     return dict(a=a, v=v.astype(np.int32), tail=(i * 10 + j + k).astype(np.int32))
 
 
-@test_utils.test(arch=[ti.cpu, ti.cuda], offline_cache=False)
+@test_utils.test(arch=[ti.cpu, ti.cuda, ti.vulkan], offline_cache=False)
 def test_ordered_dense_preserves_layout_and_frozen_multi_instance_execution(tmp_path):
     model = _Ordered(3)
     env = Component.from_owner(model)
@@ -85,7 +86,8 @@ def test_ordered_dense_preserves_layout_and_frozen_multi_instance_execution(tmp_
     artifact = tmp_path / "ordered.tcm"
     module.archive(str(artifact))
     backend = ti.cfg.arch.name
-    with Runtime(backend) as runtime, runtime.load_module(artifact) as loaded:
+    device = int(os.getenv("TI_TEST_VULKAN_DEVICE_INDEX", "0")) if backend == "vulkan" else 0
+    with Runtime(backend, device_index=device) as runtime, runtime.load_module(artifact) as loaded:
         component = loaded.component("step")
         instances = []
         try:
