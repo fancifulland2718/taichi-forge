@@ -14,7 +14,8 @@ from collections import Counter
 from taichi_forge.lang._function_library import FunctionLibrary
 from taichi_forge.lang.ast._inline_ir import InlineSyntax, _MISSING, _PURE_CALLS, _path, scalar_key
 from taichi_forge.lang.field import Field
-from taichi_forge.lang import impl
+from taichi_forge._lib import core
+from taichi_forge.lang import impl, misc
 from taichi_forge.lang.matrix import Matrix, Vector, MatrixType
 from taichi_forge.lang.struct import Struct
 from taichi_forge.math.mathimpl import isinf, isnan
@@ -141,6 +142,7 @@ class FunctionSyntax(InlineSyntax):
         self.bindings = bindings
         self.absent_templates = {name for name, value in bindings.items() if value is None} if package_fields else ()
         self.calls = {}
+        self.target_facts = set()
         self.forwarded = set()
         self.package_fields = package_fields
         self.returned_record = returned_record
@@ -184,6 +186,9 @@ class FunctionSyntax(InlineSyntax):
                 self.local_bindings[node.targets[0].id] = schema
 
     def visit_Attribute(self, node):
+        if self.package_fields and self._program_arch(node):
+            self.target_facts.add(("arch", int(impl.current_cfg().arch)))
+            return
         path = _path(node)
         if path and len(path) == 2:
             schema = self.local_bindings.get(path[0])
@@ -191,7 +196,39 @@ class FunctionSyntax(InlineSyntax):
                 return
         super().visit_Attribute(node)
 
+    def _program_arch(self, node):
+        if not isinstance(node, ast.Attribute) or node.attr != "arch":
+            return False
+        cfg = node.value
+        if not isinstance(cfg, ast.Call) or cfg.args or cfg.keywords:
+            return False
+        path = _path(cfg.func)
+        return bool(path and path[0] not in self.locals and _resolve(path, self.scope)[0] is impl.current_cfg)
+
+    def _target_extension(self, node):
+        if (not self.package_fields or not isinstance(node, ast.Call) or len(node.args) != 2
+                or node.keywords or not self._program_arch(node.args[0])):
+            return None
+        query = _path(node.func)
+        if not query or query[0] in self.locals or _resolve(query, self.scope)[0] is not misc.is_extension_supported:
+            return None
+        path = _path(node.args[1])
+        if not path or path[0] in self.locals:
+            return None
+        if len(path) > 1 and _resolve(path[:-1], self.scope)[0] is core.Extension:
+            ext = core.Extension.__members__.get(path[-1])
+        else:
+            ext = _resolve(path, self.scope)[0]
+        if type(ext) is not core.Extension:
+            return None
+        arch = impl.current_cfg().arch
+        supported = misc.is_extension_supported(arch, ext)
+        self.target_facts.add(("extension", int(arch), int(ext), supported))
+        return supported
+
     def visit_Call(self, node):
+        if self._target_extension(node) is not None:
+            return
         path = _path(node.func)
         value = _resolve(path, self.scope)[0]
         if isinstance(node.func, ast.Attribute) and node.func.attr in _VALUE_METHODS and value is _MISSING:
@@ -213,7 +250,6 @@ class FunctionSyntax(InlineSyntax):
             super().visit_Call(node)
 
     def visit_If(self, node):
-        self.visit(node.test)
         if (
             isinstance(node.test, ast.Call)
             and len(node.test.args) == 1
@@ -221,6 +257,12 @@ class FunctionSyntax(InlineSyntax):
             and _resolve(_path(node.test.func), self.scope)[0] is impl.static
         ):
             predicate = node.test.args[0]
+            supported = self._target_extension(predicate)
+            if supported is not None:
+                for statement in node.body if supported else node.orelse:
+                    self.visit(statement)
+                return
+            self.visit(node.test)
             if (
                 isinstance(predicate, ast.Compare) and len(predicate.ops) == 1
                 and isinstance(predicate.ops[0], (ast.Is, ast.IsNot))
@@ -236,6 +278,8 @@ class FunctionSyntax(InlineSyntax):
                 for statement in node.body if value else node.orelse:
                     self.visit(statement)
                 return
+        else:
+            self.visit(node.test)
         for statement in [*node.body, *node.orelse]:
             self.visit(statement)
 
@@ -256,8 +300,9 @@ class FunctionSyntax(InlineSyntax):
             if isinstance(node.ctx, ast.Store):
                 self.safe = False
             return
-        if isinstance(node.ctx, ast.Store) and node.id in self.absent_templates:
-            self.safe = False  # The entry binding no longer proves later identity tests.
+        if isinstance(node.ctx, ast.Store) and (node.id in self.absent_templates
+                or (self.package_fields and node.id in self.static_scope)):
+            self.safe = False  # Rebinding invalidates the entry fact for later static tests.
         if (
             id(node) not in self.forwarded
             and isinstance(node.ctx, ast.Load)
@@ -293,20 +338,20 @@ class FunctionDependencyAnalysis:
         record = self._record_factories[source]
         return _constructed_record(record, source._definition.scope()) if record is not None else None
 
-    def _dependencies(self, source, bindings, active, memo):
+    def _dependencies(self, source, bindings, active, memo, fixed_flags=frozenset()):
         if source in active or source.pyfunc or source.is_real_function:
             return None
         # Sibling calls frequently forward the exact same receiver. Its Python
         # bindings are stable for this proof only. Discard the memo before the
         # next capture so that rebindings remain visible.
         if memo is None:
-            return self._inspect_dependencies(source, bindings, active, memo)
-        key = (source, frozenset(active), tuple((name, id(value)) for name, value in bindings.items()))
+            return self._inspect_dependencies(source, bindings, active, memo, fixed_flags)
+        key = (source, frozenset(active), tuple((name, id(value)) for name, value in bindings.items()), fixed_flags)
         if key not in memo:
-            memo[key] = (tuple(bindings.values()), self._inspect_dependencies(source, bindings, active, memo))
+            memo[key] = (tuple(bindings.values()), self._inspect_dependencies(source, bindings, active, memo, fixed_flags))
         return memo[key][1]
 
-    def _inspect_dependencies(self, source, bindings, active, memo):
+    def _inspect_dependencies(self, source, bindings, active, memo, fixed_flags):
         if source not in self._syntax:
             self._syntax[source], _ = source._definition.acquire(cache=True)
             if self.package_fields:
@@ -317,14 +362,16 @@ class FunctionDependencyAnalysis:
         scope.update(bindings)
         # JIT specializes the bound object. In a portable package the same
         # owner property can become a live scalar and guard an array capture.
-        # Only literals and explicit None template bindings can prune it.
-        syntax = FunctionSyntax(self._syntax[source], scope, bindings, scope if self.allow_fields else {},
+        # Only bound boolean templates, literals/defaults and their proven
+        # forwards can prune package callees. Owner attributes remain live.
+        static_scope = scope if self.allow_fields else {name: bindings[name] for name in fixed_flags}
+        syntax = FunctionSyntax(self._syntax[source], scope, bindings, static_scope,
                                 package_fields=self.package_fields,
                                 single_assignments=self._single_assignments.get(source, ()),
                                 returned_record=self._returned_record)
         if not syntax.safe or any(name in scope for name in syntax.assigned):
             return None
-        dependencies = []
+        dependencies = sorted(syntax.target_facts)
         for path, kind in sorted(syntax.references):
             value, receiver = _resolve(path, scope)
             if kind == "call":
@@ -337,33 +384,34 @@ class FunctionDependencyAnalysis:
                     children = []
                     for call, locals_at_call in syntax.calls.get(path, ()):
                         call_scope = scope | locals_at_call if locals_at_call else scope
-                        values = [_literal(arg, call_scope, objects=True) for arg in call.args]
+                        operands = list(call.args)
                         if wrapped.classfunc and receiver is not None:
-                            values.insert(0, receiver)
-                        keywords = {kw.arg: _literal(kw.value, call_scope, objects=True) for kw in call.keywords}
+                            operands.insert(0, receiver)
+                        keywords = {kw.arg: kw.value for kw in call.keywords}
                         try:
-                            bound = wrapped._definition.signature.bind(*values, **keywords)
+                            bound = wrapped._definition.signature.bind(*operands, **keywords)
                         except TypeError:
                             return None
                         bound.apply_defaults()
                         # Templates and forwarded resource owners are Python
                         # compilation data. Numerical operands stay symbolic
                         # even if this call happens to pass a literal.
-                        child_bindings = {
-                            arg.name: bound.arguments[arg.name]
-                            for arg in wrapped.arguments
-                            if bound.arguments[arg.name] is not _MISSING
-                            and (isinstance(arg.annotation, template) or
-                                 (bound.arguments[arg.name] is not _STATIC_INTEGER
-                                  and scalar_key(bound.arguments[arg.name]) is None))
-                        }
-                        if any(
-                            arg.name not in child_bindings
-                            for arg in wrapped.arguments
-                            if isinstance(arg.annotation, template)
-                        ):
-                            return None
-                        child = self._dependencies(wrapped, child_bindings, active | {source}, memo)
+                        child_bindings = {}
+                        child_flags = set()
+                        for arg in wrapped.arguments:
+                            operand = bound.arguments[arg.name]
+                            expr = isinstance(operand, ast.AST)
+                            actual = _literal(operand, call_scope, objects=True) if expr else operand
+                            if isinstance(arg.annotation, template):
+                                if actual is _MISSING:
+                                    return None
+                                child_bindings[arg.name] = actual
+                                if (self.package_fields and type(actual) is bool
+                                        and (not expr or _literal(operand, static_scope) is actual)):
+                                    child_flags.add(arg.name)
+                            elif actual is not _MISSING and actual is not _STATIC_INTEGER and scalar_key(actual) is None:
+                                child_bindings[arg.name] = actual
+                        child = self._dependencies(wrapped, child_bindings, active | {source}, memo, frozenset(child_flags))
                         if child is None:
                             return None
                         children.append(child)
@@ -382,6 +430,8 @@ class FunctionDependencyAnalysis:
                     key = ("call", id(value))
                 else:
                     return None
+            elif self.package_fields and type(value) is core.Arch:
+                key = ("arch", int(value))
             elif self.package_fields and value is _STATIC_INTEGER:
                 key = ("literal_static_iteration",)
             elif self.allow_fields and isinstance(value, Field):
@@ -410,8 +460,9 @@ class FunctionDependencyAnalysis:
         bindings = {
             arg.name: value for arg, value in zip(source.arguments, args) if isinstance(arg.annotation, template)
         }
+        flags = frozenset(name for name, value in bindings.items() if self.package_fields and type(value) is bool)
         try:
-            return self._dependencies(source, bindings, set(), {} if self.package_fields else None)
+            return self._dependencies(source, bindings, set(), {} if self.package_fields else None, flags)
         except RecursionError:
             return None
 

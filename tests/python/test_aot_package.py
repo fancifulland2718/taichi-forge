@@ -2320,7 +2320,7 @@ class Model:
                     np.testing.assert_array_equal(getattr(aot, name).to_numpy(), getattr(jit, name).to_numpy())
 
 
-@test_utils.test(arch=ti.cuda, offline_cache=False)
+@test_utils.test(arch=[ti.cuda, ti.vulkan], offline_cache=False)
 def test_package_library_extracts_proven_serial_task_branch(tmp_path, monkeypatch):
     from taichi_forge.aot._package_compilation import PackageCompilation
 
@@ -2360,9 +2360,11 @@ class Model:
     monkeypatch.setattr(PackageCompilation, 'library_function', observe)
     package = _source_package(tmp_path, monkeypatch, source)
     output = tmp_path / 'sdk'
-    ti.aot.export_package(package, output, artifact_format='bc-library')
+    vulkan = ti.lang.impl.current_cfg().arch == ti.vulkan
+    ti.aot.export_package(package, output, artifact_format=None if vulkan else 'bc-library')
     assert seen == {'wrapper', 'inner'}
-    with Runtime('cuda') as runtime, load_package(runtime, output) as code:
+    device = int(os.environ.get('TI_TEST_VULKAN_DEVICE_INDEX', 0)) if vulkan else 0
+    with Runtime('vulkan' if vulkan else 'cuda', device_index=device) as runtime, load_package(runtime, output) as code:
         for n in (128, 257):
             jit, aot = package.model.Model(n), code.host.Model(n)
             for amount in (3, 9):
@@ -4697,6 +4699,70 @@ def test_portable_helper_checks_optional_field_behind_static_branch():
     assert FunctionDependencyAnalysis(allow_fields=False).dependencies(source, args) is None
     portable = FunctionDependencyAnalysis(allow_fields=False, package_fields=True)
     assert portable.dependencies(Mesh.with_local_record.func, args) is None
+
+
+def test_portable_helper_keeps_owner_flags_live_when_forwarded():
+    from taichi_forge.lang._jit_function_library import FunctionDependencyAnalysis
+
+    @ti.func
+    def leaf(cooperative: ti.template() = False) -> ti.i32:
+        if ti.static(cooperative):
+            ti.simt.block.sync()
+        return 1
+
+    @ti.data_oriented
+    class Owner:
+        flag = False
+
+        @ti.func
+        def literal(self) -> ti.i32:
+            return leaf(cooperative=False)
+
+        @ti.func
+        def mixed(self) -> ti.i32:
+            return leaf(False) + leaf(self.flag)
+
+    analysis = FunctionDependencyAnalysis(allow_fields=False, package_fields=True)
+    owner = Owner()
+    assert analysis.dependencies(Owner.literal.func, (owner,)) is not None
+    assert analysis.dependencies(Owner.mixed.func, (owner,)) is None
+    assert analysis.dependencies(leaf.func, (True,)) is None
+
+
+@test_utils.test(arch=ti.vulkan, offline_cache=False)
+def test_portable_helper_records_compiler_target_queries():
+    from taichi_forge.lang._jit_function_library import FunctionDependencyAnalysis
+
+    @ti.func
+    def by_capability(x: ti.i32) -> ti.i32:
+        y = x
+        if ti.static(ti.lang.misc.is_extension_supported(ti.lang.impl.current_cfg().arch, ti.extension.data64)):
+            y = x + 1
+        return y
+
+    @ti.func
+    def by_target(x: ti.i32) -> ti.i32:
+        y = x
+        if ti.static(ti.lang.impl.current_cfg().arch == ti.vulkan):
+            y = x + 2
+        return y
+
+    def other_cfg():
+        raise AssertionError("dependency analysis called an application config getter")
+
+    @ti.func
+    def by_owner(x: ti.i32) -> ti.i32:
+        y = x
+        if ti.static(other_cfg().arch == ti.vulkan):
+            y = x + 2
+        return y
+
+    analysis = FunctionDependencyAnalysis(allow_fields=False, package_fields=True)
+    target = int(ti.vulkan)
+    supported = ti.lang.misc.is_extension_supported(ti.vulkan, ti.extension.data64)
+    assert ("extension", target, int(ti.extension.data64), supported) in analysis.dependencies(by_capability.func, (1,))
+    assert ("arch", target) in analysis.dependencies(by_target.func, (1,))
+    assert analysis.dependencies(by_owner.func, (1,)) is None
 
 
 def test_portable_helper_distinguishes_none_template_from_optional_resource():
