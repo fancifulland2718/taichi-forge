@@ -31,6 +31,7 @@ enum class EmptyRangeGroupProof {
   sparse_topology,
   compiler_tls_reduction,
   cuda_block_collective,
+  vulkan_workgroup_collective,
 };
 
 inline const char *empty_range_group_proof_name(EmptyRangeGroupProof proof) {
@@ -55,6 +56,8 @@ inline const char *empty_range_group_proof_name(EmptyRangeGroupProof proof) {
       return "compiler_tls_reduction";
     case EmptyRangeGroupProof::cuda_block_collective:
       return "cuda_block_collective";
+    case EmptyRangeGroupProof::vulkan_workgroup_collective:
+      return "vulkan_workgroup_collective";
   }
   return nullptr;
 }
@@ -230,10 +233,13 @@ struct RangeForBounds {
            begin.kind != RangeBoundKind::unknown &&
            end.kind != RangeBoundKind::unknown;
   }
+  bool requires_complete_groups() const {
+    return empty_group_elision == EmptyRangeGroupProof::cuda_block_collective ||
+           empty_group_elision == EmptyRangeGroupProof::vulkan_workgroup_collective;
+  }
   bool uses_host_launch_grid() const {
     return host_launch.has_value() &&
-           (can_elide_empty_groups() ||
-            empty_group_elision == EmptyRangeGroupProof::cuda_block_collective);
+           (can_elide_empty_groups() || requires_complete_groups());
   }
 
   bool valid() const {
@@ -259,7 +265,7 @@ struct RangeForBounds {
           return baseline;
       }
     }
-    if (empty_group_elision == EmptyRangeGroupProof::cuda_block_collective) {
+    if (requires_complete_groups()) {
       // Preserve complete cooperating lane groups. These bounds come from the
       // immutable invocation image; device-range dispatch remains unqualified.
       // Only whole empty blocks disappear, never a productive block or lane.

@@ -46,11 +46,15 @@ inline EmptyRangeGroupProof describe_empty_range_group_elision(
   if (has_tls && !describe_range_reduction_slots(task, reductions))
     return EmptyRangeGroupProof::auxiliary_region;
   auto proof = EmptyRangeGroupProof::independent_iterations;
-  bool cuda_collective = false;
+  bool local_collective = false;
   irpass::analysis::any_statement(task.body.get(), [&](Stmt *stmt) {
     if (auto *call = stmt->cast<InternalFuncStmt>()) {
-      if (task.device == Arch::cuda && !has_tls && is_cuda_local_collective(*call))
-        cuda_collective = true;
+      if (!has_tls &&
+          ((task.device == Arch::cuda && is_cuda_local_collective(*call)) ||
+           (task.device == Arch::vulkan && !call->with_runtime_context &&
+            (call->func_name == "workgroupBarrier" ||
+             call->func_name == "workgroupMemoryBarrier"))))
+        local_collective = true;
       else
         proof = EmptyRangeGroupProof::unproven_call;
     } else if (stmt->is<ExternalFuncCallStmt>() || stmt->is<FuncCallStmt>())
@@ -71,8 +75,8 @@ inline EmptyRangeGroupProof describe_empty_range_group_elision(
       proof = EmptyRangeGroupProof::local_storage;
     if (auto *allocation = stmt->cast<AllocaStmt>())
       if (allocation->is_shared) {
-        if (task.device == Arch::cuda && !has_tls)
-          cuda_collective = true;
+        if (!has_tls && (task.device == Arch::cuda || task.device == Arch::vulkan))
+          local_collective = true;
         else
           proof = EmptyRangeGroupProof::local_storage;
       }
@@ -83,8 +87,9 @@ inline EmptyRangeGroupProof describe_empty_range_group_elision(
     }
     return proof != EmptyRangeGroupProof::independent_iterations;
   });
-  if (cuda_collective && proof == EmptyRangeGroupProof::independent_iterations)
-    return EmptyRangeGroupProof::cuda_block_collective;
+  if (local_collective && proof == EmptyRangeGroupProof::independent_iterations)
+    return task.device == Arch::cuda ? EmptyRangeGroupProof::cuda_block_collective
+                                     : EmptyRangeGroupProof::vulkan_workgroup_collective;
   return has_tls && proof == EmptyRangeGroupProof::independent_iterations
              ? EmptyRangeGroupProof::compiler_tls_reduction
              : proof;

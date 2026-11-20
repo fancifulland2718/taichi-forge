@@ -132,6 +132,26 @@ TEST(RangeCollectiveProof, CudaSharedBlocksRequireImmutableAlignedHostBounds) {
   task.device = Arch::vulkan;
   EXPECT_FALSE(describe_launch_range_for_bounds(task)->uses_host_launch_grid());
 }
+
+TEST(DeviceRangeProof, VulkanSharedBarriersKeepWholeImmutableWorkgroups) {
+  OffloadedStmt task(OffloadedTaskType::range_for, Arch::vulkan, nullptr);
+  task.const_begin = true;
+  task.end_offset = 4;
+  task.host_launch_range = HostRangeBounds{{0, {}, false}, {1, {0}, false}};
+  task.body->insert(std::make_unique<AllocaStmt>(
+      std::vector<int>{64}, PrimitiveType::i32, true));
+  auto *barrier = task.body->push_back<InternalFuncStmt>(
+      "workgroupBarrier", std::vector<Stmt *>{}, nullptr, false)->as<InternalFuncStmt>();
+  const auto bounds = describe_launch_range_for_bounds(task);
+  ASSERT_EQ(bounds->empty_group_elision, EmptyRangeGroupProof::vulkan_workgroup_collective);
+  EXPECT_FALSE(bounds->supports_device_dispatch());
+  int32_t count = 193 * 64;
+  EXPECT_EQ(bounds->launch_grid(2048, 64, &count, sizeof(count)), 193);
+  --count;
+  EXPECT_EQ(bounds->launch_grid(2048, 64, &count, sizeof(count)), 2048);
+  barrier->func_name = "vkGlobalThreadIdx";
+  EXPECT_FALSE(describe_launch_range_for_bounds(task)->uses_host_launch_grid());
+}
 }  // namespace taichi::lang
 
 #ifdef TI_WITH_VULKAN
