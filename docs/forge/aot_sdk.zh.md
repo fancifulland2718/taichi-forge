@@ -23,6 +23,11 @@ JIT 脚本的 `ti.runtime.fault_snapshot()` 相同。借用者被拒绝工作后
 
 ## 组件配套与版本
 
+GFX metadata v19 允许多个逻辑任务引用同一份字节相同的 SPIR-V 文件。每个任务保留自己的
+资源绑定和调度参数，消费者通过可选的 `shader_aliases` 映射找到对应文件。
+Vulkan 普通核在查找时读取产物和参数合同。支持特化的定义包入口在首次绑定时直接创建所选
+管线。显式使用通用入口时才创建对应的通用管线。相同特化条件可以复用代码，各实例保有自己的资源绑定。
+
 frontend、Python bridge 与 native runtime 的私有 ABI 必须匹配。当前修订统一见
 [发行说明的升级约定](release_notes.zh.md#升级与编译设置)，权威定义见
 [`runtime_contract.h`](../../taichi/common/runtime_contract.h) 与

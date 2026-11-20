@@ -380,9 +380,8 @@ class CachedCall:
                           argument_specs=self.argument_specs)
 
     def run(self, *, reuse=False):
-        # Eligible LLVM packages prepare on their first call, before any generic
-        # backend compilation. Other formats prepare on binding reuse. Neither
-        # path rebuilds a descriptor while its captured inputs remain unchanged.
+        # The caller has already selected the entry's backend and task contract.
+        # Prepare an eligible stable binding before the first device launch.
         if reuse and self.prepared is None:
             self.prepared = self.call.prepare(specialize=self.specialize, constant_args=self.constant_args)
         if self.prepared is None:

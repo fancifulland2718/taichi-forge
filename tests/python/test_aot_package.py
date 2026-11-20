@@ -1907,20 +1907,33 @@ class Model:
     def second(self, value: ti.i32):
         for i in range(self.n):
             self.out[i] = i + value
+    @ti.kernel
+    def incremented(self, value: ti.i32):
+        for i in range(self.n):
+            self.out[i] = i + value
+        for i in range(self.n):
+            self.out[i] += 1
 ''')
     original = package.Model(5)
     original.first(3)
     expected = original.out.to_numpy()
     ti.aot.export_package(package, tmp_path / 'sdk')
     with zipfile.ZipFile(tmp_path / 'sdk/code.tcm') as archive:
-        assert json.loads(archive.read('metadata.json'))['kernel_aliases']
+        metadata = json.loads(archive.read('metadata.json'))
+        assert metadata['kernel_aliases']
+        assert metadata['shader_aliases']
+        for alias in metadata['shader_aliases']:
+            assert alias['key'] + '.spv' not in archive.namelist()
+            assert alias['value'] + '.spv' in archive.namelist()
+        shaders = [archive.read(name) for name in archive.namelist() if name.endswith('.spv')]
+        assert len(shaders) == len(set(shaders))
     with Runtime('vulkan') as runtime, load_package(runtime, tmp_path / 'sdk') as code:
         owner = code.host.Model(5)
-        for entry in (owner.first, owner.second):
+        for entry, increment in ((owner.first, 0), (owner.second, 0), (owner.incremented, 1)):
             for value in (3, 8):
                 entry(value)
                 entry(value)
-                np.testing.assert_array_equal(owner.out.to_numpy(), expected + value - 3)
+                np.testing.assert_array_equal(owner.out.to_numpy(), expected + value - 3 + increment)
         assert all(call.prepared is not None for call in owner._forge_package_calls.values())
 
 
@@ -13656,14 +13669,13 @@ class Model:
     monkeypatch.setattr(_runtime.BoundCall, "prepare", prepared)
     if not specialize:
         monkeypatch.setattr(_runtime.BoundCall, "_run_specialized", lambda call, _: call.run())
-    first_specialization = ti.cfg.arch in (ti.cpu, ti.cuda)
     with ti.aot.borrow_runtime() as runtime, load_package(runtime, tmp_path / "sdk") as code:
         a, b = code.host.Model(7), code.host.Model(13)
         a.prepare(None)
         b.prepare(None)
         a.step(2)
         b.step(3)
-        assert counts["prepare"] == (2 if first_specialization else 0)
+        assert counts["prepare"] == 2
         a.step(2)
         b.step(3)
         initial = counts.copy()
@@ -13684,8 +13696,7 @@ class Model:
         a.step(5)
         assert counts["bind"] == initial["bind"] + 1
         assert counts["prepare"] == initial["prepare"]
-        if first_specialization:
-            assert counts["admission"] == initial["admission"]
+        assert counts["admission"] == initial["admission"]
         if ti.cfg.arch == ti.cuda:
             assert core.query_int64("cuda_artifact_entry_points_loaded") == code_count
         data = runtime.ndarray("f32", 7)

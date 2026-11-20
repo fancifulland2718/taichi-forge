@@ -51,7 +51,8 @@ struct TaichiAotData {
   // v16 preserves source-owned block geometry for cold tuning admission.
   // v17 retains compiler-proven affine array arguments, checked against SPIR-V.
   // v18 binds model workgroup geometry and shared allocations per pipeline.
-  static constexpr uint32_t kMetadataVersion = 18;
+  // v19 allows logical tasks to reference an identical stored shader.
+  static constexpr uint32_t kMetadataVersion = 19;
 
   uint32_t metadata_version{0};
   //   BufferMetaData metadata;
@@ -59,6 +60,7 @@ struct TaichiAotData {
   std::vector<spirv::TaichiKernelAttributes> kernels;
   std::vector<AotKernelMetadata> kernel_metadata;
   std::vector<AotKernelAlias> kernel_aliases;
+  std::map<std::string, std::string> shader_aliases;
   std::vector<AotDeviceRangeDispatch> device_range_dispatch;
   std::vector<aot::CompiledFieldData> fields;
   std::map<std::string, uint32_t> required_caps;
@@ -74,6 +76,7 @@ struct TaichiAotData {
             kernels,
             kernel_metadata,
             kernel_aliases,
+            shader_aliases,
             device_range_dispatch,
             fields,
             required_caps,

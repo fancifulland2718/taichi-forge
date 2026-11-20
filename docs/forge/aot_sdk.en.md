@@ -28,6 +28,14 @@ see [AOT deployment profiles](aot_deployment_profiles.en.md).
 
 ## Component pairing and versions
 
+GFX metadata v19 allows multiple logical tasks to reference one identical
+SPIR-V file. Each task keeps its own bindings and dispatch geometry. Consumers
+resolve the optional `shader_aliases` mapping before reading the shader.
+Lookup of an ordinary Vulkan kernel reads its payload and argument contract.
+An eligible package entry creates the selected pipeline on its first binding.
+Direct generic execution creates the generic pipeline on demand. Instances
+can reuse specialized code while retaining their own resource bindings.
+
 Frontend, Python bridge and native runtime must have matching private ABI
 revisions. The current revision is listed in the
 [release upgrade guidance](release_notes.en.md#upgrading-and-compilation-settings) and defined in

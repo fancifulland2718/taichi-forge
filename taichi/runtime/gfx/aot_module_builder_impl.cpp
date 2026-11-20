@@ -4,7 +4,9 @@
 
 #include <fstream>
 #include <set>
+#include <string_view>
 #include <type_traits>
+#include <unordered_map>
 
 #include "taichi/aot/module_data.h"
 #include "taichi/aot/graph_artifact.h"
@@ -62,12 +64,32 @@ void AotModuleBuilderImpl::dump(const std::string &output_dir,
              "Filename prefix is ignored on Unified Device API backends.");
 
   const auto &spirv_codes = ti_aot_data_.spirv_codes;
+  // The words stay owned by the builder for the duration of dump(). Compare
+  // complete byte strings, leaving launch, binding and specialization metadata
+  // on their original logical tasks.
+  std::unordered_map<std::string_view, std::string> stored_shaders;
+  std::unordered_map<std::string, std::string_view> task_sources;
+  std::map<std::string, std::string> shader_aliases;
   for (int i = 0; i < spirv_codes.size(); ++i) {
     auto &k = ti_aot_data_.kernels[i];
     for (int j = 0; j < spirv_codes[i].size(); ++j) {
       if (!spirv_codes[i][j].empty()) {
-        std::string spv_path =
-            write_spv_file(output_dir, k.tasks_attribs[j], spirv_codes[i][j]);
+        const auto &words = spirv_codes[i][j];
+        const auto &task = k.tasks_attribs[j];
+        const std::string_view bytes(reinterpret_cast<const char *>(words.data()),
+                                     words.size() * sizeof(uint32_t));
+        const auto [previous, new_task] = task_sources.try_emplace(task.name, bytes);
+        if (!new_task) {
+          TI_ERROR_IF(previous->second != bytes,
+                      "Conflicting SPIR-V payloads for task {}", task.name);
+          continue;
+        }
+        const auto [match, inserted] = stored_shaders.try_emplace(bytes, task.name);
+        if (inserted) {
+          write_spv_file(output_dir, task, words);
+        } else if (task.name != match->second) {
+          shader_aliases.emplace(task.name, match->second);
+        }
       }
     }
   }
@@ -80,6 +102,7 @@ void AotModuleBuilderImpl::dump(const std::string &output_dir,
     artifact.kernels = ti_aot_data_.kernels;
     artifact.kernel_metadata = ti_aot_data_.kernel_metadata;
     artifact.kernel_aliases = ti_aot_data_.kernel_aliases;
+    artifact.shader_aliases = std::move(shader_aliases);
     artifact.fields = ti_aot_data_.fields;
     artifact.required_caps = ti_aot_data_.required_caps;
     const auto module_ids = exported_snode_tree_bindings();
@@ -147,7 +170,7 @@ void AotModuleBuilderImpl::dump(const std::string &output_dir,
       }
       for (auto &task : kernel.tasks_attribs) {
         if (task.has_model_workgroup())
-          artifact.metadata_version = TaichiAotData::kMetadataVersion;
+          artifact.metadata_version = std::max(artifact.metadata_version, uint32_t(18));
         if (!task.cooperative_matrix_requirements.empty())
           artifact.metadata_version =
               std::max(artifact.metadata_version, uint32_t(8));
@@ -162,6 +185,8 @@ void AotModuleBuilderImpl::dump(const std::string &output_dir,
     // Typed range bounds replace the old untagged constant/offset metadata.
     artifact.metadata_version =
         std::max(artifact.metadata_version, uint32_t(17));
+    if (!artifact.shader_aliases.empty())
+      artifact.metadata_version = TaichiAotData::kMetadataVersion;
     std::string json = liong::json::print(liong::json::serialize(artifact));
     aot::write_root_storage_views(root_storage_views_, module_ids, output_dir);
     std::fstream f(output_dir + "/metadata.json",

@@ -79,10 +79,23 @@ TEST(GfxAotTest, VulkanSNodeInstancesShareCodeAndIsolateState) {
   const std::vector<std::string> names{"activate", "activate_alias", "update", "read", "drop"};
   for (const auto &name : names)
     ASSERT_NE(code->get_kernel(name), nullptr);
-  const auto pipelines = runtime.debug_unique_pipeline_count();
-  const auto registrations = runtime.debug_registered_kernel_count();
+  EXPECT_EQ(runtime.debug_unique_pipeline_count(), 0);
+  EXPECT_EQ(runtime.debug_registered_kernel_count(), 0);
   auto *original = dynamic_cast<gfx::KernelImpl *>(code->get_kernel("activate"));
   ASSERT_NE(original, nullptr);
+  LaunchContextBuilder context(original);
+  context.set_arg({0}, 3);
+  context.set_arg({1}, 7);
+  auto *specialized = code->specialize_kernel(*original, context, {0});
+  ASSERT_NE(specialized, nullptr);
+  EXPECT_EQ(runtime.debug_registered_kernel_count(), 1);
+  EXPECT_EQ(code->specialize_kernel(*original, context, {0}), specialized);
+  EXPECT_EQ(runtime.debug_registered_kernel_count(), 1);
+  for (const auto &name : names)
+    static_cast<gfx::KernelImpl *>(code->get_kernel(name))->handle();
+  const auto pipelines = runtime.debug_unique_pipeline_count();
+  const auto registrations = runtime.debug_registered_kernel_count();
+  EXPECT_EQ(registrations, 5);
   const auto original_bindings = original->params().root_buffer_bindings;
   EXPECT_THROW(gfx::make_aot_snode_instance(code, {"activate", "missing"}),
                std::invalid_argument);

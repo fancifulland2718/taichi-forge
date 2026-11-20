@@ -90,6 +90,19 @@ class AotModuleImpl : public aot::Module {
             (const char *)metadata_json.data(),
             (const char *)(metadata_json.data() + metadata_json.size()));
         liong::json::deserialize(json, ti_aot_data_);
+        if (!ti_aot_data_.shader_aliases.empty()) {
+          if (ti_aot_data_.metadata_version < 19)
+            throw std::invalid_argument("Shader aliases require GFX AOT metadata v19");
+          std::unordered_set<std::string> names;
+          for (const auto &kernel : ti_aot_data_.kernels)
+            for (const auto &task : kernel.tasks_attribs)
+              names.insert(task.name);
+          for (const auto &[alias, source] : ti_aot_data_.shader_aliases) {
+            if (!names.count(alias) || !names.count(source) ||
+                ti_aot_data_.shader_aliases.count(source))
+              throw std::invalid_argument("Invalid GFX AOT shader alias");
+          }
+        }
         // Legacy metadata permits omitted fields. A selected strategy is an
         // explicit versioned contract and must never inherit a missing field.
         for (const auto &[name, value] : json.fields()) {
@@ -447,8 +460,9 @@ class AotModuleImpl : public aot::Module {
       try {
         std::vector<GfxRuntime::KernelHandle> handles;
         handles.reserve(registered_kernels_.size());
-        for (const auto &[index, handle] : registered_kernels_) {
-          handles.push_back(handle);
+        for (const auto &[index, registration] : registered_kernels_) {
+          if (registration->handle.get_launch_id() >= 0)
+            handles.push_back(registration->handle);
         }
         for (const auto &[key, kernel] : specialized_kernels_)
           handles.push_back(kernel->handle());
@@ -748,13 +762,19 @@ class AotModuleImpl : public aot::Module {
       return nullptr;
     }
     const size_t index = kernel_indices_.at(name);
-    const auto registered = registered_kernels_.find(index);
-    auto kernel = std::make_unique<KernelImpl>(
-        runtime_, std::move(kparams),
-        registered == registered_kernels_.end() ? nullptr : &registered->second,
-        range_selections_.count(name) ? range_selections_.at(name) : std::vector<uint32_t>{});
-    registered_kernels_.emplace(index, kernel->handle());
-    return kernel;
+    auto &registration = registered_kernels_[index];
+    if (!registration)
+      registration = std::make_shared<AotKernelRegistration>();
+    auto range = range_selections_.find(name);
+    const std::vector<uint32_t> tasks =
+        range == range_selections_.end() ? std::vector<uint32_t>{} : range->second;
+    // Lookup already validated the payload and resource contract. A Vulkan
+    // prepare can compile the selected specialization directly from params.
+    if (device_api_backend_ == Arch::vulkan && tasks.empty())
+      return std::make_unique<KernelImpl>(
+          runtime_, std::move(kparams), nullptr, tasks, registration);
+    const auto handle = registration->get(*runtime_, kparams);
+    return std::make_unique<KernelImpl>(runtime_, std::move(kparams), &handle, tasks);
   }
 
   std::unique_ptr<aot::KernelTemplate> make_new_kernel_template(
@@ -779,7 +799,9 @@ class AotModuleImpl : public aot::Module {
       return false;
     std::vector<std::vector<uint32_t>> codes;
     for (const auto &task : ti_aot_data_.kernels[index].tasks_attribs) {
-      const std::string path = task.name + ".spv";
+      const auto alias = ti_aot_data_.shader_aliases.find(task.name);
+      const auto &source = alias == ti_aot_data_.shader_aliases.end() ? task.name : alias->second;
+      const std::string path = source + ".spv";
       std::vector<uint32_t> code;
       if (!dir.load_file(path, code)) {
         shader_errors_[index] = "Cannot read SPIR-V payload: " + path;
@@ -826,7 +848,7 @@ class AotModuleImpl : public aot::Module {
       shader_codes_;
   std::vector<std::string> shader_errors_;
   std::unordered_map<std::string, size_t> kernel_indices_;
-  std::unordered_map<size_t, GfxRuntime::KernelHandle> registered_kernels_;
+  std::unordered_map<size_t, std::shared_ptr<AotKernelRegistration>> registered_kernels_;
   std::unordered_map<std::string, GfxRuntime::KernelHandle> specialized_code_;
   std::unordered_map<std::string, std::unique_ptr<KernelImpl>> specialized_kernels_;
   std::vector<int> root_bindings_;

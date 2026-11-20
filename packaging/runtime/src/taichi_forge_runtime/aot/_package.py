@@ -1800,7 +1800,6 @@ class entry:
                 constant_args = specialization_constant_args(
                     contract, package.manifest["owners"].get(owner_type(owner), {}), package.manifest["owners"]
                 ) if specialize else ()
-                specialize_first = specialize and package.runtime.arch in ("x64", "arm64", "cuda")
                 # Host arrays must upload/download on every call. Mutable
                 # tensor/scalar wrappers also require a fresh value snapshot.
                 reusable = not buffers.pending and all(
@@ -1814,7 +1813,7 @@ class entry:
                 if reusable:
                     ready = CachedCall(guard, values, call, workspaces,
                                        specialize=specialize, constant_args=constant_args,
-                                       specialized_launch=specialize_first, arguments=prepared,
+                                       specialized_launch=specialize, arguments=prepared,
                                        argument_specs=contract["arguments"])
                     if previous is not None:
                         previous.close()
@@ -1825,12 +1824,12 @@ class entry:
                     # only a subsequent identical binding promotes to fixed
                     # replay. Continuously changing values never build a Graph
                     # per call, and no historical value frames accumulate.
-                    return ready.run(reuse=specialize_first and previous is None)
+                    return ready.run(reuse=specialize and previous is None)
                 else:
                     if previous is not None:
                         previous.close()
                     cache.pop(self, None)
-                if specialize_first:
+                if specialize:
                     # Host transfers still happen for every invocation, using
                     # the same specialization without a disposable fixed frame.
                     return call._run_specialized(constant_args)
