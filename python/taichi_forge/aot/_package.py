@@ -1295,8 +1295,9 @@ def _host_projection(
                 and kind(ast.Attribute(node.args[0], "algorithms", ast.Load())) == "algorithms"
             ):
                 self.minimum_version = max(self.minimum_version, 61)
+            method = node.func.attr if isinstance(node.func, ast.Attribute) else None
             for item in binding_schemas.get(self.owner, {}).values():
-                if item.get("reference_declaration") == [
+                if method == "owner_reference" and item.get("reference_declaration") == [
                     getattr(node, "lineno", None),
                     getattr(node, "col_offset", None),
                 ]:
@@ -1314,7 +1315,9 @@ def _host_projection(
                         node,
                     )
             for item in binding_schemas.get(self.owner, {}).values():
-                if item.get("borrow_declaration") == [getattr(node, "lineno", None), getattr(node, "col_offset", None)]:
+                if method == "borrow" and item.get("borrow_declaration") == [
+                    getattr(node, "lineno", None), getattr(node, "col_offset", None)
+                ]:
                     self.minimum_version = max(
                         self.minimum_version,
                         (60 if item.get("optional_input") else 59) if item.get("external") else 20,

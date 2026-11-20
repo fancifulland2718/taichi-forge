@@ -11095,7 +11095,7 @@ def _borrowed_alias_source(source, struct_member, alias_form):
     original_borrow = next(line.strip() for line in source.splitlines() if "scope.borrow(" in line)
     access = "getattr(getattr(self, group), member)" if struct_member else "getattr(self, member)"
     target = "name, (group, member)" if struct_member else "name, (member,)"
-    relation = ", dimensions={'n': cols}" if alias_form == "mapping" else ""
+    relation = ", dimensions={'n': scope.dim('m')}" if alias_form == "mapping" else ""
     loop = f"for {target} in ALIASES.items():\n            scope.borrow(name, {access}, source_scope=True{relation})"
     source = source.replace(original_borrow, loop if alias_form == "mapping" else "self._bind_aliases()")
     if alias_form == "method":
