@@ -13,6 +13,44 @@ from taichi_forge_runtime.aot import Scalar
 from tests import test_utils
 
 
+@test_utils.test(arch=ti.vulkan, offline_cache=False)
+def test_same_vulkan_task_name_can_have_different_payloads(tmp_path):
+    from zipfile import ZipFile
+    from taichi_forge_runtime.aot import Runtime
+
+    def make_writer(value):
+        @ti.kernel
+        def write(out: ti.types.ndarray(dtype=ti.i32, ndim=1)):
+            out[0] = value
+
+        return write
+
+    first, second = make_writer(4), make_writer(9)
+    # Two producer variants can have the same generated task label.
+    second._primal.kernel_counter = first._primal.kernel_counter
+    module = ti.aot.Module(ti.vulkan)
+    module.add_kernel(first, name="first")
+    module.add_kernel(second, name="second")
+    path = tmp_path / "variants.tcm"
+    module.archive(str(path))
+    with ZipFile(path) as archive:
+        meta = json.loads(archive.read("metadata.json"))
+        assert meta["kernels"][0]["tasks_attribs"][0]["name"] == meta["kernels"][1]["tasks_attribs"][0]["name"]
+        assert meta["task_shader_sources"] and meta["metadata_version"] >= 20
+        assert len({archive.read(p) for p in archive.namelist() if p.endswith(".spv")}) == 2
+    with Runtime("vulkan", device_index=int(os.environ.get("TI_TEST_VULKAN_DEVICE_INDEX", 0))) as runtime:
+        loaded = runtime.load_module(str(path))
+        out = runtime.ndarray("i32", (1,))
+        for name, value in (("second", 9), ("first", 4), ("second", 9)):
+            loaded.kernel(name)(out)
+            runtime.wait()
+            assert int.from_bytes(out.read(), "little", signed=True) == value
+        for name, value in (("first", 4), ("second", 9), ("first", 4)):
+            with loaded.kernel(name).bind(out).prepare(specialize=True) as ready:
+                ready.submit().wait()
+                assert int.from_bytes(out.read(), "little", signed=True) == value
+
+
 @test_utils.test(arch=ti.cpu, offline_cache=False, compile_tier="full")
 def test_package_helpers_reuse_declared_receivers_across_instances(tmp_path, monkeypatch):
     from collections import Counter

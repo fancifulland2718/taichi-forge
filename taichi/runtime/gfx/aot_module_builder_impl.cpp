@@ -3,6 +3,7 @@
 #include "taichi/program/kernel_compile_request.h"
 
 #include <fstream>
+#include <filesystem>
 #include <set>
 #include <string_view>
 #include <type_traits>
@@ -49,13 +50,13 @@ std::map<int, int> AotModuleBuilderImpl::exported_snode_tree_bindings() const {
 
 std::string AotModuleBuilderImpl::write_spv_file(
     const std::string &output_dir,
-    const TaskAttributes &k,
+    const std::string &name,
     const std::vector<uint32_t> &source_code) const {
-  const std::string spv_path = fmt::format("{}/{}.spv", output_dir, k.name);
+  const std::string spv_path = fmt::format("{}/{}.spv", output_dir, name);
   std::ofstream fs(spv_path, std::ios_base::binary | std::ios::trunc);
   fs.write((char *)source_code.data(), source_code.size() * sizeof(uint32_t));
   fs.close();
-  return k.name + ".spv";
+  return name + ".spv";
 }
 
 void AotModuleBuilderImpl::dump(const std::string &output_dir,
@@ -68,8 +69,9 @@ void AotModuleBuilderImpl::dump(const std::string &output_dir,
   // complete byte strings, leaving launch, binding and specialization metadata
   // on their original logical tasks.
   std::unordered_map<std::string_view, std::string> stored_shaders;
-  std::unordered_map<std::string, std::string_view> task_sources;
+  std::unordered_map<std::string, std::string> default_sources;
   std::map<std::string, std::string> shader_aliases;
+  decltype(ti_aot_data_.task_shader_sources) task_shader_sources;
   for (int i = 0; i < spirv_codes.size(); ++i) {
     auto &k = ti_aot_data_.kernels[i];
     for (int j = 0; j < spirv_codes[i].size(); ++j) {
@@ -78,17 +80,21 @@ void AotModuleBuilderImpl::dump(const std::string &output_dir,
         const auto &task = k.tasks_attribs[j];
         const std::string_view bytes(reinterpret_cast<const char *>(words.data()),
                                      words.size() * sizeof(uint32_t));
-        const auto [previous, new_task] = task_sources.try_emplace(task.name, bytes);
-        if (!new_task) {
-          TI_ERROR_IF(previous->second != bytes,
-                      "Conflicting SPIR-V payloads for task {}", task.name);
-          continue;
-        }
+        const auto previous = default_sources.find(task.name);
         const auto [match, inserted] = stored_shaders.try_emplace(bytes, task.name);
         if (inserted) {
-          write_spv_file(output_dir, task, words);
-        } else if (task.name != match->second) {
-          shader_aliases.emplace(task.name, match->second);
+          if (previous != default_sources.end()) {
+            match->second = TaichiAotData::indexed_shader(i, j);
+            std::filesystem::create_directories(std::filesystem::path(output_dir) / "shader_blobs");
+          }
+          write_spv_file(output_dir, match->second, words);
+        }
+        if (previous == default_sources.end()) {
+          default_sources.emplace(task.name, match->second);
+          if (task.name != match->second)
+            shader_aliases.emplace(task.name, match->second);
+        } else if (previous->second != match->second) {
+          task_shader_sources[i].emplace(j, match->second);
         }
       }
     }
@@ -103,6 +109,7 @@ void AotModuleBuilderImpl::dump(const std::string &output_dir,
     artifact.kernel_metadata = ti_aot_data_.kernel_metadata;
     artifact.kernel_aliases = ti_aot_data_.kernel_aliases;
     artifact.shader_aliases = std::move(shader_aliases);
+    artifact.task_shader_sources = std::move(task_shader_sources);
     artifact.fields = ti_aot_data_.fields;
     artifact.required_caps = ti_aot_data_.required_caps;
     const auto module_ids = exported_snode_tree_bindings();
@@ -186,6 +193,8 @@ void AotModuleBuilderImpl::dump(const std::string &output_dir,
     artifact.metadata_version =
         std::max(artifact.metadata_version, uint32_t(17));
     if (!artifact.shader_aliases.empty())
+      artifact.metadata_version = std::max(artifact.metadata_version, uint32_t(19));
+    if (!artifact.task_shader_sources.empty())
       artifact.metadata_version = TaichiAotData::kMetadataVersion;
     std::string json = liong::json::print(liong::json::serialize(artifact));
     aot::write_root_storage_views(root_storage_views_, module_ids, output_dir);
@@ -259,15 +268,12 @@ void AotModuleBuilderImpl::add_compiled_kernel(const std::string &identifier,
   const AotKernelMetadata metadata{/*num_snode_trees=*/0,
                                    compiled.metadata.used_snode_tree_ids};
   const auto identity = kernel_identity(compiled.metadata.kernel_attribs, metadata);
-  const auto existing = kernel_identities_.find(identity);
-  const size_t index = existing == kernel_identities_.end()
-                           ? ti_aot_data_.kernels.size()
-                           : existing->second;
-  if (existing != kernel_identities_.end()) {
-    TI_ERROR_IF(ti_aot_data_.spirv_codes[index] != compiled.src.spirv_src,
-                "GFX AOT kernel '{}' has conflicting shader payloads for the "
-                "same task and ABI identity.", identifier);
-  }
+  const auto [begin, end] = kernel_identities_.equal_range(identity);
+  const auto existing = std::find_if(begin, end, [&](const auto &candidate) {
+    return ti_aot_data_.spirv_codes[candidate.second] == compiled.src.spirv_src;
+  });
+  const size_t index = existing == end ? ti_aot_data_.kernels.size()
+                                       : existing->second;
   const auto [named, inserted] = kernel_names_.emplace(identifier, index);
   TI_ERROR_IF(!inserted && named->second != index,
               "GFX AOT export name '{}' refers to different kernels.", identifier);
@@ -281,7 +287,7 @@ void AotModuleBuilderImpl::add_compiled_kernel(const std::string &identifier,
   }
   if (!range_tasks.empty())
     ti_aot_data_.device_range_dispatch.push_back({identifier, 1, std::move(range_tasks)});
-  if (existing != kernel_identities_.end()) {
+  if (existing != end) {
     ti_aot_data_.kernel_aliases.push_back({identifier, index});
     return;
   }

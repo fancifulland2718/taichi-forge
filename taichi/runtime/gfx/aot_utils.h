@@ -52,7 +52,11 @@ struct TaichiAotData {
   // v17 retains compiler-proven affine array arguments, checked against SPIR-V.
   // v18 binds model workgroup geometry and shared allocations per pipeline.
   // v19 allows logical tasks to reference an identical stored shader.
-  static constexpr uint32_t kMetadataVersion = 19;
+  // v20 identifies distinct shaders that have the same logical task name.
+  static constexpr uint32_t kMetadataVersion = 20;
+  static std::string indexed_shader(size_t kernel, size_t task) {
+    return "shader_blobs/" + std::to_string(kernel) + "_" + std::to_string(task);
+  }
 
   uint32_t metadata_version{0};
   //   BufferMetaData metadata;
@@ -61,6 +65,7 @@ struct TaichiAotData {
   std::vector<AotKernelMetadata> kernel_metadata;
   std::vector<AotKernelAlias> kernel_aliases;
   std::map<std::string, std::string> shader_aliases;
+  std::map<size_t, std::map<size_t, std::string>> task_shader_sources;
   std::vector<AotDeviceRangeDispatch> device_range_dispatch;
   std::vector<aot::CompiledFieldData> fields;
   std::map<std::string, uint32_t> required_caps;
@@ -77,6 +82,7 @@ struct TaichiAotData {
             kernel_metadata,
             kernel_aliases,
             shader_aliases,
+            task_shader_sources,
             device_range_dispatch,
             fields,
             required_caps,

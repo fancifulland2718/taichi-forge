@@ -1927,7 +1927,8 @@ class Model:
             assert alias['value'] + '.spv' in archive.namelist()
         shaders = [archive.read(name) for name in archive.namelist() if name.endswith('.spv')]
         assert len(shaders) == len(set(shaders))
-    with Runtime('vulkan') as runtime, load_package(runtime, tmp_path / 'sdk') as code:
+    device = int(os.environ.get("TI_TEST_VULKAN_DEVICE_INDEX", 0))
+    with Runtime('vulkan', device_index=device) as runtime, load_package(runtime, tmp_path / 'sdk') as code:
         owner = code.host.Model(5)
         for entry, increment in ((owner.first, 0), (owner.second, 0), (owner.incremented, 1)):
             for value in (3, 8):

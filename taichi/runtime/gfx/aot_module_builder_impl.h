@@ -46,12 +46,12 @@ class AotModuleBuilderImpl : public AotModuleBuilder {
                             Kernel *kernel) override;
 
   std::string write_spv_file(const std::string &output_dir,
-                             const spirv::TaskAttributes &k,
+                             const std::string &name,
                              const std::vector<uint32_t> &source_code) const;
 
   const std::vector<spirv::CompiledSNodeStructs> &compiled_structs_;
   TaichiAotData ti_aot_data_;
-  std::unordered_map<std::string, size_t> kernel_identities_;
+  std::unordered_multimap<std::string, size_t> kernel_identities_;
   std::unordered_map<std::string, size_t> kernel_names_;
 
   KernelCompilationManager &compilation_manager_;

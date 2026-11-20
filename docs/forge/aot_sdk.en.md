@@ -31,6 +31,9 @@ see [AOT deployment profiles](aot_deployment_profiles.en.md).
 GFX metadata v19 allows multiple logical tasks to reference one identical
 SPIR-V file. Each task keeps its own bindings and dispatch geometry. Consumers
 resolve the optional `shader_aliases` mapping before reading the shader.
+When tasks with the same name contain different code, the producer emits GFX
+metadata v20 and records their shader references by kernel and task index.
+The consumer distinguishes their generic and specialized pipelines by physical kernel index.
 Lookup of an ordinary Vulkan kernel reads its payload and argument contract.
 An eligible package entry creates the selected pipeline on its first binding.
 Direct generic execution creates the generic pipeline on demand. Instances

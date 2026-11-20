@@ -90,18 +90,35 @@ class AotModuleImpl : public aot::Module {
             (const char *)metadata_json.data(),
             (const char *)(metadata_json.data() + metadata_json.size()));
         liong::json::deserialize(json, ti_aot_data_);
-        if (!ti_aot_data_.shader_aliases.empty()) {
+        if (!ti_aot_data_.shader_aliases.empty() || !ti_aot_data_.task_shader_sources.empty()) {
           if (ti_aot_data_.metadata_version < 19)
             throw std::invalid_argument("Shader aliases require GFX AOT metadata v19");
           std::unordered_set<std::string> names;
           for (const auto &kernel : ti_aot_data_.kernels)
             for (const auto &task : kernel.tasks_attribs)
               names.insert(task.name);
+          auto sources = names;
+          for (const auto &[index, tasks] : ti_aot_data_.task_shader_sources) {
+            if (ti_aot_data_.metadata_version < 20 || index >= ti_aot_data_.kernels.size())
+              throw std::invalid_argument("Invalid GFX AOT shader source kernel");
+            for (const auto &[task, source] : tasks) {
+              if (task >= ti_aot_data_.kernels[index].tasks_attribs.size())
+                throw std::invalid_argument("Invalid GFX AOT shader source task");
+              if (source == TaichiAotData::indexed_shader(index, task))
+                sources.insert(source);
+            }
+          }
+          const auto valid_source = [&](const std::string &source) {
+            return sources.count(source) && !ti_aot_data_.shader_aliases.count(source);
+          };
           for (const auto &[alias, source] : ti_aot_data_.shader_aliases) {
-            if (!names.count(alias) || !names.count(source) ||
-                ti_aot_data_.shader_aliases.count(source))
+            if (!names.count(alias) || !valid_source(source))
               throw std::invalid_argument("Invalid GFX AOT shader alias");
           }
+          for (const auto &[_, tasks] : ti_aot_data_.task_shader_sources)
+            for (const auto &[task, source] : tasks)
+              if (!valid_source(source))
+                throw std::invalid_argument("Invalid GFX AOT shader source");
         }
         // Legacy metadata permits omitted fields. A selected strategy is an
         // explicit versioned contract and must never inherit a missing field.
@@ -376,10 +393,11 @@ class AotModuleImpl : public aot::Module {
     std::vector<size_t> canonical_indices;
     canonical_indices.reserve(ti_aot_data_.kernels.size());
     for (size_t i = 0; i < ti_aot_data_.kernels.size(); ++i) {
-      const auto identity = identities.emplace(
-          kernel_identity(ti_aot_data_.kernels[i],
-                          ti_aot_data_.kernel_metadata[i]), i).first;
-      const size_t canonical = identity->second;
+      size_t canonical = i;
+      if (ti_aot_data_.metadata_version < 20) {
+        canonical = identities.emplace(kernel_identity(ti_aot_data_.kernels[i],
+                                        ti_aot_data_.kernel_metadata[i]), i).first->second;
+      }
       canonical_indices.push_back(canonical);
       // Legacy exporters may repeat a kernel shared by multiple Graphs.
       // Preserve their first-match lookup behavior without repeated scans.
@@ -798,9 +816,17 @@ class AotModuleImpl : public aot::Module {
     if (!shader_errors_[index].empty())
       return false;
     std::vector<std::vector<uint32_t>> codes;
-    for (const auto &task : ti_aot_data_.kernels[index].tasks_attribs) {
+    const auto &tasks = ti_aot_data_.kernels[index].tasks_attribs;
+    const auto overrides = ti_aot_data_.task_shader_sources.find(index);
+    for (size_t i = 0; i < tasks.size(); ++i) {
+      const auto &task = tasks[i];
       const auto alias = ti_aot_data_.shader_aliases.find(task.name);
-      const auto &source = alias == ti_aot_data_.shader_aliases.end() ? task.name : alias->second;
+      auto source = alias == ti_aot_data_.shader_aliases.end() ? task.name : alias->second;
+      if (overrides != ti_aot_data_.task_shader_sources.end()) {
+        const auto found = overrides->second.find(i);
+        if (found != overrides->second.end())
+          source = found->second;
+      }
       const std::string path = source + ".spv";
       std::vector<uint32_t> code;
       if (!dir.load_file(path, code)) {
