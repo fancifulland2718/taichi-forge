@@ -66,7 +66,8 @@ struct TaichiAotData {
   // v20 identifies distinct shaders that have the same logical task name.
   // v21 stores identical SPIR-V function bodies once across task shaders.
   // v22 can store the operands of same-shape functions relative to one base.
-  static constexpr uint32_t kMetadataVersion = 22;
+  // v23 extends single-hop sharing to complete instruction ranges.
+  static constexpr uint32_t kMetadataVersion = 23;
   static std::string indexed_shader(size_t kernel, size_t task) {
     return "shader_blobs/" + std::to_string(kernel) + "_" + std::to_string(task);
   }

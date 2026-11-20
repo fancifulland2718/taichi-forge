@@ -905,10 +905,11 @@ class AotModuleImpl : public aot::Module {
     if (!dir.load_file(source + ".spvroot", root) || root.size() < 5)
       throw std::invalid_argument("Cannot read Vulkan shader root");
     size_t local = 0;
+    const size_t min_words = ti_aot_data_.metadata_version >= 23 ? 1 : 6;
     for (const auto &ref : refs) {
       if (ref.offset_words < std::max(size_t(5), code.size()) ||
           ref.offset_words - code.size() > root.size() - local ||
-          ref.size_words < 6 ||
+          ref.size_words < min_words ||
           ref.size_words > std::numeric_limits<size_t>::max() / sizeof(uint32_t))
         throw std::invalid_argument("Invalid shared shader function extent");
       const size_t next = local + (ref.offset_words - code.size());
@@ -943,9 +944,18 @@ class AotModuleImpl : public aot::Module {
                                             ref.size_words * sizeof(uint32_t));
           std::memcpy(body, bytes.data(), bytes.size());
         }
-        if (code[start] != ((5u << 16) | spv::OpFunction) ||
-            code.back() != ((1u << 16) | spv::OpFunctionEnd))
-          throw std::invalid_argument("Invalid SPIR-V function body");
+        if (ti_aot_data_.metadata_version < 23) {
+          if (code[start] != ((5u << 16) | spv::OpFunction) ||
+              code.back() != ((1u << 16) | spv::OpFunctionEnd))
+            throw std::invalid_argument("Invalid SPIR-V function body");
+        } else {
+          for (size_t i = start; i < code.size();) {
+            size_t words = code[i] >> 16;
+            if (!words || words > code.size() - i)
+              throw std::invalid_argument("Invalid shared SPIR-V instruction range");
+            i += words;
+          }
+        }
       }
     }
     code.insert(code.end(), root.begin() + local, root.end());

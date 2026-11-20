@@ -17,10 +17,19 @@ struct SharedBody {
   std::string anchor_digest;
   std::string_view base;
 };
-struct Function {
+using BodyMap = std::unordered_map<std::string_view, SharedBody>;
+
+struct Region {
   size_t offset;
   std::string_view bytes;
   SharedBody *body;
+  bool fragment{false};
+
+  bool shared() const {
+    const size_t duplicates = 1 + 1023 / bytes.size();
+    return !body->base.empty() || !body->anchor_digest.empty() ||
+           body->uses - 1 >= duplicates;
+  }
 };
 
 std::string_view as_bytes(const std::vector<uint32_t> &words) {
@@ -50,8 +59,7 @@ size_t deflated_size(std::string_view bytes, std::vector<uint8_t> &scratch) {
 // Functions emitted into different SPIR-V modules often have identical
 // instructions with different local IDs. The root still owns its ABI and
 // declarations. Unsigned subtraction also preserves differing literal words.
-void select_function_bases(
-    std::unordered_map<std::string_view, SharedBody> &bodies) {
+void select_function_bases(BodyMap &bodies) {
   using Candidate = std::pair<const std::string_view, SharedBody>;
   std::map<std::pair<size_t, uint64_t>, std::vector<Candidate *>> groups;
   for (auto &entry : bodies) {
@@ -94,6 +102,44 @@ void select_function_bases(
   }
 }
 
+// Cut only the gaps between already shared whole functions. Boundaries use
+// recent opcodes and instruction lengths, so a changed local ID or an edit
+// earlier in a shader does not shift every later fragment.
+void collect_fragments(std::string_view shader,
+                       size_t begin,
+                       size_t end,
+                       BodyMap &bodies,
+                       std::vector<Region> &regions) {
+  constexpr size_t min_bytes = 4096;
+  if (end - begin < min_bytes)
+    return;
+  auto emit = [&](size_t stop) {
+    if (stop - begin >= min_bytes) {
+      const auto bytes = shader.substr(begin, stop - begin);
+      auto &body = bodies[bytes];
+      ++body.uses;
+      regions.push_back({begin, bytes, &body, true});
+    }
+    begin = stop;
+  };
+  const auto *words = reinterpret_cast<const uint32_t *>(shader.data());
+  uint64_t rolling = 0;
+  for (size_t pos = begin; pos < end;) {
+    const uint32_t header = words[pos / 4];
+    const uint32_t opcode = header & 0xffff;
+    if (opcode == spv::OpFunction)
+      emit(pos);
+    uint64_t mixed = header * 0x9e3779b97f4a7c15ull;
+    mixed = (mixed ^ (mixed >> 30)) * 0xbf58476d1ce4e5b9ull;
+    rolling = (rolling << 1) + (mixed ^ (mixed >> 27));
+    pos += size_t(header >> 16) * 4;
+    if (opcode == spv::OpFunctionEnd || pos - begin >= 32768 ||
+        (pos - begin >= min_bytes && (rolling & 511) == 0))
+      emit(pos);
+  }
+  emit(end);
+}
+
 void write_bytes(const std::filesystem::path &path, std::string_view bytes) {
   std::ofstream out(path, std::ios::binary);
   out.exceptions(std::ios::failbit | std::ios::badbit);
@@ -102,19 +148,23 @@ void write_bytes(const std::filesystem::path &path, std::string_view bytes) {
 }
 }  // namespace
 
-ShaderFunctionRefs write_aot_shaders(const std::string &directory,
-                                     const StoredShaders &shaders,
-                                     bool share_functions) {
+uint32_t write_aot_shaders(const std::string &directory,
+                           const StoredShaders &shaders,
+                           bool share_functions,
+                           ShaderFunctionRefs &result) {
   std::filesystem::path base(directory);
-  std::unordered_map<std::string_view, SharedBody> bodies;
-  std::unordered_map<std::string_view, std::vector<Function>> functions;
+  BodyMap bodies;
+  std::unordered_map<std::string_view, std::vector<Region>> functions;
   if (!share_functions) {
     for (const auto &[bytes, name] : shaders)
       write_bytes(base / (name + ".spv"), bytes);
-    return {};
+    return 0;
   }
   for (const auto &[bytes, name] : shaders) {
     auto &regions = functions[name];
+    TI_ERROR_IF(bytes.size() < 5 * sizeof(uint32_t) ||
+                    bytes.size() % sizeof(uint32_t),
+                "Invalid SPIR-V module length in {}", name);
     const auto *words = reinterpret_cast<const uint32_t *>(bytes.data());
     const size_t size = bytes.size() / sizeof(uint32_t);
     size_t start = 0;
@@ -141,7 +191,23 @@ ShaderFunctionRefs write_aot_shaders(const std::string &directory,
   }
 
   select_function_bases(bodies);
-  ShaderFunctionRefs result;
+  BodyMap fragments;
+  for (const auto &[bytes, name] : shaders) {
+    auto &regions = functions.at(name);
+    std::vector<Region> retained;
+    size_t cursor = 5 * sizeof(uint32_t);
+    for (const auto &region : regions) {
+      if (region.shared()) {
+        collect_fragments(bytes, cursor, region.offset, fragments, retained);
+        retained.push_back(region);
+        cursor = region.offset + region.bytes.size();
+      }
+    }
+    collect_fragments(bytes, cursor, bytes.size(), fragments, retained);
+    regions.swap(retained);
+  }
+  select_function_bases(fragments);
+  uint32_t version = 0;
   bool created_data_dir = false;
   for (const auto &[bytes, name] : shaders) {
     size_t last = 0;
@@ -149,13 +215,10 @@ ShaderFunctionRefs write_aot_shaders(const std::string &directory,
     std::ofstream root;
     for (const auto &func : functions[name]) {
       auto &shared = *func.body;
-      // For short functions a ZIP member and digest references can cost
-      // more than the second compressed copy. Keep those bytes in the root
-      // unless enough occurrences share the cost.
-      const size_t min_duplicates = 1 + (1024 - 1) / func.bytes.size();
-      if (shared.base.empty() && shared.anchor_digest.empty() &&
-          shared.uses - 1 < min_duplicates)
+      if (!func.shared())
         continue;
+      const uint32_t function_version = shared.base.empty() ? 21 : 22;
+      version = std::max(version, func.fragment ? 23u : function_version);
       if (refs.empty()) {
         root.exceptions(std::ios::failbit | std::ios::badbit);
         root.open(base / (name + ".spvroot"), std::ios::binary);
@@ -179,9 +242,11 @@ ShaderFunctionRefs write_aot_shaders(const std::string &directory,
       }
       root.write(bytes.data() + last, func.offset - last);
       last = func.offset + func.bytes.size();
-      refs.push_back(
-          {func.offset / 4, func.bytes.size() / 4, shared.digest,
-           shared.base.empty() ? "" : bodies.at(shared.base).anchor_digest});
+      refs.push_back({func.offset / 4, func.bytes.size() / 4, shared.digest,
+                      shared.base.empty() ? ""
+                                          : (func.fragment ? fragments : bodies)
+                                                .at(shared.base)
+                                                .anchor_digest});
     }
     if (refs.empty()) {
       write_bytes(base / (name + ".spv"), bytes);
@@ -191,6 +256,6 @@ ShaderFunctionRefs write_aot_shaders(const std::string &directory,
       result.emplace(name, std::move(refs));
     }
   }
-  return result;
+  return version;
 }
 }  // namespace taichi::lang::gfx
