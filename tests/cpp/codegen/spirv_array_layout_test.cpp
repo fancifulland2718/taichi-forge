@@ -36,6 +36,31 @@ TEST(SpirvArrayLayout, DispatchUniformReuseIsLocalToOneBlockAndBinding) {
   EXPECT_NE(first.id, read(args, 0).id);
 }
 
+TEST(SpirvArrayLayout, RandomInitializationAllowsLaterFunctionLocals) {
+  DeviceCapabilityConfig caps;
+  caps.set(DeviceCapability::spirv_version, 0x10300u);
+  spirv::IRBuilder builder(Arch::vulkan, &caps);
+  builder.init_header();
+  const auto function = builder.new_function();
+  const auto scratch = builder.buffer_argument(builder.u32_type(), 0, 0, "scratch");
+  builder.start_function(function);
+  builder.get_global_invocation_id(0);
+  const auto entry = builder.current_label();
+  const auto body = builder.new_label();
+  builder.make_inst(spv::OpBranch, body);
+  builder.start_label(body);
+  auto phi = builder.make_phi(builder.u32_type(), 1);
+  const auto value = builder.rand_u32(scratch);
+  phi.set_incoming(0, builder.uint_immediate_number(builder.u32_type(), 0), entry);
+  builder.store_variable(builder.alloca_variable(builder.u32_type()), value);
+  builder.make_inst(spv::OpReturn);
+  builder.make_inst(spv::OpFunctionEnd);
+  builder.commit_kernel_function(function, "main", {}, {1, 1, 1});
+  const auto module = builder.finalize();
+  spvtools::SpirvTools validator(SPV_ENV_VULKAN_1_2);
+  EXPECT_TRUE(validator.Validate(module));
+}
+
 TEST(SpirvArrayLayout, LocalSharedAndBufferArraysValidateTogether) {
   for (auto version : {0x10000u, 0x10300u, 0x10500u}) {
     for (bool boolean_elements : {false, true}) {

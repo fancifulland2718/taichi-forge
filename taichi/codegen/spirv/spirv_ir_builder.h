@@ -838,6 +838,8 @@ class IRBuilder {
   std::vector<uint32_t> completed_functions_;
   // Function header segment
   std::vector<uint32_t> func_header_;
+  // Executable entry instructions after all Function variables.
+  std::vector<uint32_t> func_prologue_;
   // Main Function segment
   std::vector<uint32_t> function_;
 };

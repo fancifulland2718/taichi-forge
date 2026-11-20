@@ -299,6 +299,7 @@ std::vector<uint32_t> IRBuilder::finalize() {
   data.insert(data.end(), completed_functions_.begin(),
               completed_functions_.end());
   data.insert(data.end(), func_header_.begin(), func_header_.end());
+  data.insert(data.end(), func_prologue_.begin(), func_prologue_.end());
   data.insert(data.end(), function_.begin(), function_.end());
   return data;
 }
@@ -326,9 +327,12 @@ std::vector<Value> IRBuilder::start_function(
     bool inline_hint) {
   completed_functions_.insert(completed_functions_.end(), func_header_.begin(),
                               func_header_.end());
+  completed_functions_.insert(completed_functions_.end(), func_prologue_.begin(),
+                              func_prologue_.end());
   completed_functions_.insert(completed_functions_.end(), function_.begin(),
                               function_.end());
   func_header_.clear();
+  func_prologue_.clear();
   function_.clear();
   value_name_tbl_.clear();
   ib_.begin(spv::OpFunction)
@@ -2431,20 +2435,24 @@ void IRBuilder::init_random_function(Value global_tmp_) {
   Value rand_gtmp_ = new_value(gtmp_type, ValueKind::kVariablePtr);
   debug_name(spv::OpName, rand_gtmp_, "rand_gtmp");
 
+  // Entry-block variable declarations may still be emitted after the first
+  // random expression. Seed the generator before ordinary instructions while
+  // leaving the declaration section open for those later locals.
+  auto &seed = func_prologue_;
   auto load_var = [&](Value pointer, const SType &res_type) {
     TI_ASSERT(pointer.flag == ValueKind::kVariablePtr ||
               pointer.flag == ValueKind::kStructArrayPtr);
     Value ret = new_value(res_type, ValueKind::kNormal);
     ib_.begin(spv::OpLoad)
         .add_seq(res_type, ret, pointer)
-        .commit(&func_header_);
+        .commit(&seed);
     return ret;
   };
 
   auto store_var = [&](Value pointer, Value value) {
     TI_ASSERT(pointer.flag == ValueKind::kVariablePtr);
     TI_ASSERT(value.stype.id == pointer.stype.element_type_id);
-    ib_.begin(spv::OpStore).add_seq(pointer, value).commit(&func_header_);
+    ib_.begin(spv::OpStore).add_seq(pointer, value).commit(&seed);
   };
 
   // Constant Number
@@ -2462,7 +2470,7 @@ void IRBuilder::init_random_function(Value global_tmp_) {
   // The offloader reserves this word outside compiler-owned temporaries.
   ib_.begin(spv::OpAccessChain)
       .add_seq(gtmp_type, rand_gtmp_, global_tmp_, const_i32_zero_, counter_index)
-      .commit(&func_header_);
+      .commit(&seed);
   // Get gl_GlobalInvocationID.x, assert it has be visited
   // (in generate_serial_kernel/generate_range_for_kernel
   SType pint_type = this->get_pointer_type(t_uint32_, spv::StorageClassInput);
@@ -2470,7 +2478,7 @@ void IRBuilder::init_random_function(Value global_tmp_) {
   ib_.begin(spv::OpAccessChain)
       .add_seq(pint_type, tmp0, gl_global_invocation_id_,
                uint_immediate_number(t_uint32_, 0))
-      .commit(&func_header_);
+      .commit(&seed);
   Value tmp1 = load_var(tmp0, t_uint32_);
   Value tmp2 = new_value(t_uint32_, ValueKind::kNormal);
   // Claim the counter value atomically. A separate load followed by an
@@ -2479,31 +2487,31 @@ void IRBuilder::init_random_function(Value global_tmp_) {
   // counter does not publish any other memory.
   ib_.begin(spv::OpAtomicIIncrement)
       .add_seq(t_uint32_, tmp2, rand_gtmp_, const_i32_one_, const_i32_zero_)
-      .commit(&func_header_);
+      .commit(&seed);
   Value tmp3 = new_value(t_uint32_, ValueKind::kNormal);
   ib_.begin(spv::OpIAdd)
       .add_seq(t_uint32_, tmp3, _7654321u, tmp1)
-      .commit(&func_header_);
+      .commit(&seed);
   Value tmp4 = new_value(t_uint32_, ValueKind::kNormal);
   ib_.begin(spv::OpIMul)
       .add_seq(t_uint32_, tmp4, _9723451u, tmp2)
-      .commit(&func_header_);
+      .commit(&seed);
   Value tmp5 = new_value(t_uint32_, ValueKind::kNormal);
   ib_.begin(spv::OpIAdd)
       .add_seq(t_uint32_, tmp5, _1234567u, tmp4)
-      .commit(&func_header_);
+      .commit(&seed);
   Value tmp6 = new_value(t_uint32_, ValueKind::kNormal);
   ib_.begin(spv::OpIMul)
       .add_seq(t_uint32_, tmp6, tmp3, tmp5)
-      .commit(&func_header_);
+      .commit(&seed);
   Value tmp7 = new_value(t_uint32_, ValueKind::kNormal);
   ib_.begin(spv::OpIMul)
       .add_seq(t_uint32_, tmp7, _123456789u, tmp6)
-      .commit(&func_header_);
+      .commit(&seed);
   Value tmp8 = new_value(t_uint32_, ValueKind::kNormal);
   ib_.begin(spv::OpIMul)
       .add_seq(t_uint32_, tmp8, _1000000007u, tmp7)
-      .commit(&func_header_);
+      .commit(&seed);
   store_var(rand_x_, tmp8);
   store_var(rand_y_, _362436069u);
   store_var(rand_z_, _521288629u);
