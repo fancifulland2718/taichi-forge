@@ -3,8 +3,81 @@
 #ifdef TI_WITH_VULKAN
 #include "spirv-tools/libspirv.hpp"
 #include "taichi/codegen/spirv/spirv_ir_builder.h"
+#include "taichi/rhi/vulkan/shader_specialization.h"
 
 namespace taichi::lang {
+
+TEST(SpirvArrayLayout, PreparePrunesGuardedWorkgroupAccess) {
+  // The bound count determines both the guard and the last valid index.
+  // Keep the result observable through a separate storage buffer.
+  spvtools::SpirvTools tools(SPV_ENV_VULKAN_1_3);
+  std::vector<uint32_t> input;
+  ASSERT_TRUE(tools.Assemble(R"(
+OpCapability Shader
+OpMemoryModel Logical GLSL450
+OpEntryPoint GLCompute %main "main" %args %shared %out
+OpExecutionMode %main LocalSize 1 1 1
+OpDecorate %args DescriptorSet 0
+OpDecorate %args Binding 0
+OpDecorate %out DescriptorSet 0
+OpDecorate %out Binding 1
+OpDecorate %argsType Block
+OpMemberDecorate %argsType 0 Offset 0
+%void = OpTypeVoid
+%fn = OpTypeFunction %void
+%bool = OpTypeBool
+%i32 = OpTypeInt 32 1
+%zero = OpConstant %i32 0
+%one = OpConstant %i32 1
+%four = OpConstant %i32 4
+%argsType = OpTypeStruct %i32
+%argsPtr = OpTypePointer Uniform %argsType
+%uniformInt = OpTypePointer Uniform %i32
+%localBool = OpTypePointer Function %bool
+%array = OpTypeArray %i32 %four
+%arrayPtr = OpTypePointer Workgroup %array
+%elementPtr = OpTypePointer Workgroup %i32
+%outPtr = OpTypePointer StorageBuffer %argsType
+%outInt = OpTypePointer StorageBuffer %i32
+%out = OpVariable %outPtr StorageBuffer
+%args = OpVariable %argsPtr Uniform
+%shared = OpVariable %arrayPtr Workgroup
+%main = OpFunction %void None %fn
+%entry = OpLabel
+%guard = OpVariable %localBool Function
+%member = OpAccessChain %uniformInt %args %zero
+%n = OpLoad %i32 %member
+%enabled = OpSGreaterThan %bool %n %zero
+OpStore %guard %enabled
+%active = OpLoad %bool %guard
+OpSelectionMerge %end None
+OpBranchConditional %active %body %end
+%body = OpLabel
+%idx = OpISub %i32 %n %one
+%ptr = OpAccessChain %elementPtr %shared %idx
+%val = OpLoad %i32 %ptr
+%to = OpAccessChain %outInt %out %zero
+OpStore %to %val
+OpBranch %end
+%end = OpLabel
+OpReturn
+OpFunctionEnd
+)", &input));
+  ASSERT_TRUE(tools.Validate(input));
+  for (uint32_t count : {0u, 2u}) {
+    size_t folded = 0;
+    const auto shader = vulkan::specialize_spirv_arguments(
+        input, 0, {{0, 32, count}}, &folded);
+    ASSERT_EQ(folded, 1u);
+    EXPECT_TRUE(tools.Validate(shader));
+    size_t loads = 0;
+    for (size_t pos = 5; pos < shader.size(); pos += shader[pos] >> 16) {
+      if ((shader[pos] & 0xffffu) == spv::OpLoad)
+        ++loads;
+    }
+    EXPECT_EQ(loads, count ? 1u : 0u);
+  }
+}
 
 TEST(SpirvArrayLayout, DispatchUniformReuseIsLocalToOneBlockAndBinding) {
   DeviceCapabilityConfig caps;

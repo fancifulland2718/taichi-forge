@@ -13,6 +13,7 @@
 #include "source/opt/flatten_decoration_pass.h"
 #include "source/opt/ir_context.h"
 #include "source/opt/constants.h"
+#include "source/opt/local_single_block_elim_pass.h"
 #include "source/opt/pass_manager.h"
 #include "source/opt/simplification_pass.h"
 #include "source/opt/type_manager.h"
@@ -271,6 +272,10 @@ std::vector<uint32_t> specialize_spirv_arguments(
   // removing a variable here would disagree with that immutable task contract.
   context->set_preserve_bindings(true);
   context->set_preserve_spec_constants(true);
+  // A branch guard may be stored in a function-local temporary. Forward
+  // its last store in the same block before CCP so a disabled shared-memory
+  // access disappears together with its branch when ABI values become known.
+  passes.AddPass<spvtools::opt::LocalSingleBlockLoadStoreElimPass>();
   passes.AddPass<spvtools::opt::CCPPass>();
   // Remove the branches disabled by the bound arguments before simplifying
   // their bodies. Simplification can expose additional constant conditions.
