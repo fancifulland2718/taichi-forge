@@ -14,6 +14,46 @@ from tests import test_utils
 
 
 @test_utils.test(arch=ti.vulkan, offline_cache=False)
+def test_vulkan_aot_local_values_across_loops_and_branches(tmp_path):
+    import numpy as np
+    from taichi_forge_runtime.aot import Runtime
+
+    @ti.kernel
+    def advance(out: ti.types.ndarray(dtype=ti.i32, ndim=1), bias: ti.i32):
+        for i in range(out.shape[0]):
+            base = out[i] + bias
+            value = base
+            for j in range(4):
+                delta = base + j
+                if (i + j) % 2 == 0:
+                    value += delta
+                else:
+                    value -= 2 * delta
+            out[i] = value + base
+
+    module = ti.aot.Module(ti.vulkan)
+    module.add_kernel(advance)
+    path = tmp_path / "local-values.tcm"
+    module.archive(str(path))
+    device = int(os.environ.get("TI_TEST_VULKAN_DEVICE_INDEX", 0))
+    with Runtime("vulkan", device_index=device) as runtime:
+        loaded = runtime.load_module(str(path))
+        out = runtime.ndarray("i32", (7,))
+        expected = np.arange(7, dtype=np.int32)
+        out.write(expected.tobytes())
+        for bias in (3, -5):
+            with loaded.kernel("advance").bind(out, Scalar("i32", bias)).prepare(
+                specialize=True, constant_args=(1,)
+            ) as ready:
+                ready.submit().wait()
+            base = expected + bias
+            expected = 2 * base
+            for j in range(4):
+                expected += np.where((np.arange(7) + j) % 2 == 0, base + j, -2 * (base + j))
+            np.testing.assert_array_equal(np.frombuffer(out.read(), dtype=np.int32), expected)
+
+
+@test_utils.test(arch=ti.vulkan, offline_cache=False)
 def test_vulkan_prepare_preserves_per_shader_constants_in_shared_functions(tmp_path):
     from zipfile import ZipFile
     import numpy as np

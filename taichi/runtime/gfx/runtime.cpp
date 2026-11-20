@@ -8999,7 +8999,7 @@ GfxRuntime::RegisterParams run_codegen(
   params.caps = caps;
   params.enable_spv_opt = compile_config.external_optimization_level > 0;
   params.vulkan_listgen_reuse = compile_config.vulkan_listgen_reuse;
-  spirv::KernelCodegen codegen(params);
+  spirv::KernelCodegen codegen(std::move(params));
   GfxRuntime::RegisterParams res;
   codegen.run(res.kernel_attribs, res.task_spirv_source_codes);
   res.num_snode_trees = compiled_structs.size();

@@ -91,7 +91,7 @@ class FunctionLibrary:
             self._function_templates[source] = (supported, projection)
         return self._function_templates[source]
 
-    def library_function(self, source, args, *, dependencies=None):
+    def library_function(self, source, args, *, dependencies=None, analysis=None):
         """Retain typed device boundaries without mutating JIT definitions.
 
         Infer value parameters from DSL operands, never from a model sample.
@@ -197,6 +197,12 @@ class FunctionLibrary:
                 ):
                     return None
         identity = (source, tuple(signature)) if signature or projection else source
+        # Prove transitive captures only after establishing a callable ABI.
+        # A template pointing into caller IR must expand at that call site.
+        if analysis is not None:
+            dependencies = analysis.dependencies(source, args)
+            if dependencies is None:
+                return None
         if dependencies is not None:
             identity = (identity, dependencies)
         if identity not in self._function_variants:

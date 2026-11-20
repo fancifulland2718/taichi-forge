@@ -24,6 +24,7 @@
 #include "taichi/system/profiler.h"
 #include "taichi/program/extension.h"
 #include "taichi/ir/statements.h"
+#include "taichi/ir/visitors.h"
 #include "taichi/ir/ir.h"
 #include "taichi/ir/analysis.h"
 #include "taichi/util/line_appender.h"
@@ -376,13 +377,62 @@ SparseTopologyMutationInfo detect_sparse_topology_mutation(
                               : TaskAttributes::kSparseMutationNone};
 }
 
+// Classify the immutable lowered body before assigning shader-local IDs.
+// Descriptor variants of a function and separate offloads use the same plan.
+struct ShaderBodyPlan : BasicStmtVisitor {
+  std::vector<FuncCallStmt *> calls;
+  std::unordered_set<Stmt *> scalar_slots;
+
+  explicit ShaderBodyPlan(IRNode *root) {
+    invoke_default_visitor = true;
+    root->accept(this);
+  }
+  using BasicStmtVisitor::visit;
+  void preprocess_container_stmt(Stmt *stmt) override {
+    visit(stmt);
+  }
+  void visit(Stmt *stmt) override {
+    if (auto *call = stmt->cast<FuncCallStmt>())
+      calls.push_back(call);
+    if (auto *slot = stmt->cast<AllocaStmt>(); slot && !slot->is_shared &&
+        slot->ret_type.ptr_removed()->is<PrimitiveType>())
+      scalar_slots.insert(slot);
+    for (int i = 0; i < stmt->num_operands(); ++i) {
+      auto *operand = stmt->operand(i);
+      if (!operand || !operand->is<AllocaStmt>())
+        continue;
+      auto type = operand->ret_type.ptr_removed();
+      if (stmt->is<LocalLoadStmt>() && stmt->ret_type == type)
+        continue;
+      const auto *store = stmt->cast<LocalStoreStmt>();
+      // Nested reads use the dominating value. A branch or loop that writes
+      // the slot requires a merge, and address uses require real storage.
+      if (!store || store->dest != operand || store->val->ret_type != type ||
+          store->parent != operand->parent)
+        scalar_slots.erase(operand);
+    }
+  }
+};
+
+using ShaderBodyPlans = std::unordered_map<IRNode *, ShaderBodyPlan>;
+
+void collect_shader_body_plans(IRNode *root, ShaderBodyPlans &plans) {
+  auto [it, inserted] = plans.try_emplace(root, root);
+  if (inserted) {
+    for (auto *call : it->second.calls)
+      collect_shader_body_plans(call->func->ir.get(), plans);
+  }
+}
+
 class TaskCodegen : public IRVisitor {
  public:
   struct Params {
+    const std::vector<CompiledSNodeStructs> &compiled_structs;
+    const std::unordered_map<int, int> &snode_to_root;
+    const ShaderBodyPlans &body_plans;
     OffloadedStmt *task_ir;
     Arch arch;
     DeviceCapabilityConfig *caps;
-    std::vector<CompiledSNodeStructs> compiled_structs;
     const KernelContextAttributes *ctx_attribs;
     std::string ti_kernel_name;
     int task_id_in_kernel;
@@ -402,6 +452,8 @@ class TaskCodegen : public IRVisitor {
         caps_(params.caps),
         task_ir_(params.task_ir),
         compiled_structs_(params.compiled_structs),
+        snode_to_root_(params.snode_to_root),
+        body_plans_(params.body_plans),
         ctx_attribs_(params.ctx_attribs),
         task_name_(fmt::format("{}_t{:02d}",
                                params.ti_kernel_name,
@@ -414,18 +466,9 @@ class TaskCodegen : public IRVisitor {
     allow_undefined_visitor = true;
     invoke_default_visitor = true;
 
-    fill_snode_to_root();
     collect_ray_query_result_masks();
     collect_resource_usage();
     ir_ = std::make_shared<spirv::IRBuilder>(arch_, caps_, params.omit_value_names);
-  }
-
-  void fill_snode_to_root() {
-    for (int root = 0; root < compiled_structs_.size(); ++root) {
-      for (auto &[node_id, node] : compiled_structs_[root].snode_descriptors) {
-        snode_to_root_[node_id] = root;
-      }
-    }
   }
 
   // Replace the wild '%' in the format string with "%%".
@@ -667,6 +710,12 @@ class TaskCodegen : public IRVisitor {
   void visit(AllocaStmt *alloca) override {
     spirv::Value ptr_val;
     auto alloca_type = alloca->ret_type.ptr_removed();
+    if (compact_aot_) {
+      if (auto it = local_values_.find(alloca); it != local_values_.end()) {
+        it->second = ir_->get_zero(ir_->get_primitive_type(alloca_type));
+        return;
+      }
+    }
     if (auto tensor_type = alloca_type->cast<TensorType>()) {
       auto elem_num = tensor_type->get_num_elements();
       spirv::SType elem_type =
@@ -754,6 +803,12 @@ class TaskCodegen : public IRVisitor {
 
   void visit(LocalLoadStmt *stmt) override {
     auto ptr = stmt->src;
+    if (compact_aot_) {
+      if (auto it = local_values_.find(ptr); it != local_values_.end()) {
+        ir_->register_value(stmt->raw_name(), it->second);
+        return;
+      }
+    }
     spirv::Value ptr_val = ir_->query_value(ptr->raw_name());
     const auto value_type = ir_->get_primitive_type(stmt->element_type());
     spirv::Value val =
@@ -765,6 +820,12 @@ class TaskCodegen : public IRVisitor {
   }
 
   void visit(LocalStoreStmt *stmt) override {
+    if (compact_aot_) {
+      if (auto it = local_values_.find(stmt->dest); it != local_values_.end()) {
+        it->second = ir_->query_value(stmt->val->raw_name());
+        return;
+      }
+    }
     spirv::Value ptr_val = ir_->query_value(stmt->dest->raw_name());
     spirv::Value val = ir_->query_value(stmt->val->raw_name());
     if (uses_shared_cas_storage(stmt->dest)) {
@@ -5568,66 +5629,78 @@ class TaskCodegen : public IRVisitor {
   }
 
   void emit_function_units(IRNode *root, const DescriptorPaths &caller = {}) {
-    auto calls = irpass::analysis::gather_statements(
-        root, [](Stmt *stmt) { return stmt->is<FuncCallStmt>(); });
-    for (auto *call : calls) {
-      auto *invocation = call->as<FuncCallStmt>();
-      auto *function = invocation->func;
-      auto [iter, inserted] = function_layouts_.try_emplace(function);
-      auto &layout = iter->second;
-      if (inserted) {
-        for (size_t i = 0; i < function->parameter_list.size(); ++i) {
-          if (function->parameter_list[i].ptype == ParameterType::kNdarray) {
-            auto operand = layout.value_types.size() + layout.descriptor_operands.size();
-            layout.descriptor_operands.emplace(operand, static_cast<int>(i));
-          } else {
-            flatten_function_types(function->args_type->elements()[i].type, layout.value_types);
-          }
+    if (compact_aot_) {
+      const auto &plan = body_plans_.at(root);
+      for (auto *slot : plan.scalar_slots)
+        local_values_.try_emplace(slot);
+      for (auto *call : plan.calls)
+        emit_function_unit(call, caller);
+    } else {
+      for (auto *stmt : irpass::analysis::gather_statements(
+               root, [](Stmt *s) { return s->is<FuncCallStmt>(); }))
+        emit_function_unit(stmt->as<FuncCallStmt>(), caller);
+    }
+  }
+
+  void emit_function_unit(FuncCallStmt *invocation,
+                          const DescriptorPaths &caller) {
+    auto *function = invocation->func;
+    auto [iter, inserted] = function_layouts_.try_emplace(function);
+    auto &layout = iter->second;
+    if (inserted) {
+      for (size_t i = 0; i < function->parameter_list.size(); ++i) {
+        if (function->parameter_list[i].ptype == ParameterType::kNdarray) {
+          auto operand =
+              layout.value_types.size() + layout.descriptor_operands.size();
+          layout.descriptor_operands.emplace(operand, static_cast<int>(i));
+        } else {
+          flatten_function_types(function->args_type->elements()[i].type,
+                                 layout.value_types);
         }
       }
-      auto bindings = call_descriptors(invocation, layout, caller);
-      auto key = std::make_pair(function, bindings);
-      if (function_units_.count(key))
-        continue;
-      TI_ASSERT_INFO(
-          function->backend_inline(),
-          "SPIR-V function units require a proven thread-local value ABI");
-      TI_ASSERT_INFO(active_functions_.insert(function).second,
-                     "Recursive SPIR-V function units are not supported");
-      emit_function_units(function->ir.get(), bindings);
-      active_functions_.erase(function);
-      TI_COMPILE_PROFILER("cpp.compile.spirv.function_body_emit");
-      const auto &parameters = layout.value_types;
-      auto result = function_result_type(function);
-      auto symbol = ir_->new_function(result, parameters);
-      function_units_[std::move(key)] = symbol;
-      auto arguments = ir_->start_function(symbol, result, parameters, true);
-      current_function_ = function;
-      function_descriptors_ = std::move(bindings);
-      size_t index = 0;
-      function_arguments_.resize(function->parameter_list.size());
-      for (size_t i = 0; i < function_arguments_.size(); ++i) {
-        if (!function_descriptors_.count(i))
-          function_arguments_[i] = compose_function_value(
-              function->args_type->elements()[i].type, arguments, index);
-      }
-      TI_ASSERT(index == arguments.size());
-      function->ir->accept(this);
-      if (!gen_label_ && function->rets.empty()) {
-        ir_->make_inst(spv::OpReturn);
-        gen_label_ = true;
-      }
-      TI_ASSERT_INFO(gen_label_, "SPIR-V value helper must end with a return");
-      ir_->make_inst(spv::OpFunctionEnd);
-      current_function_ = nullptr;
-      function_descriptors_.clear();
-      function_arguments_.clear();
-      gen_label_ = false;
-      root_stmts_.clear();
-      ptr_to_buffers_.clear();
-      ptr_to_chunk_idx_.clear();
-      bit_ptr_bit_offsets_.clear();
     }
+    auto bindings = call_descriptors(invocation, layout, caller);
+    auto key = std::make_pair(function, bindings);
+    if (function_units_.count(key))
+      return;
+    TI_ASSERT_INFO(
+        function->backend_inline(),
+        "SPIR-V function units require a proven thread-local value ABI");
+    TI_ASSERT_INFO(active_functions_.insert(function).second,
+                   "Recursive SPIR-V function units are not supported");
+    emit_function_units(function->ir.get(), bindings);
+    active_functions_.erase(function);
+    TI_COMPILE_PROFILER("cpp.compile.spirv.function_body_emit");
+    const auto &parameters = layout.value_types;
+    auto result = function_result_type(function);
+    auto symbol = ir_->new_function(result, parameters);
+    function_units_[std::move(key)] = symbol;
+    auto arguments = ir_->start_function(symbol, result, parameters, true);
+    current_function_ = function;
+    function_descriptors_ = std::move(bindings);
+    size_t index = 0;
+    function_arguments_.resize(function->parameter_list.size());
+    for (size_t i = 0; i < function_arguments_.size(); ++i) {
+      if (!function_descriptors_.count(i))
+        function_arguments_[i] = compose_function_value(
+            function->args_type->elements()[i].type, arguments, index);
+    }
+    TI_ASSERT(index == arguments.size());
+    function->ir->accept(this);
+    if (!gen_label_ && function->rets.empty()) {
+      ir_->make_inst(spv::OpReturn);
+      gen_label_ = true;
+    }
+    TI_ASSERT_INFO(gen_label_, "SPIR-V value helper must end with a return");
+    ir_->make_inst(spv::OpFunctionEnd);
+    current_function_ = nullptr;
+    function_descriptors_.clear();
+    function_arguments_.clear();
+    gen_label_ = false;
+    root_stmts_.clear();
+    ptr_to_buffers_.clear();
+    ptr_to_chunk_idx_.clear();
+    bit_ptr_bit_offsets_.clear();
   }
   void finish_block(spirv::Label target) {
     // A continue may terminate an if arm or an entire loop body. Emit the
@@ -7918,6 +7991,7 @@ class TaskCodegen : public IRVisitor {
   std::map<std::pair<std::vector<int>, bool>, BufferInfo> function_array_buffers_;
   std::unordered_set<Function *> active_functions_;
   std::vector<Value> function_arguments_;
+  std::unordered_map<Stmt *, Value> local_values_;
   spirv::Label kernel_return_label_;
   bool gen_label_{false};
 
@@ -7929,8 +8003,9 @@ class TaskCodegen : public IRVisitor {
       */
 
   OffloadedStmt *const task_ir_;  // not owned
-  std::vector<CompiledSNodeStructs> compiled_structs_;
-  std::unordered_map<int, int> snode_to_root_;
+  const std::vector<CompiledSNodeStructs> &compiled_structs_;
+  const std::unordered_map<int, int> &snode_to_root_;
+  const ShaderBodyPlans &body_plans_;
   const KernelContextAttributes *const ctx_attribs_;  // not owned
   const std::string task_name_;
   // G11-A (2026-05): mirrored from KernelCodegen::Params; controls whether
@@ -8005,19 +8080,19 @@ void clear_last_spv_stats() {
   state.last_stats.clear();
 }
 
-KernelCodegen::KernelCodegen(const Params &params)
-    : params_(params), ctx_attribs_(*params.kernel, &params.caps) {
-  TI_ASSERT(params.kernel);
-  TI_ASSERT(params.ir_root);
+KernelCodegen::KernelCodegen(Params &&params)
+    : params_(std::move(params)), ctx_attribs_(*params_.kernel, &params_.caps) {
+  TI_ASSERT(params_.kernel);
+  TI_ASSERT(params_.ir_root);
   ctx_attribs_.descriptor_array_offsets =
-      params.arch == Arch::vulkan &&
-      !params.caps.get(DeviceCapability::spirv_has_physical_storage_buffer) &&
+      params_.arch == Arch::vulkan &&
+      !params_.caps.get(DeviceCapability::spirv_has_physical_storage_buffer) &&
       std::any_of(ctx_attribs_.args().begin(), ctx_attribs_.args().end(),
                   [](const auto &arg) {
                     return arg.second.ptype == ParameterType::kNdarray;
                   });
 
-  uint32_t spirv_version = params.caps.get(DeviceCapability::spirv_version);
+  uint32_t spirv_version = params_.caps.get(DeviceCapability::spirv_version);
 
   if (spirv_version >= 0x10600) {
     target_env_ = SPV_ENV_VULKAN_1_3;
@@ -8268,17 +8343,27 @@ void KernelCodegen::run(TaichiKernelAttributes &kernel_attribs,
         grad_arr_access;
   };
   std::vector<TaskOut> outs(n);
+  // All tasks read the same kernel layout snapshot, including concurrent workers.
+  std::unordered_map<int, int> snode_to_root;
+  for (size_t root_id = 0; root_id < params_.compiled_structs.size(); ++root_id) {
+    for (const auto &node : params_.compiled_structs[root_id].snode_descriptors)
+      snode_to_root[node.first] = static_cast<int>(root_id);
+  }
 
+  ShaderBodyPlans body_plans;
+  if (params_.omit_value_names) {
+    for (const auto &task : tasks)
+      collect_shader_body_plans(task.get(), body_plans);
+  }
   // V2 (2026-04-26): per-task SPIR-V emission + spvtools::Optimizer::Run
   // are independent (no shared mutable state across tasks; ctx_attribs_
   // is read-only inside TaskCodegen, mutated only in the post-loop
   // aggregation below). The lambda is thread-safe: each invocation
   // constructs its own TaskCodegen, IRBuilder and Optimizer.
   auto run_task = [&, this](int i) {
-    TaskCodegen::Params tp;
+    TaskCodegen::Params tp{params_.compiled_structs, snode_to_root, body_plans};
     tp.task_ir = tasks[i]->as<OffloadedStmt>();
     tp.task_id_in_kernel = i;
-    tp.compiled_structs = params_.compiled_structs;
     tp.ctx_attribs = &ctx_attribs_;
     tp.ti_kernel_name = fmt::format("{}_{}", params_.ti_kernel_name, i);
     tp.arch = params_.arch;
@@ -8295,11 +8380,15 @@ void KernelCodegen::run(TaichiKernelAttributes &kernel_attribs,
       return cgen.run();
     }();
 
-    std::vector<uint32_t> optimized_spv(task_res.spirv_code);
+    auto optimized_spv = std::move(task_res.spirv_code);
+    const size_t before_words = optimized_spv.size();
+    const auto before_counts = params_.vulkan_spv_stats
+                                   ? count_diagnostic_opcodes(optimized_spv)
+                                   : DiagnosticOpcodeCounts{};
     int task_spv_opt_level = params_.spv_opt_level;
     bool adaptive_quick = false;
     if (params_.spirv_adaptive_opt && task_spv_opt_level > 1 &&
-        should_use_adaptive_quick_opt(tp.task_ir, task_res.spirv_code.size(),
+        should_use_adaptive_quick_opt(tp.task_ir, before_words,
                                       params_.spirv_adaptive_opt_threshold)) {
       task_spv_opt_level = 0;
       adaptive_quick = true;
@@ -8329,7 +8418,7 @@ void KernelCodegen::run(TaichiKernelAttributes &kernel_attribs,
       number_aot_function_ids(optimized_spv, target_env_);
 
     TI_TRACE("SPIRV-Tools-opt: binary size, before={}, after={}",
-             task_res.spirv_code.size(), optimized_spv.size());
+             before_words, optimized_spv.size());
 
     if (params_.vulkan_spv_stats) {
       outs[i].has_spv_stats = true;
@@ -8351,10 +8440,8 @@ void KernelCodegen::run(TaichiKernelAttributes &kernel_attribs,
           snode_chain_contains_sparse(tp.task_ir->snode);
       stats.opt_run = opt_run;
       stats.opt_ok = opt_ok;
-      stats.before_words = task_res.spirv_code.size();
+      stats.before_words = before_words;
       stats.after_words = optimized_spv.size();
-      const auto before_counts =
-          count_diagnostic_opcodes(task_res.spirv_code);
       const auto after_counts = count_diagnostic_opcodes(optimized_spv);
       stats.ray_query_initialize_before = before_counts.ray_query_initialize;
       stats.ray_query_initialize_after = after_counts.ray_query_initialize;

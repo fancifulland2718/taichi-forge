@@ -134,7 +134,7 @@ KernelCompiler::CKDPtr KernelCompiler::compile(
   spirv::CompiledKernelData::InternalData internal_data;
   {
     TI_COMPILE_PROFILER("cpp.compile.spirv.codegen_run");
-    spirv::KernelCodegen codegen(params);
+    spirv::KernelCodegen codegen(std::move(params));
     codegen.run(internal_data.metadata.kernel_attribs,
                 internal_data.src.spirv_src);
   }

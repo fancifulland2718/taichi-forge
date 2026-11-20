@@ -96,19 +96,13 @@ class PackageCompilation(FunctionLibrary):
             # SPIR-V binds those descriptor slots within each task.
             if source.is_real_function or source.pyfunc:
                 return None
-            supported, _ = self._function_template(source)
-            if not supported:
-                return None
-            dependencies = self.spirv_dependencies.dependencies(source, args)
-            if dependencies is None:
-                return None
         if (self.static_preparation is not None
                 and self.static_preparation.requires_task_context(source, args)):
             # Direct syntax checks miss SIMT operations in inline callees.
             # Keep the existing task boundary instead of extracting a wrapper
             # whose transitive body requires that task's execution context.
             return None
-        function = super().library_function(source, args, dependencies=dependencies)
+        function = super().library_function(source, args, dependencies=dependencies, analysis=self.spirv_dependencies)
         if function is not None:
             # Retain the source ti.func's backend policy, just as JIT does.
             # Archive a callable body. Materialization applies the hint after

@@ -90,7 +90,7 @@ class KernelCodegen {
     bool vulkan_spv_stats_to_stderr{false};
   };
 
-  explicit KernelCodegen(const Params &params);
+  explicit KernelCodegen(Params &&params);
 
   void run(TaichiKernelAttributes &kernel_attribs,
            std::vector<std::vector<uint32_t>> &generated_spirv);
