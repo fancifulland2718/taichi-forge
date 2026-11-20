@@ -28,6 +28,13 @@ def _inherited_input_calls(owners, inputs):
             if target in parameters:
                 arguments = {name: ast.Name(id=name, ctx=ast.Load()) for name in parameters[target]}
                 yield target, (caller, arguments, {'inherited_input_forward': True})
+        # Only this next constructor can receive an ordinary super() call.
+        # Skip source inspection when it has no inputs to resolve.
+        next_base = next((base for base in cls.__mro__[cls.__mro__.index(defining) + 1:]
+                          if '__init__' in vars(base)), object)
+        target = classes.get(next_base)
+        if target not in parameters:
+            continue
         try:
             tree = ast.parse(textwrap.dedent(inspect.getsource(function))).body[0]
         except (OSError, TypeError, SyntaxError):
@@ -45,11 +52,6 @@ def _inherited_input_calls(owners, inputs):
                 and any(isinstance(node, ast.Expr) and node.value is call for node in tree.body)
                 and not any(isinstance(arg, ast.Starred) for arg in call.args)
                 and not any(keyword.arg is None for keyword in call.keywords)):
-            continue
-        next_base = next((base for base in cls.__mro__[cls.__mro__.index(defining) + 1:]
-                          if '__init__' in vars(base)), object)
-        target = classes.get(next_base)
-        if target not in parameters:
             continue
         try:
             bound = inspect.signature(inspect.getattr_static(next_base, '__init__')).bind(
@@ -210,7 +212,7 @@ def resolve_inputs(sources, imported, *, partial=False):
     # Preparation discovery needs provisional input facts, not admission of
     # every ordinary Host constructor call. The complete pass below remains
     # authoritative after preparation declarations and input families exist.
-    if not partial:
+    if not partial and untyped_targets:
         for name, _, _, _, tree, *_ in sources:
             for node in ast.walk(tree):
                 if not isinstance(node, ast.Call) or (name, node.lineno, node.col_offset) in declared_sites:

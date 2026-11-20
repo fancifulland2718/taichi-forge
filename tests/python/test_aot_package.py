@@ -26679,6 +26679,25 @@ def _resource_factory_fixture(
     return _source_package(tmp_path, monkeypatch, source)
 
 
+def test_factory_source_is_reused_only_within_one_declaration_pass(monkeypatch):
+    from taichi_forge.aot._package_factories import factory_source, reuse_factory_sources
+
+    def first():
+        return 1
+
+    def second():
+        return 2
+
+    with reuse_factory_sources():
+        _, tree = factory_source(first)
+        assert factory_source(first)[1] is tree
+        monkeypatch.setattr(first, "__code__", second.__code__)
+        _, changed = factory_source(first)
+        assert changed.body[0].body[0].value.value == 2
+    with reuse_factory_sources():
+        assert factory_source(first)[1] is not changed
+
+
 @test_utils.test(arch=[ti.cpu, ti.cuda, ti.vulkan], offline_cache=False)
 def test_package_proves_imported_resource_factory_without_running_it(tmp_path, monkeypatch):
     package = _resource_factory_fixture(tmp_path, monkeypatch)

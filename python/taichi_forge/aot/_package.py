@@ -22,6 +22,7 @@ from types import SimpleNamespace
 from taichi_forge.tools._compiled_host import decorator_resolver
 from ._package_types import qualified_kind, resolve_type, type_expression, type_spec
 from ._package_fields import field_declarations, field_allocation
+from ._package_factories import reuse_factory_sources
 from ._package_sources import collect_sources, package_roots, shader_assets
 from ._package_owners import resolve_owners
 from ._package_errors import is_error_interface, project_error_interface
@@ -1609,6 +1610,7 @@ def _package_source_inputs(package, arch, source_root):
     return source_files, namespaces, dependency_report, application_modules, imported_modules, target_arch, packages
 
 
+@reuse_factory_sources()
 def _preflight_package(package, *, arch=None, source_root=None, inputs=None):
     """Resolve declarations once the current sources and imported bindings are known."""
     source_files, namespaces, dependency_report, application_modules, imported_modules, target_arch, packages = (

@@ -10,9 +10,8 @@ import copy
 import hashlib
 import inspect
 from pathlib import Path
-import textwrap
 
-from ._package_factories import _literal, _source_value, _Unproven, prove_factory
+from ._package_factories import _literal, _source_value, _Unproven, factory_source, prove_factory
 
 
 def resource_context_group(statement):
@@ -36,8 +35,7 @@ def _generator_context(function):
         or "__signature__" in vars(function)
     ):
         return None
-    source = textwrap.dedent(inspect.getsource(wrapped))
-    tree = ast.parse(source)
+    source, tree = factory_source(wrapped)
     if len(tree.body) != 1 or not isinstance(tree.body[0], ast.FunctionDef):
         return None
     definition = tree.body[0]

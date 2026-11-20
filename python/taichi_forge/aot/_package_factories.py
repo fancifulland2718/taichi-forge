@@ -6,11 +6,41 @@ not arbitrary Python execution, model preparation or numerical evaluation.
 
 import ast
 import copy
+from contextlib import contextmanager
+from contextvars import ContextVar
 from dataclasses import dataclass
 import hashlib
 import inspect
 import textwrap
 from types import ModuleType
+
+
+_factory_sources = ContextVar("forge_aot_factory_sources", default=None)
+
+
+@contextmanager
+def reuse_factory_sources():
+    """Share read-only syntax during a single package declaration pass."""
+    sources = {}
+    token = _factory_sources.set(sources)
+    try:
+        yield
+    finally:
+        _factory_sources.reset(token)
+        sources.clear()
+
+
+def factory_source(function):
+    sources = _factory_sources.get()
+    if sources is not None:
+        cached = sources.get(function)
+        if cached is not None and cached[0] is function.__code__:
+            return cached[1]
+    source = textwrap.dedent(inspect.getsource(function))
+    result = source, ast.parse(source)
+    if sources is not None:
+        sources[function] = function.__code__, result
+    return result
 
 
 class _Unproven(ValueError):
@@ -88,10 +118,9 @@ def prove_factory(function, call, scopes=frozenset(), *, allow_void=False, absen
     if not inspect.isfunction(function) or "__wrapped__" in vars(function) or "__signature__" in vars(function):
         return None
     try:
-        source = textwrap.dedent(inspect.getsource(function))
+        source, tree = factory_source(function)
     except (OSError, TypeError):
         return None
-    tree = ast.parse(source)
     if len(tree.body) != 1 or not isinstance(tree.body[0], ast.FunctionDef) or tree.body[0].decorator_list:
         return None
     definition = tree.body[0]
