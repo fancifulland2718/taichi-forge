@@ -36,6 +36,12 @@ Vulkan 定义包导出时，读写类型化数组的 helper 在满足提取条�
 发行着色器在同一基本块内复用对同一只读调度参数的读取。
 Vulkan 光线查询的候选命中筛选函数及其子调用保留内联，以便编译器核验整个筛选过程只读。
 
+GFX metadata v21 允许 Vulkan 着色器共享逐字节相同的 SPIR-V 函数体，入口函数也可共享。
+每个拆分后的着色器在 `.spvroot` 中保留自己的声明、修饰、常量和其余指令。
+`shader_functions` 记录各共享函数体的字偏移与内容哈希。普通核查找读取调用 ABI。
+首次 prepare 组装实际选中的着色器，按允许固定的参数特化并创建管线。直接通用调用也可在首次启动时完成组装。
+后续提交复用已准备的管线，各实例保有自己的资源绑定。
+
 frontend、Python bridge 与 native runtime 的私有 ABI 必须匹配。当前修订统一见
 [发行说明的升级约定](release_notes.zh.md#升级与编译设置)，权威定义见
 [`runtime_contract.h`](../../taichi/common/runtime_contract.h) 与

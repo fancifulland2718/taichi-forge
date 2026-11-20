@@ -48,6 +48,16 @@ Release shaders also reuse reads of the same immutable dispatch argument
 within a basic block. Vulkan ray-query candidate predicates and their helpers
 remain inline so the compiler can verify the entire predicate is read-only.
 
+GFX metadata v21 lets Vulkan task shaders share byte-identical SPIR-V
+functions, including entry functions. Each split shader keeps its declarations,
+decorations, constants and remaining instructions in a `.spvroot` file.
+`shader_functions` records the word offsets and content hashes of its shared
+bodies. Ordinary kernel lookup reads the callable ABI. On first prepare, the
+runtime assembles the selected shader, specializes its eligible parameters and
+creates the pipeline. A generic first launch can assemble the same shader.
+Subsequent submissions reuse the prepared pipeline. Shader storage and
+instance resource bindings have independent lifetimes.
+
 Frontend, Python bridge and native runtime must have matching private ABI
 revisions. The current revision is listed in the
 [release upgrade guidance](release_notes.en.md#upgrading-and-compilation-settings) and defined in

@@ -25,6 +25,15 @@ struct AotKernelAlias {
   TI_IO_DEF(name, kernel_index);
 };
 
+// Position in the complete shader. The containing module retains its own
+// declarations, decorations, constants and descriptor ABI.
+struct AotShaderFunction {
+  size_t offset_words{0};
+  size_t size_words{0};
+  std::string sha256;
+  TI_IO_DEF(offset_words, size_words, sha256);
+};
+
 // Entry-specific execution policy is separate from shared shader identity.
 using AotDeviceRangeDispatch = aot::DeviceRangeDispatch;
 
@@ -53,7 +62,8 @@ struct TaichiAotData {
   // v18 binds model workgroup geometry and shared allocations per pipeline.
   // v19 allows logical tasks to reference an identical stored shader.
   // v20 identifies distinct shaders that have the same logical task name.
-  static constexpr uint32_t kMetadataVersion = 20;
+  // v21 stores identical SPIR-V function bodies once across task shaders.
+  static constexpr uint32_t kMetadataVersion = 21;
   static std::string indexed_shader(size_t kernel, size_t task) {
     return "shader_blobs/" + std::to_string(kernel) + "_" + std::to_string(task);
   }
@@ -66,6 +76,7 @@ struct TaichiAotData {
   std::vector<AotKernelAlias> kernel_aliases;
   std::map<std::string, std::string> shader_aliases;
   std::map<size_t, std::map<size_t, std::string>> task_shader_sources;
+  std::map<std::string, std::vector<AotShaderFunction>> shader_functions;
   std::vector<AotDeviceRangeDispatch> device_range_dispatch;
   std::vector<aot::CompiledFieldData> fields;
   std::map<std::string, uint32_t> required_caps;
@@ -83,6 +94,7 @@ struct TaichiAotData {
             kernel_aliases,
             shader_aliases,
             task_shader_sources,
+            shader_functions,
             device_range_dispatch,
             fields,
             required_caps,

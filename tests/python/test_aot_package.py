@@ -1952,9 +1952,12 @@ class Model:
         metadata = json.loads(archive.read('metadata.json'))
         assert metadata['kernel_aliases']
         assert metadata['shader_aliases']
+        split = {entry['key'] for entry in metadata.get('shader_functions', ())}
         for alias in metadata['shader_aliases']:
             assert alias['key'] + '.spv' not in archive.namelist()
-            assert alias['value'] + '.spv' in archive.namelist()
+            assert alias['key'] + '.spvroot' not in archive.namelist()
+            suffix = '.spvroot' if alias['value'] in split else '.spv'
+            assert alias['value'] + suffix in archive.namelist()
         shaders = [archive.read(name) for name in archive.namelist() if name.endswith('.spv')]
         assert len(shaders) == len(set(shaders))
     device = int(os.environ.get("TI_TEST_VULKAN_DEVICE_INDEX", 0))

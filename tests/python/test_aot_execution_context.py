@@ -14,6 +14,69 @@ from tests import test_utils
 
 
 @test_utils.test(arch=ti.vulkan, offline_cache=False)
+def test_vulkan_prepare_preserves_per_shader_constants_in_shared_functions(tmp_path):
+    from zipfile import ZipFile
+    import numpy as np
+    from taichi_forge_runtime.aot import Runtime
+
+    def make_writer(bias):
+        @ti.kernel
+        def write(out: ti.types.ndarray(dtype=ti.i32, ndim=1), factor: ti.i32):
+            for i in range(out.shape[0]):
+                value = out[i]
+                for j in range(7):
+                    value = (value + j) * 3 % 997
+                out[i] = value + bias * factor
+
+        return write
+
+    module = ti.aot.Module(ti.vulkan)
+    for name, bias in (("left", 1103), ("right", 1109)):
+        module.add_kernel(make_writer(bias), name=name)
+    path = tmp_path / "functions.tcm"
+    module.archive(str(path))
+    with ZipFile(path) as collection:
+        meta = json.loads(collection.read("metadata.json"))
+        assert meta["metadata_version"] == 21
+        roots = [row["value"] for row in meta["shader_functions"]]
+        assert len(roots) == 2
+        common = set(ref["sha256"] for ref in roots[0]) & set(ref["sha256"] for ref in roots[1])
+        assert common
+        body = "data/" + min(common) + ".bin"
+        missing = tmp_path / "missing.tcm"
+        corrupt = tmp_path / "corrupt.tcm"
+        with ZipFile(missing, "w") as incomplete, ZipFile(corrupt, "w") as damaged:
+            for entry in collection.infolist():
+                data = collection.read(entry)
+                if entry.filename == body:
+                    data = bytes([data[0] ^ 1]) + data[1:]
+                else:
+                    incomplete.writestr(entry.filename, data)
+                damaged.writestr(entry.filename, data)
+
+    device = int(os.environ.get("TI_TEST_VULKAN_DEVICE_INDEX", 0))
+    with Runtime("vulkan", device_index=device) as runtime:
+        loaded = runtime.load_module(str(path))
+        out = runtime.ndarray("i32", (3,))
+        expected = np.arange(3, dtype=np.int32)
+        out.write(expected.tobytes())
+        for name, bias, factor in (("left", 1103, 2), ("right", 1109, 3), ("left", 1103, 2)):
+            with loaded.kernel(name).bind(out, Scalar("i32", factor)).prepare(
+                specialize=True, constant_args=(1,)
+            ) as ready:
+                ready.submit().wait()
+            for j in range(7):
+                expected = (expected + j) * 3 % 997
+            expected += bias * factor
+            np.testing.assert_array_equal(np.frombuffer(out.read(), dtype=np.int32), expected)
+        for broken, error in ((missing, "missing"), (corrupt, "integrity validation")):
+            incomplete = runtime.load_module(str(broken))
+            kernel = incomplete.kernel("left")
+            with pytest.raises(RuntimeError, match=error):
+                kernel.bind(out, Scalar("i32", 2)).prepare(specialize=True, constant_args=(1,))
+
+
+@test_utils.test(arch=ti.vulkan, offline_cache=False)
 def test_same_vulkan_task_name_can_have_different_payloads(tmp_path):
     from zipfile import ZipFile
     from taichi_forge_runtime.aot import Runtime
@@ -37,7 +100,9 @@ def test_same_vulkan_task_name_can_have_different_payloads(tmp_path):
         meta = json.loads(archive.read("metadata.json"))
         assert meta["kernels"][0]["tasks_attribs"][0]["name"] == meta["kernels"][1]["tasks_attribs"][0]["name"]
         assert meta["task_shader_sources"] and meta["metadata_version"] >= 20
-        assert len({archive.read(p) for p in archive.namelist() if p.endswith(".spv")}) == 2
+        payloads = [p for p in archive.namelist() if p.endswith((".spv", ".spvroot"))]
+        assert len(payloads) == 2
+        assert archive.read(payloads[0]) != archive.read(payloads[1])
     with Runtime("vulkan", device_index=int(os.environ.get("TI_TEST_VULKAN_DEVICE_INDEX", 0))) as runtime:
         loaded = runtime.load_module(str(path))
         out = runtime.ndarray("i32", (1,))

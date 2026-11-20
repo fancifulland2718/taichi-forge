@@ -1,10 +1,13 @@
 #include "taichi/runtime/gfx/aot_module_loader_impl.h"
 
 #include <algorithm>
+#include <cstring>
+#include <limits>
 #include <set>
 #include <type_traits>
 #include <unordered_set>
 
+#include "spirv/unified1/spirv.hpp"
 #include "taichi/runtime/gfx/runtime.h"
 #include "taichi/runtime/gfx/range_dispatch.h"
 #include "taichi/runtime/gfx/cooperative_matrix.h"
@@ -90,7 +93,8 @@ class AotModuleImpl : public aot::Module {
             (const char *)metadata_json.data(),
             (const char *)(metadata_json.data() + metadata_json.size()));
         liong::json::deserialize(json, ti_aot_data_);
-        if (!ti_aot_data_.shader_aliases.empty() || !ti_aot_data_.task_shader_sources.empty()) {
+        if (!ti_aot_data_.shader_aliases.empty() || !ti_aot_data_.task_shader_sources.empty() ||
+            !ti_aot_data_.shader_functions.empty()) {
           if (ti_aot_data_.metadata_version < 19)
             throw std::invalid_argument("Shader aliases require GFX AOT metadata v19");
           std::unordered_set<std::string> names;
@@ -119,6 +123,11 @@ class AotModuleImpl : public aot::Module {
             for (const auto &[task, source] : tasks)
               if (!valid_source(source))
                 throw std::invalid_argument("Invalid GFX AOT shader source");
+          for (const auto &[name, refs] : ti_aot_data_.shader_functions) {
+            if (!valid_source(name) || refs.empty() || ti_aot_data_.metadata_version < 21 ||
+                device_api_backend_ != Arch::vulkan)
+              throw std::invalid_argument("Invalid Vulkan shared shader function source");
+          }
         }
         // Legacy metadata permits omitted fields. A selected strategy is an
         // explicit versioned contract and must never inherit a missing field.
@@ -744,12 +753,40 @@ class AotModuleImpl : public aot::Module {
     return false;
   }
 
+  const std::string &shader_source(size_t index, size_t task) const {
+    const auto &name = ti_aot_data_.kernels[index].tasks_attribs[task].name;
+    const auto overrides = ti_aot_data_.task_shader_sources.find(index);
+    if (overrides != ti_aot_data_.task_shader_sources.end()) {
+      const auto found = overrides->second.find(task);
+      if (found != overrides->second.end())
+        return found->second;
+    }
+    const auto alias = ti_aot_data_.shader_aliases.find(name);
+    return alias == ti_aot_data_.shader_aliases.end() ? name : alias->second;
+  }
+
+  bool has_shared_functions(const std::string &name) const {
+    if (ti_aot_data_.shader_functions.empty())
+      return false;
+    const auto found = kernel_indices_.find(name);
+    if (found != kernel_indices_.end()) {
+      for (size_t i = 0; i < ti_aot_data_.kernels[found->second].tasks_attribs.size(); ++i) {
+        if (ti_aot_data_.shader_functions.count(shader_source(found->second, i)))
+          return true;
+      }
+    }
+    return false;
+  }
+
   bool get_kernel_params_by_name(const std::string &name,
-                                 GfxRuntime::RegisterParams &kernel) {
+                                 GfxRuntime::RegisterParams &kernel,
+                                 bool defer_code) {
     auto found = kernel_indices_.find(name);
     if (found != kernel_indices_.end()) {
       const size_t i = found->second;
-      if (source_ && !load_shader(*source_, i)) {
+      if (defer_code && !shader_codes_[i])
+        shader_codes_[i] = std::make_shared<ShaderCode>();
+      if (source_ && !defer_code && !load_shader(*source_, i)) {
         throw aot::ArtifactLoadError(shader_errors_[i]);
       }
       kernel.kernel_attribs = ti_aot_data_.kernels[i];
@@ -775,19 +812,27 @@ class AotModuleImpl : public aot::Module {
   std::unique_ptr<aot::Kernel> make_new_kernel(
       const std::string &name) override {
     GfxRuntime::RegisterParams kparams;
-    if (!get_kernel_params_by_name(name, kparams)) {
+    auto range = range_selections_.find(name);
+    const bool defer_code = source_ && range == range_selections_.end() &&
+                            has_shared_functions(name);
+    if (!get_kernel_params_by_name(name, kparams, defer_code)) {
       TI_DEBUG("Failed to load kernel {}", name);
       return nullptr;
     }
     const size_t index = kernel_indices_.at(name);
     auto &registration = registered_kernels_[index];
-    if (!registration)
+    if (!registration) {
       registration = std::make_shared<AotKernelRegistration>();
-    auto range = range_selections_.find(name);
+      if (defer_code) {
+        registration->load_code = [this, index] {
+          if (!load_shader(*source_, index))
+            throw aot::ArtifactLoadError(shader_errors_[index]);
+        };
+      }
+    }
     const std::vector<uint32_t> tasks =
         range == range_selections_.end() ? std::vector<uint32_t>{} : range->second;
-    // Lookup already validated the payload and resource contract. A Vulkan
-    // prepare can compile the selected specialization directly from params.
+    // A Vulkan prepare can compile the selected specialization directly.
     if (device_api_backend_ == Arch::vulkan && tasks.empty())
       return std::make_unique<KernelImpl>(
           runtime_, std::move(kparams), nullptr, tasks, registration);
@@ -810,47 +855,96 @@ class AotModuleImpl : public aot::Module {
     return std::make_unique<FieldImpl>(runtime_, field);
   }
 
+  using ShaderCode = std::vector<std::vector<uint32_t>>;
+  struct LinkedFunction {
+    const uint32_t *data;
+    size_t words;
+  };
+
+  void link_functions(const io::VirtualDir &dir,
+                      const std::string &source,
+                      const std::vector<AotShaderFunction> &refs,
+                      std::vector<uint32_t> &code) {
+    std::vector<uint32_t> root;
+    if (!dir.load_file(source + ".spvroot", root) || root.size() < 5)
+      throw std::invalid_argument("Cannot read Vulkan shader root");
+    size_t local = 0;
+    for (const auto &ref : refs) {
+      if (ref.offset_words < std::max(size_t(5), code.size()) ||
+          ref.offset_words - code.size() > root.size() - local ||
+          ref.size_words < 6 ||
+          ref.size_words > std::numeric_limits<size_t>::max() / sizeof(uint32_t))
+        throw std::invalid_argument("Invalid shared shader function extent");
+      const size_t next = local + (ref.offset_words - code.size());
+      code.insert(code.end(), root.begin() + local, root.begin() + next);
+      local = next;
+      const auto cached = linked_functions_.find(ref.sha256);
+      if (cached != linked_functions_.end()) {
+        if (cached->second.words != ref.size_words)
+          throw std::invalid_argument("Shared shader function size mismatch");
+        const auto *first = cached->second.data;
+        code.insert(code.end(), first, first + ref.size_words);
+      } else {
+        auto bytes = load_data_from(&dir, ref.sha256, ref.size_words * sizeof(uint32_t));
+        const size_t start = code.size();
+        code.resize(start + ref.size_words);
+        std::memcpy(code.data() + start, bytes.data(), bytes.size());
+        if (code[start] != ((5u << 16) | spv::OpFunction) ||
+            code.back() != ((1u << 16) | spv::OpFunctionEnd))
+          throw std::invalid_argument("Invalid SPIR-V function body");
+      }
+    }
+    code.insert(code.end(), root.begin() + local, root.end());
+  }
+
   bool load_shader(const io::VirtualDir &dir, size_t index) {
-    if (shader_codes_[index])
+    // The cache borrows spans of previously verified immutable task code.
+    // Publish them only after the whole kernel passes its ABI checks.
+    std::lock_guard<std::mutex> guard(shader_mutex_);
+    const auto &tasks = ti_aot_data_.kernels[index].tasks_attribs;
+    if (shader_codes_[index] && shader_codes_[index]->size() == tasks.size())
       return true;
     if (!shader_errors_[index].empty())
       return false;
     std::vector<std::vector<uint32_t>> codes;
-    const auto &tasks = ti_aot_data_.kernels[index].tasks_attribs;
-    const auto overrides = ti_aot_data_.task_shader_sources.find(index);
+    std::vector<const std::vector<AotShaderFunction> *> function_refs;
     for (size_t i = 0; i < tasks.size(); ++i) {
       const auto &task = tasks[i];
-      const auto alias = ti_aot_data_.shader_aliases.find(task.name);
-      auto source = alias == ti_aot_data_.shader_aliases.end() ? task.name : alias->second;
-      if (overrides != ti_aot_data_.task_shader_sources.end()) {
-        const auto found = overrides->second.find(i);
-        if (found != overrides->second.end())
-          source = found->second;
-      }
-      const std::string path = source + ".spv";
+      const auto &source = shader_source(index, i);
       std::vector<uint32_t> code;
-      if (!dir.load_file(path, code)) {
-        shader_errors_[index] = "Cannot read SPIR-V payload: " + path;
-        return false;
-      }
-      if (code.size() < 5 || code[0] != 0x07230203) {
-        shader_errors_[index] = "Invalid SPIR-V header: " + path;
-        return false;
-      }
       try {
+        const auto refs = ti_aot_data_.shader_functions.find(source);
+        if (refs != ti_aot_data_.shader_functions.end()) {
+          link_functions(dir, source, refs->second, code);
+          function_refs.push_back(&refs->second);
+        } else {
+          if (!dir.load_file(source + ".spv", code))
+            throw std::invalid_argument("Cannot read SPIR-V payload");
+          function_refs.push_back(nullptr);
+        }
+        if (code.size() < 5 || code[0] != 0x07230203)
+          throw std::invalid_argument("Invalid SPIR-V header");
         if (spirv::runtime_affine_arrays(code) != ti_aot_data_.kernels[index].runtime_affine_arrays)
           throw std::invalid_argument("GFX affine array metadata differs from compiled SPIR-V");
         validate_cooperative_matrix_metadata(
             task, code, ti_aot_data_.metadata_version);
       } catch (const std::exception &error) {
-        shader_errors_[index] = path + ": " + error.what();
+        shader_errors_[index] = source + ": " + error.what();
         return false;
       }
       codes.emplace_back(std::move(code));
     }
-    shader_codes_[index] =
-        std::make_shared<const std::vector<std::vector<uint32_t>>>(
-            std::move(codes));
+    if (!shader_codes_[index])
+      shader_codes_[index] = std::make_shared<ShaderCode>();
+    *shader_codes_[index] = std::move(codes);
+    for (size_t i = 0; i < function_refs.size(); ++i) {
+      if (function_refs[i]) {
+        for (const auto &ref : *function_refs[i]) {
+          const auto *body = (*shader_codes_[index])[i].data() + ref.offset_words;
+          linked_functions_.try_emplace(ref.sha256, LinkedFunction{body, ref.size_words});
+        }
+      }
+    }
     return true;
   }
 
@@ -870,8 +964,9 @@ class AotModuleImpl : public aot::Module {
   std::shared_ptr<const io::VirtualDir> source_;
   TaichiAotData ti_aot_data_;
   DeviceCapabilityConfig required_caps_;
-  std::vector<std::shared_ptr<const std::vector<std::vector<uint32_t>>>>
-      shader_codes_;
+  std::mutex shader_mutex_;
+  std::vector<std::shared_ptr<ShaderCode>> shader_codes_;
+  std::unordered_map<std::string, LinkedFunction> linked_functions_;
   std::vector<std::string> shader_errors_;
   std::unordered_map<std::string, size_t> kernel_indices_;
   std::unordered_map<size_t, std::shared_ptr<AotKernelRegistration>> registered_kernels_;

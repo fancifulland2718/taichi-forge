@@ -1,4 +1,5 @@
 #include "taichi/runtime/gfx/aot_module_builder_impl.h"
+#include "taichi/runtime/gfx/aot_shader_functions.h"
 #include "taichi/runtime/gfx/range_dispatch.h"
 #include "taichi/program/kernel_compile_request.h"
 
@@ -48,17 +49,6 @@ std::map<int, int> AotModuleBuilderImpl::exported_snode_tree_bindings() const {
   return result;
 }
 
-std::string AotModuleBuilderImpl::write_spv_file(
-    const std::string &output_dir,
-    const std::string &name,
-    const std::vector<uint32_t> &source_code) const {
-  const std::string spv_path = fmt::format("{}/{}.spv", output_dir, name);
-  std::ofstream fs(spv_path, std::ios_base::binary | std::ios::trunc);
-  fs.write((char *)source_code.data(), source_code.size() * sizeof(uint32_t));
-  fs.close();
-  return name + ".spv";
-}
-
 void AotModuleBuilderImpl::dump(const std::string &output_dir,
                                 const std::string &filename) const {
   TI_WARN_IF(!filename.empty(),
@@ -68,7 +58,7 @@ void AotModuleBuilderImpl::dump(const std::string &output_dir,
   // The words stay owned by the builder for the duration of dump(). Compare
   // complete byte strings, leaving launch, binding and specialization metadata
   // on their original logical tasks.
-  std::unordered_map<std::string_view, std::string> stored_shaders;
+  StoredShaders stored_shaders;
   std::unordered_map<std::string, std::string> default_sources;
   std::map<std::string, std::string> shader_aliases;
   decltype(ti_aot_data_.task_shader_sources) task_shader_sources;
@@ -87,7 +77,6 @@ void AotModuleBuilderImpl::dump(const std::string &output_dir,
             match->second = TaichiAotData::indexed_shader(i, j);
             std::filesystem::create_directories(std::filesystem::path(output_dir) / "shader_blobs");
           }
-          write_spv_file(output_dir, match->second, words);
         }
         if (previous == default_sources.end()) {
           default_sources.emplace(task.name, match->second);
@@ -110,6 +99,8 @@ void AotModuleBuilderImpl::dump(const std::string &output_dir,
     artifact.kernel_aliases = ti_aot_data_.kernel_aliases;
     artifact.shader_aliases = std::move(shader_aliases);
     artifact.task_shader_sources = std::move(task_shader_sources);
+    artifact.shader_functions = write_aot_shaders(
+        output_dir, stored_shaders, config_.arch == Arch::vulkan && !config_.debug);
     artifact.fields = ti_aot_data_.fields;
     artifact.required_caps = ti_aot_data_.required_caps;
     const auto module_ids = exported_snode_tree_bindings();
@@ -195,6 +186,8 @@ void AotModuleBuilderImpl::dump(const std::string &output_dir,
     if (!artifact.shader_aliases.empty())
       artifact.metadata_version = std::max(artifact.metadata_version, uint32_t(19));
     if (!artifact.task_shader_sources.empty())
+      artifact.metadata_version = std::max(artifact.metadata_version, uint32_t(20));
+    if (!artifact.shader_functions.empty())
       artifact.metadata_version = TaichiAotData::kMetadataVersion;
     std::string json = liong::json::print(liong::json::serialize(artifact));
     aot::write_root_storage_views(root_storage_views_, module_ids, output_dir);

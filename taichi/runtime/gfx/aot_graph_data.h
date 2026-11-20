@@ -1,5 +1,6 @@
 #pragma once
 #include <exception>
+#include <functional>
 #include <mutex>
 
 #include "taichi/runtime/gfx/runtime.h"
@@ -9,10 +10,20 @@ namespace gfx {
 // Public kernel aliases share one physical registration. The module can
 // retire a used handle without materializing an unused one on destruction.
 struct AotKernelRegistration {
+  // Only split, owned Vulkan artifacts need assembly. Alias lookups and
+  // construction of a LaunchContext can use the callable ABI immediately.
+  std::function<void()> load_code;
+
+  void materialize_code() {
+    if (load_code)
+      std::call_once(code_once, load_code);
+  }
+
   GfxRuntime::KernelHandle get(GfxRuntime &runtime,
                                const GfxRuntime::RegisterParams &params) {
     std::call_once(once, [&] {
       try {
+        materialize_code();
         handle = runtime.register_taichi_kernel(params);
       } catch (...) {
         failure = std::current_exception();
@@ -26,6 +37,7 @@ struct AotKernelRegistration {
   GfxRuntime::KernelHandle handle;
 
  private:
+  std::once_flag code_once;
   std::once_flag once;
   std::exception_ptr failure;
 };
@@ -104,6 +116,8 @@ class KernelImpl : public aot::Kernel {
   }
 
   const GfxRuntime::RegisterParams &params() {
+    if (registration_)
+      registration_->materialize_code();
     return params_;
   }
 
