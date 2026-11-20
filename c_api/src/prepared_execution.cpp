@@ -156,6 +156,7 @@ struct PreparedExecution {
   PreparedExecutionInstance domain_registration;
   std::shared_ptr<PreparedDomainInstance> domain_instance;
 #ifdef TI_WITH_VULKAN
+  gfx::GfxRuntime *graph_submission_runtime{nullptr};
   std::shared_ptr<gfx::GfxRuntime::FixedGraphWorkspace> vulkan_workspace;
   std::shared_ptr<const vulkan::ExecutionDomain::Commands> vulkan_workspace_initialization;
 #endif
@@ -398,6 +399,10 @@ struct PreparedExecution {
 #ifdef TI_WITH_VULKAN
     if (auto *gfx = dynamic_cast<::GfxRuntime *>(&runtime))
       gfx_runtime = &gfx->get_gfx_runtime();
+    // Publish complete default-queue graphs and plans. Direct kernels can be
+    // part of a larger recording, and independent domains own their queue.
+    if (runtime.arch == taichi::Arch::vulkan && !domain && !kernel_arguments)
+      graph_submission_runtime = gfx_runtime;
 #endif
     try {
       // Cold binding precedes capture of domain/family operands. Initialization
@@ -905,6 +910,15 @@ struct PreparedExecution {
     prepare_operations(runtime, operations);
   }
 
+  void publish_graph_commands() {
+#ifdef TI_WITH_VULKAN
+    // Submit any remaining primary without waiting. Stream submission still
+    // joins an enclosing batch and retains the recording and its resources.
+    if (graph_submission_runtime)
+      graph_submission_runtime->flush_if_pending();
+#endif
+  }
+
   void run() {
     if (!live)
       throw MemoryBindingError("Prepared execution has a retired dependency");
@@ -921,6 +935,7 @@ struct PreparedExecution {
       (void)native->submit();
     } else {
       native->run();
+      publish_graph_commands();
     }
     ++info.launches;
     result_valid = bool(kernel_result);
@@ -3322,6 +3337,8 @@ static TiBool launch_ordinary_parameters(
   std::copy_n(parameters, parameter_count, entry.submission_values.begin());
   try {
     entry.native->run_parameters(entry.submission_values);
+    if (!ticket)
+      entry.publish_graph_commands();
     ++entry.info.launches;
     if (ticket) {
       *ticket = rt.finish_submission_completion();

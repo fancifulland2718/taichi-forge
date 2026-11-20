@@ -19582,6 +19582,8 @@ def test_package_graph_prepares_live_parameters_in_execution_domain(tmp_path, mo
 
 @test_utils.test(arch=ti.vulkan, offline_cache=False)
 def test_package_vulkan_graph_updates_queued_integer_arguments(tmp_path, monkeypatch):
+    from contextlib import closing
+
     source = """
 import taichi_forge as ti
 @ti.kernel
@@ -19635,6 +19637,32 @@ def graph():
         for i in (0, 1, 2, 4):
             assert output[4 + extents[i]] == epochs[i]
         np.testing.assert_array_equal(second.to_numpy()[:5], [0, -(2**50), 0, 0, 0])
+
+    # Inspect the shared Vulkan queue before any readback can flush it.
+    program = ti.lang.impl.get_runtime().prog
+    queue_stats = program._debug_vulkan_queue_submission_stats
+    with ti.aot.borrow_runtime() as runtime, load_package(runtime, tmp_path / "sdk") as code:
+        graph = code.host.graph()
+        with closing(runtime.ndarray("i64", (8,))) as out:
+            args = dict(out=out, slot=0, epoch=0, count=0)
+            graph.run(args)
+            graph.run(dict(args, epoch=1))
+            runtime.wait()
+            before = queue_stats()["queue_submit_calls"]
+            graph.run(dict(args, epoch=2))
+            assert queue_stats()["queue_submit_calls"] == before + 1
+            transaction = program._begin_runtime_submission_transaction(False)
+            try:
+                batched = queue_stats()["queue_submit_calls"]
+                graph.run(dict(args, slot=1, epoch=3))
+                graph.run(dict(args, slot=2, epoch=4))
+                inside = queue_stats()["queue_submit_calls"]
+            finally:
+                completion = transaction._finish()
+            assert inside == batched
+            assert queue_stats()["queue_submit_calls"] == batched + 1
+            completion.wait()
+            np.testing.assert_array_equal(out.to_numpy()[:3], [2, 3, 4])
 
 
 @test_utils.test(arch=ti.cuda, offline_cache=False)
