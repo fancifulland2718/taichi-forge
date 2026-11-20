@@ -31,7 +31,9 @@ struct AotShaderFunction {
   size_t offset_words{0};
   size_t size_words{0};
   std::string sha256;
-  TI_IO_DEF(offset_words, size_words, sha256);
+  // A nonempty base makes sha256 the digest of the per-word differences.
+  std::string base_sha256;
+  TI_IO_DEF(offset_words, size_words, sha256, base_sha256);
 };
 
 // Entry-specific execution policy is separate from shared shader identity.
@@ -63,7 +65,8 @@ struct TaichiAotData {
   // v19 allows logical tasks to reference an identical stored shader.
   // v20 identifies distinct shaders that have the same logical task name.
   // v21 stores identical SPIR-V function bodies once across task shaders.
-  static constexpr uint32_t kMetadataVersion = 21;
+  // v22 can store the operands of same-shape functions relative to one base.
+  static constexpr uint32_t kMetadataVersion = 22;
   static std::string indexed_shader(size_t kernel, size_t task) {
     return "shader_blobs/" + std::to_string(kernel) + "_" + std::to_string(task);
   }

@@ -54,7 +54,9 @@ def test_vulkan_aot_local_values_across_loops_and_branches(tmp_path):
 
 
 @test_utils.test(arch=ti.vulkan, offline_cache=False)
-def test_vulkan_prepare_preserves_per_shader_constants_in_shared_functions(tmp_path):
+@pytest.mark.parametrize("relative", [False, True])
+def test_vulkan_prepare_preserves_per_shader_constants_in_shared_functions(tmp_path, relative):
+    import hashlib
     from zipfile import ZipFile
     import numpy as np
     from taichi_forge_runtime.aot import Runtime
@@ -75,14 +77,44 @@ def test_vulkan_prepare_preserves_per_shader_constants_in_shared_functions(tmp_p
         module.add_kernel(make_writer(bias), name=name)
     path = tmp_path / "functions.tcm"
     module.archive(str(path))
+    if relative:
+        # Exercise a nonzero relocation in a small executable fixture. The
+        # original return type, function ID and root constants must survive.
+        relative_path = tmp_path / "relative.tcm"
+        with ZipFile(path) as source, ZipFile(relative_path, "w") as target:
+            meta = json.loads(source.read("metadata.json"))
+            groups = [row["value"] for row in meta["shader_functions"]]
+            shared = min(set.intersection(*({r["sha256"] for r in refs} for refs in groups)))
+            name = "data/" + shared + ".bin"
+            words = np.frombuffer(source.read(name), dtype="<u4")
+            base = words.copy()
+            base[2] += 1
+            relocation = {}
+            for key, data in (("base_sha256", base.tobytes()), ("sha256", (words - base).tobytes())):
+                relocation[key] = hashlib.sha256(data).hexdigest()
+                target.writestr("data/" + relocation[key] + ".bin", data)
+            for refs in groups:
+                for ref in refs:
+                    if ref["sha256"] == shared:
+                        ref.update(relocation)
+            meta["metadata_version"] = 22
+            for item in source.infolist():
+                if item.filename == name:
+                    continue
+                target.writestr(item, json.dumps(meta) if item.filename == "metadata.json"
+                                else source.read(item))
+        path = relative_path
     with ZipFile(path) as collection:
         meta = json.loads(collection.read("metadata.json"))
-        assert meta["metadata_version"] == 21
+        assert meta["metadata_version"] == (22 if relative else 21)
         roots = [row["value"] for row in meta["shader_functions"]]
         assert len(roots) == 2
         common = set(ref["sha256"] for ref in roots[0]) & set(ref["sha256"] for ref in roots[1])
-        assert common
-        body = "data/" + min(common) + ".bin"
+        if relative:
+            body = "data/" + relocation["base_sha256"] + ".bin"
+        else:
+            assert common
+            body = "data/" + min(common) + ".bin"
         missing = tmp_path / "missing.tcm"
         corrupt = tmp_path / "corrupt.tcm"
         with ZipFile(missing, "w") as incomplete, ZipFile(corrupt, "w") as damaged:

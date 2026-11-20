@@ -3,6 +3,7 @@
 #include "taichi/runtime/gfx/range_dispatch.h"
 #include "taichi/program/kernel_compile_request.h"
 
+#include <algorithm>
 #include <fstream>
 #include <filesystem>
 #include <set>
@@ -187,8 +188,17 @@ void AotModuleBuilderImpl::dump(const std::string &output_dir,
       artifact.metadata_version = std::max(artifact.metadata_version, uint32_t(19));
     if (!artifact.task_shader_sources.empty())
       artifact.metadata_version = std::max(artifact.metadata_version, uint32_t(20));
-    if (!artifact.shader_functions.empty())
-      artifact.metadata_version = TaichiAotData::kMetadataVersion;
+    if (!artifact.shader_functions.empty()) {
+      artifact.metadata_version = 21;
+      for (const auto &[_, refs] : artifact.shader_functions) {
+        if (std::any_of(refs.begin(), refs.end(), [](const auto &ref) {
+              return !ref.base_sha256.empty();
+            })) {
+          artifact.metadata_version = TaichiAotData::kMetadataVersion;
+          break;
+        }
+      }
+    }
     std::string json = liong::json::print(liong::json::serialize(artifact));
     aot::write_root_storage_views(root_storage_views_, module_ids, output_dir);
     std::fstream f(output_dir + "/metadata.json",

@@ -870,6 +870,33 @@ class AotModuleImpl : public aot::Module {
     size_t words;
   };
 
+  static std::string function_key(const AotShaderFunction &ref) {
+    return ref.base_sha256.empty() ? ref.sha256
+                                   : ref.base_sha256 + "/" + ref.sha256;
+  }
+
+  void copy_function_base(const io::VirtualDir &dir,
+                          const std::string &digest,
+                          size_t words,
+                          uint32_t *out) {
+    const auto linked = linked_functions_.find(digest);
+    const size_t size = words * sizeof(uint32_t);
+    if (linked != linked_functions_.end()) {
+      if (linked->second.words != words)
+        throw std::invalid_argument("Shared shader base size mismatch");
+      std::memcpy(out, linked->second.data, size);
+      return;
+    }
+    auto stored = function_bases_.find(digest);
+    if (stored == function_bases_.end())
+      stored =
+          function_bases_.emplace(digest, load_data_from(&dir, digest, size))
+              .first;
+    if (stored->second.size() != size)
+      throw std::invalid_argument("Shared shader base size mismatch");
+    std::memcpy(out, stored->second.data(), size);
+  }
+
   void link_functions(const io::VirtualDir &dir,
                       const std::string &source,
                       const std::vector<AotShaderFunction> &refs,
@@ -887,17 +914,35 @@ class AotModuleImpl : public aot::Module {
       const size_t next = local + (ref.offset_words - code.size());
       code.insert(code.end(), root.begin() + local, root.begin() + next);
       local = next;
-      const auto cached = linked_functions_.find(ref.sha256);
+      const auto cached = linked_functions_.find(function_key(ref));
       if (cached != linked_functions_.end()) {
         if (cached->second.words != ref.size_words)
           throw std::invalid_argument("Shared shader function size mismatch");
         const auto *first = cached->second.data;
         code.insert(code.end(), first, first + ref.size_words);
       } else {
-        auto bytes = load_data_from(&dir, ref.sha256, ref.size_words * sizeof(uint32_t));
         const size_t start = code.size();
         code.resize(start + ref.size_words);
-        std::memcpy(code.data() + start, bytes.data(), bytes.size());
+        auto *body = code.data() + start;
+        if (!ref.base_sha256.empty()) {
+          if (ti_aot_data_.metadata_version < 22)
+            throw std::invalid_argument(
+                "Shared shader base requires GFX AOT metadata v22");
+          copy_function_base(dir, ref.base_sha256, ref.size_words, body);
+          const auto delta = load_data_from(&dir, ref.sha256,
+                                            ref.size_words * sizeof(uint32_t));
+          for (size_t j = 0; j < ref.size_words; ++j) {
+            uint32_t word;
+            std::memcpy(&word, delta.data() + j * sizeof(word), sizeof(word));
+            body[j] += word;
+          }
+        } else if (function_bases_.count(ref.sha256)) {
+          copy_function_base(dir, ref.sha256, ref.size_words, body);
+        } else {
+          const auto bytes = load_data_from(&dir, ref.sha256,
+                                            ref.size_words * sizeof(uint32_t));
+          std::memcpy(body, bytes.data(), bytes.size());
+        }
         if (code[start] != ((5u << 16) | spv::OpFunction) ||
             code.back() != ((1u << 16) | spv::OpFunctionEnd))
           throw std::invalid_argument("Invalid SPIR-V function body");
@@ -950,7 +995,9 @@ class AotModuleImpl : public aot::Module {
       if (function_refs[i]) {
         for (const auto &ref : *function_refs[i]) {
           const auto *body = (*shader_codes_[index])[i].data() + ref.offset_words;
-          linked_functions_.try_emplace(ref.sha256, LinkedFunction{body, ref.size_words});
+          linked_functions_.try_emplace(function_key(ref), LinkedFunction{body, ref.size_words});
+          if (ref.base_sha256.empty())
+            function_bases_.erase(ref.sha256);
         }
       }
     }
@@ -976,6 +1023,8 @@ class AotModuleImpl : public aot::Module {
   std::mutex shader_mutex_;
   std::vector<std::shared_ptr<ShaderCode>> shader_codes_;
   std::unordered_map<std::string, LinkedFunction> linked_functions_;
+  // Own a requested base only until a resident shader supplies that span.
+  std::unordered_map<std::string, std::vector<uint8_t>> function_bases_;
   std::vector<std::string> shader_errors_;
   std::unordered_map<std::string, size_t> kernel_indices_;
   std::unordered_map<size_t, std::shared_ptr<AotKernelRegistration>> registered_kernels_;
