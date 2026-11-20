@@ -105,12 +105,11 @@ class InlineSyntax(ast.NodeVisitor):
             if isinstance(node, ast.Name) and isinstance(node.ctx, ast.Store)
         } - parameters
         self.locals = parameters | self.assigned
-        returns = [
-            node for statement in function.body for node in ast.walk(statement) if isinstance(node, ast.Return)
-        ]
+        body = self.return_block(function.body)
+        returns = [node for statement in body for node in ast.walk(statement) if isinstance(node, ast.Return)]
         # Preserve regular ti.func return semantics; no early-return rewriting.
         if returns:
-            if len(returns) != 1 or returns[0] is not function.body[-1] or (returns[0].value is None and not allow_void):
+            if len(returns) != 1 or returns[0] is not body[-1] or (returns[0].value is None and not allow_void):
                 self.safe = False
         elif not allow_void:
             self.safe = False
@@ -120,6 +119,9 @@ class InlineSyntax(ast.NodeVisitor):
         except RecursionError:
             # An optional proof must not impose a new expression-depth limit.
             self.safe = False
+
+    def return_block(self, body):
+        return body
 
     def generic_visit(self, node):
         if type(node) not in _ALLOWED and not isinstance(node, (ast.operator, ast.unaryop, ast.boolop, ast.cmpop)):

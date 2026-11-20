@@ -4747,6 +4747,19 @@ def test_portable_helper_records_compiler_target_queries():
             y = x + 2
         return y
 
+    @ti.func
+    def native_level(x: ti.i32) -> ti.i32:
+        if ti.static(ti.lang.impl.get_runtime().prog.get_device_caps().get(ti.DeviceCapability.spirv_has_float64)):
+            x += 1
+        return x
+
+    @ti.func
+    def terminal(flag: ti.template(), owner: ti.template()) -> ti.i32:
+        if ti.static(flag):
+            return 3
+        else:
+            return owner.missing[0]
+
     def other_cfg():
         raise AssertionError("dependency analysis called an application config getter")
 
@@ -4763,6 +4776,64 @@ def test_portable_helper_records_compiler_target_queries():
     assert ("extension", target, int(ti.extension.data64), supported) in analysis.dependencies(by_capability.func, (1,))
     assert ("arch", target) in analysis.dependencies(by_target.func, (1,))
     assert analysis.dependencies(by_owner.func, (1,)) is None
+    cap = ti.DeviceCapability.spirv_has_float64
+    level = ti.lang.impl.get_runtime().prog.get_device_caps().get(cap)
+    assert ("device_capability", cap, level) in analysis.dependencies(native_level.func, (1,))
+    assert analysis.dependencies(terminal.func, (True, object())) is not None
+    assert analysis.dependencies(terminal.func, (False, object())) is None
+
+
+@test_utils.test(arch=ti.vulkan, offline_cache=False)
+def test_package_vulkan_retains_atomic_array_effects_in_helpers(tmp_path, monkeypatch):
+    from taichi_forge.aot._package_compilation import PackageCompilation
+    from taichi_forge.lang._jit_function_library import FunctionDependencyAnalysis
+
+    @ti.func
+    def local_atomic(local: ti.template()) -> ti.i32:
+        return ti.atomic_add(local[0], 1)
+
+    analysis = FunctionDependencyAnalysis(allow_fields=False, package_fields=True)
+    assert analysis.dependencies(local_atomic.func, (object(),)) is None
+    package = _source_package(tmp_path, monkeypatch, """
+import taichi_forge as ti
+
+@ti.func
+def advance(state: ti.types.ndarray(dtype=ti.i32, ndim=1)) -> ti.i32:
+    result = 0
+    cell = ti.Matrix([[1, 2], [3, 4]])
+    for i, j in ti.static(ti.ndrange(2, 2)):
+        row = cell[i, :]
+        result += ti.atomic_add(state[0], row[j])
+    return result
+
+@ti.kernel
+def step(state: ti.types.ndarray(dtype=ti.i32, ndim=1)):
+    for i in range(1):
+        advance(state)
+        state[1] = advance(state)
+""", initializer="from .model import step\n")
+    retained = set()
+    original = PackageCompilation.library_function
+
+    def observe(compilation, source, args, **options):
+        unit = original(compilation, source, args, **options)
+        if unit is not None:
+            retained.add(source.func.__name__)
+        return unit
+
+    monkeypatch.setattr(PackageCompilation, "library_function", observe)
+    sdk = tmp_path / "sdk"
+    ti.aot.export_package(package, sdk)
+    assert "advance" in retained
+    with Runtime("vulkan", device_index=int(os.environ.get("TI_TEST_VULKAN_DEVICE_INDEX", 0))) as runtime, \
+            load_package(runtime, sdk) as code:
+        state = runtime.ndarray("i32", (2,))
+        result = np.zeros(2, dtype=np.int32)
+        state.write(result)
+        for expected in ([20, 50], [40, 130]):
+            code.host.step(state)
+            state.read_into(result)
+            np.testing.assert_array_equal(result, expected)
 
 
 def test_portable_helper_distinguishes_none_template_from_optional_resource():

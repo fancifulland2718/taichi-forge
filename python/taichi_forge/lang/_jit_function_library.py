@@ -15,11 +15,14 @@ from taichi_forge.lang._function_library import FunctionLibrary
 from taichi_forge.lang.ast._inline_ir import InlineSyntax, _MISSING, _PURE_CALLS, _path, scalar_key
 from taichi_forge.lang.field import Field
 from taichi_forge._lib import core
-from taichi_forge.lang import impl, misc
+from taichi_forge.lang import impl, misc, ops
+from taichi_forge.lang._ndrange import ndrange
+from taichi_forge.lang.enums import DeviceCapability
 from taichi_forge.lang.matrix import Matrix, Vector, MatrixType
 from taichi_forge.lang.struct import Struct
 from taichi_forge.math.mathimpl import isinf, isnan
 from taichi_forge.types import primitive_types, template
+from taichi_forge.types.ndarray_type import NdarrayType
 
 _VALUE_METHODS = frozenset(
     (
@@ -41,6 +44,8 @@ _VALUE_METHODS = frozenset(
 )
 _VALUE_ATTRIBUTES = frozenset(("x", "y", "z", "w", "n", "m"))
 _CONSTRUCTORS = (Matrix, Vector, Matrix.zero, Vector.zero, Matrix.identity)
+_CAPABILITY_NAMES = frozenset(name for name, value in vars(DeviceCapability).items()
+                              if type(value) is str and value == name)
 
 
 def _resolve(path, scope):
@@ -150,8 +155,27 @@ class FunctionSyntax(InlineSyntax):
         self.single_assignments = single_assignments
         super().__init__(tree, allow_void=package_fields)
 
+    def return_block(self, body):
+        # A terminal static if can have a syntactic return in both branches.
+        # Lowering sees only the branch chosen by the proven template value.
+        while self.package_fields and body and isinstance(body[-1], ast.If):
+            branch = body[-1]
+            test = branch.test
+            if not isinstance(test, ast.Call) or len(test.args) != 1 or test.keywords:
+                break
+            path = _path(test.func)
+            if not path or path[0] in self.locals or _resolve(path, self.scope)[0] is not impl.static:
+                break
+            value = _literal(test.args[0], self.static_scope)
+            if type(value) is not bool:
+                break
+            body = [*body[:-1], *(branch.body if value else branch.orelse)]
+        return body
+
     def generic_visit(self, node):
-        if isinstance(node, (ast.Subscript, ast.While, ast.Break, ast.Continue)):
+        if isinstance(node, (ast.Subscript, ast.While, ast.Break, ast.Continue)) or (
+            self.package_fields and isinstance(node, ast.Slice)
+        ):
             ast.NodeVisitor.generic_visit(self, node)
         else:
             super().generic_visit(node)
@@ -226,8 +250,34 @@ class FunctionSyntax(InlineSyntax):
         self.target_facts.add(("extension", int(arch), int(ext), supported))
         return supported
 
+    def _device_capability(self, node):
+        if (not self.package_fields or len(node.args) != 1 or node.keywords
+                or not isinstance(node.func, ast.Attribute) or node.func.attr != "get"):
+            return False
+        caps = node.func.value
+        if (not isinstance(caps, ast.Call) or caps.args or caps.keywords
+                or not isinstance(caps.func, ast.Attribute) or caps.func.attr != "get_device_caps"):
+            return False
+        program = caps.func.value
+        if not isinstance(program, ast.Attribute) or program.attr != "prog":
+            return False
+        runtime = program.value
+        if not isinstance(runtime, ast.Call) or runtime.args or runtime.keywords:
+            return False
+        factory, arg = _path(runtime.func), _path(node.args[0])
+        if (not factory or factory[0] in self.locals or _resolve(factory, self.scope)[0] is not impl.get_runtime
+                or not arg or len(arg) < 2 or arg[0] in self.locals
+                or _resolve(arg[:-1], self.scope)[0] is not DeviceCapability):
+            return False
+        name = vars(DeviceCapability).get(arg[-1])
+        prog = impl.get_runtime().prog
+        if type(name) is not str or name != arg[-1] or name not in _CAPABILITY_NAMES or type(prog) is not core.Program:
+            return False
+        self.target_facts.add(("device_capability", name, prog.get_device_caps().get(name)))
+        return True
+
     def visit_Call(self, node):
-        if self._target_extension(node) is not None:
+        if self._target_extension(node) is not None or self._device_capability(node):
             return
         path = _path(node.func)
         value = _resolve(path, self.scope)[0]
@@ -422,6 +472,26 @@ class FunctionDependencyAnalysis:
                     key = ("local_record",)
                 elif isinstance(value, MatrixType):
                     key = ("tensor_type", value.n, value.m, value.ndim, str(value.dtype))
+                elif self.package_fields and any(value is builtin for builtin in (ndrange, Matrix.rows, Matrix.cols)):
+                    key = ("call", id(value))
+                elif self.package_fields and value is ops.atomic_add:
+                    # A retained function may mutate a captured device field or
+                    # an explicit array descriptor. A caller's local lvalue has
+                    # no such ABI and must keep ordinary inline semantics.
+                    arrays = {a.name for a in source.arguments if isinstance(a.annotation, NdarrayType)}
+                    for call, _ in syntax.calls[path]:
+                        if len(call.args) != 2 or call.keywords or not isinstance(call.args[0], ast.Subscript):
+                            return None
+                        dest = _path(call.args[0].value)
+                        if not dest:
+                            return None
+                        if len(dest) == 1 and dest[0] in arrays:
+                            continue
+                        if dest[0] in syntax.locals and dest[0] not in bindings:
+                            return None
+                        if not isinstance(_resolve(dest, scope)[0], Field):
+                            return None
+                    key = ("atomic_add",)
                 elif (
                     id(value) in _PURE_CALLS
                     or id(value) in primitive_types.type_ids
