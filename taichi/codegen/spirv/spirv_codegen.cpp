@@ -653,49 +653,51 @@ class TaskCodegen : public IRVisitor {
   }
 
   void visit(ConstStmt *const_stmt) override {
+    // Named statements keep their own debug IDs. Compact AOT can share the
+    // same typed literal across all its uses within the shader.
     auto get_const = [&](const TypedConstant &const_val) {
       auto dt = const_val.dt.ptr_removed();
       spirv::SType stype = ir_->get_primitive_type(dt);
 
       if (dt->is_primitive(PrimitiveTypeID::f32)) {
         return ir_->float_immediate_number(
-            stype, static_cast<double>(const_val.val_f32), false);
+            stype, static_cast<double>(const_val.val_f32), compact_aot_);
       } else if (dt->is_primitive(PrimitiveTypeID::f16)) {
         // Ref: See taichi::lang::TypedConstant::TypedConstant()
         // FP16 is stored as FP32 on host side,
         // as some CPUs does not have native FP16 (and no libc support)
         return ir_->float_immediate_number(
-            stype, static_cast<double>(const_val.val_f32), false);
+            stype, static_cast<double>(const_val.val_f32), compact_aot_);
       } else if (dt->is_primitive(PrimitiveTypeID::i32)) {
         return ir_->int_immediate_number(
-            stype, static_cast<int64_t>(const_val.val_i32), false);
+            stype, static_cast<int64_t>(const_val.val_i32), compact_aot_);
       } else if (dt->is_primitive(PrimitiveTypeID::i64)) {
         return ir_->int_immediate_number(
-            stype, static_cast<int64_t>(const_val.val_i64), false);
+            stype, static_cast<int64_t>(const_val.val_i64), compact_aot_);
       } else if (dt->is_primitive(PrimitiveTypeID::f64)) {
         return ir_->float_immediate_number(
-            stype, static_cast<double>(const_val.val_f64), false);
+            stype, static_cast<double>(const_val.val_f64), compact_aot_);
       } else if (dt->is_primitive(PrimitiveTypeID::i8)) {
         return ir_->int_immediate_number(
-            stype, static_cast<int64_t>(const_val.val_i8), false);
+            stype, static_cast<int64_t>(const_val.val_i8), compact_aot_);
       } else if (dt->is_primitive(PrimitiveTypeID::i16)) {
         return ir_->int_immediate_number(
-            stype, static_cast<int64_t>(const_val.val_i16), false);
+            stype, static_cast<int64_t>(const_val.val_i16), compact_aot_);
       } else if (dt->is_primitive(PrimitiveTypeID::u1)) {
         return ir_->uint_immediate_number(
-            stype, static_cast<uint64_t>(const_val.val_u1), false);
+            stype, static_cast<uint64_t>(const_val.val_u1), compact_aot_);
       } else if (dt->is_primitive(PrimitiveTypeID::u8)) {
         return ir_->uint_immediate_number(
-            stype, static_cast<uint64_t>(const_val.val_u8), false);
+            stype, static_cast<uint64_t>(const_val.val_u8), compact_aot_);
       } else if (dt->is_primitive(PrimitiveTypeID::u16)) {
         return ir_->uint_immediate_number(
-            stype, static_cast<uint64_t>(const_val.val_u16), false);
+            stype, static_cast<uint64_t>(const_val.val_u16), compact_aot_);
       } else if (dt->is_primitive(PrimitiveTypeID::u32)) {
         return ir_->uint_immediate_number(
-            stype, static_cast<uint64_t>(const_val.val_u32), false);
+            stype, static_cast<uint64_t>(const_val.val_u32), compact_aot_);
       } else if (dt->is_primitive(PrimitiveTypeID::u64)) {
         return ir_->uint_immediate_number(
-            stype, static_cast<uint64_t>(const_val.val_u64), false);
+            stype, static_cast<uint64_t>(const_val.val_u64), compact_aot_);
       } else {
         TI_P(data_type_name(dt));
         TI_NOT_IMPLEMENTED

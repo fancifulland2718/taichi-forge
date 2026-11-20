@@ -1,7 +1,6 @@
 #include "taichi/rhi/vulkan/shader_specialization.h"
 
 #include <stdexcept>
-#include <unordered_set>
 #include <map>
 #include <limits>
 
@@ -142,7 +141,6 @@ std::vector<uint32_t> specialize_spirv_arguments(
   passes.AddPass<spvtools::opt::FlattenDecorationPass>();
   if (passes.Run(context.get()) == spvtools::opt::Pass::Status::Failure)
     throw std::invalid_argument("Cannot prepare SPIR-V arguments: " + diagnostic);
-  auto *defs = context->get_def_use_mgr();
   std::map<uint32_t, uint32_t> bindings, sets, strides;
   std::map<std::pair<uint32_t, uint32_t>, uint32_t> offsets;
   for (auto &instruction : context->module()->annotations()) {
@@ -179,39 +177,51 @@ std::vector<uint32_t> specialize_spirv_arguments(
   std::map<uint32_t, ShaderArgumentConstant> constants;
   for (const auto &value : values)
     constants.emplace(value.offset, value);
-  std::vector<spvtools::opt::Instruction *> replaced;
-  context->module()->ForEachInst([&](spvtools::opt::Instruction *load) {
-    // Additional memory operands (volatile/visibility/etc.) retain their load.
-    if (load->opcode() != spv::Op::OpLoad || load->NumInOperands() != 1)
-      return;
-    auto *type = defs->GetDef(load->type_id());
-    if (!type || type->opcode() != spv::Op::OpTypeInt)
-      return;
-    std::vector<std::vector<uint32_t>> chains;
-    uint32_t pointer = load->GetSingleWordInOperand(0);
-    std::unordered_set<uint32_t> seen;
-    while (pointer != argument) {
-      auto *chain = defs->GetDef(pointer);
-      if (!chain || !seen.insert(pointer).second ||
-          (chain->opcode() != spv::Op::OpAccessChain &&
-           chain->opcode() != spv::Op::OpInBoundsAccessChain))
-        return;
-      std::vector<uint32_t> indices;
-      for (uint32_t i = 1; i < chain->NumInOperands(); ++i) {
-        auto *index = defs->GetDef(chain->GetSingleWordInOperand(i));
-        if (!index || index->opcode() != spv::Op::OpConstant ||
-            index->NumInOperands() != 1)
+  // Only pointers derived from the argument UBO can denote a prepare-time
+  // fact. Follow their uses once per access chain, sharing the accumulated ABI
+  // offset across its loads. Other buffers and dynamic indices stay live.
+  auto *defs = context->get_def_use_mgr();
+  struct Address {
+    uint32_t pointer;
+    uint32_t type;
+    uint32_t offset;
+  };
+  auto *pointer_type = defs->GetDef(defs->GetDef(argument)->type_id());
+  if (!pointer_type || pointer_type->opcode() != spv::Op::OpTypePointer)
+    return code;
+  std::vector<Address> pending{
+      {argument, pointer_type->GetSingleWordInOperand(1), 0}};
+  using Instruction = spvtools::opt::Instruction;
+  std::vector<std::pair<Instruction *, ShaderArgumentConstant>> loads;
+  while (!pending.empty()) {
+    const auto base = pending.back();
+    pending.pop_back();
+    defs->ForEachUser(base.pointer, [&](Instruction *user) {
+      const auto op = user->opcode();
+      if (op == spv::Op::OpLoad) {
+        // Loads with explicit memory operands retain their access semantics.
+        if (user->NumInOperands() != 1 || user->type_id() != base.type)
           return;
-        indices.push_back(index->GetSingleWordInOperand(0));
+        const auto value = constants.find(base.offset);
+        if (value == constants.end())
+          return;
+        auto *type = defs->GetDef(base.type);
+        if (type && type->opcode() == spv::Op::OpTypeInt &&
+            type->GetSingleWordInOperand(0) == value->second.bits)
+          loads.emplace_back(user, value->second);
+        return;
       }
-      chains.push_back(std::move(indices));
-      pointer = chain->GetSingleWordInOperand(0);
-    }
-    auto *pointer_type = defs->GetDef(defs->GetDef(argument)->type_id());
-    uint32_t member_type = pointer_type->GetSingleWordInOperand(1);
-    uint64_t offset = 0;
-    for (auto chain = chains.rbegin(); chain != chains.rend(); ++chain) {
-      for (const auto index : *chain) {
+      if ((op != spv::Op::OpAccessChain && op != spv::Op::OpInBoundsAccessChain) ||
+          user->GetSingleWordInOperand(0) != base.pointer)
+        return;
+      uint32_t member_type = base.type;
+      uint64_t offset = base.offset;
+      for (uint32_t i = 1; i < user->NumInOperands(); ++i) {
+        auto *index_def = defs->GetDef(user->GetSingleWordInOperand(i));
+        if (!index_def || index_def->opcode() != spv::Op::OpConstant ||
+            index_def->NumInOperands() != 1)
+          return;
+        const auto index = index_def->GetSingleWordInOperand(0);
         auto *aggregate = defs->GetDef(member_type);
         if (!aggregate)
           return;
@@ -230,7 +240,7 @@ std::vector<uint32_t> specialize_spirv_arguments(
         } else if (aggregate->opcode() == spv::Op::OpTypeVector) {
           member_type = aggregate->GetSingleWordInOperand(0);
           auto *element = defs->GetDef(member_type);
-          if (element->opcode() != spv::Op::OpTypeInt ||
+          if (!element || element->opcode() != spv::Op::OpTypeInt ||
               index >= aggregate->GetSingleWordInOperand(1))
             return;
           offset += uint64_t(index) * (element->GetSingleWordInOperand(0) / 8);
@@ -240,32 +250,31 @@ std::vector<uint32_t> specialize_spirv_arguments(
         if (offset > std::numeric_limits<uint32_t>::max())
           return;
       }
-    }
-    const auto value = constants.find(static_cast<uint32_t>(offset));
-    if (member_type != load->type_id() || value == constants.end() ||
-        type->GetSingleWordInOperand(0) != value->second.bits)
-      return;
-    auto *manager = context->get_constant_mgr();
-    // SPIR-V integer literals smaller than one word must be sign extended.
-    const auto *constant = manager->GetIntConst(
-        value->second.value, value->second.bits,
-        type->GetSingleWordInOperand(1) != 0);
-    auto *definition = manager->GetDefiningInstruction(constant, load->type_id());
-    context->ReplaceAllUsesWith(load->result_id(), definition->result_id());
-    replaced.push_back(load);
-  });
-  if (replaced.empty())
+      pending.push_back({user->result_id(), member_type, static_cast<uint32_t>(offset)});
+    });
+  }
+  if (loads.empty())
     return code;
   if (folded)
-    *folded = replaced.size();
-  for (auto *load : replaced)
+    *folded = loads.size();
+  auto *manager = context->get_constant_mgr();
+  for (const auto &[load, value] : loads) {
+    auto *type = defs->GetDef(load->type_id());
+    const auto *constant = manager->GetIntConst(
+        value.value, value.bits, type->GetSingleWordInOperand(1) != 0);
+    auto *definition = manager->GetDefiningInstruction(constant, load->type_id());
+    context->ReplaceAllUsesWith(load->result_id(), definition->result_id());
     context->KillInst(load);
+  }
   // Kernel metadata owns the descriptor ABI and prepared resource views reuse
   // it. Fold unreachable computations while retaining their binding declarations;
   // removing a variable here would disagree with that immutable task contract.
   context->set_preserve_bindings(true);
   context->set_preserve_spec_constants(true);
   passes.AddPass<spvtools::opt::CCPPass>();
+  // Remove the branches disabled by the bound arguments before simplifying
+  // their bodies. Simplification can expose additional constant conditions.
+  passes.AddPass<spvtools::opt::DeadBranchElimPass>();
   passes.AddPass<spvtools::opt::SimplificationPass>();
   passes.AddPass<spvtools::opt::DeadBranchElimPass>();
   passes.AddPass<spvtools::opt::AggressiveDCEPass>(false, false);
