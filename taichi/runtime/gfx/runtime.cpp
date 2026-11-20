@@ -35,6 +35,7 @@
 #include <iostream>
 #include <iterator>
 #include <limits>
+#include <map>
 #include <memory>
 #include <optional>
 #include <unordered_map>
@@ -3787,6 +3788,100 @@ void GfxRuntime::prepare_detached_kernel_workspace(
   }
 }
 
+#ifdef TI_WITH_VULKAN
+namespace {
+// All mutable arguments belong to private uniform buffers of this recording.
+// Prepare their disjoint word ranges once. Each submit embeds the live values
+// in its primary command buffer, including when a previous replay is in flight.
+auto prepare_uniform_updates(
+    vulkan::VulkanDevice &device,
+    const GfxRuntime::GraphReplayExecutable::Slot &slot,
+    const GfxRuntime::FixedGraphParameters &parameters) {
+  struct Word {
+    size_t slot;
+    unsigned shift;
+  };
+  struct Range {
+    VkBuffer buffer;
+    size_t offset, first, count;
+  };
+  std::vector<Word> words;
+  std::vector<Range> ranges;
+  std::vector<vkapi::IVkBuffer> buffers;
+  std::vector<VkBufferMemoryBarrier> before, after;
+  TI_ERROR_IF(parameters.patches.size() != slot.args_buffers.size(),
+              "Vulkan Graph parameter dispatch count mismatch");
+  for (size_t i = 0; i < parameters.patches.size(); ++i) {
+    if (parameters.patches[i].empty())
+      continue;
+    const auto size = slot.args_buffer_sizes[i];
+    std::map<size_t, Word> layout;
+    for (const auto &patch : parameters.patches[i]) {
+      TI_ERROR_IF(
+          patch.slot >= parameters.values->size() ||
+              (patch.bytes != 4 && patch.bytes != 8) ||
+              patch.argument_offset % 4 || patch.argument_offset > size ||
+              patch.bytes > size - patch.argument_offset,
+          "Vulkan Graph parameter is outside the compiled argument buffer");
+      for (size_t j = 0; j < patch.bytes; j += 4)
+        layout[patch.argument_offset + j] = {patch.slot, unsigned(8 * j)};
+    }
+    const auto buffer = device.get_vkbuffer(*slot.args_buffers[i]);
+    buffers.push_back(buffer);
+    VkBufferMemoryBarrier barrier{VK_STRUCTURE_TYPE_BUFFER_MEMORY_BARRIER};
+    barrier.srcQueueFamilyIndex = barrier.dstQueueFamilyIndex =
+        VK_QUEUE_FAMILY_IGNORED;
+    barrier.buffer = buffer->buffer;
+    barrier.offset = layout.begin()->first;
+    barrier.size = layout.rbegin()->first + 4 - barrier.offset;
+    barrier.srcAccessMask =
+        VK_ACCESS_UNIFORM_READ_BIT | VK_ACCESS_TRANSFER_WRITE_BIT;
+    barrier.dstAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+    before.push_back(barrier);
+    barrier.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+    barrier.dstAccessMask = VK_ACCESS_UNIFORM_READ_BIT;
+    after.push_back(barrier);
+    for (const auto &[offset, source] : layout) {
+      // vkCmdUpdateBuffer accepts up to 64 KiB. Gaps can contain immutable
+      // arguments or padding and must never be overwritten.
+      if (ranges.empty() || ranges.back().buffer != buffer->buffer ||
+          ranges.back().offset + ranges.back().count * 4 != offset ||
+          ranges.back().count == 65536 / 4)
+        ranges.push_back({buffer->buffer, offset, words.size(), 0});
+      ++ranges.back().count;
+      words.push_back(source);
+    }
+  }
+  std::vector<uint32_t> data(words.size());
+  return [values = parameters.values,
+          data = std::move(data), words = std::move(words),
+          ranges = std::move(ranges), buffers = std::move(buffers),
+          before = std::move(before),
+          after = std::move(after)](CommandList *list) mutable {
+    if (ranges.empty())
+      return;
+    auto cmd =
+        static_cast<vulkan::VulkanCommandList *>(list)->vk_command_buffer();
+    cmd->refs.insert(cmd->refs.end(), buffers.begin(), buffers.end());
+    const auto &vk = cmd->device.functions();
+    vk.vkCmdPipelineBarrier(
+        cmd->buffer,
+        VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT | VK_PIPELINE_STAGE_TRANSFER_BIT,
+        VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 0, nullptr, uint32_t(before.size()),
+        before.data(), 0, nullptr);
+    for (size_t i = 0; i < words.size(); ++i)
+      data[i] = uint32_t((*values)[words[i].slot] >> words[i].shift);
+    for (const auto &range : ranges)
+      vk.vkCmdUpdateBuffer(cmd->buffer, range.buffer, range.offset,
+                           range.count * 4, data.data() + range.first);
+    vk.vkCmdPipelineBarrier(cmd->buffer, VK_PIPELINE_STAGE_TRANSFER_BIT,
+                            VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, 0, 0, nullptr,
+                            uint32_t(after.size()), after.data(), 0, nullptr);
+  };
+}
+}  // namespace
+#endif
+
 GfxRuntime::GraphReplayState GfxRuntime::record_fixed_graph(
     const std::vector<GraphRecordingOperation> &operations,
     std::vector<std::shared_ptr<void>> owners,
@@ -4261,26 +4356,15 @@ GfxRuntime::GraphReplayState GfxRuntime::record_fixed_graph(
       commands->image_transition(image, final_layout, layout);
     }
   }
-  struct ParameterTarget {
-    DevicePtr destination;
-    std::size_t index;
-    std::size_t bytes;
-  };
-  std::vector<ParameterTarget> targets;
+  std::function<void(CommandList *)> update_parameters;
   if (parameters) {
-    TI_ERROR_IF(parameters->patches.size() != prepared.size(),
-                "Vulkan Graph parameter dispatch count mismatch");
-    for (std::size_t i = 0; i < prepared.size(); ++i) {
-      for (const auto &patch : parameters->patches[i]) {
-        const auto size = slot.args_buffer_sizes[i];
-        TI_ERROR_IF(patch.slot >= parameters->values->size() ||
-                        (patch.bytes != 4 && patch.bytes != 8) || patch.argument_offset % 4 ||
-                        patch.argument_offset > size || patch.bytes > size - patch.argument_offset,
-                    "Vulkan Graph parameter is outside the compiled argument buffer");
-        targets.push_back({slot.args_buffers[i]->get_ptr(patch.argument_offset),
-                           patch.slot, patch.bytes});
-      }
-    }
+#ifdef TI_WITH_VULKAN
+    auto *vk = dynamic_cast<vulkan::VulkanDevice *>(device_);
+    TI_ERROR_IF(!vk, "Parameterized Vulkan Graph requires a Vulkan device");
+    update_parameters = prepare_uniform_updates(*vk, slot, *parameters);
+#else
+    TI_ERROR("Parameterized Vulkan Graph requires Vulkan");
+#endif
   }
   for (auto bytes : slot.args_buffer_sizes) {
     state.fixed_argument_bytes += bytes;
@@ -4346,28 +4430,11 @@ GfxRuntime::GraphReplayState GfxRuntime::record_fixed_graph(
           : submit_compute_commands(primary_slot->cmdlist.get());
     };
   }
-  if (parameters) {
-    // Record values into the caller's ordered primary. A later replay can
-    // supply new bits while the previous dispatch is still reading its values.
-    // The existing secondary/primary retains the argument buffers to completion.
-    state.fixed_submit = [this, values = parameters->values, targets = std::move(targets),
+  if (update_parameters) {
+    state.fixed_submit = [this, update = std::move(update_parameters),
                           launch = std::move(state.fixed_submit)] {
       ensure_current_cmdlist();
-      for (const auto &target : targets) {
-        const auto bits = (*values)[target.index];
-        auto dst = target.destination;
-        current_cmdlist_->buffer_transition(dst, target.bytes,
-            {BufferBarrierStage::Compute, BufferBarrierAccess::UniformRead,
-             BufferBarrierStage::Transfer, BufferBarrierAccess::TransferWrite});
-        current_cmdlist_->buffer_fill(dst, 4, static_cast<std::uint32_t>(bits));
-        if (target.bytes == 8) {
-          dst.offset += 4;
-          current_cmdlist_->buffer_fill(dst, 4, static_cast<std::uint32_t>(bits >> 32));
-        }
-        current_cmdlist_->buffer_transition(target.destination, target.bytes,
-            {BufferBarrierStage::Transfer, BufferBarrierAccess::TransferWrite,
-             BufferBarrierStage::Compute, BufferBarrierAccess::UniformRead});
-      }
+      update(current_cmdlist_.get());
       launch();
     };
   }
