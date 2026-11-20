@@ -4670,6 +4670,81 @@ def test_portable_helper_checks_optional_field_behind_static_branch():
     assert FunctionDependencyAnalysis(allow_fields=False).dependencies(source, args) is None
 
 
+def test_portable_helper_distinguishes_none_template_from_optional_resource():
+    from taichi_forge.lang._jit_function_library import FunctionDependencyAnalysis
+
+    @ti.func
+    def update(state: ti.template() = None) -> ti.i32:
+        value = 1
+        if ti.static(state is not None):
+            state.value += 1
+            value = state.value
+        return value
+
+    @ti.data_oriented
+    class Owner:
+        def __init__(self):
+            self.optional = None
+
+        @ti.func
+        def default(self) -> ti.i32:
+            return update()
+
+        @ti.func
+        def forwarded(self) -> ti.i32:
+            return update(self.optional)
+
+    @ti.func
+    def rebound(state: ti.template()) -> ti.i32:
+        state = 1
+        value = 0
+        if ti.static(state is None):
+            value = 1
+        return value
+
+    analysis = FunctionDependencyAnalysis(allow_fields=False, package_fields=True)
+    owner = Owner()
+    assert analysis.dependencies(Owner.default.func, (owner,)) is not None
+    assert analysis.dependencies(Owner.forwarded.func, (owner,)) is None
+    assert analysis.dependencies(update.func, (object(),)) is None
+    assert analysis.dependencies(rebound.func, (None,)) is None
+
+
+@test_utils.test(arch=ti.vulkan, offline_cache=False)
+def test_package_keeps_local_template_writes_at_the_call_site(tmp_path, monkeypatch):
+    package = _source_package(tmp_path, monkeypatch, """
+import taichi_forge as ti
+
+@ti.func
+def update(x: ti.i32, state: ti.template() = None) -> ti.i32:
+    value = x
+    if ti.static(state is None):
+        value += 2
+    else:
+        state.total += x
+    return value
+
+@ti.kernel
+def step(a: ti.types.ndarray(dtype=ti.i32, ndim=1)):
+    for i in range(a.shape[0]):
+        state = ti.Struct(total=a[i])
+        update(update(a[i]), state)
+        a[i] = state.total
+""", initializer="from .model import step\n")
+    sdk = tmp_path / "state"
+    ti.aot.export_package(package, sdk)
+    device = int(os.environ.get("TI_TEST_VULKAN_DEVICE_INDEX", 0))
+    with Runtime("vulkan", device_index=device) as runtime, load_package(runtime, sdk) as code:
+        array = runtime.ndarray("i32", (4,))
+        initial = np.array([-1, 0, 3, 7], dtype=np.int32)
+        array.write(initial)
+        for _ in range(2):
+            code.host.step(array)
+        result = np.empty_like(initial)
+        array.read_into(result)
+        np.testing.assert_array_equal(result, 4 * initial + 6)
+
+
 @test_utils.test(arch=[ti.cpu, ti.cuda, ti.vulkan], offline_cache=False)
 def test_package_defers_value_helper_until_materialization(tmp_path, monkeypatch):
     package = _source_package(tmp_path, monkeypatch, """
@@ -4696,8 +4771,12 @@ class Model:
         return self.out[i]
 
     @ti.func
-    def add_to_output(self, i: ti.i32, delta: ti.i32) -> ti.i32:
-        self.out[i] = self.read_output(i) + delta
+    def add_to_output(self, i: ti.i32, delta: ti.i32, state: ti.template() = None) -> ti.i32:
+        if ti.static(state is None):
+            if (ti.Vector([delta, -delta]) != 0).any() and not ti.math.isinf(delta) and not ti.math.isnan(delta):
+                self.out[i] = self.read_output(i) + delta
+        else:
+            state.value += delta
         return self.read_output(i)
 
     @ti.func

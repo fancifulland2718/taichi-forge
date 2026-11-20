@@ -15,6 +15,7 @@ from taichi_forge.lang.ast._inline_ir import InlineSyntax, _MISSING, _PURE_CALLS
 from taichi_forge.lang.field import Field
 from taichi_forge.lang import impl
 from taichi_forge.lang.matrix import Matrix, Vector, MatrixType
+from taichi_forge.math.mathimpl import isinf, isnan
 from taichi_forge.types import primitive_types, template
 
 _VALUE_METHODS = frozenset(
@@ -24,6 +25,8 @@ _VALUE_METHODS = frozenset(
         "norm",
         "norm_sqr",
         "normalized",
+        "any",
+        "all",
         "sum",
         "min",
         "max",
@@ -94,13 +97,14 @@ def _literal(node, scope, *, objects=False):
 
 
 class FunctionSyntax(InlineSyntax):
-    def __init__(self, tree, scope, bindings, static_scope, *, allow_void=False):
+    def __init__(self, tree, scope, bindings, static_scope, *, package_fields=False):
         self.scope = scope
         self.static_scope = static_scope
         self.bindings = bindings
+        self.absent_templates = {name for name, value in bindings.items() if value is None} if package_fields else ()
         self.calls = {}
         self.forwarded = set()
-        super().__init__(tree, allow_void=allow_void)
+        super().__init__(tree, allow_void=package_fields)
 
     def generic_visit(self, node):
         if isinstance(node, (ast.Subscript, ast.While, ast.Break, ast.Continue)):
@@ -140,7 +144,18 @@ class FunctionSyntax(InlineSyntax):
             and not node.test.keywords
             and _resolve(_path(node.test.func), self.scope)[0] is impl.static
         ):
-            value = _literal(node.test.args[0], self.static_scope)
+            predicate = node.test.args[0]
+            if (
+                isinstance(predicate, ast.Compare) and len(predicate.ops) == 1
+                and isinstance(predicate.ops[0], (ast.Is, ast.IsNot))
+                and isinstance(predicate.left, ast.Name) and predicate.left.id in self.absent_templates
+                and isinstance(predicate.comparators[0], ast.Constant) and predicate.comparators[0].value is None
+            ):
+                # A literal None template has no resource ABI. Optional package
+                # inputs carry presence references, even in an absent witness.
+                value = isinstance(predicate.ops[0], ast.Is)
+            else:
+                value = _literal(predicate, self.static_scope)
             if type(value) in (bool, int, float):
                 for statement in node.body if value else node.orelse:
                     self.visit(statement)
@@ -161,6 +176,8 @@ class FunctionSyntax(InlineSyntax):
             self.references.add((path, kind))
 
     def visit_Name(self, node):
+        if isinstance(node.ctx, ast.Store) and node.id in self.absent_templates:
+            self.safe = False  # The entry binding no longer proves later identity tests.
         if (
             id(node) not in self.forwarded
             and isinstance(node.ctx, ast.Load)
@@ -195,9 +212,9 @@ class FunctionDependencyAnalysis:
         scope.update(bindings)
         # JIT specializes the bound object. In a portable package the same
         # owner property can become a live scalar and guard an array capture.
-        # Only literal predicates can prune that resource-use proof.
+        # Only literals and explicit None template bindings can prune it.
         syntax = FunctionSyntax(self._syntax[source], scope, bindings, scope if self.allow_fields else {},
-                                allow_void=self.package_fields)
+                                package_fields=self.package_fields)
         if not syntax.safe or any(name in scope for name in syntax.assigned):
             return None
         dependencies = []
@@ -205,7 +222,11 @@ class FunctionDependencyAnalysis:
             value, receiver = _resolve(path, scope)
             if kind == "call":
                 wrapped = _wrapped(value)
-                if wrapped is not None:
+                if self.package_fields and (value is isinf or value is isnan):
+                    # These DSL builtins classify bits at the configured float
+                    # precision. Keep their normal lowering inside the unit.
+                    key = ("fp_classification", wrapped, impl.get_runtime().default_fp)
+                elif wrapped is not None:
                     children = []
                     for call in syntax.calls.get(path, ()):
                         values = [_literal(arg, scope, objects=True) for arg in call.args]
