@@ -4667,6 +4667,9 @@ class Model:
 def test_portable_helper_checks_optional_field_behind_static_branch():
     from taichi_forge.lang._jit_function_library import FunctionDependencyAnalysis
 
+    def fallback():
+        raise AssertionError("dependency inspection executed a Python default")
+
     @ti.data_oriented
     class Mesh:
         def __init__(self):
@@ -4679,6 +4682,10 @@ def test_portable_helper_checks_optional_field_behind_static_branch():
             if ti.static(self.mixed):
                 value = self.sidedness[i]
             return value
+
+        @ti.func
+        def with_fallback(self) -> ti.i32:
+            return ti.static(getattr(self, "mixed", fallback()))
 
         @ti.func
         def record_phase(self, state: ti.template(), phase: ti.template()):
@@ -4699,6 +4706,75 @@ def test_portable_helper_checks_optional_field_behind_static_branch():
     assert FunctionDependencyAnalysis(allow_fields=False).dependencies(source, args) is None
     portable = FunctionDependencyAnalysis(allow_fields=False, package_fields=True)
     assert portable.dependencies(Mesh.with_local_record.func, args) is None
+    declared = FunctionDependencyAnalysis(
+        allow_fields=False, package_fields=True,
+        declared_static=lambda owner, path: owner is mesh and path == ("mixed",))
+    assert declared.dependencies(source, args) is not None
+    assert declared.dependencies(Mesh.with_fallback.func, (mesh,)) is None
+
+
+@test_utils.test(arch=ti.vulkan, offline_cache=False)
+def test_package_retains_helpers_for_declared_owner_branches(tmp_path, monkeypatch):
+    package = _source_package(tmp_path, monkeypatch, """
+import taichi_forge as ti
+
+@ti.data_oriented
+class Model:
+    def __init__(self, n: int, extra: bool):
+        self.n = n
+        self.extra = extra
+        s = ti.experimental.ResourceScope(self)
+        s.static('extra', choices=(False, True))
+        s.out = s.field(ti.i32, shape=s.dim('n'))
+        self.bias = None
+        if self.extra:
+            s.bias = s.field(ti.i32, shape=s.dim('n'), initialization='zero')
+
+    @ti.func
+    def sample(self, i: ti.i32, x: ti.i32) -> ti.i32:
+        if ti.static(getattr(self, 'extra', False)):
+            return ti.Vector([self.bias[(i + j) % self.n] + x for j in ti.static(range(2))]).sum()
+        else:
+            return x + 3
+
+    @ti.kernel
+    def step(self, x: ti.i32):
+        for i in range(self.n):
+            self.out[i] = self.sample(i, x) + self.sample(i, i)
+""")
+    def run(model):
+        values = []
+        for x in (1, 7, -2):
+            if model.extra:
+                model.bias.from_numpy(x + np.arange(5, dtype=np.int32))
+            model.step(x)
+            values.append(model.out.to_numpy())
+        return values
+
+    expected = [run(package.Model(5, extra)) for extra in (False, True)]
+    sdk = tmp_path / 'sdk'
+    ti.aot.export_package(package, sdk)
+    with zipfile.ZipFile(sdk / 'code.tcm') as archive:
+        calls = []
+        for name in archive.namelist():
+            if name.endswith('.spv'):
+                words = np.frombuffer(archive.read(name), dtype='<u4')
+                callees = []
+                pos = 5
+                while pos < len(words):
+                    width, opcode = divmod(int(words[pos]), 1 << 16)
+                    assert width
+                    if opcode == 57:  # OpFunctionCall
+                        callees.append(words[pos + 3])
+                    pos += width
+                if callees:
+                    calls.append(callees)
+        assert len(calls) == 2
+        assert all(len(callees) == 2 and len(set(callees)) == 1 for callees in calls)
+    device = int(os.environ.get("TI_TEST_VULKAN_DEVICE_INDEX", 0))
+    with Runtime("vulkan", device_index=device) as runtime, load_package(runtime, sdk) as code:
+        for extra, reference in zip((False, True), expected):
+            np.testing.assert_array_equal(run(code.host.Model(5, extra)), reference)
 
 
 def test_portable_helper_keeps_owner_flags_live_when_forwarded():
@@ -4708,6 +4784,12 @@ def test_portable_helper_keeps_owner_flags_live_when_forwarded():
     def leaf(cooperative: ti.template() = False) -> ti.i32:
         if ti.static(cooperative):
             ti.simt.block.sync()
+        return 1
+
+    @ti.func
+    def early(short: ti.template()) -> ti.i32:
+        if ti.static(short):
+            return 2
         return 1
 
     @ti.data_oriented
@@ -4727,6 +4809,8 @@ def test_portable_helper_keeps_owner_flags_live_when_forwarded():
     assert analysis.dependencies(Owner.literal.func, (owner,)) is not None
     assert analysis.dependencies(Owner.mixed.func, (owner,)) is None
     assert analysis.dependencies(leaf.func, (True,)) is None
+    assert analysis.dependencies(early.func, (False,)) is not None
+    assert analysis.dependencies(early.func, (True,)) is None
 
 
 @test_utils.test(arch=ti.vulkan, offline_cache=False)

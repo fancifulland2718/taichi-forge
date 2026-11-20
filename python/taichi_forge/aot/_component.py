@@ -2182,6 +2182,15 @@ class _Capture:
         self.workspaces[name] = dict(dtype=str(dtype), shape=shapes)
         return LocalTensor(self, self._workspace_operand(name), index, shape, dtype)
 
+    def _receiver_path(self, owner):
+        if owner is self.owner:
+            return ()
+        return next((path for child, path in self._method_owners if child is owner), None)
+
+    def producer_static_member(self, owner, path):
+        prefix = self._receiver_path(owner)
+        return prefix is not None and type(self.declarations.get(_capture_id((*prefix, *path)))) is StaticValue
+
     def call_real_function(self, function, args):
         from taichi_forge._lib import core
         from taichi_forge.lang._local_tensor import is_model_value
@@ -2207,11 +2216,7 @@ class _Capture:
         # Python identity alone does not establish the captured declaration ABI.
         identity = (function, instance_id)
         if track_dependencies:
-            receivers = tuple(
-                (index, () if args[index] is self.owner else next(
-                    (path for child, path in self._method_owners if args[index] is child), None))
-                for index in function.template_slot_locations
-            )
+            receivers = tuple((index, self._receiver_path(args[index])) for index in function.template_slot_locations)
             if any(path is not None for _, path in receivers):
                 # Package helpers capture these receivers through declaration
                 # paths, not through the witness object's address. Preserve the

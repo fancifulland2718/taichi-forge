@@ -56,11 +56,17 @@ class PackageCompilation(FunctionLibrary):
         self.function_library = function_library
 
         if function_library and module._arch == core.vulkan:
+            from taichi_forge.lang import impl
             from taichi_forge.lang._jit_function_library import FunctionDependencyAnalysis
+
+            def declared_static(owner, path):
+                capture = getattr(impl.get_runtime().current_kernel, "_deployment_context", None)
+                return capture is not None and capture.producer_static_member(owner, path)
 
             self.allow_spirv = True
             self.spirv_descriptor_arguments = True
-            self.spirv_dependencies = FunctionDependencyAnalysis(allow_fields=False, package_fields=True)
+            self.spirv_dependencies = FunctionDependencyAnalysis(
+                allow_fields=False, package_fields=True, declared_static=declared_static)
         # Discovery has finished. Keep short-lived lowering cycles in the young
         # generations until each private definition is sealed. Otherwise the
         # automatic collector can promote them, requiring a scan of the entire

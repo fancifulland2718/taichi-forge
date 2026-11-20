@@ -83,19 +83,24 @@ def _wrapped(value):
     return None
 
 
-def _literal(node, scope, *, objects=False):
+def _literal(node, scope, *, objects=False, attribute=None):
     if isinstance(node, ast.Constant):
         return node.value if scalar_key(node.value) is not None else _MISSING
+    if attribute is not None and isinstance(node, (ast.Call, ast.Attribute)):
+        value = attribute(node)
+        if value is not _MISSING:
+            return value
     if isinstance(node, (ast.Name, ast.Attribute)):
-        value = _resolve(_path(node), scope)[0]
+        path = _path(node)
+        value = _resolve(path, scope)[0]
         return value if objects or scalar_key(value) is not None else _MISSING
     if isinstance(node, ast.UnaryOp):
-        value = _literal(node.operand, scope)
+        value = _literal(node.operand, scope, attribute=attribute)
         op = {ast.Not: operator.not_, ast.USub: operator.neg, ast.UAdd: operator.pos}.get(type(node.op))
         if type(value) in (bool, int, float) and op:
             return op(value)
     if isinstance(node, ast.BoolOp):
-        values = [_literal(arg, scope) for arg in node.values]
+        values = [_literal(arg, scope, attribute=attribute) for arg in node.values]
         if all(type(value) in (bool, int, float) for value in values):
             for value in values[:-1]:
                 if bool(value) != isinstance(node.op, ast.And):
@@ -141,10 +146,11 @@ def _literal_integer_loop(iterator, scope):
 
 class FunctionSyntax(InlineSyntax):
     def __init__(self, tree, scope, bindings, static_scope, *, package_fields=False,
-                 single_assignments=(), returned_record=None):
+                 single_assignments=(), returned_record=None, declared_static=None):
         self.scope = scope
         self.static_scope = static_scope
         self.bindings = bindings
+        self.declared_static = declared_static
         self.absent_templates = {name for name, value in bindings.items() if value is None} if package_fields else ()
         self.calls = {}
         self.target_facts = set()
@@ -155,22 +161,52 @@ class FunctionSyntax(InlineSyntax):
         self.single_assignments = single_assignments
         super().__init__(tree, allow_void=package_fields)
 
+    def static_literal(self, node):
+        return _literal(node, self.static_scope, attribute=self.member_value if self.declared_static else None)
+
+    def static_member(self, node):
+        # Component capture lowers builtin getattr on a declared member exactly
+        # like dotted access. A computed name or an effectful default still
+        # needs normal inline evaluation.
+        if isinstance(node, ast.Call):
+            target = _path(node.func)
+            if (node.keywords or len(node.args) not in (2, 3)
+                    or not isinstance(node.args[1], ast.Constant) or type(node.args[1].value) is not str
+                    or (len(node.args) == 3 and not isinstance(node.args[2], ast.Constant))
+                    or not target or target[0] in self.locals or _resolve(target, self.scope)[0] is not getattr):
+                return None
+            owner = _path(node.args[0])
+            path = (*owner, node.args[1].value) if owner else None
+        else:
+            path = _path(node)
+        if path and path[0] in self.bindings and self.declared_static(self.bindings[path[0]], path[1:]):
+            return path
+        return None
+
+    def member_value(self, node):
+        path = self.static_member(node)
+        value = _resolve(path, self.bindings)[0] if path else _MISSING
+        return value if type(value) in (bool, int, float) else _MISSING
+
     def return_block(self, body):
-        # A terminal static if can have a syntactic return in both branches.
-        # Lowering sees only the branch chosen by the proven template value.
-        while self.package_fields and body and isinstance(body[-1], ast.If):
-            branch = body[-1]
-            test = branch.test
-            if not isinstance(test, ast.Call) or len(test.args) != 1 or test.keywords:
-                break
-            path = _path(test.func)
-            if not path or path[0] in self.locals or _resolve(path, self.scope)[0] is not impl.static:
-                break
-            value = _literal(test.args[0], self.static_scope)
-            if type(value) is not bool:
-                break
-            body = [*body[:-1], *(branch.body if value else branch.orelse)]
-        return body
+        # Count returns in the same static branches the compiler will lower.
+        # Keep the suffix even after a selected return so an early return
+        # cannot silently acquire different real-function semantics.
+        if not self.package_fields:
+            return body
+        selected = []
+        for statement in body:
+            if isinstance(statement, ast.If):
+                test = statement.test
+                if isinstance(test, ast.Call) and len(test.args) == 1 and not test.keywords:
+                    path = _path(test.func)
+                    if path and path[0] not in self.locals and _resolve(path, self.scope)[0] is impl.static:
+                        value = self.static_literal(test.args[0])
+                        if type(value) is bool:
+                            selected.extend(self.return_block(statement.body if value else statement.orelse))
+                            continue
+            selected.append(statement)
+        return selected
 
     def generic_visit(self, node):
         if isinstance(node, (ast.Subscript, ast.While, ast.Break, ast.Continue)) or (
@@ -194,6 +230,28 @@ class FunctionSyntax(InlineSyntax):
                 self.visit(statement)
             return
         self.generic_visit(node)
+
+    def visit_ListComp(self, node):
+        # Fixed tensor constructors often read a field once per mathematical
+        # axis. Track the lexical indices without expanding the comprehension.
+        if not self.package_fields:
+            return self.generic_visit(node)
+        enclosing = self.local_bindings
+        self.local_bindings = enclosing.copy()
+        try:
+            for generator in node.generators:
+                if (generator.is_async or not isinstance(generator.target, ast.Name)
+                        or generator.target.id in self.scope or generator.target.id in self.local_bindings
+                        or not _literal_integer_loop(generator.iter, self.scope)):
+                    self.safe = False
+                    return
+                self.visit(generator.iter)
+                self.local_bindings[generator.target.id] = _STATIC_INTEGER
+                for condition in generator.ifs:
+                    self.visit(condition)
+            self.visit(node.elt)
+        finally:
+            self.local_bindings = enclosing
 
     def visit_Assign(self, node):
         self.generic_visit(node)
@@ -277,6 +335,11 @@ class FunctionSyntax(InlineSyntax):
         return True
 
     def visit_Call(self, node):
+        if self.declared_static is not None:
+            member = self.static_member(node)
+            if member:
+                self.references.add((member, "value"))
+                return
         if self._target_extension(node) is not None or self._device_capability(node):
             return
         path = _path(node.func)
@@ -323,7 +386,7 @@ class FunctionSyntax(InlineSyntax):
                 # inputs carry presence references, even in an absent witness.
                 value = isinstance(predicate.ops[0], ast.Is)
             else:
-                value = _literal(predicate, self.static_scope)
+                value = self.static_literal(predicate)
             if type(value) in (bool, int, float):
                 for statement in node.body if value else node.orelse:
                     self.visit(statement)
@@ -351,7 +414,8 @@ class FunctionSyntax(InlineSyntax):
                 self.safe = False
             return
         if isinstance(node.ctx, ast.Store) and (node.id in self.absent_templates
-                or (self.package_fields and node.id in self.static_scope)):
+                or (self.package_fields and node.id in self.static_scope)
+                or (self.declared_static is not None and node.id in self.bindings)):
             self.safe = False  # Rebinding invalidates the entry fact for later static tests.
         if (
             id(node) not in self.forwarded
@@ -362,9 +426,10 @@ class FunctionSyntax(InlineSyntax):
 
 
 class FunctionDependencyAnalysis:
-    def __init__(self, *, allow_fields, package_fields=False):
+    def __init__(self, *, allow_fields, package_fields=False, declared_static=None):
         self.allow_fields = allow_fields
         self.package_fields = package_fields
+        self.declared_static = declared_static
         self._syntax = {}
         self._single_assignments = {}
         self._record_factories = {}
@@ -412,11 +477,12 @@ class FunctionDependencyAnalysis:
         scope.update(bindings)
         # JIT specializes the bound object. In a portable package the same
         # owner property can become a live scalar and guard an array capture.
-        # Only bound boolean templates, literals/defaults and their proven
-        # forwards can prune package callees. Owner attributes remain live.
+        # Only bound flags and producer-static declarations can prune a package
+        # callee. Prepare facts and live scalars can share the same witness type.
         static_scope = scope if self.allow_fields else {name: bindings[name] for name in fixed_flags}
         syntax = FunctionSyntax(self._syntax[source], scope, bindings, static_scope,
                                 package_fields=self.package_fields,
+                                declared_static=self.declared_static,
                                 single_assignments=self._single_assignments.get(source, ()),
                                 returned_record=self._returned_record)
         if not syntax.safe or any(name in scope for name in syntax.assigned):
@@ -453,11 +519,13 @@ class FunctionDependencyAnalysis:
                             expr = isinstance(operand, ast.AST)
                             actual = _literal(operand, call_scope, objects=True) if expr else operand
                             if isinstance(arg.annotation, template):
+                                if actual is _MISSING and expr and self.declared_static is not None:
+                                    actual = syntax.static_literal(operand)
                                 if actual is _MISSING:
                                     return None
                                 child_bindings[arg.name] = actual
                                 if (self.package_fields and type(actual) is bool
-                                        and (not expr or _literal(operand, static_scope) is actual)):
+                                        and (not expr or syntax.static_literal(operand) is actual)):
                                     child_flags.add(arg.name)
                             elif actual is not _MISSING and actual is not _STATIC_INTEGER and scalar_key(actual) is None:
                                 child_bindings[arg.name] = actual
