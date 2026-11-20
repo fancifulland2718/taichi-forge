@@ -29,6 +29,7 @@
 // JSON serialization/deserialization.
 // @PENGUINLIONG
 #pragma once
+#include <functional>
 #include <string>
 #include <vector>
 #include <map>
@@ -357,6 +358,14 @@ struct JsonValue {
 // unsupported, `JsonException` will be raised.
 JsonValue parse(const char *beg, const char *end);
 JsonValue parse(const std::string &json_lit);
+// Consume one top-level array as it is parsed. The returned object contains
+// an empty array in its place. Other members follow the ordinary parse path.
+struct StreamedArrayField {
+  std::string name;
+  std::function<void()> begin;
+  std::function<void(const JsonValue &)> element;
+};
+JsonValue parse(const char *beg, const char *end, const StreamedArrayField &field);
 // Parse one complete document. Legacy parse() permits a trailing document;
 // versioned execution descriptions must not silently ignore trailing content.
 JsonValue parse_complete(const std::string &json_lit);

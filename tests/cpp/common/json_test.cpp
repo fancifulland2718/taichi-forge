@@ -4,6 +4,28 @@
 #include <utility>
 
 namespace liong::json {
+TEST(Json, StreamsOnlyTheSelectedTopLevelArray) {
+  std::vector<std::string> elements;
+  const StreamedArrayField field{
+      "kernels", [&] { elements.clear(); },
+      [&](const JsonValue &element) { elements.push_back(print(element)); }};
+  auto read = [&](const std::string &text) {
+    return parse(text.data(), text.data() + text.size(), field);
+  };
+  const std::string input =
+      R"({"prefix":{"kernels":[4]},"kernels":[{"kernels":[1]},2],"tail":3})";
+  auto expected = parse(input);
+  EXPECT_EQ(print(read(input)["prefix"]), print(expected["prefix"]));
+  EXPECT_EQ(elements, (std::vector<std::string>{
+                          print(expected["kernels"][size_t(0)]), "2"}));
+  auto result = read(R"({"kernels":[1],"kernels":[],"tail":3})");
+  EXPECT_TRUE(elements.empty());
+  EXPECT_TRUE(result["kernels"].arr.inner.empty());
+  EXPECT_EQ(result["tail"].num_int, 3);
+  EXPECT_THROW(read(R"({"kernels":{}})"), JsonException);
+  EXPECT_THROW(read(R"({"kernels":[1 2]})"), JsonException);
+}
+
 TEST(Json, InitializesScalarStorageForCopyAndMove) {
   const JsonValue values[] = {
       JsonValue(),

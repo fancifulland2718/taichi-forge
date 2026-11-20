@@ -89,10 +89,19 @@ class AotModuleImpl : public aot::Module {
         return;
       }
       try {
+        // Decode each kernel into its final ABI descriptor before reading the
+        // next one. The archive may describe thousands of independent kernels.
+        decltype(ti_aot_data_.kernels) kernels;
+        const liong::json::StreamedArrayField kernel_field{
+            "kernels", [&] { kernels.clear(); },
+            [&](const liong::json::JsonValue &value) {
+              liong::json::deserialize(value, kernels.emplace_back());
+            }};
         auto json = liong::json::parse(
             (const char *)metadata_json.data(),
-            (const char *)(metadata_json.data() + metadata_json.size()));
+            (const char *)(metadata_json.data() + metadata_json.size()), kernel_field);
         liong::json::deserialize(json, ti_aot_data_);
+        ti_aot_data_.kernels = std::move(kernels);
         if (!ti_aot_data_.shader_aliases.empty() || !ti_aot_data_.task_shader_sources.empty() ||
             !ti_aot_data_.shader_functions.empty()) {
           if (ti_aot_data_.metadata_version < 19)

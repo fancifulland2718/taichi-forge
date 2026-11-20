@@ -249,10 +249,13 @@ struct Tokenizer {
 
 bool try_parse_impl(Tokenizer &tokenizer,
                     JsonValue &out,
-                    bool unique_keys = false) {
+                    bool unique_keys = false,
+                    const StreamedArrayField *root_field = nullptr,
+                    const StreamedArrayField *array = nullptr) {
   JsonToken token;
   while (tokenizer.next_token(token)) {
-    JsonValue val;
+    if (array && token.ty != L_JSON_TOKEN_OPEN_BRACKET)
+      throw JsonException("expected an array for " + array->name);
     switch (token.ty) {
       case L_JSON_TOKEN_TRUE:
         out.ty = L_JSON_BOOLEAN;
@@ -279,12 +282,18 @@ bool try_parse_impl(Tokenizer &tokenizer,
         return true;
       case L_JSON_TOKEN_OPEN_BRACKET:
         out.ty = L_JSON_ARRAY;
+        if (array)
+          array->begin();
         for (;;) {
+          JsonValue val;
           if (!try_parse_impl(tokenizer, val, unique_keys)) {
             // When the array has no element.
             break;
           }
-          out.arr.inner.emplace_back(std::move(val));
+          if (array)
+            array->element(val);
+          else
+            out.arr.inner.emplace_back(std::move(val));
           if (tokenizer.next_token(token)) {
             if (token.ty == L_JSON_TOKEN_COMMA) {
               continue;
@@ -323,7 +332,10 @@ bool try_parse_impl(Tokenizer &tokenizer,
             throw JsonException("unexpected token in object");
           }
           // Match the value.
-          if (!try_parse_impl(tokenizer, val, unique_keys)) {
+          JsonValue val;
+          const auto *selected = root_field && key == root_field->name
+                                     ? root_field : nullptr;
+          if (!try_parse_impl(tokenizer, val, unique_keys, nullptr, selected)) {
             throw JsonException("unexpected end of object");
           }
           if (unique_keys && out.obj.inner.count(key))
@@ -353,16 +365,23 @@ bool try_parse_impl(Tokenizer &tokenizer,
   throw JsonException("unexpected program state");
 }
 
-JsonValue parse(const char *beg, const char *end) {
+static JsonValue parse_document(const char *beg, const char *end,
+                                const StreamedArrayField *field) {
   if (beg == nullptr || end == nullptr || beg >= end) {
     throw JsonException("json text is empty");
   }
   JsonValue rv;
   Tokenizer tokenizer(beg, end);
-  if (!try_parse_impl(tokenizer, rv)) {
+  if (!try_parse_impl(tokenizer, rv, false, field)) {
     throw JsonException("unexpected close token");
   }
   return rv;
+}
+JsonValue parse(const char *beg, const char *end) {
+  return parse_document(beg, end, nullptr);
+}
+JsonValue parse(const char *beg, const char *end, const StreamedArrayField &field) {
+  return parse_document(beg, end, &field);
 }
 JsonValue parse(const std::string &json_lit) {
   return parse(json_lit.c_str(), json_lit.c_str() + json_lit.size());
