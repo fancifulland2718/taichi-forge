@@ -7,9 +7,15 @@
 
 #include "spirv-tools/libspirv.hpp"
 #include "spirv-tools/optimizer.hpp"
+#include "source/opt/aggressive_dead_code_elim_pass.h"
 #include "source/opt/build_module.h"
+#include "source/opt/ccp_pass.h"
+#include "source/opt/dead_branch_elim_pass.h"
+#include "source/opt/flatten_decoration_pass.h"
 #include "source/opt/ir_context.h"
 #include "source/opt/constants.h"
+#include "source/opt/pass_manager.h"
+#include "source/opt/simplification_pass.h"
 #include "source/opt/type_manager.h"
 #include "source/util/parse_number.h"
 
@@ -125,17 +131,17 @@ std::vector<uint32_t> specialize_spirv_arguments(
     if (level <= SPV_MSG_ERROR)
       diagnostic = message;
   };
-  spvtools::Optimizer flatten(environment);
-  flatten.SetMessageConsumer(consumer);
-  flatten.RegisterPass(spvtools::CreateFlattenDecorationPass());
-  spvtools::OptimizerOptions options;
-  options.set_run_validator(false);
-  std::vector<uint32_t> normalized;
-  if (!flatten.Run(code.data(), code.size(), &normalized, options))
-    throw std::invalid_argument("Cannot prepare SPIR-V arguments: " + diagnostic);
-  auto context = spvtools::BuildModule(environment, consumer, normalized.data(), normalized.size());
+  auto context = spvtools::BuildModule(environment, consumer, code.data(), code.size());
   if (!context)
     throw std::invalid_argument("Cannot read SPIR-V arguments: " + diagnostic);
+  // Normalize decorations, replace ABI loads and clean up the same module.
+  // A prepared entry can have millions of instructions before specialization.
+  spvtools::opt::PassManager passes;
+  passes.SetTargetEnv(environment);
+  passes.SetMessageConsumer(consumer);
+  passes.AddPass<spvtools::opt::FlattenDecorationPass>();
+  if (passes.Run(context.get()) == spvtools::opt::Pass::Status::Failure)
+    throw std::invalid_argument("Cannot prepare SPIR-V arguments: " + diagnostic);
   auto *defs = context->get_def_use_mgr();
   std::map<uint32_t, uint32_t> bindings, sets, strides;
   std::map<std::pair<uint32_t, uint32_t>, uint32_t> offsets;
@@ -254,23 +260,19 @@ std::vector<uint32_t> specialize_spirv_arguments(
     *folded = replaced.size();
   for (auto *load : replaced)
     context->KillInst(load);
-  std::vector<uint32_t> transformed;
-  context->module()->ToBinary(&transformed, false);
-  context.reset();
-  spvtools::Optimizer optimizer(environment);
-  optimizer.SetMessageConsumer(consumer);
-  optimizer.RegisterPass(spvtools::CreateCCPPass());
-  optimizer.RegisterPass(spvtools::CreateSimplificationPass());
-  optimizer.RegisterPass(spvtools::CreateDeadBranchElimPass());
-  optimizer.RegisterPass(spvtools::CreateAggressiveDCEPass());
   // Kernel metadata owns the descriptor ABI and prepared resource views reuse
   // it. Fold unreachable computations while retaining their binding declarations;
   // removing a variable here would disagree with that immutable task contract.
-  options.set_preserve_bindings(true);
-  options.set_preserve_spec_constants(true);
-  std::vector<uint32_t> output;
-  if (!optimizer.Run(transformed.data(), transformed.size(), &output, options))
+  context->set_preserve_bindings(true);
+  context->set_preserve_spec_constants(true);
+  passes.AddPass<spvtools::opt::CCPPass>();
+  passes.AddPass<spvtools::opt::SimplificationPass>();
+  passes.AddPass<spvtools::opt::DeadBranchElimPass>();
+  passes.AddPass<spvtools::opt::AggressiveDCEPass>(false, false);
+  if (passes.Run(context.get()) == spvtools::opt::Pass::Status::Failure)
     throw std::invalid_argument("Cannot specialize SPIR-V arguments: " + diagnostic);
+  std::vector<uint32_t> output;
+  context->module()->ToBinary(&output, true);
   return output;
 }
 
