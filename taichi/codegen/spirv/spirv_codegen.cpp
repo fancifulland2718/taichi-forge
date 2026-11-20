@@ -3877,13 +3877,77 @@ class TaskCodegen : public IRVisitor {
       function_array_buffers_[{arg_id, stmt->is_grad}] = ptr_to_buffers_[stmt];
   }
 
+  // An invocation binds one layout per array. Select byte strides before
+  // applying indices, so address calculation has one live arithmetic path.
+  Value affine_byte_offset(ExternalPtrStmt *stmt,
+                           const std::vector<int> &arg_id) {
+    const auto &shape = stmt->element_shape;
+    const int rank = int(stmt->indices.size()) - int(shape.size());
+    const auto scalar_bytes =
+        uint32_t(data_type_size(stmt->ret_type.ptr_removed()));
+    uint32_t element_bytes = scalar_bytes;
+    for (int extent : shape)
+      element_bytes *= extent;
+    const auto type = ir_->i32_type();
+    const auto zero = ir_->int_immediate_number(type, 0);
+    const auto label = ir_->current_label().id;
+    if (label != stride_block_) {
+      stride_block_ = label;
+      block_strides_.clear();
+    }
+    auto &strides = block_strides_[{arg_id, stmt->ndim, rank, element_bytes}];
+    if (rank && strides.empty()) {
+      auto member = [&](int slot) {
+        auto path = arg_id;
+        path.push_back(TypeFactory::SHAPE_POS_IN_NDARRAY);
+        path.push_back(slot);
+        auto pointer = ir_->make_access_chain(
+            ir_->get_pointer_type(type, spv::StorageClassUniform),
+            get_buffer_value(BufferType::Args, PrimitiveType::i32), path);
+        return ir_->load_variable(pointer, type);
+      };
+      auto affine = ir_->make_value(
+          spv::OpINotEqual, ir_->bool_type(),
+          member(TypeFactory::affine_mode_pos_in_ndarray(stmt->ndim)), zero);
+      auto packed = ir_->uint_immediate_number(type, element_bytes);
+      strides.resize(rank);
+      for (int i = rank - 1; i >= 0; --i) {
+        auto explicit_stride =
+            member(TypeFactory::stride_pos_in_ndarray(stmt->ndim, i));
+        strides[i] = ir_->select(affine, explicit_stride, packed);
+        if (i)
+          packed = ir_->mul(packed, member(i));
+      }
+    }
+    Value offset;
+    auto append = [&](int i, Value stride) {
+      auto index = ir_->query_value(stmt->indices[i]->raw_name());
+      auto term = ir_->mul(index, stride);
+      offset = offset.id ? ir_->add(offset, term) : term;
+    };
+    for (int i = 0; i < rank; ++i)
+      append(i, strides[i]);
+    uint32_t stride = scalar_bytes;
+    for (int i = int(shape.size()) - 1; i >= 0; --i) {
+      append(rank + i, ir_->uint_immediate_number(type, stride));
+      stride *= shape[i];
+    }
+    return offset.id ? offset : zero;
+  }
+
   void visit(ExternalPtrStmt *stmt) override {
     // Used mostly for transferring data between host (e.g. numpy array) and
     // device.
     spirv::Value linear_offset = ir_->int_immediate_number(ir_->i32_type(), 0);
     const auto *argload = stmt->base_ptr->as<ArgLoadStmt>();
     const auto arg_id = descriptor_path(argload->arg_id, function_descriptors_);
-    {
+    if (compact_aot_ && stmt->byte_stride == 0 && stmt->runtime_affine) {
+      linear_offset = affine_byte_offset(stmt, arg_id);
+      if (!stmt->indices.empty() &&
+          caps_->get(DeviceCapability::spirv_has_no_integer_wrap_decoration))
+        ir_->decorate(spv::OpDecorate, linear_offset,
+                      spv::DecorationNoSignedWrap);
+    } else {
       const int num_indices = stmt->indices.size();
       std::vector<std::string> size_var_names;
       const auto &element_shape = stmt->element_shape;
@@ -7991,6 +8055,9 @@ class TaskCodegen : public IRVisitor {
   std::unordered_map<Function *, FunctionLayout> function_layouts_;
   std::map<std::pair<Function *, DescriptorPaths>, Value> function_units_;
   std::map<std::pair<std::vector<int>, bool>, BufferInfo> function_array_buffers_;
+  uint32_t stride_block_{0};
+  std::map<std::tuple<std::vector<int>, int, int, uint32_t>, std::vector<Value>>
+      block_strides_;
   std::unordered_set<Function *> active_functions_;
   std::vector<Value> function_arguments_;
   std::unordered_map<Stmt *, Value> local_values_;

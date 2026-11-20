@@ -456,6 +456,45 @@ def _interleaved_group(n):
     return schema, tree, builder.ptr
 
 
+@test_utils.test(arch=ti.vulkan, offline_cache=False)
+def test_vulkan_aot_tensor_addresses_in_packed_and_interleaved_storage(tmp_path):
+    vector_type = ti.types.vector(3, ti.f32)
+
+    @ti.kernel
+    def update(x: ti.types.ndarray(dtype=vector_type, ndim=2),
+               bias: ti.types.ndarray(dtype=ti.i32, ndim=0)):
+        for i, j in x:
+            x[i, j][1] += x[i, j][0] + 10 * i + j + bias[None]
+
+    exemplar = ti.Vector.ndarray(3, dtype=ti.f32, shape=(12, 3))
+    view = ti.experimental.ndarray_view(exemplar, slices=(slice(0, 12, 2), slice(None)))
+    module = ti.aot.Module()
+    module.add_kernel(update, template_args={"x": view, "bias": ti.ndarray(ti.i32, ())})
+    artifact = tmp_path / "tensor-addresses.tcm"
+    module.archive(str(artifact))
+    schema, tree, _ = _interleaved_group(7)
+    tree.destroy()
+    with ti.aot.borrow_runtime() as runtime, runtime.load_module(artifact) as loaded:
+        with runtime.dense_snode_group(schema.to_json(), {"N": 9}) as group:
+            packed = runtime.ndarray("f32", (9, 3), element_shape=(3,))
+            interleaved = group.member([[0, axis] for axis in (1, 2, 3)], "f32", element_shape=(3,))
+            guard = group.member([[0, 8]], "i32")
+            guard.write(np.full((9, 3), 73, dtype=np.int32))
+            bias = runtime.ndarray("i32", ())
+            bias.write(np.int32(7).tobytes())
+            for array in (packed, interleaved):
+                expected = np.arange(81, dtype=np.float32).reshape(9, 3, 3)
+                array.write(expected)
+                i, j = np.indices((9, 3))
+                for specialize in (False, True):
+                    with loaded.kernel("update").bind(array, bias).prepare(specialize=specialize) as ready:
+                        with ready.submit() as ticket:
+                            ticket.wait()
+                    expected[:, :, 1] += expected[:, :, 0] + 10 * i + j + 7
+                    np.testing.assert_array_equal(array.to_numpy(), expected)
+                np.testing.assert_array_equal(guard.to_numpy(), np.full((9, 3), 73))
+
+
 @test_utils.test(arch=[ti.cpu, ti.cuda, ti.vulkan], offline_cache=False)
 def test_interleaved_members_transfer_logical_elements_without_touching_neighbors():
     schema, producer, _ = _interleaved_group(7)
