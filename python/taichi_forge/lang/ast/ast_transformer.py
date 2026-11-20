@@ -1917,6 +1917,14 @@ class ASTTransformer(Builder):
                 statements, compilation.static_preparation.schedule_functions, scalar_helpers))
         kind = lambda expression: ASTTransformer.schedule_kind(ctx, expression)
 
+        def guarded_region(statement):
+            # A device if is already a serial control region. Its predicate,
+            # nested loops and scalar effects all depend on the outer guard.
+            # Only a static model branch can pass a guard to separate tasks.
+            if isinstance(statement, ast.If) and ASTTransformer.get_decorator(ctx, statement.test) != "static":
+                return True
+            return scalar_statement(statement, kind, scalar_helpers)
+
         def empty_value(value):
             if isinstance(value, Expr):
                 if value.is_tensor():
@@ -1935,12 +1943,18 @@ class ASTTransformer(Builder):
             index = 0
             while index < len(statements):
                 first = index
-                while index < len(statements) and scalar_statement(statements[index], kind, scalar_helpers):
+                while index < len(statements) and guarded_region(statements[index]):
                     index += 1
                 if index == first:
                     statement = statements[index]
                     if isinstance(statement, ast.For):
                         statement._uniform_loop_guard = guard
+                    elif isinstance(statement, ast.If):
+                        # The selected static arm can contain both parallel
+                        # loops and scalar effects. Forward its enclosing guard
+                        # on this visit only, including for plain Components.
+                        statement = copy.copy(statement)
+                        statement._uniform_parent_guard = guard
                     build_stmt(ctx, statement)
                     index += 1
                     continue
@@ -2014,14 +2028,15 @@ class ASTTransformer(Builder):
                     continue
                 guard = node.test.ptr if truth else ti_ops.logical_not(node.test.ptr)
                 previous = compilation.schedule_guard if compilation is not None else None
-                if previous is not None:
+                parent_guard = getattr(node, "_uniform_parent_guard", previous)
+                if parent_guard is not None:
                     if (getattr(node.test.ptr, "_uniform_extent", None) or (None,))[0] == "dim":
                         # A direct model argument is safe to read in either arm.
                         # Keep nested guards in SSA so offload can describe the
                         # range to prepare, including an inactive fallback.
-                        guard = ti_ops.bit_and(ti_ops.cmp_ne(previous, 0), ti_ops.cmp_ne(guard, 0))
+                        guard = ti_ops.bit_and(ti_ops.cmp_ne(parent_guard, 0), ti_ops.cmp_ne(guard, 0))
                     else:
-                        guard = ti_ops.logical_and(previous, guard)
+                        guard = ti_ops.logical_and(parent_guard, guard)
                 if compilation is not None:
                     compilation.schedule_guard = guard
                 try:
@@ -2082,18 +2097,17 @@ class ASTTransformer(Builder):
         build_stmt(ctx, node.test)
         is_static_if = ASTTransformer.get_decorator(ctx, node.test) == "static"
 
-        if is_static_if and is_model_value(node.test.ptr):
-            truth = getattr(node.test.ptr, "_uniform_truth", None)
+        if is_static_if:
+            model_test = is_model_value(node.test.ptr)
+            truth = getattr(node.test.ptr, "_uniform_truth", None) if model_test else bool(node.test.ptr)
             if truth is not None:
-                build_stmts(ctx, node.body if truth else node.orelse)
+                statements = node.body if truth else node.orelse
+                guard = getattr(node, "_uniform_parent_guard", None)
+                if guard is not None:
+                    ASTTransformer.build_guarded_schedule(ctx, statements, guard)
+                else:
+                    build_stmts(ctx, statements)
                 return node
-
-        if is_static_if and not is_model_value(node.test.ptr):
-            if node.test.ptr:
-                build_stmts(ctx, node.body)
-            else:
-                build_stmts(ctx, node.orelse)
-            return node
 
         if is_static_if and is_model_value(node.test.ptr) and ctx.deployment is not None:
             if ASTTransformer.build_uniform_loop_branch(ctx, node):

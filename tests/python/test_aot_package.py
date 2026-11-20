@@ -20076,6 +20076,15 @@ class Model:
         if ti.static(self.mode == 1):
             for I in ti.grouped(self.values):
                 self.values[I] += 32
+        if ti.static(self.mode == 1):
+            if self.n > 1:
+                for j in range(2):
+                    self.values[0, j] += 128
+                self.values[0, 0] += 7
+            if ti.static(True):
+                for i in range(self.n):
+                    self.values[i, 1] += 1
+                self.values[0, 1] += 3
     def graph(self):
         builder = ti.graph.GraphBuilder()
         builder.dispatch(self.step)
@@ -20096,15 +20105,18 @@ class Model:
     package = _source_package(tmp_path, monkeypatch, source)
     manifest = ti.aot.export_package(package, tmp_path / "sdk", arch=ti.cfg.arch)
     # Assert actual backend task geometry, not just equal numerical output:
-    # wrapping these loops in a device if would serialize all six loops.
+    # The loop inside the ordinary device if remains serial. The seven
+    # model-guarded loops, including the static arm, remain parallel.
     parallel = [task for task in tasks if task["task_type"] == "range_for"]
-    assert len(parallel) == 6, tasks
+    assert len(parallel) == 7, tasks
     assert not manifest["entry_families"]
     if ti.cfg.arch == ti.cuda:
         assert parallel[0]["selected_block_size"] == 128
     expected = package.Model(19, 1)
     expected.step()
-    np.testing.assert_array_equal(expected.values.to_numpy(), np.tile([61, 62], (19, 1)))
+    reference = np.tile([61, 63], (19, 1))
+    reference[0] += [135, 131]
+    np.testing.assert_array_equal(expected.values.to_numpy(), reference)
     probe = tmp_path / "consume_uniform_loops.py"
     probe.write_text(
         textwrap.dedent("""
@@ -20118,14 +20130,16 @@ class Model:
         with Runtime(sys.argv[2]) as runtime, load_package(runtime, sys.argv[1]) as library:
             for n in (3, 19):
                 active, absent = library.host.Model(n, 1), library.host.Model(n, 2)
+                reference = np.tile([61, 63], (n, 1))
+                reference[0] += [135, 131]
                 with active.graph().bind({}) as call:
                     active.mode = 2
                     absent.step()
                     call.run()
-                    np.testing.assert_array_equal(active.values.to_numpy(), np.tile([61, 62], (n, 1)))
+                    np.testing.assert_array_equal(active.values.to_numpy(), reference)
                     np.testing.assert_array_equal(absent.values.to_numpy(), 0)
                     active.step()
-                    np.testing.assert_array_equal(active.values.to_numpy(), np.tile([61, 62], (n, 1)))
+                    np.testing.assert_array_equal(active.values.to_numpy(), reference)
         print('UNIFORM_LOOPS_SOURCE_FREE_OK')
     """),
         encoding="utf8",
