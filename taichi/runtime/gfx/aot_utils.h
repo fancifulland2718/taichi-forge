@@ -33,7 +33,12 @@ struct AotShaderFunction {
   std::string sha256;
   // A nonempty base makes sha256 the digest of the per-word differences.
   std::string base_sha256;
-  TI_IO_DEF(offset_words, size_words, sha256, base_sha256);
+  // A compact relocation stores a bit per word, followed by the nonzero deltas.
+  size_t relocation_bytes{0};
+  // A single-use relocation follows the preceding instructions in the root.
+  bool relocation_in_root{false};
+  TI_IO_DEF(offset_words, size_words, sha256, base_sha256, relocation_bytes,
+            relocation_in_root);
 };
 
 // Entry-specific execution policy is separate from shared shader identity.
@@ -67,7 +72,8 @@ struct TaichiAotData {
   // v21 stores identical SPIR-V function bodies once across task shaders.
   // v22 can store the operands of same-shape functions relative to one base.
   // v23 extends single-hop sharing to complete instruction ranges.
-  static constexpr uint32_t kMetadataVersion = 23;
+  // v24 can omit unchanged operands and keep a single-use relocation in its root.
+  static constexpr uint32_t kMetadataVersion = 24;
   static std::string indexed_shader(size_t kernel, size_t task) {
     return "shader_blobs/" + std::to_string(kernel) + "_" + std::to_string(task);
   }

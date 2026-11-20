@@ -7,6 +7,7 @@
 #include <type_traits>
 #include <unordered_set>
 
+#include "external/PicoSHA2/picosha2.h"
 #include "spirv/unified1/spirv.hpp"
 #include "taichi/runtime/gfx/runtime.h"
 #include "taichi/runtime/gfx/range_dispatch.h"
@@ -868,6 +869,7 @@ class AotModuleImpl : public aot::Module {
   struct LinkedFunction {
     const uint32_t *data;
     size_t words;
+    size_t relocation_bytes;
   };
 
   static std::string function_key(const AotShaderFunction &ref) {
@@ -897,6 +899,27 @@ class AotModuleImpl : public aot::Module {
     std::memcpy(out, stored->second.data(), size);
   }
 
+  static void apply_relocation(const uint8_t *bytes,
+                               size_t size,
+                               const AotShaderFunction &ref,
+                               uint32_t *body) {
+    size_t cursor = ref.relocation_bytes ? (ref.size_words + 7) / 8 : 0;
+    if (cursor > size)
+      throw std::invalid_argument("Invalid SPIR-V relocation mask");
+    for (size_t i = 0; i < ref.size_words; ++i) {
+      if (ref.relocation_bytes && !(bytes[i / 8] & (1u << (i % 8))))
+        continue;
+      if (size - cursor < sizeof(uint32_t))
+        throw std::invalid_argument("Truncated SPIR-V relocation");
+      uint32_t word;
+      std::memcpy(&word, bytes + cursor, sizeof(word));
+      body[i] += word;
+      cursor += sizeof(word);
+    }
+    if (cursor != size)
+      throw std::invalid_argument("Invalid SPIR-V relocation length");
+  }
+
   void link_functions(const io::VirtualDir &dir,
                       const std::string &source,
                       const std::vector<AotShaderFunction> &refs,
@@ -912,12 +935,29 @@ class AotModuleImpl : public aot::Module {
           ref.size_words < min_words ||
           ref.size_words > std::numeric_limits<size_t>::max() / sizeof(uint32_t))
         throw std::invalid_argument("Invalid shared shader function extent");
+      if ((ref.relocation_bytes || ref.relocation_in_root) &&
+          (ti_aot_data_.metadata_version < 24 || ref.base_sha256.empty() ||
+           ref.relocation_bytes >= ref.size_words * sizeof(uint32_t)))
+        throw std::invalid_argument("Invalid compact SPIR-V relocation");
       const size_t next = local + (ref.offset_words - code.size());
       code.insert(code.end(), root.begin() + local, root.begin() + next);
       local = next;
+      const size_t delta_size = ref.relocation_bytes ? ref.relocation_bytes
+                                                     : ref.size_words * sizeof(uint32_t);
+      const uint8_t *inline_delta = nullptr;
+      if (ref.relocation_in_root) {
+        const size_t span = (delta_size + 3) / 4;
+        if (span > root.size() - local)
+          throw std::invalid_argument("Truncated SPIR-V root relocation");
+        inline_delta = reinterpret_cast<const uint8_t *>(root.data() + local);
+        if (picosha2::hash256_hex_string(inline_delta, inline_delta + delta_size) != ref.sha256)
+          throw std::invalid_argument("SPIR-V root relocation failed integrity validation");
+        local += span;
+      }
       const auto cached = linked_functions_.find(function_key(ref));
       if (cached != linked_functions_.end()) {
-        if (cached->second.words != ref.size_words)
+        if (cached->second.words != ref.size_words ||
+            cached->second.relocation_bytes != ref.relocation_bytes)
           throw std::invalid_argument("Shared shader function size mismatch");
         const auto *first = cached->second.data;
         code.insert(code.end(), first, first + ref.size_words);
@@ -930,13 +970,10 @@ class AotModuleImpl : public aot::Module {
             throw std::invalid_argument(
                 "Shared shader base requires GFX AOT metadata v22");
           copy_function_base(dir, ref.base_sha256, ref.size_words, body);
-          const auto delta = load_data_from(&dir, ref.sha256,
-                                            ref.size_words * sizeof(uint32_t));
-          for (size_t j = 0; j < ref.size_words; ++j) {
-            uint32_t word;
-            std::memcpy(&word, delta.data() + j * sizeof(word), sizeof(word));
-            body[j] += word;
-          }
+          std::vector<uint8_t> external;
+          if (!inline_delta)
+            external = load_data_from(&dir, ref.sha256, delta_size);
+          apply_relocation(inline_delta ? inline_delta : external.data(), delta_size, ref, body);
         } else if (function_bases_.count(ref.sha256)) {
           copy_function_base(dir, ref.sha256, ref.size_words, body);
         } else {
@@ -1005,7 +1042,8 @@ class AotModuleImpl : public aot::Module {
       if (function_refs[i]) {
         for (const auto &ref : *function_refs[i]) {
           const auto *body = (*shader_codes_[index])[i].data() + ref.offset_words;
-          linked_functions_.try_emplace(function_key(ref), LinkedFunction{body, ref.size_words});
+          linked_functions_.try_emplace(function_key(ref),
+                                        LinkedFunction{body, ref.size_words, ref.relocation_bytes});
           if (ref.base_sha256.empty())
             function_bases_.erase(ref.sha256);
         }

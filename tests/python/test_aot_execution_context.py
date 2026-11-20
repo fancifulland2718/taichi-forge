@@ -54,8 +54,8 @@ def test_vulkan_aot_local_values_across_loops_and_branches(tmp_path):
 
 
 @test_utils.test(arch=ti.vulkan, offline_cache=False)
-@pytest.mark.parametrize("version", [21, 22, 23])
-def test_vulkan_prepare_preserves_per_shader_constants_in_shared_functions(tmp_path, version):
+@pytest.mark.parametrize(("version", "in_root"), [(21, False), (22, False), (23, False), (24, False), (24, True)])
+def test_vulkan_prepare_preserves_per_shader_constants_in_shared_functions(tmp_path, version, in_root):
     import hashlib
     from zipfile import ZipFile
     import numpy as np
@@ -87,7 +87,7 @@ def test_vulkan_prepare_preserves_per_shader_constants_in_shared_functions(tmp_p
             shared = min(set.intersection(*({r["sha256"] for r in refs} for refs in groups)))
             name = "data/" + shared + ".bin"
             words = np.frombuffer(source.read(name), dtype="<u4")
-            if version == 23:
+            if version >= 23:
                 # The final OpFunctionEnd is a separate shared instruction.
                 # Neither referenced range constitutes a complete function.
                 end = words[-1:].tobytes()
@@ -97,26 +97,54 @@ def test_vulkan_prepare_preserves_per_shader_constants_in_shared_functions(tmp_p
             base = words.copy()
             base[2] += 1
             relocation = {}
-            for key, data in (("base_sha256", base.tobytes()), ("sha256", (words - base).tobytes())):
+            delta = words - base
+            payload = delta.tobytes()
+            if version == 24:
+                mask = delta != 0
+                payload = np.packbits(mask, bitorder="little").tobytes() + delta[mask].tobytes()
+                relocation["relocation_bytes"] = len(payload)
+            for key, data in (("base_sha256", base.tobytes()), ("sha256", payload)):
                 relocation[key] = hashlib.sha256(data).hexdigest()
-                target.writestr("data/" + relocation[key] + ".bin", data)
+                if not (in_root and key == "sha256"):
+                    target.writestr("data/" + relocation[key] + ".bin", data)
+            if in_root:
+                relocation["relocation_in_root"] = True
             for refs in groups:
                 rewritten = []
                 for ref in refs:
                     rewritten.append(ref)
                     if ref["sha256"] == shared:
                         ref.update(relocation)
-                        if version == 23:
+                        if version >= 23:
                             ref["size_words"] = len(words)
                             rewritten.append(dict(offset_words=ref["offset_words"] + len(words),
                                                   size_words=1, sha256=end_hash))
                 refs[:] = rewritten
             meta["metadata_version"] = version
+            local_roots = {}
+            local_offsets = {}
+            if in_root:
+                for row in meta["shader_functions"]:
+                    member = row["key"] + ".spvroot"
+                    root = bytearray(source.read(member))
+                    removed = 0
+                    for ref in row["value"]:
+                        start = 4 * ref["offset_words"] - removed
+                        removed += 4 * ref["size_words"]
+                        if ref.get("relocation_in_root"):
+                            span = payload + bytes(-len(payload) % 4)
+                            root[start:start] = span
+                            local_offsets[member] = start
+                            removed -= len(span)
+                    local_roots[member] = root
             for item in source.infolist():
                 if item.filename == name:
                     continue
-                target.writestr(item, json.dumps(meta) if item.filename == "metadata.json"
-                                else source.read(item))
+                if item.filename == "metadata.json":
+                    target.writestr(item, json.dumps(meta))
+                else:
+                    target.writestr(item, local_roots[item.filename] if item.filename in local_roots
+                                    else source.read(item))
         path = relative_path
     with ZipFile(path) as collection:
         meta = json.loads(collection.read("metadata.json"))
@@ -131,6 +159,7 @@ def test_vulkan_prepare_preserves_per_shader_constants_in_shared_functions(tmp_p
             body = "data/" + min(common) + ".bin"
         missing = tmp_path / "missing.tcm"
         corrupt = tmp_path / "corrupt.tcm"
+        errors = [(missing, "missing"), (corrupt, "integrity validation")]
         with ZipFile(missing, "w") as incomplete, ZipFile(corrupt, "w") as damaged:
             for entry in collection.infolist():
                 data = collection.read(entry)
@@ -139,6 +168,36 @@ def test_vulkan_prepare_preserves_per_shader_constants_in_shared_functions(tmp_p
                 else:
                     incomplete.writestr(entry.filename, data)
                 damaged.writestr(entry.filename, data)
+        if version == 24 and not in_root:
+            # The digest is correct but the mask requests one more operand
+            # than the payload contains. No shader may be published.
+            malformed = tmp_path / "truncated-relocation.tcm"
+            old_hash = relocation["sha256"]
+            old_name = "data/" + old_hash + ".bin"
+            data = bytearray(collection.read(old_name))
+            data[0] |= 1
+            new_hash = hashlib.sha256(data).hexdigest()
+            for refs in roots:
+                for ref in refs:
+                    if ref["sha256"] == old_hash:
+                        ref["sha256"] = new_hash
+            with ZipFile(malformed, "w") as target:
+                for entry in collection.infolist():
+                    if entry.filename == old_name:
+                        target.writestr("data/" + new_hash + ".bin", data)
+                    else:
+                        target.writestr(entry, json.dumps(meta) if entry.filename == "metadata.json"
+                                        else collection.read(entry))
+            errors.append((malformed, "Truncated SPIR-V relocation"))
+        if in_root:
+            damaged_root = tmp_path / "damaged-root-relocation.tcm"
+            with ZipFile(damaged_root, "w") as target:
+                for entry in collection.infolist():
+                    data = bytearray(collection.read(entry))
+                    if entry.filename in local_offsets:
+                        data[local_offsets[entry.filename]] ^= 1
+                    target.writestr(entry, data)
+            errors.append((damaged_root, "root relocation failed integrity validation"))
 
     device = int(os.environ.get("TI_TEST_VULKAN_DEVICE_INDEX", 0))
     with Runtime("vulkan", device_index=device) as runtime:
@@ -155,7 +214,7 @@ def test_vulkan_prepare_preserves_per_shader_constants_in_shared_functions(tmp_p
                 expected = (expected + j) * 3 % 997
             expected += bias * factor
             np.testing.assert_array_equal(np.frombuffer(out.read(), dtype=np.int32), expected)
-        for broken, error in ((missing, "missing"), (corrupt, "integrity validation")):
+        for broken, error in errors:
             incomplete = runtime.load_module(str(broken))
             kernel = incomplete.kernel("left")
             with pytest.raises(RuntimeError, match=error):
