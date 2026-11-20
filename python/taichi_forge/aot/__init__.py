@@ -57,6 +57,7 @@ def borrow_runtime():
     # The frontend Graph bridge must distinguish Programs, not just devices or
     # backend names. The native client still owns retirement and storage checks.
     result._frontend_program = runtime.prog
+    result._owner_namespace_versions = getattr(core, "_aot_namespace_versions", None)
     runtime.register_runtime_object(result)
     return result
 

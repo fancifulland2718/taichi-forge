@@ -519,6 +519,32 @@ void print_all_units() {
 }
 
 void export_misc(py::module &m) {
+#if !defined(PYPY_VERSION) && PY_VERSION_HEX < 0x030C0000
+  // PEP 509 versions cover replacement, insertion and deletion, including
+  // direct mutations through vars(). They are available on CPython 3.10/11.
+  m.def("_aot_namespace_versions", [](py::handle owner) -> py::object {
+    auto *type = Py_TYPE(owner.ptr());
+    if (type->tp_getattro != PyObject_GenericGetAttr || !type->tp_dictoffset)
+      return py::none();
+    auto dict = py::reinterpret_steal<py::object>(
+        PyObject_GenericGetDict(owner.ptr(), nullptr));
+    if (!dict)
+      throw py::error_already_set();
+    if (!PyDict_CheckExact(dict.ptr()))
+      return py::none();
+    auto version = [](PyObject *d) {
+      return reinterpret_cast<PyDictObject *>(d)->ma_version_tag;
+    };
+    auto mro = py::reinterpret_borrow<py::tuple>(type->tp_mro);
+    py::tuple versions(mro.size() + 1);
+    versions[0] = py::int_(version(dict.ptr()));
+    for (size_t i = 0; i < mro.size(); ++i) {
+      auto *base = reinterpret_cast<PyTypeObject *>(mro[i].ptr());
+      versions[i + 1] = py::int_(version(base->tp_dict));
+    }
+    return versions;
+  });
+#endif
 #ifdef TI_WITH_VULKAN
   m.def("specialize_spirv_shader", [](py::bytes source,
                                       const std::unordered_map<uint32_t, std::string> &values) {

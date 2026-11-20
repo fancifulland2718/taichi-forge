@@ -7106,12 +7106,16 @@ class Model:
             model.graph(exemplar)
 
 
-def test_package_binding_guard_observes_optional_parent_and_live_host_values():
+@pytest.mark.parametrize("borrowed", [False, True])
+def test_package_binding_guard_observes_optional_parent_and_live_host_values(borrowed):
     from types import SimpleNamespace
     from taichi_forge_runtime.aot._package_calls import OwnerGuard
     from taichi_forge_runtime.aot._package_values import HostTensor
 
     package = SimpleNamespace(manifest={'owners': {}})
+    if borrowed:
+        from taichi_forge._lib import core
+        package.runtime = SimpleNamespace(_owner_namespace_versions=getattr(core, "_aot_namespace_versions", None))
     owner = SimpleNamespace(child=None, value=0.0, vector=HostTensor([1.0, 2.0]), values=[1])
     contract = dict(captures=[dict(name=name, kind='value', path=path)
                              for name, path in (('child_value', ['child', 'value']),
@@ -7131,6 +7135,40 @@ def test_package_binding_guard_observes_optional_parent_and_live_host_values():
         assert guard.matches(owner)
         update()
         assert not guard.matches(owner)
+
+
+def test_package_binding_guard_observes_namespace_and_descriptor_changes():
+    from types import SimpleNamespace
+    from taichi_forge._lib import core
+    from taichi_forge_runtime.aot._package_calls import OwnerGuard
+
+    class Base:
+        policy = 2
+
+    class Owner(Base):
+        pass
+
+    owner = Owner()
+    owner.resource = object()
+    runtime = SimpleNamespace(_owner_namespace_versions=getattr(core, "_aot_namespace_versions", None))
+    package = SimpleNamespace(runtime=runtime, manifest={'owners': {}})
+    contract = dict(captures=[dict(name=name, kind='value') for name in ('policy', 'optional', 'resource')])
+    guard = OwnerGuard.for_graph(package, owner, [contract])
+    assert guard.matches(owner)
+    vars(owner)['unrelated'] = 5
+    assert guard.matches(owner)
+    vars(owner)['optional'] = 0
+    assert not guard.matches(owner)
+    del owner.optional
+    assert guard.matches(owner)
+    cell = [2]
+    Base.policy = property(lambda self: cell[0])
+    assert guard.matches(owner)
+    cell[0] = 3
+    assert not guard.matches(owner)
+    Base.policy = 2
+    vars(owner)['resource'] = object()
+    assert not guard.matches(owner)
 
 
 def test_package_binding_guard_uses_dimension_paths_and_observes_deleted_attributes():

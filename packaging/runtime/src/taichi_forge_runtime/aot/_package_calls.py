@@ -265,6 +265,8 @@ class OwnerGuard:
                 reachable.add(parts)
         names = [".".join(p) for p in sorted(reachable) if p]
         self.readers = tuple(operator.attrgetter(name) for name in names)
+        versions = getattr(getattr(package, "runtime", None), "_owner_namespace_versions", None)
+        stamp = versions(owner) if versions and type(type(owner)) is type and len(names) > 1 else None
         self.values = self.read(owner)
         # Batch present attributes in the C accessor. Missing top-level names
         # use getattr's default instead of raising/catching in Python each step.
@@ -283,6 +285,24 @@ class OwnerGuard:
         from ._package_native import NativeObject
         self.identity_safe = tuple(type(x) not in (tuple, list, dict) and not isinstance(x, (HostTensor, NativeObject))
                                    for x in self.values)
+        self._namespace_versions = None
+        if stamp is not None and stamp == versions(owner):
+            # Versioned dictionaries cover plain top-level attributes, including
+            # absence. Properties, nested paths and mutable contents have their
+            # own semantics and must still be read on every implicit replay.
+            classes = type(owner).__mro__
+            residual = []
+            for index, name in enumerate(ordered):
+                value = next((cls.__dict__[name] for cls in classes if name in cls.__dict__), _MISSING)
+                if ("." in name or not self.identity_safe[index]
+                        or (value is not _MISSING and type(value) not in (bool, int, float, str, bytes, type(None)))):
+                    residual.append(index)
+            if len(residual) < len(ordered):
+                self._namespace_versions = versions
+                self._namespace_stamp = stamp
+                self._namespace_type = type(owner)
+                self._residual = [(self.readers[i], self.values[i], self.tokens[i], self.identity_safe[i])
+                                  for i in residual]
 
     def read(self, owner):
         if hasattr(self, "_present_count"):
@@ -316,9 +336,25 @@ class OwnerGuard:
         # Identity is sufficient for immutable values and resource handles.
         # CPU tensors/containers still need content tokens even when their
         # Python object is unchanged. No device data is inspected here.
-        return all((safe and value is previous) or _token(value) == token
-                   for value, previous, token, safe in
-                   zip(self.read(owner), self.values, self.tokens, self.identity_safe))
+        versions = self._namespace_versions
+        stamp = versions(owner) if versions is not None and type(owner) is self._namespace_type else None
+        if stamp is not None and stamp == self._namespace_stamp:
+            for reader, previous, token, safe in self._residual:
+                try:
+                    value = reader(owner)
+                except AttributeError:
+                    value = _MISSING
+                if not (safe and value is previous) and _token(value) != token:
+                    return False
+            return not self._residual or versions(owner) == stamp
+        matched = all((safe and value is previous) or _token(value) == token
+                      for value, previous, token, safe in
+                      zip(self.read(owner), self.values, self.tokens, self.identity_safe))
+        if matched and stamp is not None and stamp[1:] == self._namespace_stamp[1:]:
+            # Only the instance changed. Class mutation may install a descriptor
+            # and requires the full read until the next binding.
+            self._namespace_stamp = stamp
+        return matched
 
 
 class CachedCall:
