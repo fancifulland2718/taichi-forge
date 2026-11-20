@@ -93,7 +93,7 @@ def _path(node):
 
 
 class InlineSyntax(ast.NodeVisitor):
-    def __init__(self, tree):
+    def __init__(self, tree, *, allow_void=False):
         function = tree.body[0]
         self.safe = True
         self.references = set()
@@ -109,7 +109,10 @@ class InlineSyntax(ast.NodeVisitor):
             node for statement in function.body for node in ast.walk(statement) if isinstance(node, ast.Return)
         ]
         # Preserve regular ti.func return semantics; no early-return rewriting.
-        if len(returns) != 1 or returns[0] is not function.body[-1] or returns[0].value is None:
+        if returns:
+            if len(returns) != 1 or returns[0] is not function.body[-1] or (returns[0].value is None and not allow_void):
+                self.safe = False
+        elif not allow_void:
             self.safe = False
         try:
             for statement in function.body:

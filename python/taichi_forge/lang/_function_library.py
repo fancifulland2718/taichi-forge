@@ -13,17 +13,9 @@ class FunctionLibrary:
         self.function_library = False
         self.thread_local_call = False
         self.allow_spirv = False
+        self.spirv_descriptor_arguments = False
 
-    def library_function(self, source, args, *, dependencies=None):
-        """Retain typed device boundaries without mutating JIT definitions.
-
-        Infer value parameters from DSL operands, never from a model sample.
-        Unannotated returns are eligible only for a terminal projection of
-        those value parameters. Their local copies retain the incoming types,
-        including after assignment. Other return inference stays inline.
-        """
-        if not self.function_library or not self.thread_local_call:
-            return None
+    def _function_template(self, source):
         if source not in self._function_templates:
             tree, _ = source._definition.acquire(cache=True)
             returns = [node for node in ast.walk(tree) if isinstance(node, ast.Return)]
@@ -80,7 +72,19 @@ class FunctionLibrary:
                             ):
                                 supported = False
             self._function_templates[source] = (supported, projection)
-        supported, projection = self._function_templates[source]
+        return self._function_templates[source]
+
+    def library_function(self, source, args, *, dependencies=None):
+        """Retain typed device boundaries without mutating JIT definitions.
+
+        Infer value parameters from DSL operands, never from a model sample.
+        Unannotated returns are eligible only for a terminal projection of
+        those value parameters. Their local copies retain the incoming types,
+        including after assignment. Other return inference stays inline.
+        """
+        if not self.function_library or not self.thread_local_call:
+            return None
+        supported, projection = self._function_template(source)
         if not supported:
             return None
 
@@ -157,18 +161,20 @@ class FunctionLibrary:
             from taichi_forge._lib import core
 
             if impl.default_cfg().arch == core.Arch.vulkan:
-                # Pointer/ndarray/ref ABIs retain ordinary inline lowering.
-                # The shared SPIR-V ABI currently admits scalar/tensor values
-                # and compile-time template bindings only.
+                from taichi_forge.types.ndarray_type import NdarrayType
+
+                parameter_types = (MatrixType, template)
+                if self.spirv_descriptor_arguments:
+                    parameter_types += (NdarrayType,)
                 if (
-                    not returns
+                    (not returns and not self.spirv_descriptor_arguments)
                     or any(
                         id(dtype) not in primitive_types.type_ids and not isinstance(dtype, MatrixType)
-                        for dtype in returns
+                        for dtype in returns or ()
                     )
                     or any(
                         id(arg.annotation) not in primitive_types.type_ids
-                        and not isinstance(arg.annotation, (MatrixType, template))
+                        and not isinstance(arg.annotation, parameter_types)
                         for arg in arguments
                     )
                 ):

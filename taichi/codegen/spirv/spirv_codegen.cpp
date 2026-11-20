@@ -12,6 +12,7 @@
 #include <cstdlib>
 #include <fstream>
 #include <limits>
+#include <map>
 #include <mutex>
 
 #include "taichi/codegen/codegen_utils.h"
@@ -408,7 +409,8 @@ class TaskCodegen : public IRVisitor {
         bitmasked_clear_data_on_deactivate_(
             params.bitmasked_clear_data_on_deactivate),
         listgen_subgroup_ballot_(params.listgen_subgroup_ballot),
-        listgen_reuse_(params.listgen_reuse) {
+        listgen_reuse_(params.listgen_reuse),
+        compact_aot_(params.omit_value_names) {
     allow_undefined_visitor = true;
     invoke_default_visitor = true;
 
@@ -493,6 +495,14 @@ class TaskCodegen : public IRVisitor {
     res.arr_access = irpass::detect_external_ptr_access_in_task(task_ir_);
     res.grad_arr_access =
         irpass::detect_external_ptr_access_in_task(task_ir_, /*is_grad=*/true);
+    for (const auto &[resource, buffer] : function_array_buffers_) {
+      auto access = buffer_access_map_.find(buffer);
+      if (access == buffer_access_map_.end())
+        continue;
+      auto &table = resource.second ? res.grad_arr_access : res.arr_access;
+      auto &flags = table[resource.first];
+      flags = flags | static_cast<irpass::ExternalPtrAccess>(access->second);
+    }
 
     return res;
   }
@@ -3487,7 +3497,7 @@ class TaskCodegen : public IRVisitor {
   }
 
   void visit(ArgLoadStmt *stmt) override {
-    if (current_function_) {
+    if (current_function_ && !function_descriptors_.count(stmt->arg_id.front())) {
       auto value = function_arguments_.at(stmt->arg_id[0]);
       if (stmt->arg_id.size() > 1) {
         std::vector<int> indices(stmt->arg_id.begin() + 1, stmt->arg_id.end());
@@ -3499,11 +3509,9 @@ class TaskCodegen : public IRVisitor {
       ir_->register_value(stmt->raw_name(), value);
       return;
     }
-    const auto arg_id = stmt->arg_id;
-    const std::vector<int> indices_l(stmt->arg_id.begin(),
-                                     stmt->arg_id.begin() + stmt->arg_depth);
-    const std::vector<int> indices_r(stmt->arg_id.begin() + stmt->arg_depth,
-                                     stmt->arg_id.end());
+    const auto arg_id = descriptor_path(stmt->arg_id, function_descriptors_);
+    const std::vector<int> indices_l(arg_id.begin(), arg_id.begin() + stmt->arg_depth);
+    const std::vector<int> indices_r(arg_id.begin() + stmt->arg_depth, arg_id.end());
     const auto arg_type =
         stmt->arg_depth == 0
             ? ctx_attribs_->args_type()->get_element_type(arg_id)
@@ -3659,6 +3667,11 @@ class TaskCodegen : public IRVisitor {
 
   void visit(ReturnStmt *stmt) override {
     if (current_function_) {
+      if (stmt->values.empty()) {
+        ir_->make_inst(spv::OpReturn);
+        gen_label_ = true;
+        return;
+      }
       std::vector<Value> values;
       for (auto *value : stmt->values)
         values.push_back(ir_->query_value(value->raw_name()));
@@ -3738,7 +3751,7 @@ class TaskCodegen : public IRVisitor {
 
   void visit(ExternalTensorShapeAlongAxisStmt *stmt) override {
     const auto name = stmt->raw_name();
-    const auto arg_id = stmt->arg_id;
+    const auto arg_id = descriptor_path(stmt->arg_id, function_descriptors_);
     const auto axis = stmt->axis;
 
     spirv::Value var_ptr;
@@ -3770,13 +3783,14 @@ class TaskCodegen : public IRVisitor {
   }
 
   void visit(ExternalTensorBasePtrStmt *stmt) override {
+    const auto arg_id = descriptor_path(stmt->arg_id, function_descriptors_);
     const bool uses_physical_storage =
         caps_->get(DeviceCapability::spirv_has_physical_storage_buffer);
     const int ndarray_ptr_slot =
         stmt->is_grad ? TypeFactory::GRAD_PTR_POS_IN_NDARRAY
                       : TypeFactory::DATA_PTR_POS_IN_NDARRAY;
     if (uses_physical_storage) {
-      std::vector<int> indices = stmt->arg_id;
+      std::vector<int> indices = arg_id;
       indices.push_back(ndarray_ptr_slot);
       auto address_ptr = ir_->make_access_chain(
           ir_->get_pointer_type(ir_->u64_type(), spv::StorageClassUniform),
@@ -3786,14 +3800,16 @@ class TaskCodegen : public IRVisitor {
     } else {
       ir_->register_value(
           stmt->raw_name(),
-          descriptor_array_byte_bias(stmt->arg_id, ndarray_ptr_slot));
+          descriptor_array_byte_bias(arg_id, ndarray_ptr_slot));
     }
 
-    std::vector<int> ext_arr_id = stmt->arg_id;
+    std::vector<int> ext_arr_id = arg_id;
     if (uses_physical_storage || stmt->is_grad) {
       ext_arr_id.push_back(ndarray_ptr_slot);
     }
     ptr_to_buffers_[stmt] = {BufferType::ExtArr, ext_arr_id};
+    if (current_function_)
+      function_array_buffers_[{arg_id, stmt->is_grad}] = ptr_to_buffers_[stmt];
   }
 
   void visit(ExternalPtrStmt *stmt) override {
@@ -3801,7 +3817,7 @@ class TaskCodegen : public IRVisitor {
     // device.
     spirv::Value linear_offset = ir_->int_immediate_number(ir_->i32_type(), 0);
     const auto *argload = stmt->base_ptr->as<ArgLoadStmt>();
-    const auto arg_id = argload->arg_id;
+    const auto arg_id = descriptor_path(argload->arg_id, function_descriptors_);
     {
       const int num_indices = stmt->indices.size();
       std::vector<std::string> size_var_names;
@@ -3951,6 +3967,8 @@ class TaskCodegen : public IRVisitor {
         ext_arr_id.push_back(ndarray_ptr_slot);
       }
       ptr_to_buffers_[stmt] = {BufferType::ExtArr, ext_arr_id};
+      if (current_function_)
+        function_array_buffers_[{arg_id, stmt->is_grad}] = ptr_to_buffers_[stmt];
     } else {
       ptr_to_buffers_[stmt] = BufferType::Args;
     }
@@ -5466,12 +5484,16 @@ class TaskCodegen : public IRVisitor {
   }
 
   void visit(FuncCallStmt *stmt) override {
+    const auto &layout = function_layouts_.at(stmt->func);
     std::vector<Value> arguments;
-    for (auto *argument : stmt->args)
-      arguments.push_back(ir_->query_value(argument->raw_name()));
+    for (size_t i = 0; i < stmt->args.size(); ++i) {
+      if (!layout.descriptor_operands.count(i))
+        arguments.push_back(ir_->query_value(stmt->args[i]->raw_name()));
+    }
+    const auto bindings = call_descriptors(stmt, layout, function_descriptors_);
     auto value = ir_->make_value(spv::OpFunctionCall,
-                                 ir_->value_type(stmt->func->ret_type),
-                                 function_units_.at(stmt->func), arguments);
+                                 function_result_type(stmt->func),
+                                 function_units_.at({stmt->func, bindings}), arguments);
     ir_->register_value(stmt->raw_name(), value);
   }
 
@@ -5510,37 +5532,93 @@ class TaskCodegen : public IRVisitor {
                            members);
   }
 
-  void emit_function_units(IRNode *root) {
+  // Values use ordinary OpFunctionParameter slots. An ndarray operand is a
+  // declaration path in the enclosing task. The buffer address, offset and
+  // shape remain part of the dispatch binding.
+  using DescriptorPaths = std::map<int, std::vector<int>>;
+  struct FunctionLayout {
+    std::vector<SType> value_types;
+    std::map<size_t, int> descriptor_operands;
+  };
+  SType function_result_type(const Function *function) {
+    return function->rets.empty() ? ir_->void_type() : ir_->value_type(function->ret_type);
+  }
+
+  static std::vector<int> descriptor_path(const std::vector<int> &path,
+                                          const DescriptorPaths &bindings) {
+    auto found = bindings.find(path.front());
+    if (found == bindings.end())
+      return path;
+    auto result = found->second;
+    result.insert(result.end(), path.begin() + 1, path.end());
+    return result;
+  }
+
+  static DescriptorPaths call_descriptors(FuncCallStmt *call,
+                                          const FunctionLayout &layout,
+                                          const DescriptorPaths &caller) {
+    DescriptorPaths bindings;
+    for (const auto &[operand, parameter] : layout.descriptor_operands) {
+      auto *origin = call->args.at(operand)->as<ArgLoadStmt>();
+      bindings.emplace(parameter, descriptor_path(origin->arg_id, caller));
+    }
+    return bindings;
+  }
+
+  void emit_function_units(IRNode *root, const DescriptorPaths &caller = {}) {
     auto calls = irpass::analysis::gather_statements(
         root, [](Stmt *stmt) { return stmt->is<FuncCallStmt>(); });
     for (auto *call : calls) {
-      auto *function = call->as<FuncCallStmt>()->func;
-      if (function_units_.count(function))
+      auto *invocation = call->as<FuncCallStmt>();
+      auto *function = invocation->func;
+      auto [iter, inserted] = function_layouts_.try_emplace(function);
+      auto &layout = iter->second;
+      if (inserted) {
+        for (size_t i = 0; i < function->parameter_list.size(); ++i) {
+          if (function->parameter_list[i].ptype == ParameterType::kNdarray) {
+            auto operand = layout.value_types.size() + layout.descriptor_operands.size();
+            layout.descriptor_operands.emplace(operand, static_cast<int>(i));
+          } else {
+            flatten_function_types(function->args_type->elements()[i].type, layout.value_types);
+          }
+        }
+      }
+      auto bindings = call_descriptors(invocation, layout, caller);
+      auto key = std::make_pair(function, bindings);
+      if (function_units_.count(key))
         continue;
       TI_ASSERT_INFO(
           function->backend_inline(),
           "SPIR-V function units require a proven thread-local value ABI");
       TI_ASSERT_INFO(active_functions_.insert(function).second,
                      "Recursive SPIR-V function units are not supported");
-      emit_function_units(function->ir.get());
+      emit_function_units(function->ir.get(), bindings);
       active_functions_.erase(function);
       TI_COMPILE_PROFILER("cpp.compile.spirv.function_body_emit");
-      std::vector<SType> parameters;
-      flatten_function_types(function->args_type, parameters);
-      auto result = ir_->value_type(function->ret_type);
+      const auto &parameters = layout.value_types;
+      auto result = function_result_type(function);
       auto symbol = ir_->new_function(result, parameters);
-      function_units_[function] = symbol;
+      function_units_[std::move(key)] = symbol;
       auto arguments = ir_->start_function(symbol, result, parameters, true);
       current_function_ = function;
+      function_descriptors_ = std::move(bindings);
       size_t index = 0;
-      for (const auto &element : function->args_type->elements())
-        function_arguments_.push_back(
-            compose_function_value(element.type, arguments, index));
+      function_arguments_.resize(function->parameter_list.size());
+      for (size_t i = 0; i < function_arguments_.size(); ++i) {
+        if (!function_descriptors_.count(i))
+          function_arguments_[i] = compose_function_value(
+              function->args_type->elements()[i].type, arguments, index);
+      }
       TI_ASSERT(index == arguments.size());
       function->ir->accept(this);
+      if (!gen_label_ && function->rets.empty()) {
+        ir_->make_inst(spv::OpReturn);
+        gen_label_ = true;
+      }
       TI_ASSERT_INFO(gen_label_, "SPIR-V value helper must end with a return");
       ir_->make_inst(spv::OpFunctionEnd);
       current_function_ = nullptr;
+      function_descriptors_.clear();
       function_arguments_.clear();
       gen_label_ = false;
       root_stmts_.clear();
@@ -7566,6 +7644,8 @@ class TaskCodegen : public IRVisitor {
 
     args_buffer_value_ =
         ir_->uniform_struct_argument(args_struct_type_, 0, 0, "args");
+    if (compact_aot_)
+      ir_->reuse_dispatch_arguments(args_buffer_value_);
   }
 
   spirv::Value compile_argpack_struct(const std::vector<int> &arg_id,
@@ -7776,6 +7856,7 @@ class TaskCodegen : public IRVisitor {
 
   spirv::SType args_struct_type_;
   spirv::Value args_buffer_value_;
+  bool compact_aot_;
 
   std::unordered_map<std::vector<int>,
                      spirv::SType,
@@ -7829,7 +7910,10 @@ class TaskCodegen : public IRVisitor {
   std::vector<spirv::Value> shared_array_binds_;
   spirv::Value kernel_function_;
   Function *current_function_{nullptr};
-  std::unordered_map<Function *, Value> function_units_;
+  DescriptorPaths function_descriptors_;
+  std::unordered_map<Function *, FunctionLayout> function_layouts_;
+  std::map<std::pair<Function *, DescriptorPaths>, Value> function_units_;
+  std::map<std::pair<std::vector<int>, bool>, BufferInfo> function_array_buffers_;
   std::unordered_set<Function *> active_functions_;
   std::vector<Value> function_arguments_;
   spirv::Label kernel_return_label_;

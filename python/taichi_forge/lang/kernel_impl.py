@@ -597,6 +597,12 @@ class Func:
                         raise TaichiTypeError(
                             f"Expected ndarray in the kernel argument for argument {kernel_arg.name}, got {args[i]}"
                         )
+                    if getattr(self, "_spirv_descriptor_arguments", False):
+                        # A task-scoped SPIR-V callee addresses the caller's
+                        # descriptor. Pass its IR origin without materializing
+                        # a private shape/stride/pointer frame.
+                        non_template_args.append(args[i].ptr)
+                        continue
                     # The ndarray ABI reserves one shape slot even for rank
                     # zero. The external-tensor helper emits actual dimensions,
                     # strides, affine mode and pointers, so retain that padding

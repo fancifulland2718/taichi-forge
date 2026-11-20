@@ -1798,7 +1798,20 @@ std::optional<Expr> ASTBuilder::insert_func_call(Function *func,
                                                  const ExprGroup &args,
                                                  const DebugInfo &dbg_info) {
   ExprGroup expanded_args;
-  expanded_args.exprs = this->expand_exprs(args.exprs);
+  if (func->backend_inline() && func->arch == Arch::vulkan) {
+    for (const auto &arg : args.exprs) {
+      if (arg.is<ExternalTensorExpression>()) {
+        // The task binds this descriptor. Keep its origin as one operand
+        // while flattening ordinary scalar, vector and structure values.
+        expanded_args.exprs.push_back(arg);
+      } else {
+        auto values = expand_exprs({arg});
+        expanded_args.exprs.insert(expanded_args.exprs.end(), values.begin(), values.end());
+      }
+    }
+  } else {
+    expanded_args.exprs = expand_exprs(args.exprs);
+  }
   if (!func->rets.empty()) {
     auto var = Expr(std::make_shared<IdExpression>(get_next_id()));
     this->insert(std::make_unique<FrontendFuncCallStmt>(

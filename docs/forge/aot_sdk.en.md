@@ -39,6 +39,15 @@ An eligible package entry creates the selected pipeline on its first binding.
 Direct generic execution creates the generic pipeline on demand. Instances
 can reuse specialized code while retaining their own resource bindings.
 
+During Vulkan package export, eligible helpers that read or write typed array
+arguments can remain separate functions inside a shader. The producer records
+which descriptor slot each call uses, including when two arguments alias.
+The consumer binds the instance's buffers and specializes eligible argument
+values during prepare. Array contents remain live on every invocation.
+Release shaders also reuse reads of the same immutable dispatch argument
+within a basic block. Vulkan ray-query candidate predicates and their helpers
+remain inline so the compiler can verify the entire predicate is read-only.
+
 Frontend, Python bridge and native runtime must have matching private ABI
 revisions. The current revision is listed in the
 [release upgrade guidance](release_notes.en.md#upgrading-and-compilation-settings) and defined in

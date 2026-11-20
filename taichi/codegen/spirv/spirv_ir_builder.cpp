@@ -411,6 +411,7 @@ void IRBuilder::init_pre_defs() {
   ib_.begin(spv::OpTypeFunction)
       .add_seq(t_void_func_, t_void_)
       .commit(&global_);
+  function_type_tbl_[{t_void_.id}] = t_void_func_;
 
   // compute shader related types
   t_v2_int_.id = id_counter_++;
@@ -2084,7 +2085,20 @@ Value IRBuilder::load_variable(Value pointer, const SType &res_type) {
             pointer.flag == ValueKind::kStructArrayPtr ||
             pointer.flag == ValueKind::kNonUniformTexturePtr ||
             pointer.flag == ValueKind::kPhysicalPtr);
+  // Only constant-index addresses into the immutable dispatch parameter
+  // buffer are registered here. Array contents and physical loads stay live.
+  Value *cached = nullptr;
+  if (dispatch_uniform_ && dispatch_cache_label_ == curr_label_.id) {
+    auto it = dispatch_loads_.find(pointer.id);
+    if (it != dispatch_loads_.end()) {
+      cached = &it->second;
+      if (cached->id && cached->stype.id == res_type.id)
+        return *cached;
+    }
+  }
   Value ret = new_value(res_type, ValueKind::kNormal);
+  if (cached)
+    *cached = ret;
   if (pointer.flag == ValueKind::kPhysicalPtr) {
     uint32_t alignment = uint32_t(get_primitive_type_size(res_type.dt));
     ib_.begin(spv::OpLoad)
@@ -2501,7 +2515,22 @@ void IRBuilder::init_random_function(Value global_tmp_) {
 Value IRBuilder::make_access_chain(const SType &out_type,
                                    Value base,
                                    const std::vector<int> &indices) {
+  Value *cached = nullptr;
+  if (dispatch_uniform_ && base.id == dispatch_uniform_) {
+    if (dispatch_cache_label_ != curr_label_.id) {
+      dispatch_addresses_.clear();
+      dispatch_loads_.clear();
+      dispatch_cache_label_ = curr_label_.id;
+    }
+    cached = &dispatch_addresses_[{out_type.id, indices}];
+    if (cached->id)
+      return *cached;
+  }
   Value ret = new_value(out_type, ValueKind::kVariablePtr);
+  if (cached) {
+    *cached = ret;
+    dispatch_loads_.try_emplace(ret.id);
+  }
   std::vector<Value> index_values;
   for (auto &ind : indices) {
     index_values.push_back(int_immediate_number(t_int32_, ind));

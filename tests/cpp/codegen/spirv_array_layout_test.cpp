@@ -6,6 +6,36 @@
 
 namespace taichi::lang {
 
+TEST(SpirvArrayLayout, DispatchUniformReuseIsLocalToOneBlockAndBinding) {
+  DeviceCapabilityConfig caps;
+  caps.set(DeviceCapability::spirv_version, 0x10300u);
+  spirv::IRBuilder builder(Arch::vulkan, &caps);
+  builder.init_header();
+  const auto type = builder.i32_type();
+  std::vector<std::tuple<spirv::SType, std::string, size_t>> members = {
+      {type, "x", 0}, {type, "y", 4}};
+  auto structure = builder.create_struct_type(members);
+  auto args = builder.uniform_struct_argument(structure, 0, 0, "args");
+  auto other = builder.uniform_struct_argument(structure, 0, 1, "other");
+  builder.reuse_dispatch_arguments(args);
+  builder.start_function(builder.new_function());
+  auto read = [&](spirv::Value base, int index) {
+    auto pointer = builder.make_access_chain(
+        builder.get_pointer_type(type, spv::StorageClassUniform), base,
+        std::vector<int>{index});
+    return builder.load_variable(pointer, type);
+  };
+  auto first = read(args, 0);
+  EXPECT_EQ(first.id, read(args, 0).id);
+  EXPECT_NE(first.id, read(args, 1).id);
+  auto uncached = read(other, 0);
+  EXPECT_NE(uncached.id, read(other, 0).id);
+  auto next = builder.new_label();
+  builder.make_inst(spv::OpBranch, next);
+  builder.start_label(next);
+  EXPECT_NE(first.id, read(args, 0).id);
+}
+
 TEST(SpirvArrayLayout, LocalSharedAndBufferArraysValidateTogether) {
   for (auto version : {0x10000u, 0x10300u, 0x10500u}) {
     for (bool boolean_elements : {false, true}) {

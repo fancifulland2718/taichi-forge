@@ -296,6 +296,10 @@ class IRBuilder {
     return curr_label_;
   }
 
+  void reuse_dispatch_arguments(Value uniform) {
+    dispatch_uniform_ = uniform.id;
+  }
+
   // Make a new SSA value
   template <typename... Args>
   Value make_value(spv::Op op, const SType &out_type, Args &&...args) {
@@ -487,6 +491,9 @@ class IRBuilder {
   // inlining is a backend decision after composition.
   Value new_function() {
     return new_value(t_void_func_, ValueKind::kFunction);
+  }
+  SType void_type() const {
+    return t_void_;
   }
   Value new_function(const SType &result, const std::vector<SType> &parameters);
 
@@ -710,6 +717,10 @@ class IRBuilder {
   std::unordered_set<std::string> dynamic_extensions_;
   // Current label
   Label curr_label_;
+  uint32_t dispatch_uniform_{0};
+  uint32_t dispatch_cache_label_{0};
+  std::map<std::pair<uint32_t, std::vector<int>>, Value> dispatch_addresses_;
+  std::unordered_map<uint32_t, Value> dispatch_loads_;
   // The current maximum id
   uint32_t id_counter_{1};
 

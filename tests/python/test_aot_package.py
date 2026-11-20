@@ -1813,6 +1813,36 @@ class Model:
 
 
 @test_utils.test(arch=ti.vulkan, offline_cache=False)
+@pytest.mark.parametrize("write", [False, True])
+def test_package_ray_filter_checks_effects_of_nested_array_helper(tmp_path, monkeypatch, write):
+    source = """import taichi_forge as ti
+
+@ti.func
+def material(flags: ti.types.ndarray(ti.i32, ndim=1), i: ti.i32) -> ti.i32:
+    return flags[i]
+
+@ti.func
+def accept(hit: ti.template(), flags: ti.template()):
+    return material(flags, hit.instance_id) != 0
+
+@ti.kernel
+def trace(scene: ti.types.acceleration_structure(), flags: ti.types.ndarray(ti.i32, ndim=1),
+          out: ti.types.ndarray(ti.i32, ndim=1)):
+    for i in range(out.shape[0]):
+        hit = scene.trace_closest_filtered(ti.Vector([0., 0., 1.]), ti.Vector([0., 0., -1.]), accept, args=(flags,))
+        out[i] = hit.hit
+"""
+    if write:
+        source = source.replace("    return flags[i]", "    flags[i] = 0\n    return flags[i]")
+    package = _source_package(tmp_path, monkeypatch, source, initializer="from .model import trace\n")
+    if write:
+        with pytest.raises(ti.aot.PackageExportError, match="read-only"):
+            ti.aot.export_package(package, tmp_path / "sdk", caps=["spirv_has_ray_query"])
+    else:
+        ti.aot.export_package(package, tmp_path / "sdk", caps=["spirv_has_ray_query"])
+
+
+@test_utils.test(arch=ti.vulkan, offline_cache=False)
 def test_package_host_texture_constructs_without_frontend(tmp_path, monkeypatch):
     source = SAMPLED_TEXTURE_SOURCE.replace(
         "self.n, self.m = n, m", """self.n, self.m = n, m
@@ -4662,10 +4692,26 @@ class Model:
     def read_output(self, i: ti.i32) -> ti.i32:
         return self.out[i]
 
+    @ti.func
+    def add_to_output(self, i: ti.i32, delta: ti.i32) -> ti.i32:
+        self.out[i] = self.read_output(i) + delta
+        return self.read_output(i)
+
+    @ti.func
+    def bump_one(self, i: ti.i32):
+        self.add_to_output(i, 1)
+
+    @ti.func
+    def bump_first(self):
+        self.bump_one(0)
+
     @ti.kernel
     def bump(self):
         for i in range(self.n):
-            self.out[i] = self.read_output(i) + 1
+            if i == 0:
+                self.bump_first()
+            else:
+                self.bump_one(i)
 """)
     jit = package.Model(5)
     jit.step(3)
@@ -4677,9 +4723,11 @@ class Model:
             # OpFunctionCall carries the callee ID after result type and ID.
             import struct
 
-            callees = []
+            task_calls = []
             for name in archive.namelist():
                 if name.endswith('.spv'):
+                    callees = []
+                    function_types = set()
                     data = archive.read(name)
                     words = struct.unpack(f'<{len(data) // 4}I', data)
                     pos = 5
@@ -4691,12 +4739,21 @@ class Model:
                             assert not (value_name.startswith(b'tmp') and value_name[3:4].isdigit())
                         if opcode == 57:
                             callees.append(words[pos + 3])
+                        if opcode == 33:  # OpTypeFunction, including void()
+                            signature = words[pos + 2:pos + width]
+                            assert signature not in function_types
+                            function_types.add(signature)
                         pos += width
-            assert len(callees) == 2 and callees[0] == callees[1]
+                    if callees:
+                        task_calls.append(callees)
+            # step calls the same value unit twice. bump calls a resource
+            # writer which in turn reads the same bound field twice.
+            assert sorted((len(calls), len(set(calls))) for calls in task_calls) == [(2, 1), (6, 4)]
         else:
             assert any(b'deferred_adjust_' in archive.read(name)
                        for name in archive.namelist() if name.endswith('.bc'))
-    with Runtime(ti.cfg.arch.name) as runtime, load_package(runtime, sdk) as code:
+    device = int(os.environ.get("TI_TEST_VULKAN_DEVICE_INDEX", 0)) if ti.cfg.arch == ti.vulkan else 0
+    with Runtime(ti.cfg.arch.name, device_index=device) as runtime, load_package(runtime, sdk) as code:
         a, b = code.host.Model(5), code.host.Model(11)
         a.step(3)
         np.testing.assert_array_equal(a.out.to_numpy(), expected)
@@ -4711,6 +4768,49 @@ class Model:
             np.testing.assert_array_equal(b.out.to_numpy(), 3 * np.arange(11) + 19)
         b.bump()
         np.testing.assert_array_equal(b.out.to_numpy(), 3 * np.arange(11) + 20)
+        a.bump()
+        b.bump()
+        np.testing.assert_array_equal(a.out.to_numpy(), expected + 1)
+        np.testing.assert_array_equal(b.out.to_numpy(), 3 * np.arange(11) + 21)
+
+
+@test_utils.test(arch=ti.vulkan, offline_cache=False)
+def test_package_function_descriptors_follow_each_call_site(tmp_path, monkeypatch):
+    package = _source_package(tmp_path, monkeypatch, """
+import taichi_forge as ti
+
+@ti.func
+def increment(a: ti.types.ndarray(dtype=ti.i32, ndim=1), i: ti.i32, delta: ti.i32) -> ti.i32:
+    previous = a[i]
+    a[i] = previous + delta
+    return previous
+
+@ti.func
+def forward(a: ti.types.ndarray(dtype=ti.i32, ndim=1), i: ti.i32, delta: ti.i32) -> ti.i32:
+    return increment(a, i, delta)
+
+@ti.kernel
+def mix(left: ti.types.ndarray(dtype=ti.i32, ndim=1), right: ti.types.ndarray(dtype=ti.i32, ndim=1), delta: ti.i32):
+    for i in range(left.shape[0]):
+        old = forward(left, i, delta)
+        forward(right, i, old)
+""", initializer="from .model import mix\n")
+    sdk = tmp_path / "descriptors"
+    ti.aot.export_package(package, sdk)
+    device = int(os.environ.get("TI_TEST_VULKAN_DEVICE_INDEX", 0))
+    with Runtime("vulkan", device_index=device) as rt, load_package(rt, sdk) as code:
+        left, right = rt.ndarray("i32", (5,)), rt.ndarray("i32", (5,))
+        initial = np.arange(5, dtype=np.int32)
+        left.from_numpy(initial)
+        right.from_numpy(initial + 10)
+        code.host.mix(left, right, 3)
+        np.testing.assert_array_equal(left.to_numpy(), initial + 3)
+        np.testing.assert_array_equal(right.to_numpy(), 2 * initial + 10)
+        code.host.mix(right, left, 7)
+        np.testing.assert_array_equal(right.to_numpy(), 2 * initial + 17)
+        np.testing.assert_array_equal(left.to_numpy(), 3 * initial + 13)
+        code.host.mix(left, left, 1)
+        np.testing.assert_array_equal(left.to_numpy(), 6 * initial + 27)
 
 
 @test_utils.test(arch=ti.cpu, offline_cache=False)

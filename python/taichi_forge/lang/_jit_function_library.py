@@ -94,13 +94,13 @@ def _literal(node, scope, *, objects=False):
 
 
 class FunctionSyntax(InlineSyntax):
-    def __init__(self, tree, scope, bindings, static_scope):
+    def __init__(self, tree, scope, bindings, static_scope, *, allow_void=False):
         self.scope = scope
         self.static_scope = static_scope
         self.bindings = bindings
         self.calls = {}
         self.forwarded = set()
-        super().__init__(tree)
+        super().__init__(tree, allow_void=allow_void)
 
     def generic_visit(self, node):
         if isinstance(node, (ast.Subscript, ast.While, ast.Break, ast.Continue)):
@@ -170,13 +170,25 @@ class FunctionSyntax(InlineSyntax):
 
 
 class FunctionDependencyAnalysis:
-    def __init__(self, *, allow_fields):
+    def __init__(self, *, allow_fields, package_fields=False):
         self.allow_fields = allow_fields
+        self.package_fields = package_fields
         self._syntax = {}
 
-    def _dependencies(self, source, bindings, active):
+    def _dependencies(self, source, bindings, active, memo):
         if source in active or source.pyfunc or source.is_real_function:
             return None
+        # Sibling calls frequently forward the exact same receiver. Its Python
+        # bindings are stable for this proof only. Discard the memo before the
+        # next capture so that rebindings remain visible.
+        if memo is None:
+            return self._inspect_dependencies(source, bindings, active, memo)
+        key = (source, frozenset(active), tuple((name, id(value)) for name, value in bindings.items()))
+        if key not in memo:
+            memo[key] = (tuple(bindings.values()), self._inspect_dependencies(source, bindings, active, memo))
+        return memo[key][1]
+
+    def _inspect_dependencies(self, source, bindings, active, memo):
         if source not in self._syntax:
             self._syntax[source], _ = source._definition.acquire(cache=True)
         scope = source._definition.scope()
@@ -184,7 +196,8 @@ class FunctionDependencyAnalysis:
         # JIT specializes the bound object. In a portable package the same
         # owner property can become a live scalar and guard an array capture.
         # Only literal predicates can prune that resource-use proof.
-        syntax = FunctionSyntax(self._syntax[source], scope, bindings, scope if self.allow_fields else {})
+        syntax = FunctionSyntax(self._syntax[source], scope, bindings, scope if self.allow_fields else {},
+                                allow_void=self.package_fields)
         if not syntax.safe or any(name in scope for name in syntax.assigned):
             return None
         dependencies = []
@@ -219,7 +232,7 @@ class FunctionDependencyAnalysis:
                             if isinstance(arg.annotation, template)
                         ):
                             return None
-                        child = self._dependencies(wrapped, child_bindings, active | {source})
+                        child = self._dependencies(wrapped, child_bindings, active | {source}, memo)
                         if child is None:
                             return None
                         children.append(child)
@@ -237,6 +250,10 @@ class FunctionDependencyAnalysis:
             elif self.allow_fields and isinstance(value, Field):
                 # Identity only: device contents are live, not compile-time data.
                 key = ("field", value)
+            elif self.package_fields and isinstance(value, Field):
+                # Component capture records the declaration ABI and its path.
+                # A producer witness's address is not part of a portable unit.
+                key = ("field", type(value))
             elif isinstance(value, MatrixType):
                 key = ("tensor_type", value.n, value.m, value.ndim, str(value.dtype))
             elif id(value) in primitive_types.type_ids:
@@ -257,7 +274,7 @@ class FunctionDependencyAnalysis:
             arg.name: value for arg, value in zip(source.arguments, args) if isinstance(arg.annotation, template)
         }
         try:
-            return self._dependencies(source, bindings, set())
+            return self._dependencies(source, bindings, set(), {} if self.package_fields else None)
         except RecursionError:
             return None
 

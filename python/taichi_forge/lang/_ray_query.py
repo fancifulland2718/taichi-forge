@@ -253,7 +253,18 @@ class AccelerationStructureAccessor:
         builder.begin_frontend_ray_query_filter(proceed.ptr, debug)
         try:
             candidate = RayQueryHit(query_op("candidate", query))
-            accepted = ops.cast(accept(candidate, *args), i32)
+            # LowerAST verifies all effects of the candidate predicate in
+            # this block. Keep its transitive calls visible to that check.
+            kernel = impl.get_runtime().current_kernel
+            library = getattr(kernel, "_package_compilation", None) or getattr(kernel, "_jit_function_library", None)
+            retain_functions = library is not None and library.function_library
+            if retain_functions:
+                library.function_library = False
+            try:
+                accepted = ops.cast(accept(candidate, *args), i32)
+            finally:
+                if retain_functions:
+                    library.function_library = True
             builder.begin_frontend_if(accepted.ptr, debug)
             builder.begin_frontend_if_true()
             try:

@@ -59,7 +59,8 @@ class PackageCompilation(FunctionLibrary):
             from taichi_forge.lang._jit_function_library import FunctionDependencyAnalysis
 
             self.allow_spirv = True
-            self.spirv_dependencies = FunctionDependencyAnalysis(allow_fields=False)
+            self.spirv_descriptor_arguments = True
+            self.spirv_dependencies = FunctionDependencyAnalysis(allow_fields=False, package_fields=True)
         # Discovery has finished. Keep short-lived lowering cycles in the young
         # generations until each private definition is sealed. Otherwise the
         # automatic collector can promote them, requiring a scan of the entire
@@ -91,8 +92,13 @@ class PackageCompilation(FunctionLibrary):
         if not self.function_library or not self.thread_local_call:
             return None
         if self.spirv_dependencies is not None:
-            # SPIR-V callable parameters are values. A package field would
-            # introduce a hidden resource argument when lowering the body.
+            # The component records resource captures just as it does on LLVM.
+            # SPIR-V binds those descriptor slots within each task.
+            if source.is_real_function or source.pyfunc:
+                return None
+            supported, _ = self._function_template(source)
+            if not supported:
+                return None
             dependencies = self.spirv_dependencies.dependencies(source, args)
             if dependencies is None:
                 return None
@@ -108,6 +114,7 @@ class PackageCompilation(FunctionLibrary):
             # Archive a callable body. Materialization applies the hint after
             # any binding-specific constants have been supplied.
             function._backend_inline_function = True
+            function._spirv_descriptor_arguments = self.spirv_descriptor_arguments
         return function
 
     def reuse_function(self, identity, context):
