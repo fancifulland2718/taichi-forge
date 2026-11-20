@@ -4874,7 +4874,7 @@ def test_package_vulkan_retains_atomic_array_effects_in_helpers(tmp_path, monkey
 
     @ti.func
     def local_atomic(local: ti.template()) -> ti.i32:
-        return ti.atomic_add(local[0], 1)
+        return ti.atomic_or(local[0], 1)
 
     analysis = FunctionDependencyAnalysis(allow_fields=False, package_fields=True)
     assert analysis.dependencies(local_atomic.func, (object(),)) is None
@@ -4884,6 +4884,9 @@ import taichi_forge as ti
 @ti.func
 def advance(state: ti.types.ndarray(dtype=ti.i32, ndim=1)) -> ti.i32:
     result = 0
+    if state[0] < 0:
+        print("negative", state[0])
+    ti.atomic_or(state[2], ti.pow(2, 3))
     cell = ti.Matrix([[1, 2], [3, 4]])
     for i, j in ti.static(ti.ndrange(2, 2)):
         row = cell[i, :]
@@ -4911,10 +4914,10 @@ def step(state: ti.types.ndarray(dtype=ti.i32, ndim=1)):
     assert "advance" in retained
     with Runtime("vulkan", device_index=int(os.environ.get("TI_TEST_VULKAN_DEVICE_INDEX", 0))) as runtime, \
             load_package(runtime, sdk) as code:
-        state = runtime.ndarray("i32", (2,))
-        result = np.zeros(2, dtype=np.int32)
+        state = runtime.ndarray("i32", (3,))
+        result = np.zeros(3, dtype=np.int32)
         state.write(result)
-        for expected in ([20, 50], [40, 130]):
+        for expected in ([20, 50, 8], [40, 130, 8]):
             code.host.step(state)
             state.read_into(result)
             np.testing.assert_array_equal(result, expected)

@@ -44,6 +44,10 @@ _VALUE_METHODS = frozenset(
 )
 _VALUE_ATTRIBUTES = frozenset(("x", "y", "z", "w", "n", "m"))
 _CONSTRUCTORS = (Matrix, Vector, Matrix.zero, Vector.zero, Matrix.identity)
+_RESOURCE_ATOMICS = (
+    ops.atomic_add, ops.atomic_sub, ops.atomic_mul, ops.atomic_min,
+    ops.atomic_max, ops.atomic_and, ops.atomic_or, ops.atomic_xor,
+)
 _CAPABILITY_NAMES = frozenset(name for name, value in vars(DeviceCapability).items()
                               if type(value) is str and value == name)
 
@@ -540,9 +544,15 @@ class FunctionDependencyAnalysis:
                     key = ("local_record",)
                 elif isinstance(value, MatrixType):
                     key = ("tensor_type", value.n, value.m, value.ndim, str(value.dtype))
-                elif self.package_fields and any(value is builtin for builtin in (ndrange, Matrix.rows, Matrix.cols)):
+                elif self.package_fields and any(
+                    value is builtin for builtin in (ndrange, Matrix.rows, Matrix.cols, ops.pow)
+                ):
                     key = ("call", id(value))
-                elif self.package_fields and value is ops.atomic_add:
+                elif self.package_fields and value is builtins.print:
+                    # Device print lowers inside the function. Its operands were
+                    # visited normally, and no caller-local address is required.
+                    key = ("device_print",)
+                elif self.package_fields and any(value is op for op in _RESOURCE_ATOMICS):
                     # A retained function may mutate a captured device field or
                     # an explicit array descriptor. A caller's local lvalue has
                     # no such ABI and must keep ordinary inline semantics.
@@ -559,7 +569,7 @@ class FunctionDependencyAnalysis:
                             return None
                         if not isinstance(_resolve(dest, scope)[0], Field):
                             return None
-                    key = ("atomic_add",)
+                    key = ("resource_atomic", value)
                 elif (
                     id(value) in _PURE_CALLS
                     or id(value) in primitive_types.type_ids
