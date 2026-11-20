@@ -130,7 +130,7 @@
     CACHE_FIELD(spirv_skip_loop_unroll);
     CACHE_OPTIONAL_FLAG(spirv_omit_value_names);
     if (config.spirv_omit_value_names)
-      CACHE_VALUE(std::string("vulkan-aot-void-descriptors-and-dispatch-args-v2"));
+      CACHE_VALUE(std::string("vulkan-aot-function-numbering-v3"));
   }
   // B-2.b (2026-05): the 4 vulkan_pointer_* runtime fields drive both
   // root-buffer layout and pointer-SNode SPIR-V codegen. They MUST be

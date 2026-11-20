@@ -443,6 +443,7 @@ class TaskCodegen : public IRVisitor {
 
   struct Result {
     std::vector<uint32_t> spirv_code;
+    bool has_function_units{false};
     TaskAttributes task_attribs;
     std::unordered_map<std::vector<int>,
                        irpass::ExternalPtrAccess,
@@ -491,6 +492,7 @@ class TaskCodegen : public IRVisitor {
 
     Result res;
     res.spirv_code = ir_->finalize();
+    res.has_function_units = !function_units_.empty();
     res.task_attribs = std::move(task_attribs_);
     res.arr_access = irpass::detect_external_ptr_access_in_task(task_ir_);
     res.grad_arr_access =
@@ -8109,6 +8111,61 @@ bool should_use_adaptive_quick_opt(const OffloadedStmt *stmt,
          spirv_words <= static_cast<std::size_t>(threshold_words);
 }
 
+// Independently emitted tasks can assign different IDs to an identical helper
+// because their globals differ. Number IDs in helper order first so that the
+// existing exact-body archive pool can share them. Each task keeps its own
+// declarations, bindings and literal operands.
+void number_aot_function_ids(std::vector<uint32_t> &words, spv_target_env env) {
+  struct Numbering {
+    std::vector<uint32_t> ids;
+    std::vector<size_t> offsets;
+    size_t instruction_offset{5};
+    uint32_t next{1};
+    uint32_t entry{0};
+    bool in_helper{false};
+
+    uint32_t assign(uint32_t id) {
+      if (!ids[id])
+        ids[id] = next++;
+      return ids[id];
+    }
+  } state{std::vector<uint32_t>(words.at(3))};
+
+  auto collect = [](void *data, const spv_parsed_instruction_t *inst) {
+    auto &s = *static_cast<Numbering *>(data);
+    if (inst->opcode == spv::OpEntryPoint) {
+      if (s.entry)  // This numbering applies to single-entry task modules.
+        return SPV_REQUESTED_TERMINATION;
+      s.entry = inst->words[2];
+    } else if (inst->opcode == spv::OpFunction) {
+      s.in_helper = inst->result_id != s.entry;
+    }
+    for (uint16_t n = 0; n < inst->num_operands; ++n) {
+      const auto &operand = inst->operands[n];
+      // These are the five concrete ID kinds in the SPIRV-Tools grammar.
+      if (operand.type < SPV_OPERAND_TYPE_ID || operand.type > SPV_OPERAND_TYPE_SCOPE_ID)
+        continue;
+      const uint32_t id = inst->words[operand.offset];
+      if (!id || id >= s.ids.size() || operand.num_words != 1)
+        return SPV_ERROR_INVALID_BINARY;
+      s.offsets.push_back(s.instruction_offset + operand.offset);
+      if (s.in_helper)
+        s.assign(id);
+    }
+    s.instruction_offset += inst->num_words;
+    if (inst->opcode == spv::OpFunctionEnd)
+      s.in_helper = false;
+    return SPV_SUCCESS;
+  };
+  spvtools::Context context(env);
+  if (spvBinaryParse(context.CContext(), &state, words.data(), words.size(),
+                     nullptr, collect, nullptr) != SPV_SUCCESS || state.next == 1)
+    return;
+  for (const size_t offset : state.offsets)
+    words[offset] = state.assign(words[offset]);
+  words[3] = state.next;
+}
+
 std::unique_ptr<spvtools::Optimizer> make_optimizer(
     spv_target_env target_env,
     int spv_opt_level,
@@ -8267,6 +8324,9 @@ void KernelCodegen::run(TaichiKernelAttributes &kernel_attribs,
       }
       TI_WARN_IF(!opt_ok, "SPIRV optimization failed");
     }
+
+    if (params_.omit_value_names && task_res.has_function_units && opt_ok)
+      number_aot_function_ids(optimized_spv, target_env_);
 
     TI_TRACE("SPIRV-Tools-opt: binary size, before={}, after={}",
              task_res.spirv_code.size(), optimized_spv.size());

@@ -4678,11 +4678,25 @@ def test_portable_helper_checks_optional_field_behind_static_branch():
                 value = self.sidedness[i]
             return value
 
+        @ti.func
+        def record_phase(self, state: ti.template(), phase: ti.template()):
+            if ti.static(phase == 1 and self.mixed):
+                state.total += self.sidedness[0]
+
+        @ti.func
+        def with_local_record(self, i: ti.i32) -> ti.i32:
+            state = ti.Struct(total=i)
+            for phase in ti.static(range(2)):
+                self.record_phase(state, phase)
+            return state.total
+
     mesh = Mesh()
     source = Mesh.sided.func
     args = (mesh, 0)
     assert FunctionDependencyAnalysis(allow_fields=True).dependencies(source, args) is not None
     assert FunctionDependencyAnalysis(allow_fields=False).dependencies(source, args) is None
+    portable = FunctionDependencyAnalysis(allow_fields=False, package_fields=True)
+    assert portable.dependencies(Mesh.with_local_record.func, args) is None
 
 
 def test_portable_helper_distinguishes_none_template_from_optional_resource():
@@ -4727,8 +4741,14 @@ def test_portable_helper_distinguishes_none_template_from_optional_resource():
 
 @test_utils.test(arch=ti.vulkan, offline_cache=False)
 def test_package_keeps_local_template_writes_at_the_call_site(tmp_path, monkeypatch):
+    from taichi_forge.aot._package_compilation import PackageCompilation
+
     package = _source_package(tmp_path, monkeypatch, """
 import taichi_forge as ti
+
+@ti.func
+def make_state(x):
+    return ti.Struct(total=x)
 
 @ti.func
 def update(x: ti.i32, state: ti.template() = None) -> ti.i32:
@@ -4739,15 +4759,42 @@ def update(x: ti.i32, state: ti.template() = None) -> ti.i32:
         state.total += x
     return value
 
+@ti.func
+def increment(state: ti.template(), phase: ti.template()):
+    if ti.static(phase == 1):
+        state.total += 3
+    else:
+        state.total -= 1
+
+@ti.func
+def solve(x: ti.i32) -> ti.i32:
+    state = make_state(x)
+    for phase in ti.static((1, 2)):
+        increment(state, phase)
+    for phase_index in ti.static(range(2)):
+        increment(state, phase_index)
+    return state.total
+
 @ti.kernel
 def step(a: ti.types.ndarray(dtype=ti.i32, ndim=1)):
     for i in range(a.shape[0]):
         state = ti.Struct(total=a[i])
         update(update(a[i]), state)
-        a[i] = state.total
+        a[i] = solve(state.total)
 """, initializer="from .model import step\n")
     sdk = tmp_path / "state"
+    retained = set()
+    original = PackageCompilation.library_function
+
+    def observe(compilation, source, args, **options):
+        unit = original(compilation, source, args, **options)
+        if unit is not None:
+            retained.add(source.func.__name__)
+        return unit
+
+    monkeypatch.setattr(PackageCompilation, "library_function", observe)
     ti.aot.export_package(package, sdk)
+    assert "solve" in retained and "increment" not in retained
     device = int(os.environ.get("TI_TEST_VULKAN_DEVICE_INDEX", 0))
     with Runtime("vulkan", device_index=device) as runtime, load_package(runtime, sdk) as code:
         array = runtime.ndarray("i32", (4,))
@@ -4757,7 +4804,7 @@ def step(a: ti.types.ndarray(dtype=ti.i32, ndim=1)):
             code.host.step(array)
         result = np.empty_like(initial)
         array.read_into(result)
-        np.testing.assert_array_equal(result, 4 * initial + 6)
+        np.testing.assert_array_equal(result, 4 * initial + 18)
 
 
 @test_utils.test(arch=[ti.cpu, ti.cuda, ti.vulkan], offline_cache=False)

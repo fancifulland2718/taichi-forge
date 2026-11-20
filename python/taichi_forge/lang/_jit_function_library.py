@@ -9,12 +9,14 @@ import builtins
 import inspect
 import operator
 import types
+from collections import Counter
 
 from taichi_forge.lang._function_library import FunctionLibrary
 from taichi_forge.lang.ast._inline_ir import InlineSyntax, _MISSING, _PURE_CALLS, _path, scalar_key
 from taichi_forge.lang.field import Field
 from taichi_forge.lang import impl
 from taichi_forge.lang.matrix import Matrix, Vector, MatrixType
+from taichi_forge.lang.struct import Struct
 from taichi_forge.math.mathimpl import isinf, isnan
 from taichi_forge.types import primitive_types, template
 
@@ -96,14 +98,54 @@ def _literal(node, scope, *, objects=False):
     return _MISSING
 
 
+class _LocalRecord(frozenset):
+    """Member names of a DSL record owned inside the function being inspected."""
+
+
+_STATIC_INTEGER = object()
+
+
+def _constructed_record(call, scope):
+    if not isinstance(call, ast.Call) or call.args or not call.keywords:
+        return None
+    if _resolve(_path(call.func), scope)[0] is not Struct:
+        return None
+    names = [kw.arg for kw in call.keywords]
+    if all(name and not name.startswith("_") and not hasattr(Struct, name) for name in names):
+        return _LocalRecord(names)
+    return None
+
+
+def _literal_integer_loop(iterator, scope):
+    if not isinstance(iterator, ast.Call) or len(iterator.args) != 1 or iterator.keywords:
+        return False
+    if _resolve(_path(iterator.func), scope)[0] is not impl.static:
+        return False
+    sequence = iterator.args[0]
+    if isinstance(sequence, (ast.Tuple, ast.List)):
+        values = sequence.elts
+    elif (isinstance(sequence, ast.Call) and _resolve(_path(sequence.func), scope)[0] is range
+          and not sequence.keywords and 1 <= len(sequence.args) <= 3):
+        values = sequence.args
+    else:
+        return False
+    return all(isinstance(item, (ast.Constant, ast.UnaryOp)) and type(_literal(item, {})) in (bool, int)
+               for item in values)
+
+
 class FunctionSyntax(InlineSyntax):
-    def __init__(self, tree, scope, bindings, static_scope, *, package_fields=False):
+    def __init__(self, tree, scope, bindings, static_scope, *, package_fields=False,
+                 single_assignments=(), returned_record=None):
         self.scope = scope
         self.static_scope = static_scope
         self.bindings = bindings
         self.absent_templates = {name for name, value in bindings.items() if value is None} if package_fields else ()
         self.calls = {}
         self.forwarded = set()
+        self.package_fields = package_fields
+        self.returned_record = returned_record
+        self.local_bindings = {k: v for k, v in bindings.items() if isinstance(v, _LocalRecord)}
+        self.single_assignments = single_assignments
         super().__init__(tree, allow_void=package_fields)
 
     def generic_visit(self, node):
@@ -113,8 +155,41 @@ class FunctionSyntax(InlineSyntax):
             super().generic_visit(node)
 
     def visit_For(self, node):
-        # Extraction is only requested inside an existing thread's iteration.
+        # Inspect all branches once. The DSL supplies the actual integer when
+        # it lowers each iteration; dependency discovery needs only its kind.
+        if (isinstance(node.target, ast.Name) and node.target.id in self.single_assignments
+                and node.target.id not in self.scope and _literal_integer_loop(node.iter, self.scope)):
+            self.visit(node.iter)
+            self.local_bindings[node.target.id] = _STATIC_INTEGER
+            for statement in node.body:
+                self.visit(statement)
+            del self.local_bindings[node.target.id]
+            for statement in node.orelse:
+                self.visit(statement)
+            return
         self.generic_visit(node)
+
+    def visit_Assign(self, node):
+        self.generic_visit(node)
+        if (self.package_fields and len(node.targets) == 1 and isinstance(node.targets[0], ast.Name)
+                and node.targets[0].id in self.single_assignments and node.targets[0].id not in self.scope
+                and isinstance(node.value, ast.Call)
+                and _path(node.value.func) and _path(node.value.func)[0] not in self.locals):
+            schema = _constructed_record(node.value, self.scope)
+            if schema is None and self.returned_record:
+                callee = _wrapped(_resolve(_path(node.value.func), self.scope)[0])
+                if callee is not None:
+                    schema = self.returned_record(callee)
+            if schema is not None:
+                self.local_bindings[node.targets[0].id] = schema
+
+    def visit_Attribute(self, node):
+        path = _path(node)
+        if path and len(path) == 2:
+            schema = self.local_bindings.get(path[0])
+            if isinstance(schema, _LocalRecord) and path[1] in schema:
+                return
+        super().visit_Attribute(node)
 
     def visit_Call(self, node):
         path = _path(node.func)
@@ -129,7 +204,8 @@ class FunctionSyntax(InlineSyntax):
                 self.visit(keyword.value)
         else:
             if path:
-                self.calls.setdefault(path, []).append(node)
+                local = self.local_bindings.copy() if self.local_bindings and _wrapped(value) is not None else None
+                self.calls.setdefault(path, []).append((node, local))
             for arg in [*node.args, *(kw.value for kw in node.keywords)]:
                 if isinstance(arg, ast.Name) and arg.id in self.bindings:
                     if _wrapped(_resolve(path, self.scope)[0]) is not None:
@@ -176,6 +252,10 @@ class FunctionSyntax(InlineSyntax):
             self.references.add((path, kind))
 
     def visit_Name(self, node):
+        if isinstance(self.local_bindings.get(node.id), _LocalRecord):
+            if isinstance(node.ctx, ast.Store):
+                self.safe = False
+            return
         if isinstance(node.ctx, ast.Store) and node.id in self.absent_templates:
             self.safe = False  # The entry binding no longer proves later identity tests.
         if (
@@ -191,6 +271,27 @@ class FunctionDependencyAnalysis:
         self.allow_fields = allow_fields
         self.package_fields = package_fields
         self._syntax = {}
+        self._single_assignments = {}
+        self._record_factories = {}
+
+    def _returned_record(self, source):
+        if source not in self._record_factories:
+            tree, _ = source._definition.acquire(cache=True)
+            body = tree.body[0].body
+            record = None
+            if isinstance(body[-1], ast.Return):
+                result = body[-1].value
+                stores = Counter(n.id for n in ast.walk(tree) if isinstance(n, ast.Name) and isinstance(n.ctx, ast.Store))
+                if isinstance(result, ast.Name) and stores[result.id] == 1:
+                    result = next((s.value for s in body if isinstance(s, ast.Assign) and len(s.targets) == 1
+                                   and isinstance(s.targets[0], ast.Name) and s.targets[0].id == result.id), None)
+                if isinstance(result, ast.Call):
+                    path = _path(result.func)
+                    if path and path[0] not in stores and path[0] not in source._definition.signature.parameters:
+                        record = result
+            self._record_factories[source] = record
+        record = self._record_factories[source]
+        return _constructed_record(record, source._definition.scope()) if record is not None else None
 
     def _dependencies(self, source, bindings, active, memo):
         if source in active or source.pyfunc or source.is_real_function:
@@ -208,13 +309,19 @@ class FunctionDependencyAnalysis:
     def _inspect_dependencies(self, source, bindings, active, memo):
         if source not in self._syntax:
             self._syntax[source], _ = source._definition.acquire(cache=True)
+            if self.package_fields:
+                stores = Counter(n.id for n in ast.walk(self._syntax[source])
+                                 if isinstance(n, ast.Name) and isinstance(n.ctx, ast.Store))
+                self._single_assignments[source] = {name for name, count in stores.items() if count == 1}
         scope = source._definition.scope()
         scope.update(bindings)
         # JIT specializes the bound object. In a portable package the same
         # owner property can become a live scalar and guard an array capture.
         # Only literals and explicit None template bindings can prune it.
         syntax = FunctionSyntax(self._syntax[source], scope, bindings, scope if self.allow_fields else {},
-                                package_fields=self.package_fields)
+                                package_fields=self.package_fields,
+                                single_assignments=self._single_assignments.get(source, ()),
+                                returned_record=self._returned_record)
         if not syntax.safe or any(name in scope for name in syntax.assigned):
             return None
         dependencies = []
@@ -228,11 +335,12 @@ class FunctionDependencyAnalysis:
                     key = ("fp_classification", wrapped, impl.get_runtime().default_fp)
                 elif wrapped is not None:
                     children = []
-                    for call in syntax.calls.get(path, ()):
-                        values = [_literal(arg, scope, objects=True) for arg in call.args]
+                    for call, locals_at_call in syntax.calls.get(path, ()):
+                        call_scope = scope | locals_at_call if locals_at_call else scope
+                        values = [_literal(arg, call_scope, objects=True) for arg in call.args]
                         if wrapped.classfunc and receiver is not None:
                             values.insert(0, receiver)
-                        keywords = {kw.arg: _literal(kw.value, scope, objects=True) for kw in call.keywords}
+                        keywords = {kw.arg: _literal(kw.value, call_scope, objects=True) for kw in call.keywords}
                         try:
                             bound = wrapped._definition.signature.bind(*values, **keywords)
                         except TypeError:
@@ -245,7 +353,9 @@ class FunctionDependencyAnalysis:
                             arg.name: bound.arguments[arg.name]
                             for arg in wrapped.arguments
                             if bound.arguments[arg.name] is not _MISSING
-                            and (isinstance(arg.annotation, template) or scalar_key(bound.arguments[arg.name]) is None)
+                            and (isinstance(arg.annotation, template) or
+                                 (bound.arguments[arg.name] is not _STATIC_INTEGER
+                                  and scalar_key(bound.arguments[arg.name]) is None))
                         }
                         if any(
                             arg.name not in child_bindings
@@ -258,6 +368,10 @@ class FunctionDependencyAnalysis:
                             return None
                         children.append(child)
                     key = ("function", wrapped, tuple(children))
+                elif self.package_fields and value is Struct and all(
+                    _constructed_record(call, scope) is not None for call, _ in syntax.calls[path]
+                ):
+                    key = ("local_record",)
                 elif isinstance(value, MatrixType):
                     key = ("tensor_type", value.n, value.m, value.ndim, str(value.dtype))
                 elif (
@@ -268,6 +382,8 @@ class FunctionDependencyAnalysis:
                     key = ("call", id(value))
                 else:
                     return None
+            elif self.package_fields and value is _STATIC_INTEGER:
+                key = ("literal_static_iteration",)
             elif self.allow_fields and isinstance(value, Field):
                 # Identity only: device contents are live, not compile-time data.
                 key = ("field", value)
