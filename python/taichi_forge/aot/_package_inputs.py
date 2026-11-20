@@ -420,6 +420,15 @@ def resolve_inputs(sources, imported, *, partial=False):
             raise ValueError("Write inventory input must be forwarded exactly once")
         replacements = []
         for field in sorted(fields):
+            # A write inventory enumerates possible paths, but a checkpoint
+            # can only receive Fields allocated by this target's static domain.
+            schema = owners[field[0]][0]
+            storage = schema[field[1][0]]
+            if any(schema.get(key, {}).get("kind") == "static"
+                   and schema[key]["choices"] == [("bool", not expected)]
+                   for key, expected in storage.get("conditions", {}).items()
+                   if type(expected) is bool):
+                continue
             candidate = copy.deepcopy(declaration)
             group, index = positions[0]
             expression = getattr(candidate["constructor_call"], group)[index]

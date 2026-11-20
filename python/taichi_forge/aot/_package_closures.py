@@ -133,7 +133,9 @@ def calls(sources, imported, fail):
         for function, recipe in tree._package_closure_factories.items()
     }
     result, covered = {}, set()
+    inactive = set()
     for module, _, _, _, tree, _, schemas, _ in sources:
+        inactive.update((module, name) for name in getattr(tree, "_package_inactive_constructor_calls", ()))
         for owner in tree.body:
             if not isinstance(owner, ast.ClassDef) or owner.name not in schemas:
                 continue
@@ -157,10 +159,21 @@ def calls(sources, imported, fail):
                 if _callable(target) and target in factories:
                     fail(module, call, "Cold kernel factory requires declared constructor resource inputs")
     used = {id(recipe) for items in result.values() for _, _, recipe in items}
-    for recipe in factories.values():
-        if id(recipe) in used:
-            continue
-        fail(recipe["module"], recipe["factory"], "Cold kernel factory has no declared input domain")
+    unused = {target: recipe for target, recipe in factories.items() if id(recipe) not in used}
+    for recipe in unused.values():
+        if (recipe["module"], recipe["factory"].name) not in inactive:
+            fail(recipe["module"], recipe["factory"], "Cold kernel factory has no declared input domain")
+    if unused:
+        # A surviving reference, including passing a factory as a value, still
+        # requires an input domain. Check all discarded factories in one pass.
+        for module, _, _, _, tree, _, _, _ in sources:
+            namespace = vars(imported[module])
+            for node in ast.walk(tree):
+                if isinstance(node, (ast.Name, ast.Attribute)) and isinstance(node.ctx, ast.Load):
+                    target = _source_value(node, namespace)
+                    if _callable(target) and target in unused:
+                        recipe = unused[target]
+                        fail(recipe["module"], recipe["factory"], "Cold kernel factory has no declared input domain")
     return result
 
 

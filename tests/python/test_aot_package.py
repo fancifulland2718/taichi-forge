@@ -17537,20 +17537,18 @@ def test_package_factory_sequence_projects_each_stage_domain(tmp_path, monkeypat
         manifest = ti.aot.export_package(package, tmp_path / "sdk")
     finally:
         sys.setprofile(previous)
-    # 18 legal Host configurations: 2 stages x 2 non-None options x 2 actual
-    # numerical specializations, plus the fixture's unrelated entry. No product
-    # of the two stage option domains appears in numerical code or families.
-    assert len(manifest["entries"]) == 9 and len(manifest["entry_families"]) == 4
-    for family in manifest["entry_families"].values():
-        assert set(family["domain"]) == {"biased"}
-        assert len(family["variants"]) == 2
+    # Each stage and compile tier owns one portable body. The numerical
+    # predicate is fixed by the consuming instance at prepare.
+    assert len(manifest["entries"]) == 5 and not manifest["entry_families"]
     for candidates in manifest["closure_entries"].values():
         assert len(candidates) == 2
         assert len({candidate["symbol"] for candidate in candidates}) == 2
         for candidate in candidates:
             option = candidate["options"]["opt_level"][1]
-            for variant in manifest["entry_families"][candidate["symbol"]]["variants"]:
-                assert manifest["entries"][variant["symbol"]]["compile_options"]["opt_level"] == option
+            entry = manifest["entries"][candidate["symbol"]]
+            assert entry["compile_options"]["opt_level"] == option
+            bias = next(arg for arg in entry["captures"] if arg["name"] == "biased")
+            assert {tuple(value) for value in bias["prepare_static"]} == {("bool", False), ("bool", True)}
     assert original.make_update.cache_info().currsize == 0
     reference = original.Model(3, 2.0, "fast", "full", True)
     assert reference.observed_count == 3
@@ -27911,6 +27909,30 @@ def test_package_does_not_compile_other_backend_resources_or_select_model_branch
     with pytest.raises(ti.aot.PackageExportError, match="unconditional declared boolean owner static"):
         ti.aot.export_package(package, tmp_path / "model_branch")
     assert not (tmp_path / "model_branch").exists()
+
+
+@pytest.mark.parametrize("retained", [False, True])
+@test_utils.test(arch=ti.cpu, offline_cache=False)
+def test_backend_private_kernel_factory_requires_a_domain_when_referenced(tmp_path, monkeypatch, retained):
+    factory = """
+def _cuda_update(field):
+    @ti.kernel
+    def update():
+        field[0] = 1
+    return update
+"""
+    source = TARGET_FIELDS_SOURCE.replace("@ti.data_oriented", factory + "\n@ti.data_oriented")
+    allocation = "            scope.a = scope.field(ti.f32, shape=extent)"
+    source = source.replace(allocation, allocation + "\n            self.update = _cuda_update(self.a)", 1)
+    if retained:
+        source += "\ndef get_factory():\n    return _cuda_update\n"
+    package = _source_package(tmp_path, monkeypatch, source)
+    if retained:
+        with pytest.raises(ti.aot.PackageExportError, match="Cold kernel factory has no declared input domain"):
+            ti.aot.export_package(package, tmp_path / "sdk")
+    else:
+        manifest = ti.aot.export_package(package, tmp_path / "sdk")
+        assert not any("_cuda_update" in item["definition"] for item in manifest["entries"].values())
 
 
 @pytest.mark.parametrize("shadow", ["frontend", "tuple_argument", "tuple_global"])

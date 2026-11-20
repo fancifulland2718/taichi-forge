@@ -174,6 +174,16 @@ def select_target_branches(tree, kind, target, module, fail, *, include_host=Fal
                         # interface before trying to infer its numerical ABI.
                         output.extend(statements(node.body if selected else node.orelse))
                         continue
+                    if function.name == "__init__" and isinstance(scope, ast.ClassDef):
+                        # A private kernel factory can belong exclusively to the
+                        # other target. Keep just its unshadowed name, not its AST.
+                        discarded = node.orelse if selected else node.body
+                        hidden = getattr(tree, "_package_inactive_constructor_calls", set())
+                        for stmt in discarded:
+                            hidden.update(call.func.id for call in ast.walk(stmt)
+                                          if isinstance(call, ast.Call) and isinstance(call.func, ast.Name)
+                                          and call.func.id.startswith("_") and call.func.id not in locals_)
+                        tree._package_inactive_constructor_calls = hidden
                     # Keep the original test as a consumption-time guard. A Host
                     # call/property may have changed an owner alias after the
                     # assignment; choosing that different layout is not legal.
