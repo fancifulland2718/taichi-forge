@@ -25375,7 +25375,8 @@ def test_package_free_preparation_rejects_unproven_receiver(tmp_path, monkeypatc
         ("lookup", "ordinary owner"),
         ("yield", "synchronous owner"),
         ("raw", "explicit group contexts"),
-        ("override", "Overridden construction"),
+        # The subclass's effective prepare leaves the inherited kernel without its field.
+        ("override", r"(?s)Other\.step:.*undeclared capture self\.values\b"),
     ],
 )
 @test_utils.test(arch=ti.cpu, offline_cache=False)
