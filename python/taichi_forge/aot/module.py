@@ -4,8 +4,7 @@ import json
 import os
 from contextlib import contextmanager
 from pathlib import Path
-from shutil import rmtree
-from tempfile import mkdtemp
+from tempfile import TemporaryDirectory
 from urllib.parse import quote
 from zipfile import ZIP_DEFLATED, ZipFile
 
@@ -909,11 +908,6 @@ class Module:
         tcm_path = Path(filepath).absolute()
         assert tcm_path.parent.exists(), "Output directory doesn't exist"
 
-        temp_dir = mkdtemp(prefix="tcm_")
-        # Save first as usual.
-        self.save(temp_dir, shared_component_contracts=shared_component_contracts,
-                  shared_execution_plans=shared_execution_plans)
-
         fixed_time = datetime.datetime(2000, 12, 1).timestamp()
         omitted = set()
         if not include_debug_metadata and self._arch in (
@@ -926,15 +920,15 @@ class Module:
 
         # Fast deflate reduces frozen topology/state and code without replay
         # work. Native VirtualDir readers already decompress requested entries.
-        with ZipFile(tcm_path, "w", compression=ZIP_DEFLATED, compresslevel=1) as z:
-            for path in sorted(Path(temp_dir).rglob("*")):
-                if not path.is_file():
-                    continue
-                relative = path.relative_to(temp_dir)
-                if relative in omitted:
-                    continue
-                os.utime(path, (fixed_time, fixed_time))
-                z.write(path, relative)
-
-        # Remove cached files
-        rmtree(temp_dir)
+        with TemporaryDirectory(prefix="tcm_") as temp_dir:
+            self.save(temp_dir, shared_component_contracts=shared_component_contracts,
+                      shared_execution_plans=shared_execution_plans)
+            with ZipFile(tcm_path, "w", compression=ZIP_DEFLATED, compresslevel=1) as z:
+                for path in sorted(Path(temp_dir).rglob("*")):
+                    if not path.is_file():
+                        continue
+                    relative = path.relative_to(temp_dir)
+                    if relative in omitted:
+                        continue
+                    os.utime(path, (fixed_time, fixed_time))
+                    z.write(path, relative)
