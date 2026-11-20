@@ -29,18 +29,35 @@ class FunctionLibrary:
                 value = returns[0].value
                 values = value.elts if isinstance(value, ast.Tuple) else [value]
                 parameters = {arg.name: i for i, arg in enumerate(source.arguments)}
+                origins = parameters.copy()
+                # A leading "result = operand" declares a DSL local of the
+                # operand's type, including its tensor shape and precision.
+                # Stop at other statements: a later assignment can update an
+                # already declared local of a different type.
+                if not all(isinstance(node, ast.Name) and node.id in origins for node in values):
+                    for statement in body:
+                        if (isinstance(statement, ast.Expr) and isinstance(statement.value, ast.Constant)
+                                and isinstance(statement.value.value, str)):
+                            continue
+                        if not isinstance(statement, ast.Assign) or len(statement.targets) != 1:
+                            break
+                        target, operand = statement.targets[0], statement.value
+                        if not (isinstance(target, ast.Name) and target.id not in origins
+                                and isinstance(operand, ast.Name) and operand.id in parameters):
+                            break
+                        origins[target.id] = parameters[operand.id]
                 supported = (
                     supported
                     and len(returns) == 1
                     and returns[0] is body[-1]
                     and (not isinstance(value, ast.Tuple) or len(values) > 1)
-                    and all(isinstance(node, ast.Name) and node.id in parameters for node in values)
+                    and all(isinstance(node, ast.Name) and node.id in origins for node in values)
                 )
                 if supported:
                     from taichi_forge.lang import ops
                     from taichi_forge.lang.ast.symbol_resolver import ASTResolver
 
-                    projection = tuple(parameters[node.id] for node in values)
+                    projection = tuple(origins[node.id] for node in values)
                     # Static assignment/iteration can replace a parameter's
                     # local value with a Python object. Do not change that ABI.
                     names = {node.id for node in values}

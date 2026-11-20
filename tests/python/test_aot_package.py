@@ -4477,6 +4477,18 @@ def updated(value):
     value += 0.75
     return value
 @ti.func
+def copied_pair(a, b):
+    left = a
+    right = b
+    left += 0.75
+    right -= 1
+    return left, right
+@ti.func
+def existing_local(value):
+    result = ti.cast(0, ti.i32)
+    result = value
+    return result
+@ti.func
 def static_result(value):
     value = ti.static(7)
     return value
@@ -4503,6 +4515,8 @@ class Model:
                 total += updated(ti.Vector([i + axis, i + axis + 1])).sum()
                 total += updated(ti.Matrix([[i, i + 1], [i + 2, i + 3]])).sum()
             total += updated(self.n)
+            x, y = copied_pair(ti.cast(i, ti.f64) + 1.0e-10, i)
+            total += x + y + existing_local(x)
             offset = ti.static(static_result(1) + template_result(2))
             single, = singleton_result(i)
             self.out[i] = total + offset + single
@@ -4521,6 +4535,7 @@ class Model:
     monkeypatch.setattr(Func, 'do_compile', observe)
     ti.aot.export_package(package, tmp_path / 'sdk', artifact_format='bc-library')
     assert captures['updated'] == 4  # i32, f64, vec2(i32), mat2(i32); model extent stays inline
+    assert captures['copied_pair'] == 1 and captures['existing_local'] == 0
     assert captures['static_result'] == captures['template_result'] == captures['singleton_result'] == 0
     with Runtime('cuda') as runtime, load_package(runtime, tmp_path / 'sdk') as code:
         aot = code.host.Model(4)
