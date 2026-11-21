@@ -7,6 +7,30 @@
 
 namespace taichi::lang {
 
+TEST(LowerAST, BroadcastReusesScalarArithmeticButPreservesRandomDraws) {
+  auto one = Expr::make<ConstExpression>(1.0f);
+  one->type_check(nullptr);
+  auto power = Expr::make<BinaryOpExpression>(BinaryOpType::pow, one, one);
+  power->type_check(nullptr);
+  auto random = Expr::make<RandExpression>(PrimitiveType::f32);
+  random->type_check(nullptr);
+  for (const auto &operand : {power, random}) {
+    auto vector = Expr::make<MatrixExpression>(
+        std::vector<Expr>(3, operand), std::vector<int>{3}, PrimitiveType::f32);
+    vector->type_check(nullptr);
+    Expression::FlattenContext ctx;
+    const auto &lanes = flatten_rvalue(vector, &ctx)->as<MatrixInitStmt>()->values;
+    ASSERT_EQ(lanes.size(), 3);
+    if (operand.is<RandExpression>()) {
+      EXPECT_NE(lanes[0], lanes[1]);
+      EXPECT_NE(lanes[1], lanes[2]);
+    } else {
+      EXPECT_EQ(lanes[0], lanes[1]);
+      EXPECT_EQ(lanes[1], lanes[2]);
+    }
+  }
+}
+
 TEST(LowerAST, RebindsLocalsInBothBranchesAndPreservesParents) {
   auto root = std::make_unique<Block>();
   auto old_alloca =

@@ -870,11 +870,41 @@ void MatrixExpression::type_check(const CompileConfig *config) {
   ret_type = dt;
 }
 
+bool MatrixExpression::has_repeated_operand() const {
+  return elements.size() > 1 &&
+         std::all_of(elements.begin() + 1, elements.end(), [&](const Expr &e) {
+           const auto &first = elements.front();
+           return e.expr == first.expr && e.const_value == first.const_value &&
+                  e.atomic == first.atomic;
+         });
+}
+
 void MatrixExpression::flatten(FlattenContext *ctx) {
   TI_ASSERT(dt->is<TensorType>());
   std::vector<Stmt *> values;
-  for (auto &elt : elements) {
-    values.push_back(flatten_rvalue(elt, ctx));
+  if (!elements.empty()) {
+    const auto start = ctx->stmts.size();
+    auto *first = flatten_rvalue(elements.front(), ctx);
+    values.push_back(first);
+    // An implicit scalar broadcast shares one expression across its lanes.
+    // Reuse its SSA value only for arithmetic on private or by-value inputs.
+    // In particular each random draw, atomic or device load keeps its order.
+    const auto &lowered = ctx->stmts.stmts;
+    const bool splat = has_repeated_operand() &&
+        std::all_of(lowered.begin() + start, lowered.end(), [](const pStmt &s) {
+          if (auto *load = s->cast<LocalLoadStmt>()) {
+            auto *local = load->src->cast<AllocaStmt>();
+            return local && !local->is_shared;
+          }
+          return s->is<ConstStmt>() || s->is<ArgLoadStmt>() ||
+                 s->is<UnaryOpStmt>() || s->is<BinaryOpStmt>();
+        });
+    if (splat) {
+      values.resize(elements.size(), first);
+    } else {
+      for (auto it = elements.begin() + 1; it != elements.end(); ++it)
+        values.push_back(flatten_rvalue(*it, ctx));
+    }
   }
   stmt = ctx->push_back<MatrixInitStmt>(values);
   stmt->ret_type = dt;

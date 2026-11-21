@@ -20,6 +20,7 @@ enum class ExprOpCode : std::uint8_t {
 #define PER_EXPRESSION(x) x,
 #include "taichi/inc/expressions.inc.h"
 #undef PER_EXPRESSION
+  RepeatedMatrixOperand,
 };
 
 enum class StmtOpCode : std::uint8_t {
@@ -202,6 +203,12 @@ class ASTSerializer : public IRVisitor, public ExpressionVisitor {
   }
 
   void visit(MatrixExpression *expr) override {
+    if (expr->has_repeated_operand()) {
+      emit(ExprOpCode::RepeatedMatrixOperand);
+      emit(expr->dt);
+      emit(expr->elements.front());
+      return;
+    }
     emit(ExprOpCode::MatrixExpression);
     emit(expr->dt);
     for (auto elt : expr->elements) {

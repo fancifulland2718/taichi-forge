@@ -726,6 +726,8 @@ class MatrixExpression : public Expression {
     dt = TypeFactory::create_tensor_type(shape, element_type);
   }
 
+  bool has_repeated_operand() const;
+
   void type_check(const CompileConfig *config) override;
 
   void flatten(FlattenContext *ctx) override;
