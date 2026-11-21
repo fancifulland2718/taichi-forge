@@ -53,8 +53,10 @@ functions, including entry functions. Each split shader keeps its declarations,
 decorations, constants and remaining instructions in a `.spvroot` file.
 `shader_functions` records the word offsets and content hashes of its shared
 bodies. Ordinary kernel lookup reads the callable ABI. On first prepare, the
-runtime assembles the selected shader, specializes its eligible parameters and
-creates the pipeline. A generic first launch can assemble the same shader.
+runtime assembles the selected shader and specializes its eligible parameters.
+After folding ABI constants and pruning branches, prepare inlines surviving
+helper calls before creating the pipeline. A generic first launch can assemble
+the same shader.
 Subsequent submissions reuse the prepared pipeline. Shader storage and
 instance resource bindings have independent lifetimes.
 

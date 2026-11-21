@@ -10,10 +10,13 @@
 #include "source/opt/build_module.h"
 #include "source/opt/ccp_pass.h"
 #include "source/opt/dead_branch_elim_pass.h"
+#include "source/opt/eliminate_dead_functions_pass.h"
 #include "source/opt/flatten_decoration_pass.h"
+#include "source/opt/inline_exhaustive_pass.h"
 #include "source/opt/ir_context.h"
 #include "source/opt/constants.h"
 #include "source/opt/local_single_block_elim_pass.h"
+#include "source/opt/merge_return_pass.h"
 #include "source/opt/pass_manager.h"
 #include "source/opt/simplification_pass.h"
 #include "source/opt/type_manager.h"
@@ -285,6 +288,17 @@ std::vector<uint32_t> specialize_spirv_arguments(
   passes.AddPass<spvtools::opt::AggressiveDCEPass>(false, false);
   if (passes.Run(context.get()) == spvtools::opt::Pass::Status::Failure)
     throw std::invalid_argument("Cannot specialize SPIR-V arguments: " + diagnostic);
+  // Prune with the bound ABI first. Only the surviving outlined calls can
+  // expose new caller-local values when the prepared pipeline is materialized.
+  auto function = context->module()->begin();
+  if (function != context->module()->end() && ++function != context->module()->end()) {
+    passes.AddPass<spvtools::opt::MergeReturnPass>();
+    passes.AddPass<spvtools::opt::InlineExhaustivePass>();
+    passes.AddPass<spvtools::opt::EliminateDeadFunctionsPass>();
+    passes.AddPass<spvtools::opt::AggressiveDCEPass>(false, false);
+    if (passes.Run(context.get()) == spvtools::opt::Pass::Status::Failure)
+      throw std::invalid_argument("Cannot inline prepared SPIR-V calls: " + diagnostic);
+  }
   std::vector<uint32_t> output;
   context->module()->ToBinary(&output, true);
   return output;
