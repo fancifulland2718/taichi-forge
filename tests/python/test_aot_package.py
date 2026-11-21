@@ -240,6 +240,7 @@ class Model:
 
 @test_utils.test(arch=[ti.cpu, ti.cuda, ti.vulkan], offline_cache=False)
 def test_package_build_cache_source_changes_and_missing_index(tmp_path, monkeypatch):
+    from taichi_forge.aot import _package
     from taichi_forge.aot._package_compilation import PackageCompilation
 
     source = '''import taichi_forge as ti
@@ -265,25 +266,58 @@ def compute(x: ti.i32) -> ti.i32:
         count.append(1)
         return original(self, *args, **kwargs)
 
+    scans = []
+    scan = _package._module_syntax
+
+    def scan_module(name, *args):
+        scans.append(name)
+        return scan(name, *args)
+
+    monkeypatch.setattr(_package, '_module_syntax', scan_module)
     monkeypatch.setattr(PackageCompilation, 'compile', compile_entry)
     ti.aot.export_package(package, tmp_path / 'changed', artifact_format=artifact_format, build_cache=cache)
     assert count
+    assert scans == [package.model.__name__]
     with Runtime(arch.name) as runtime, load_package(runtime, tmp_path / 'changed') as code:
         assert code.host.compute(5) == 35
     (cache / 'latest.json').write_text('{unfinished', encoding='utf8')
     count.clear()
+    scans.clear()
     ti.aot.export_package(package, tmp_path / 'recovered', artifact_format=artifact_format, build_cache=cache)
     assert count
-    assert json.loads((cache / 'latest.json').read_text())['output'] == str(tmp_path / 'recovered')
+    record = json.loads((cache / 'latest.json').read_text())
+    assert record['output'] == str(tmp_path / 'recovered')
+    assert set(scans) == set(record['module_syntax'])
+    # Damage one syntax record while a different module changes. Recompute
+    # that module's lexical facts even though its source is still identical.
+    damaged = record['module_syntax'][package.__name__]['facts']
+    damaged[0] = not damaged[0]
+    (cache / 'latest.json').write_text(json.dumps(record))
     index = (cache / 'latest.json').read_bytes()
     invalid = source.replace('x * 3', 'missing_capture')
     path.write_text(invalid, encoding='utf8')
     exec(compile(invalid, str(path), 'exec'), package.model.__dict__)
     package.compute = package.model.compute
+    scans.clear()
     with pytest.raises(ti.aot.PackageExportError):
         ti.aot.export_package(package, tmp_path / 'failed', artifact_format=artifact_format, build_cache=cache)
+    assert set(scans) == {package.__name__, package.model.__name__}
     assert (cache / 'latest.json').read_bytes() == index
     assert not (tmp_path / 'failed').exists()
+
+
+@pytest.mark.parametrize("source, diagnostic", [
+    ("if True:\n    @device\n    def nested(): pass", "numerical definitions"),
+    ("@device\nasync def asynchronous(): pass", "numerical definitions"),
+    ("class Owner:\n    @ti.data_oriented\n    def method(self): pass", "numerical definitions"),
+    ("def host(_forge_package_local): pass", "reserved package-export identifier"),
+])
+def test_package_module_syntax_retains_declaration_errors(source, diagnostic):
+    from taichi_forge.aot._package import PackageExportError, _analyze
+
+    source = "import taichi_forge as ti\nfrom taichi_forge import kernel as device\n" + source
+    with pytest.raises(PackageExportError, match=diagnostic):
+        _analyze("fixture", source, {}, "vulkan", defer_owners=True)
 
 
 @test_utils.test(arch=ti.cpu, offline_cache=True)
@@ -26769,6 +26803,27 @@ def test_factory_source_is_reused_only_within_one_declaration_pass(monkeypatch):
         assert changed.body[0].body[0].value.value == 2
     with reuse_factory_sources():
         assert factory_source(first)[1] is not changed
+
+
+@test_utils.test(arch=ti.cpu, offline_cache=False)
+def test_package_cached_module_syntax_resolves_rebound_factory(tmp_path, monkeypatch):
+    from taichi_forge.aot import _package
+
+    package = _resource_factory_fixture(tmp_path, monkeypatch)
+    cache = tmp_path / "cache"
+    options = dict(build_cache=cache, artifact_format="bc")
+    ti.aot.export_package(package, tmp_path / "first", **options)
+
+    replacement = RESOURCE_FACTORY_SOURCE.replace("    factory =", "    effects.append(1)\n    factory =", 1)
+    (tmp_path / "changed_factory.py").write_text(textwrap.dedent(replacement), encoding="utf8")
+    monkeypatch.delitem(sys.modules, "changed_factory", raising=False)
+    factory = importlib.import_module("changed_factory")
+    monkeypatch.setattr(package.model, "resource_scope", factory.resource_scope)
+    monkeypatch.setattr(_package, "_module_syntax", lambda *args: pytest.fail("unchanged source was rescanned"))
+    with pytest.raises(ti.aot.PackageExportError, match="factory forwarding is unproven"):
+        ti.aot.export_package(package, tmp_path / "changed", **options)
+    assert not factory.effects
+    assert not (tmp_path / "changed").exists()
 
 
 @test_utils.test(arch=[ti.cpu, ti.cuda, ti.vulkan], offline_cache=False)

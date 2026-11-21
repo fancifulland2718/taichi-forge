@@ -203,8 +203,11 @@ def discover_construction_methods(tree, namespace, module, fail, kind):
                     return True
             return False
 
-        allocation_paths = {name for name, function in methods.items()
-                            if not function.decorator_list and allocates(function)}
+        direct_allocations = {name for name, function in methods.items()
+                              if not function.decorator_list and allocates(function)}
+        if not direct_allocations:
+            continue
+        allocation_paths = direct_allocations
         while True:
             expanded = allocation_paths | {name for name, function in methods.items()
                 if not function.decorator_list
@@ -299,8 +302,7 @@ def discover_construction_methods(tree, namespace, module, fail, kind):
             if proven == grouped:
                 break
             grouped = proven
-        needed = {name for name, function in methods.items()
-                  if name not in grouped and not function.decorator_list and allocates(function)}
+        needed = direct_allocations - grouped
         while True:
             expanded = needed | {
                 name
@@ -416,7 +418,7 @@ def discover_construction_methods(tree, namespace, module, fail, kind):
         # __init__. Only explicit group contexts have an independent lifetime;
         # raw/default-root allocations keep their existing rejection boundary.
         for name, method in methods.items():
-            if name == "__init__" or name in selected or method.decorator_list or not allocates(method):
+            if name == "__init__" or name in selected or name not in direct_allocations:
                 continue
             contexts = []
             for part in syntax_of(method)[0]:

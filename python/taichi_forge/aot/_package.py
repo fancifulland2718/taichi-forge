@@ -349,20 +349,46 @@ def _construction_schema(module, node, constructor, kind, namespace, earlier=Non
     return schema
 
 
-def _analyze(module, source, namespace, target, *, defer_owners=False):
+def _module_syntax(module, tree, kind):
+    """Source-only facts, before inheritance, target selection or factory expansion."""
+    direct = {node for node in tree.body if isinstance(node, ast.FunctionDef)}
+    for cls in tree.body:
+        if isinstance(cls, ast.ClassDef):
+            direct.update(node for node in cls.body if isinstance(node, ast.FunctionDef)
+                          and any(kind(d) in ("kernel", "func", "real_func", "pyfunc") for d in node.decorator_list))
+    nested = target_reference = False
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Name):
+            name = node.id
+            if not target_reference:
+                target_reference = kind(node) in BACKEND_NAMES
+        elif isinstance(node, ast.Attribute):
+            name = node.attr
+            target_reference = target_reference or name == "arch" or name in BACKEND_NAMES
+        elif isinstance(node, ast.arg):
+            name = node.arg
+        elif isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+            name = node.name
+            if (not isinstance(node, ast.ClassDef) and node not in direct
+                    and any(kind(d) in _DECORATORS for d in node.decorator_list)):
+                nested = True
+        else:
+            continue
+        if name.startswith(_PREFIX):
+            _fail(module, tree, "reserved package-export identifier")
+    return nested, target_reference
+
+
+def _analyze(module, source, namespace, target, *, defer_owners=False, build_cache=None):
     tree = ast.parse(source.removeprefix("\ufeff"))
-    if any(
-        (isinstance(n, ast.Name) and n.id.startswith(_PREFIX))
-        or (isinstance(n, ast.Attribute) and n.attr.startswith(_PREFIX))
-        or (isinstance(n, ast.arg) and n.arg.startswith(_PREFIX))
-        or (isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)) and n.name.startswith(_PREFIX))
-        for n in ast.walk(tree)
-    ):
-        _fail(module, tree, "reserved package-export identifier")
     kind = decorator_resolver(tree)
+    if build_cache is None:
+        nested, target_reference = _module_syntax(module, tree, kind)
+    else:
+        nested, target_reference = build_cache.module_syntax(module, source, lambda: _module_syntax(module, tree, kind))
     construction = materialize_inherited_construction(tree, namespace, module, _fail, kind)
     construction.extend(discover_construction_methods(tree, namespace, module, _fail, kind))
-    tree._package_target_selections = select_target_branches(tree, kind, target, module, _fail)
+    tree._package_target_selections = select_target_branches(tree, kind, target, module, _fail) if target_reference else []
     from ._package_factories import normalize_factories
     from ._package_contexts import discover_contexts
 
@@ -378,7 +404,7 @@ def _analyze(module, source, namespace, target, *, defer_owners=False):
     supported = set()
     from ._package_closures import discover
 
-    tree._package_closure_factories, closures = discover(module, tree, kind, namespace, _fail)
+    tree._package_closure_factories, closures = discover(module, tree, kind, namespace, _fail) if nested else ({}, [])
     definitions.extend(closures)
     supported.update(id(item["node"]) for item in closures)
     for node in tree.body:
@@ -469,14 +495,20 @@ def _analyze(module, source, namespace, target, *, defer_owners=False):
                     error_interface=error_interface,
                 )
             )
-    for node in ast.walk(tree):
+    # Only construction and preparation bodies can acquire new syntax. Numerical
+    # target selection retains existing statements with their source locations.
+    constructors = [fn for cls in tree.body if isinstance(cls, ast.ClassDef) for fn in construction_functions(cls)]
+    candidates = ast.walk(tree) if nested else (node for fn in constructors for node in ast.walk(fn))
+    for node in candidates:
         if (
             isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
             and any(kind(d) in _DECORATORS for d in node.decorator_list)
             and id(node) not in supported
         ):
             _fail(module, node, "nested, inherited, or asynchronous numerical definitions require further support")
-    return ast.fix_missing_locations(tree), kind, owners, definitions
+    for fn in constructors:
+        ast.fix_missing_locations(fn)
+    return tree, kind, owners, definitions
 
 
 class _ProjectedHost:
@@ -1613,7 +1645,7 @@ def _package_source_inputs(package, arch, source_root):
 
 @reuse_factory_sources()
 @reuse_declaration_syntax()
-def _preflight_package(package, *, arch=None, source_root=None, inputs=None):
+def _preflight_package(package, *, arch=None, source_root=None, inputs=None, build_cache=None):
     """Resolve declarations once the current sources and imported bindings are known."""
     source_files, namespaces, dependency_report, application_modules, imported_modules, target_arch, packages = (
         inputs if inputs is not None else _package_source_inputs(package, arch, source_root)
@@ -1622,7 +1654,8 @@ def _preflight_package(package, *, arch=None, source_root=None, inputs=None):
     for name, path, relative, text in source_files:
         imported = imported_modules[name]
         try:
-            tree, kind, owners, definitions = _analyze(name, text, vars(imported), target_arch.name, defer_owners=True)
+            tree, kind, owners, definitions = _analyze(name, text, vars(imported), target_arch.name,
+                                                      defer_owners=True, build_cache=build_cache)
         except PackageExportError as error:
             failures.append(str(error))
             continue
@@ -1637,6 +1670,8 @@ def _preflight_package(package, *, arch=None, source_root=None, inputs=None):
 
     host_contexts = HostContexts(imported_modules)
     for name, _, _, _, tree, *_ in sources:
+        if not tree._package_resource_contexts:
+            continue
         for node in ast.walk(tree):
             recipe = getattr(node, "_package_resource_context", None)
             if recipe is not None:
@@ -1834,7 +1869,7 @@ def export_package(package, output, *, arch=None, caps=None, source_root=None, a
         if cached is not None:
             cache.record(output)
             return cached
-    declarations = _preflight_package(package, inputs=inputs)
+    declarations = _preflight_package(package, inputs=inputs, build_cache=cache)
     del inputs, source_files, imported_modules
     with PackageCompilation() as compilation:
         return _export_package(output, declarations, source_root, caps, artifact_format, compilation, cache, assets)

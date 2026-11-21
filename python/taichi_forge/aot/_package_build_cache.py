@@ -3,6 +3,7 @@
 import ast
 import base64
 import builtins
+from functools import cached_property
 import hashlib
 import inspect
 import json
@@ -217,6 +218,7 @@ class PackageBuildCache:
         self.objects = {}
         self.captures = {}
         self.method_inputs = {}
+        self.syntax_records = {}
         self.capture_syntax = {}
         self.object_context = None
         self.toolchain_files = {}
@@ -389,6 +391,35 @@ class PackageBuildCache:
         payload = (native, entry, module._component_entries[entry["symbol"]])
         self.objects[key] = dict(payload=payload, digest=value_digest((key, payload)))
 
+    @cached_property
+    def _syntax_policy(self):
+        from taichi_forge.tools import _compiled_host
+        from . import _package
+
+        try:
+            rules = (file_digest(_package.__file__), file_digest(_compiled_host.__file__))
+        except OSError:
+            return None
+        return value_digest((sys.version, rules, sorted(_package.BACKEND_NAMES)))
+
+    def module_syntax(self, module, source, analyze):
+        # This index describes the parsed source only. Imported owner classes,
+        # declaration factories and target decisions are resolved on each build.
+        if self._syntax_policy is None:
+            return analyze()
+        key = (self._syntax_policy, hashlib.sha256(source.encode("utf8")).hexdigest())
+        records = self.previous.get("module_syntax")
+        record = records.get(module) if isinstance(records, dict) else None
+        if isinstance(record, dict):
+            facts = record.get("facts")
+            if (isinstance(facts, list) and len(facts) == 2 and all(type(f) is bool for f in facts)
+                    and record.get("digest") == value_digest((key, facts))):
+                self.syntax_records[module] = record
+                return facts
+        facts = list(analyze())
+        self.syntax_records[module] = dict(facts=facts, digest=value_digest((key, facts)))
+        return facts
+
     def reuse(self, output, publish):
         if self.identity is None:
             return None
@@ -448,13 +479,14 @@ class PackageBuildCache:
             self.objects = record.get("objects", {})
             self.captures = record.get("captures", {})
             self.method_inputs = record.get("method_inputs", {})
+            self.syntax_records = record.get("module_syntax", {})
             return manifest
         finally:
             if not complete:
                 shutil.rmtree(staging)
 
     def record(self, output):
-        if self.identity is None and not (self.objects or self.captures or self.method_inputs):
+        if self.identity is None and not (self.objects or self.captures or self.method_inputs or self.syntax_records):
             return
         try:
             if self.identity is not None and _namespace_inputs(self.modules) != self.inputs["namespaces"]:
@@ -473,7 +505,7 @@ class PackageBuildCache:
         record = dict(version=1, key=self.identity.key if self.identity else None, output=str(output),
                       inputs=dict(self.identity.inputs) if self.identity else {}, toolchain_files=self.toolchain_files,
                       objects=self.objects,
-                      captures=self.captures, method_inputs=self.method_inputs,
+                      captures=self.captures, method_inputs=self.method_inputs, module_syntax=self.syntax_records,
                       manifest_sha256=file_digest(output / "package.json"))
         fd, temporary = tempfile.mkstemp(prefix=".latest-", suffix=".json", dir=self.directory)
         try:

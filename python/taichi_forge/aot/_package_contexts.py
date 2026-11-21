@@ -230,7 +230,7 @@ def discover_contexts(tree, namespace, module, fail):
                 or getattr(constructor, "_package_preparation_method", False)
             ):
                 continue
-            parents = {id(child): parent for parent in ast.walk(constructor) for child in ast.iter_child_nodes(parent)}
+            parents = None
             for node in ast.walk(constructor):
                 if not isinstance(node, ast.With) or len(node.items) != 1:
                     continue
@@ -246,6 +246,9 @@ def discover_contexts(tree, namespace, module, fail):
                     continue
                 if not isinstance(item.optional_vars, ast.Name):
                     fail(module, node, "Resource contexts require one local scope binding")
+                if parents is None:
+                    parents = {id(child): parent for parent in ast.walk(constructor)
+                               for child in ast.iter_child_nodes(parent)}
                 enclosing = parents[id(node)]
                 while enclosing is not constructor:
                     if not isinstance(enclosing, ast.If):

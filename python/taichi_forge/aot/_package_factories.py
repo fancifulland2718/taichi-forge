@@ -413,6 +413,7 @@ def normalize_factories(tree, namespace, module, fail, kind):
     from ._package_declarations import expand_declarations
 
     replacements = {}
+    changed_functions = set()
 
     for cls in tree.body:
         if not isinstance(cls, ast.ClassDef):
@@ -612,6 +613,7 @@ def normalize_factories(tree, namespace, module, fail, kind):
                     if expanded is not None:
                         body, facts = expanded
                         replacements[id(statement)] = body
+                        changed_functions.add(function)
                         declarations.append(
                             {**facts, "kind": "declaration_helper", "module": module, "line": call.lineno}
                         )
@@ -652,5 +654,6 @@ def normalize_factories(tree, namespace, module, fail, kind):
             replacement = replacements.get(id(node))
             return replacement if replacement is not None else super().visit(node)
 
-    Replace().visit(tree)
+    for function in changed_functions:
+        Replace().visit(function)
     return declarations
