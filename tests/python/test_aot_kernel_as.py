@@ -151,13 +151,15 @@ def _export_graph(module, query, energy):
             mappings = {blas: dict(vertices="vertices", indices="indices"), scene: dict(transforms="poses")}
             sources = dict(scene=scene)
             count = len(module._exported_kernels)
-            with pytest.raises(ti.TaichiRuntimeError, match="source_bindings"):
-                module.add_execution_plan("missing", graph, resource_bindings=mappings)
             with pytest.raises(ValueError, match="unused"):
                 module.add_execution_plan("unused", graph, source_bindings=dict(sources, unused=scene), resource_bindings=mappings)
             with pytest.raises(ValueError, match="conflict"):
                 module.add_execution_plan("conflict", graph, source_bindings=sources, resource_bindings={blas: "blas", scene: "hits"})
             assert len(module._exported_kernels) == count and not module._graph_export_failed
+            # A symbolic TLAS can be supplied by the consumer even when a
+            # separate fixed alias reconstructs its producer geometry.
+            symbolic_plan = module.add_execution_plan("symbolic", graph, resource_bindings=mappings)
+            assert "scene" in symbolic_plan.argument_names and "alias" not in symbolic_plan.argument_names
             for private in (True, False):
                 plan = module.add_execution_plan(
                     "private" if private else "public", graph,

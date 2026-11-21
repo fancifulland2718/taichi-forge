@@ -55,7 +55,7 @@ def plan_parts(private):
     )
 
 
-def check(frame, gates, dz=0, dx=0, gradients=True):
+def check(frame, gates, dz=0, dx=0, gradients=True, custom_indices=(17, 21)):
     hits, ids, occluded, dhits, loss = [], [], [], [], 0
     for ray in RAYS:
         best = None
@@ -71,7 +71,7 @@ def check(frame, gates, dz=0, dx=0, gradients=True):
         else:
             t, ordinal = best
             hits += [t, 0.25, 0.5, 0]
-            ids += [0, ordinal, (17, 21)[ordinal], 1]
+            ids += [0, ordinal, custom_indices[ordinal], 1]
             dhits += [t, 0, 0, 0]
             loss += 0.5 * t * t
         occluded.append(int(best is not None))
@@ -128,10 +128,26 @@ def main(mode, artifact, output):
         entry(*args)  # Ordinary C API launch.
         check(frame, [0, 1], gradients=False)
         bound = entry.prepare(*args)
-        for gates in ([1, 0], [0, 0], [1, 1]):
-            write(frame["gates"], gates, "i")
-            bound.run()
-            check(frame, gates, gradients=False)
+        specialized = entry.bind(*args).prepare(specialize=True)
+        for call in (bound, specialized):
+            for gates in ([1, 0], [0, 0], [1, 1]):
+                write(frame["gates"], gates, "i")
+                call.run()
+                check(frame, gates, gradients=False)
+        other_scene = runtime.native_resource(
+            "vulkan_ray", "instance_tlas",
+            parameters=dict(instance_count=2, custom_indices=[31, 37]),
+            bindings=dict(blas_0=blas, blas_1=blas, transforms=frame["poses"]),
+        )
+        other = entry.bind(other_scene, *args[1:]).prepare(specialize=True)
+        other.run()
+        check(frame, [1, 1], gradients=False, custom_indices=(31, 37))
+        other.run()
+        other_scene.close()
+        specialized.run()
+        check(frame, [1, 1], gradients=False)
+        raises(other.run)
+        other.close()
         raises(lambda: entry.prepare(blas, *args[1:]), "qualified")
         public = module.prepare_execution(
             "public",
@@ -162,6 +178,8 @@ def main(mode, artifact, output):
         scene.close()
         raises(public)
         raises(bound.run)
+        raises(specialized.run)
+        specialized.close()
         raises(lambda: entry(*args))
         private()
         check(frame, [1, 1])

@@ -10,6 +10,7 @@
 #include <optional>
 #include <unordered_set>
 #include "fp16.h"
+#include "taichi/runtime/native_acceleration_structure.h"
 #include "taichi/runtime/native_image.h"
 #include "taichi/runtime/native_kernel_resource.h"
 #include "taichi/runtime/native_operation.h"
@@ -281,22 +282,31 @@ bool validate_gradient_parameter(
 namespace capi {
 void BoundKernelArguments::specialize(
     Runtime &runtime, const std::vector<uint32_t> &constant_args) {
+  using taichi::lang::NativeAccelerationStructureKernelBinding;
   using taichi::lang::NativeImageKernelBinding;
   for (const auto &binding : kernel_resources) {
     const auto *image = dynamic_cast<const NativeImageKernelBinding *>(binding.get());
-    if (runtime.arch != taichi::Arch::vulkan || !image || !image->sampled_only())
-      throw MemoryBindingError("Managed kernel specialization requires Vulkan sampled images");
+    const auto *acceleration =
+        dynamic_cast<const NativeAccelerationStructureKernelBinding *>(binding.get());
+    if (runtime.arch != taichi::Arch::vulkan ||
+        (!acceleration && (!image || !image->sampled_only())))
+      throw MemoryBindingError("Managed kernel specialization requires Vulkan sampled images or acceleration structures");
   }
   auto *selected = owner->get().specialize_kernel(
       *kernel, *context, constant_args, private_workspaces);
   if (selected == kernel)
     return;
-  // Image descriptors belong to the prepared invocation and reference the
+  // Managed descriptors belong to the prepared invocation and reference the
   // exact callable they were checked against. Rebind once during prepare.
   for (auto &binding : kernel_resources) {
-    auto image = std::static_pointer_cast<NativeImageKernelBinding>(binding);
-    binding = std::make_shared<NativeImageKernelBinding>(
-        image->image(), image->argument(), runtime.arch, runtime.get(), *selected, *context);
+    if (const auto *image = dynamic_cast<const NativeImageKernelBinding *>(binding.get())) {
+      binding = std::make_shared<NativeImageKernelBinding>(
+          image->image(), image->argument(), runtime.arch, runtime.get(), *selected, *context);
+    } else {
+      const auto &acceleration = static_cast<const NativeAccelerationStructureKernelBinding &>(*binding);
+      binding = std::make_shared<NativeAccelerationStructureKernelBinding>(
+          acceleration.resource(), acceleration.argument(), runtime.arch, runtime.get(), *selected, *context);
+    }
   }
   kernel = selected;
 }

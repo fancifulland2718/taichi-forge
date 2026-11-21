@@ -40,9 +40,9 @@ def specialization_entries(path, target, entries):
     else:
         aliases = {item["name"]: metadata["kernels"][item["kernel_index"]]["name"]
                    for item in metadata.get("kernel_aliases", ())}
-    excluded_resources = {"rw_texture", "acceleration_structure"}
+    excluded_resources = {"rw_texture"}
     if target != "vulkan":
-        excluded_resources.add("texture")
+        excluded_resources.update(("texture", "acceleration_structure"))
     return frozenset(name for name in entries if name not in excluded and aliases.get(name, name) not in excluded
                      and not any(item["kind"] in excluded_resources
                                  for item in (*entries[name]["arguments"], *entries[name]["captures"])))

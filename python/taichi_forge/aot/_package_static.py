@@ -736,10 +736,10 @@ class StaticPreparation:
         from taichi_forge.types.ray_type import AccelerationStructureType
         from taichi_forge.types.texture_type import TextureType, RWTextureType
 
-        # Vulkan prepare rebinds sampled images to the specialized callable.
+        # Vulkan prepare rebinds sampled images and acceleration structures.
         # Other managed resources still use their original callable identity.
-        if any(isinstance(arg.annotation, (AccelerationStructureType, RWTextureType))
-               or isinstance(arg.annotation, TextureType) and impl.current_cfg().arch != core.vulkan
+        if any(isinstance(arg.annotation, RWTextureType)
+               or isinstance(arg.annotation, (TextureType, AccelerationStructureType)) and impl.current_cfg().arch != core.vulkan
                for arg in kernel.arguments):
             return environment, schema, {}
         identity = kernel.func.__module__ + "." + kernel.func.__qualname__

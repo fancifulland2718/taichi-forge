@@ -64,6 +64,9 @@ class NativeAccelerationStructureKernelBinding final
       Device &device,
       const CallableBase &kernel,
       LaunchContextBuilder &context);
+  const std::shared_ptr<NativeAccelerationStructure> &resource() const {
+    return resource_;
+  }
   const std::vector<int> &argument() const override {
     return argument_;
   }

@@ -15,6 +15,7 @@ from taichi_forge.lang.argpack import ArgPack
 class SourceAccelerationStructures:
     def __init__(self, bindings, fixed_bindings):
         self.owners = {name: owner for name, owner in fixed_bindings.items() if type(owner) is InstanceTLAS}
+        self.fixed_names = tuple(self.owners)
         self.used = set()
         for name, owner in bindings.items():
             if not isinstance(name, str) or not name or "\0" in name:
@@ -41,7 +42,9 @@ class SourceAccelerationStructures:
         from taichi_forge.hardware._aot_vulkan_ray import _scene
 
         self.validate_retained_argument(context.arch, owner)
-        self.used.update(name for name, source in self.owners.items() if source is owner)
+        # A retained value can also satisfy fixed aliases. Public slots are
+        # consumed by name in resource(), even if they bind the same owner.
+        self.used.update(name for name in self.fixed_names if self.owners[name] is owner)
         return _scene(context, owner)
 
     def kernel_resource(self, context, arg):
