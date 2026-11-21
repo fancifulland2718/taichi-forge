@@ -263,10 +263,32 @@ class OwnerGuard:
                     break
             else:
                 reachable.add(parts)
-        names = [".".join(p) for p in sorted(reachable) if p]
-        self.readers = tuple(operator.attrgetter(name) for name in names)
         versions = getattr(getattr(package, "runtime", None), "_owner_namespace_versions", None)
-        stamp = versions(owner) if versions and type(type(owner)) is type and len(names) > 1 else None
+        self._bind_paths(owner, reachable, versions)
+
+    def _bind_paths(self, owner, paths, versions):
+        stamp = versions(owner) if versions and type(type(owner)) is type and len(paths) > 1 else None
+        self._children = []
+        if stamp is not None:
+            # A write to the parent need not invalidate hundreds of independent
+            # reads on its children. Watch a plain instance link on the parent
+            # and the suffixes on the child whose namespace actually owns them.
+            groups = {}
+            for parts in paths:
+                if len(parts) > 1:
+                    groups.setdefault(parts[0], set()).add(parts[1:])
+            for name, suffixes in groups.items():
+                if len(suffixes) < 2 or any(name in cls.__dict__ for cls in type(owner).__mro__):
+                    continue
+                child = getattr(owner, name, _MISSING)
+                if child is _MISSING or type(type(child)) is not type or versions(child) is None:
+                    continue
+                paths.difference_update((name, *suffix) for suffix in suffixes)
+                guard = type(self).__new__(type(self))
+                guard._bind_paths(child, suffixes, versions)
+                self._children.append((name, guard))
+        names = [".".join(p) for p in sorted(paths) if p]
+        self.readers = tuple(operator.attrgetter(name) for name in names)
         self.values = self.read(owner)
         # Batch present attributes in the C accessor. Missing top-level names
         # use getattr's default instead of raising/catching in Python each step.
@@ -286,7 +308,7 @@ class OwnerGuard:
         self.identity_safe = tuple(type(x) not in (tuple, list, dict) and not isinstance(x, (HostTensor, NativeObject))
                                    for x in self.values)
         self._namespace_versions = None
-        if stamp is not None and stamp == versions(owner):
+        if stamp is not None and (stamp == versions(owner) or self._children):
             # Versioned dictionaries cover plain top-level attributes, including
             # absence. Properties, nested paths and mutable contents have their
             # own semantics and must still be read on every implicit replay.
@@ -297,7 +319,7 @@ class OwnerGuard:
                 if ("." in name or not self.identity_safe[index]
                         or (value is not _MISSING and type(value) not in (bool, int, float, str, bytes, type(None)))):
                     residual.append(index)
-            if len(residual) < len(ordered):
+            if len(residual) < len(ordered) or self._children:
                 self._namespace_versions = versions
                 self._namespace_stamp = stamp
                 self._namespace_type = type(owner)
@@ -333,11 +355,24 @@ class OwnerGuard:
         return tuple(values)
 
     def matches(self, owner):
+        if not self._matches_attributes(owner):
+            return False
+        for name, guard in self._children:
+            child = getattr(owner, name, _MISSING)
+            if child is _MISSING or child is None or not guard.matches(child):
+                return False
+        return True
+
+    def _matches_attributes(self, owner):
         # Identity is sufficient for immutable values and resource handles.
         # CPU tensors/containers still need content tokens even when their
         # Python object is unchanged. No device data is inspected here.
         versions = self._namespace_versions
         stamp = versions(owner) if versions is not None and type(owner) is self._namespace_type else None
+        if self._children and (stamp is None or stamp[1:] != self._namespace_stamp[1:]):
+            # A new descriptor can change lookup of a formerly plain child.
+            # Let the next prepare choose the appropriate observation boundary.
+            return False
         if stamp is not None and stamp == self._namespace_stamp:
             for reader, previous, token, safe in self._residual:
                 try:

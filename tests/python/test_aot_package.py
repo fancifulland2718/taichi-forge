@@ -7601,6 +7601,53 @@ def test_package_binding_guard_observes_namespace_and_descriptor_changes():
     assert not guard.matches(owner)
 
 
+def test_package_binding_guard_tracks_nested_namespaces_separately(monkeypatch):
+    from types import SimpleNamespace
+    from taichi_forge._lib import core
+    from taichi_forge_runtime.aot._package_calls import OwnerGuard
+
+    class Owner:
+        pass
+
+    owner = Owner()
+    owner.child = Owner()
+    owner.child.resource = object()
+    owner.child.values = [3]
+    runtime = SimpleNamespace(_owner_namespace_versions=getattr(core, "_aot_namespace_versions", None))
+    package = SimpleNamespace(runtime=runtime, _manifest={"owners": {}})
+    contract = dict(captures=[dict(name=name, kind="value", path=["child", name])
+                              for name in ("resource", "values", "optional")])
+    guard = OwnerGuard.for_graph(package, owner, [contract])
+    reads = []
+    read = OwnerGuard.read
+
+    def count_reads(guard, obj):
+        reads.append(obj)
+        return read(guard, obj)
+
+    monkeypatch.setattr(OwnerGuard, "read", count_reads)
+    owner.frame = 1
+    assert guard.matches(owner)
+    if runtime._owner_namespace_versions and runtime._owner_namespace_versions(owner):
+        assert owner.child not in reads
+    owner.child.values.append(4)
+    assert not guard.matches(owner)
+    owner.child.values.pop()
+    owner.child.optional = 3
+    assert not guard.matches(owner)
+    del owner.child.optional
+    assert guard.matches(owner)
+    previous = owner.child
+    owner.child = Owner()
+    assert not guard.matches(owner)
+    del owner.child
+    assert not guard.matches(owner)
+    owner.child = previous
+    assert guard.matches(owner)
+    Owner.child = property(lambda self: None)
+    assert not guard.matches(owner)
+
+
 def test_package_binding_guard_uses_dimension_paths_and_observes_deleted_attributes():
     from types import SimpleNamespace
     from taichi_forge_runtime.aot._package_calls import OwnerGuard
