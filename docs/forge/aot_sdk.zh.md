@@ -42,6 +42,10 @@ GFX metadata v21 允许 Vulkan 着色器共享逐字节相同的 SPIR-V 函数�
 首次 prepare 组装实际选中的着色器，按允许固定的参数特化并创建管线。直接通用调用也可在首次启动时完成组装。
 后续提交复用已准备的管线，各实例保有自己的资源绑定。
 
+Vulkan 定义包可以用 `.b4` 后缀保存着色器、着色器根或按内容哈希引用的数据。
+生产器对少量字节试压缩。若把每个四字节字中同一位置的字节排在一起更易压缩，就采用该排列。
+配套 Runtime 在加载时恢复原字节，并按原内容哈希校验共享数据。后续提交复用已加载的代码。
+
 frontend、Python bridge 与 native runtime 的私有 ABI 必须匹配。当前修订统一见
 [发行说明的升级约定](release_notes.zh.md#升级与编译设置)，权威定义见
 [`runtime_contract.h`](../../taichi/common/runtime_contract.h) 与

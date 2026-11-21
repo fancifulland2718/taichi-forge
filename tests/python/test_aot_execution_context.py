@@ -199,6 +199,20 @@ def test_vulkan_prepare_preserves_per_shader_constants_in_shared_functions(tmp_p
                     target.writestr(entry, data)
             errors.append((damaged_root, "root relocation failed integrity validation"))
 
+    if version == 24 and not in_root:
+        # Include sparse, non-word-sized relocations in both successful reads
+        # and integrity failures. The digest always covers the logical bytes.
+        for source_path in (path, *(broken for broken, _ in errors)):
+            packed = source_path.with_suffix(".packed.tcm")
+            with ZipFile(source_path) as source, ZipFile(packed, "w") as target:
+                for name in source.namelist():
+                    data = source.read(name)
+                    if name.endswith((".bin", ".spvroot")):
+                        name += ".b4"
+                        data = b"".join(data[lane::4] for lane in range(4))
+                    target.writestr(name, data)
+            packed.replace(source_path)
+
     device = int(os.environ.get("TI_TEST_VULKAN_DEVICE_INDEX", 0))
     with Runtime("vulkan", device_index=device) as runtime:
         loaded = runtime.load_module(str(path))
@@ -219,6 +233,20 @@ def test_vulkan_prepare_preserves_per_shader_constants_in_shared_functions(tmp_p
             kernel = incomplete.kernel("left")
             with pytest.raises(RuntimeError, match=error):
                 kernel.bind(out, Scalar("i32", 2)).prepare(specialize=True, constant_args=(1,))
+        if version == 24 and not in_root:
+            directory = tmp_path / "expanded"
+            with ZipFile(path) as archive:
+                archive.extractall(directory)
+            extracted = runtime.load_module(directory)
+            expected = np.arange(3, dtype=np.int32)
+            out.write(expected.tobytes())
+            with extracted.kernel("left").bind(out, Scalar("i32", 2)).prepare(
+                specialize=True, constant_args=(1,)
+            ) as ready:
+                ready.submit().wait()
+            for j in range(7):
+                expected = (expected + j) * 3 % 997
+            np.testing.assert_array_equal(np.frombuffer(out.read(), dtype=np.int32), expected + 2 * 1103)
 
 
 @test_utils.test(arch=ti.vulkan, offline_cache=False)

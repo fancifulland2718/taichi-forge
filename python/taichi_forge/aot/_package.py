@@ -3097,7 +3097,7 @@ def _export_package(output, declarations, source_root, caps, artifact_format, co
     staging = Path(tempfile.mkdtemp(prefix=".forge-package-", dir=output.parent))
     complete = False
     try:
-        module.archive(str(staging / "code.tcm"), shared_component_contracts=True)
+        module.archive(str(staging / "code.tcm"), shared_component_contracts=True, _pack_shader_members=True)
         # Archive owns complete bytes/contracts. No following file publication
         # needs frontend definitions, native witnesses or builder cache leases.
         owner_graph = owner = environment = expanded = compilation_schema = None

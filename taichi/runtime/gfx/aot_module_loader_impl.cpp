@@ -15,6 +15,7 @@
 #include "taichi/aot/graph_data.h"
 #include "taichi/aot/graph_artifact.h"
 #include "taichi/aot/specialization.h"
+#include "taichi/aot/word_plane_storage.h"
 #include "taichi/rhi/vulkan/shader_specialization.h"
 #include "taichi/codegen/spirv/array_layout_abi.h"
 
@@ -925,7 +926,7 @@ class AotModuleImpl : public aot::Module {
                       const std::vector<AotShaderFunction> &refs,
                       std::vector<uint32_t> &code) {
     std::vector<uint32_t> root;
-    if (!dir.load_file(source + ".spvroot", root) || root.size() < 5)
+    if (!aot::load_shader_words(dir, source + ".spvroot", root) || root.size() < 5)
       throw std::invalid_argument("Cannot read Vulkan shader root");
     size_t local = 0;
     const size_t min_words = ti_aot_data_.metadata_version >= 23 ? 1 : 6;
@@ -1019,7 +1020,7 @@ class AotModuleImpl : public aot::Module {
           link_functions(dir, source, refs->second, code);
           function_refs.push_back(&refs->second);
         } else {
-          if (!dir.load_file(source + ".spv", code))
+          if (!aot::load_shader_words(dir, source + ".spv", code))
             throw std::invalid_argument("Cannot read SPIR-V payload");
           function_refs.push_back(nullptr);
         }

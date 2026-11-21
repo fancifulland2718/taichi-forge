@@ -18,6 +18,13 @@ from tests import test_utils
 from taichi_forge_runtime.aot import Runtime, load_package
 
 
+def _shader_bytes(archive, name):
+    data = archive.read(name)
+    if name.endswith('.spv.b4'):
+        return np.frombuffer(data, dtype=np.uint8).reshape(4, -1).T.tobytes()
+    return data
+
+
 def test_definition_package_shared_entry_contracts():
     from taichi_forge_runtime.aot._package_manifest import decode_manifest, encode_manifest, materialize_manifest
 
@@ -1975,12 +1982,16 @@ class Model:
         assert metadata['kernel_aliases']
         assert metadata['shader_aliases']
         split = {entry['key'] for entry in metadata.get('shader_functions', ())}
+        names = {name.removesuffix('.b4') for name in archive.namelist()}
+        assert len(names) == len(archive.infolist())
+        assert any(name.endswith('.b4') for name in archive.namelist())
         for alias in metadata['shader_aliases']:
-            assert alias['key'] + '.spv' not in archive.namelist()
-            assert alias['key'] + '.spvroot' not in archive.namelist()
+            assert alias['key'] + '.spv' not in names
+            assert alias['key'] + '.spvroot' not in names
             suffix = '.spvroot' if alias['value'] in split else '.spv'
-            assert alias['value'] + suffix in archive.namelist()
-        shaders = [archive.read(name) for name in archive.namelist() if name.endswith('.spv')]
+            assert alias['value'] + suffix in names
+        shaders = [_shader_bytes(archive, name) for name in archive.namelist()
+                   if name.removesuffix('.b4').endswith('.spv')]
         assert len(shaders) == len(set(shaders))
     device = int(os.environ.get("TI_TEST_VULKAN_DEVICE_INDEX", 0))
     with Runtime('vulkan', device_index=device) as runtime, load_package(runtime, tmp_path / 'sdk') as code:
@@ -4779,8 +4790,8 @@ class Model:
     with zipfile.ZipFile(sdk / 'code.tcm') as archive:
         calls = []
         for name in archive.namelist():
-            if name.endswith('.spv'):
-                words = np.frombuffer(archive.read(name), dtype='<u4')
+            if name.removesuffix('.b4').endswith('.spv'):
+                words = np.frombuffer(_shader_bytes(archive, name), dtype='<u4')
                 callees = []
                 pos = 5
                 while pos < len(words):
@@ -5115,10 +5126,10 @@ class Model:
 
             task_calls = []
             for name in archive.namelist():
-                if name.endswith('.spv'):
+                if name.removesuffix('.b4').endswith('.spv'):
                     callees = []
                     function_types = set()
-                    data = archive.read(name)
+                    data = _shader_bytes(archive, name)
                     words = struct.unpack(f'<{len(data) // 4}I', data)
                     pos = 5
                     while pos < len(words):
@@ -6052,7 +6063,7 @@ def test_package_field_inputs_retain_source_group_without_host_combination_code(
     assert len(manifest["field_groups"]) == 1
     assert len(next(iter(manifest["field_groups"].values()))["dimensions"]) == 2
     with zipfile.ZipFile(tmp_path / "sdk/code.tcm") as archive:
-        assert len([n for n in archive.namelist() if n.endswith((".ll", ".bc", ".spv"))]) == 3
+        assert len([n for n in archive.namelist() if n.removesuffix(".b4").endswith((".ll", ".bc", ".spv"))]) == 3
     with Runtime(manifest["target"]) as runtime, load_package(runtime, tmp_path / "sdk") as code:
         a, b = code.host.Model(7, True), code.host.Model(19, False)
         reader = a.reader.reader
@@ -6231,7 +6242,7 @@ def test_package_constructor_inputs_share_source_allocation_without_combination_
     assert len(manifest["entries"]) == 4
     assert len(manifest["field_groups"]) == 1
     with zipfile.ZipFile(tmp_path / "sdk/code.tcm") as archive:
-        assert len([n for n in archive.namelist() if n.endswith((".ll", ".bc", ".spv"))]) == 4
+        assert len([n for n in archive.namelist() if n.removesuffix(".b4").endswith((".ll", ".bc", ".spv"))]) == 4
     family = next(iter(manifest["entry_families"].values()))
     assert list(family["paths"].values()) == [["source", "first"]]
     with Runtime(manifest["target"]) as runtime, load_package(runtime, tmp_path / "sdk") as code:
@@ -6769,7 +6780,7 @@ def test_package_declared_owner_graph_shares_children_and_keeps_instance_binding
     assert len(manifest["field_groups"]) == 1
     assert len(manifest["entries"]) == 4
     with zipfile.ZipFile(tmp_path / "sdk/code.tcm") as archive:
-        assert len([n for n in archive.namelist() if n.endswith((".ll", ".bc", ".spv"))]) == 4
+        assert len([n for n in archive.namelist() if n.removesuffix(".b4").endswith((".ll", ".bc", ".spv"))]) == 4
     family = next(iter(manifest["entry_families"].values()))
     assert list(family["paths"].values()) == [["child", "left", "first"]]
     assert len(family["variants"]) == 2
@@ -13647,7 +13658,7 @@ def test_package_struct_fields_keep_original_layout_and_member_paths(tmp_path, m
     assert len(manifest["field_groups"]) == 1
     with zipfile.ZipFile(tmp_path / "sdk/code.tcm") as archive:
         # Vulkan emits the loop and trailing serial task of step separately.
-        assert len([item for item in archive.infolist() if item.filename.endswith((".ll", ".bc", ".spv"))]) == (
+        assert len([item for item in archive.infolist() if item.filename.removesuffix(".b4").endswith((".ll", ".bc", ".spv"))]) == (
             4 if ti.cfg.arch == ti.vulkan else 3
         )
     original = package.Model(7)
@@ -21964,7 +21975,7 @@ class Model:
         assert base_symbols["definition_fixture.model.Model.step"] == original["symbol"]
         assert base.constructors == 0
     with zipfile.ZipFile(tmp_path / "sdk/code.tcm") as archive:
-        code = [item for item in archive.infolist() if item.filename.endswith((".ll", ".bc", ".spv"))]
+        code = [item for item in archive.infolist() if item.filename.removesuffix(".b4").endswith((".ll", ".bc", ".spv"))]
         code_count = len(code)
         assert sum(item.file_size for item in code) > 0
     expected = classes.Changed(7, 2.0).values.to_numpy()
@@ -26369,7 +26380,7 @@ def declare_layout(scope):
     assert sys.modules["definition_fixture.model"].constructors == 0
     assert len(manifest["entries"]) == 2  # One implementation plus the unimported public entry.
     with zipfile.ZipFile(tmp_path / "sdk/code.tcm") as archive:
-        assert len([item for item in archive.infolist() if item.filename.endswith((".ll", ".bc", ".spv"))]) == 2
+        assert len([item for item in archive.infolist() if item.filename.removesuffix(".b4").endswith((".ll", ".bc", ".spv"))]) == 2
     assert len(manifest["declaration_factories"]) == int(bool(forwarded))
     assert "from resource_factories import" not in (tmp_path / "sdk/host/model.py").read_text()
     original = package.Model(7)
@@ -26885,7 +26896,7 @@ def test_package_layout_contracts_do_not_duplicate_compatible_numerical_code(tmp
     # Different complete layout/binding contracts remain explicit. Both access
     # ABIs are affine, so the original native builder stores their code once.
     with zipfile.ZipFile(tmp_path / "sdk/code.tcm") as archive:
-        code = [item for item in archive.infolist() if item.filename.endswith((".ll", ".bc", ".spv"))]
+        code = [item for item in archive.infolist() if item.filename.removesuffix(".b4").endswith((".ll", ".bc", ".spv"))]
         assert len(code) == 2  # shared step + unimported public entry
     with Runtime(manifest["target"]) as runtime, load_package(runtime, tmp_path / "sdk") as loaded:
         a, b = loaded.host.Model(7), loaded.host.Expanded(19)
@@ -27473,7 +27484,7 @@ def test_package_conditional_dense_layouts_share_code_and_native_rules(tmp_path,
     assert sorted(len(family["variants"]) for family in manifest["entry_families"].values()) == [2, 2]
     assert all(len(family["domain"]) == 1 for family in manifest["entry_families"].values())
     with zipfile.ZipFile(tmp_path / "sdk/code.tcm") as archive:
-        code = [item for item in archive.infolist() if item.filename.endswith((".ll", ".bc", ".spv"))]
+        code = [item for item in archive.infolist() if item.filename.removesuffix(".b4").endswith((".ll", ".bc", ".spv"))]
         assert len(code) == 6  # common + two per actual static dependency + public entry
     with Runtime(manifest["target"]) as runtime, load_package(runtime, tmp_path / "sdk") as loaded:
         instances = []
@@ -27731,7 +27742,7 @@ def test_package_optional_fields_infer_presence_without_new_declarations(tmp_pat
     assert sorted(len(family["variants"]) for family in families.values()) == [2, 2]
     assert all(len(family["domain"]) == 1 for family in families.values())
     with zipfile.ZipFile(tmp_path / "sdk/code.tcm") as archive:
-        assert len([item for item in archive.infolist() if item.filename.endswith((".ll", ".bc", ".spv"))]) == 6
+        assert len([item for item in archive.infolist() if item.filename.removesuffix(".b4").endswith((".ll", ".bc", ".spv"))]) == 6
     with Runtime(manifest["target"]) as runtime, load_package(runtime, tmp_path / "sdk") as loaded:
         for first, second in itertools.product((False, True), repeat=2):
             original, current = package.Model(7, 5, first, second), loaded.host.Model(7, 5, first, second)
@@ -28308,7 +28319,7 @@ def test_package_specializes_only_observed_static_dependencies(tmp_path, monkeyp
     branching = next(f for f in families.values() if len(f["variants"]) == 4)
     assert {tuple(sorted(v["selection"])) for v in branching["variants"]} == {("first", "second"), ("first", "third")}
     with zipfile.ZipFile(tmp_path / "sdk/code.tcm") as archive:
-        code = [item for item in archive.infolist() if item.filename.endswith((".ll", ".bc", ".spv"))]
+        code = [item for item in archive.infolist() if item.filename.removesuffix(".b4").endswith((".ll", ".bc", ".spv"))]
         assert len(code) == 8
     with Runtime(manifest["target"]) as runtime, load_package(runtime, tmp_path / "sdk") as loaded:
         a, b = loaded.host.Model(7, False, False, False, 1), loaded.host.Equivalent(19, True, True, True, 7)

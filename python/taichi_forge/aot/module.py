@@ -2,11 +2,12 @@ import datetime
 import hashlib
 import json
 import os
+import zlib
 from contextlib import contextmanager
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from urllib.parse import quote
-from zipfile import ZIP_DEFLATED, ZipFile
+from zipfile import ZIP_DEFLATED, ZipFile, ZipInfo
 
 import numpy as np
 
@@ -30,6 +31,22 @@ from taichi_forge.types.ndarray_type import NdarrayType
 from taichi_forge.types.texture_type import RWTextureType, TextureType
 
 import taichi_forge
+
+
+def _pack_shader_member(name, data):
+    """Choose a reversible byte layout using a bounded deflate sample."""
+    if len(data) < 256:
+        return name, data
+    if len(data) <= 6144:
+        sample = data
+    else:
+        middle = (len(data) // 2) & ~3
+        end = (len(data) - 2048) & ~3
+        sample = data[:2048] + data[middle:middle + 2048] + data[end:end + 2048]
+    planes = b"".join(sample[lane::4] for lane in range(4))
+    if len(zlib.compress(planes, 1)) + 6 >= len(zlib.compress(sample, 1)):
+        return name, data
+    return name + ".b4", planes if sample is data else b"".join(data[lane::4] for lane in range(4))
 
 
 def _resolve_kernel(kernel_fn):
@@ -883,7 +900,7 @@ class Module:
             f.write(".".join(str(x) for x in taichi_forge.__version__))
 
     def archive(self, filepath: str, *, include_debug_metadata: bool = False, shared_component_contracts=False,
-                shared_execution_plans=False):
+                shared_execution_plans=False, _pack_shader_members=False):
         """
         Args:
           filepath (str): path to the stored archive of aot artifacts, MUST
@@ -931,4 +948,12 @@ class Module:
                     if relative in omitted:
                         continue
                     os.utime(path, (fixed_time, fixed_time))
+                    if _pack_shader_members and self._arch == _ti_core.vulkan and (
+                        relative.suffix in (".spv", ".spvroot")
+                        or (relative.parent == Path("data") and relative.suffix == ".bin")
+                    ):
+                        name, data = _pack_shader_member(relative.as_posix(), path.read_bytes())
+                        info = ZipInfo.from_file(path, name)
+                        z.writestr(info, data, compress_type=ZIP_DEFLATED, compresslevel=1)
+                        continue
                     z.write(path, relative)

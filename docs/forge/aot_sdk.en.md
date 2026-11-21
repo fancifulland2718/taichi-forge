@@ -58,6 +58,12 @@ creates the pipeline. A generic first launch can assemble the same shader.
 Subsequent submissions reuse the prepared pipeline. Shader storage and
 instance resource bindings have independent lifetimes.
 
+Vulkan definition packages may store a shader, shader root or content-addressed
+data member with a `.b4` suffix. The producer groups bytes by their position in
+each four-byte word when a small deflate sample compresses better that way.
+The paired runtime restores the original bytes on load and checks shared data
+against its original content hash. Prepared submissions reuse the loaded code.
+
 Frontend, Python bridge and native runtime must have matching private ABI
 revisions. The current revision is listed in the
 [release upgrade guidance](release_notes.en.md#upgrading-and-compilation-settings) and defined in
