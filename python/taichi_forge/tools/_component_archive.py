@@ -15,6 +15,7 @@ from taichi_forge_runtime.aot._component_storage import (
     decode_contract_document, encode_contract_documents, decode_plan_document, encode_plan_documents,
     decode_entry_document, encode_entry_documents,
 )
+from taichi_forge_runtime.aot._entry_blocks import BLOCK_PREFIX, ENTRY_PREFIX, indexed_entry_names, read_entry
 
 
 def share_component_contracts(source, destination, *, shared_execution_plans=False):
@@ -24,7 +25,8 @@ def share_component_contracts(source, destination, *, shared_execution_plans=Fal
     original = source.read_bytes()
     with ZipFile(BytesIO(original)) as archive:
         names = archive.namelist()
-        if len(names) != len(set(names)):
+        name_set = set(names)
+        if len(names) != len(name_set):
             raise ValueError("Component archive has duplicate member names")
         roots = {name: decode_contract_document(json.loads(archive.read(name)), archive.read)
                  for name in names if name.startswith("components/") and name.endswith(".json")}
@@ -35,7 +37,12 @@ def share_component_contracts(source, destination, *, shared_execution_plans=Fal
             if decode_contract_document(json.loads(documents[name]), documents.__getitem__) != contract:
                 raise ValueError("Component storage roundtrip changed the original contract")
         entries = {name: decode_entry_document(json.loads(archive.read(name)), archive.read)
-                   for name in names if name.startswith("component_entries/") and name.endswith(".json")}
+                   for name in names if name.startswith(ENTRY_PREFIX) and name.endswith(".json")}
+        for name in indexed_entry_names(archive):
+            if name in entries:
+                raise ValueError("Component archive has duplicate logical entry names")
+            payload = read_entry(name, archive.read, name_set.__contains__)
+            entries[name] = decode_entry_document(json.loads(payload), archive.read)
         entry_documents = encode_entry_documents(entries)
         for name, contract in entries.items():
             if decode_entry_document(json.loads(entry_documents[name]), entry_documents.__getitem__) != contract:
@@ -62,7 +69,7 @@ def share_component_contracts(source, destination, *, shared_execution_plans=Fal
             target.comment = archive.comment
             for item in archive.infolist():
                 if (item.filename in roots or item.filename in entries
-                        or item.filename.startswith("component_contracts/")
+                        or item.filename.startswith(("component_contracts/", BLOCK_PREFIX))
                         or shared_execution_plans and (item.filename in plans
                                                        or item.filename.startswith("execution_records/"))):
                     continue

@@ -1755,6 +1755,13 @@ records. `package.json` uses compact JSON while retaining every field. These sto
 changes leave LLVM/SPIR-V, specialization and native execution unchanged; smaller
 packages are not evidence of faster execution.
 
+Definition packages can also group neighboring entry documents in Deflate blocks
+of up to 256 KiB. The producer compares compressed costs with index and ZIP
+header overhead and keeps large single entries directly addressable. Packages
+that use blocks declare `component_entry_blocks_v1` in `runtime_requirements`.
+For a grouped entry, `Module.component_entry_contract()` reads one name-index
+bucket and one block, then passes the original JSON bytes to the contract reader.
+
 Runtime inspection and loaded components share one reader. It verifies record digests,
 reference positions and the expanded contract digest, then runs the existing configuration,
 ABI, resource, effects and plan checks. Logical calls receive independent mutable

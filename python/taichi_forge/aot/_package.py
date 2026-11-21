@@ -3097,7 +3097,15 @@ def _export_package(output, declarations, source_root, caps, artifact_format, co
     staging = Path(tempfile.mkdtemp(prefix=".forge-package-", dir=output.parent))
     complete = False
     try:
-        module.archive(str(staging / "code.tcm"), shared_component_contracts=True, _pack_shader_members=True)
+        # Adjacent definitions tend to share capture schemas across kernels and
+        # variants. Ordering only changes the compression window in the TCM.
+        entry_order = sorted(manifest["entries"], key=lambda name: (manifest["entries"][name]["definition"], name))
+        if module.archive(str(staging / "code.tcm"), shared_component_contracts=True, _pack_shader_members=True,
+                          _entry_block_order=entry_order):
+            from taichi_forge_runtime.aot._entry_blocks import RUNTIME_REQUIREMENT
+
+            requirements = set(manifest.get("runtime_requirements", ()))
+            manifest["runtime_requirements"] = sorted(requirements | {RUNTIME_REQUIREMENT})
         # Archive owns complete bytes/contracts. No following file publication
         # needs frontend definitions, native witnesses or builder cache leases.
         owner_graph = owner = environment = expanded = compilation_schema = None

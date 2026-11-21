@@ -2108,10 +2108,14 @@ class LoadedPackage:
             for owner in manifest["owners"].values() for member in owner.values()
         ):
             raise ValueError("External dtype selection requires definition package version 89")
+        from ._entry_blocks import RUNTIME_REQUIREMENT
+
         requirements = manifest.get("runtime_requirements", [])
-        if not isinstance(requirements, list) or any(item != "fault_snapshot" for item in requirements):
+        if not isinstance(requirements, list) or any(
+            item not in ("fault_snapshot", RUNTIME_REQUIREMENT) for item in requirements
+        ):
             raise ValueError("Unsupported package runtime requirement")
-        if requirements:
+        if "fault_snapshot" in requirements:
             if manifest["version"] < 87:
                 raise ValueError("Runtime fault snapshots require definition package version 87")
             runtime._require_fault_snapshot()

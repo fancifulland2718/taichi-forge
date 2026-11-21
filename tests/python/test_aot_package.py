@@ -46,6 +46,39 @@ def test_definition_package_shared_entry_contracts():
         decode_manifest(malformed)["entries"]["0"]
 
 
+@test_utils.test(arch=ti.cpu, offline_cache=False)
+def test_package_reads_packed_entries_and_runs_original_kernels(tmp_path, monkeypatch):
+    from taichi_forge_runtime.aot._entry_blocks import indexed_entry_names
+
+    source = """import taichi_forge as ti
+@ti.data_oriented
+class Model:
+    def __init__(self, n: int):
+        self.n = n
+        scope = ti.experimental.ResourceScope(self)
+        scope.out = scope.field(ti.i32, shape=scope.dim('n'))
+"""
+    for number in range(8):
+        source += f"""    @ti.kernel
+    def step_{number}(self, value: ti.i32):
+        for i in range(self.n):
+            self.out[i] = i + value + {number}
+"""
+    package = _source_package(tmp_path, monkeypatch, source)
+    destination = tmp_path / "sdk"
+    manifest = ti.aot.export_package(package.model, destination)
+    assert "component_entry_blocks_v1" in manifest["runtime_requirements"]
+    with zipfile.ZipFile(destination / "code.tcm") as archive:
+        assert len(list(indexed_entry_names(archive))) == 8
+    with Runtime("cpu") as runtime, load_package(runtime, destination) as code:
+        owner = code.module("definition_fixture.model").Model(5)
+        for symbol, entry in manifest["entries"].items():
+            assert code._module.component_entry_contract(symbol)["entry"] == symbol
+            method = entry["definition"].rsplit(".", 1)[-1]
+            getattr(owner, method)(13)
+            np.testing.assert_array_equal(owner.out.to_numpy(), np.arange(5) + 13 + int(method.removeprefix("step_")))
+
+
 SAMPLED_TEXTURE_SOURCE = """
 import taichi_forge as ti
 @ti.data_oriented

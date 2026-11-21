@@ -900,7 +900,7 @@ class Module:
             f.write(".".join(str(x) for x in taichi_forge.__version__))
 
     def archive(self, filepath: str, *, include_debug_metadata: bool = False, shared_component_contracts=False,
-                shared_execution_plans=False, _pack_shader_members=False):
+                shared_execution_plans=False, _pack_shader_members=False, _entry_block_order=None):
         """
         Args:
           filepath (str): path to the stored archive of aot artifacts, MUST
@@ -941,11 +941,23 @@ class Module:
             self.save(temp_dir, shared_component_contracts=shared_component_contracts,
                       shared_execution_plans=shared_execution_plans)
             with ZipFile(tcm_path, "w", compression=ZIP_DEFLATED, compresslevel=1) as z:
+                packed_entries = set()
+                has_entry_blocks = False
+                if _entry_block_order:
+                    from taichi_forge_runtime.aot._entry_blocks import BLOCK_PREFIX, ENTRY_PREFIX, pack_entry_blocks
+
+                    names = [ENTRY_PREFIX + quote(name, safe="-_.") + ".json" for name in _entry_block_order
+                             if name in self._component_entries]
+                    packed_entries.update(names)
+                    for name, data in pack_entry_blocks(names, lambda key: (Path(temp_dir) / key).read_bytes(), level=1):
+                        has_entry_blocks |= name.startswith(BLOCK_PREFIX)
+                        info = ZipInfo(name, date_time=(2000, 12, 1, 0, 0, 0))
+                        z.writestr(info, data, compress_type=ZIP_DEFLATED, compresslevel=1)
                 for path in sorted(Path(temp_dir).rglob("*")):
                     if not path.is_file():
                         continue
                     relative = path.relative_to(temp_dir)
-                    if relative in omitted:
+                    if relative in omitted or relative.as_posix() in packed_entries:
                         continue
                     os.utime(path, (fixed_time, fixed_time))
                     if _pack_shader_members and self._arch == _ti_core.vulkan and (
@@ -957,3 +969,5 @@ class Module:
                         z.writestr(info, data, compress_type=ZIP_DEFLATED, compresslevel=1)
                         continue
                     z.write(path, relative)
+        if _entry_block_order is not None:
+            return has_entry_blocks

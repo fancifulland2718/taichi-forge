@@ -12,6 +12,7 @@ from zipfile import ZipFile
 
 from .._static_values import read_static_key, static_key
 from ._component_storage import decode_contract_document
+from ._entry_blocks import BLOCK_LIMIT, BLOCK_PREFIX, ENTRY_PREFIX, read_entry
 
 
 def _valid_source_path(path, *, indexed=False):
@@ -27,15 +28,34 @@ def _valid_source_path(path, *, indexed=False):
 def _document_reader(path):
     path = Path(path).resolve(strict=True)
     if path.is_dir():
-        yield lambda relative: (path / relative).read_bytes()
+        def read_file(relative):
+            target = path / relative
+            if relative.startswith(BLOCK_PREFIX) and relative.endswith(".bin") and target.stat().st_size > BLOCK_LIMIT:
+                raise ValueError("Oversized packed component entry block")
+            return target.read_bytes()
+
+        def read(relative):
+            if relative.startswith(ENTRY_PREFIX):
+                return read_entry(relative, read_file, lambda name: (path / name).exists())
+            return read_file(relative)
+
+        yield read
     else:
         with ZipFile(path) as archive:
             counts = Counter(archive.namelist())
 
-            def read(relative):
+            def read_member(relative):
                 if counts[relative] != 1:
                     raise ValueError(f"Artifact document must occur exactly once: {relative!r}")
+                if (relative.startswith(BLOCK_PREFIX) and relative.endswith(".bin")
+                        and archive.getinfo(relative).file_size > BLOCK_LIMIT):
+                    raise ValueError("Oversized packed component entry block")
                 return archive.read(relative)
+
+            def read(relative):
+                if relative.startswith(ENTRY_PREFIX):
+                    return read_entry(relative, read_member, counts.__contains__)
+                return read_member(relative)
 
             yield read
 

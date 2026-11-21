@@ -111,11 +111,15 @@ def decode_entry_document(document, read_bytes):
                             and isinstance(path[2], str), record_type=str)
 
 
-def _zip_cost(name, payload):
-    compressor = zlib.compressobj(1, zlib.DEFLATED, -15)
+def _zip_header_size(name):
+    # Local and central-directory headers; generated names have no extras.
+    return 76 + 2 * len(name.encode("utf8"))
+
+
+def _zip_cost(name, payload, level=1):
+    compressor = zlib.compressobj(level, zlib.DEFLATED, -15)
     compressed = len(compressor.compress(payload) + compressor.flush())
-    # Local and central-directory headers; ASCII generated names have no extras.
-    return compressed + 76 + 2 * len(name.encode("utf8"))
+    return compressed + _zip_header_size(name)
 
 
 def _unique_record_fields(pairs):

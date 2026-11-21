@@ -51,6 +51,53 @@ def test_shared_records_are_exact_and_do_not_alias():
     assert json.loads(encode_contract_documents(tiny)["components/a.json"]) == tiny["components/a.json"]
 
 
+def test_entry_blocks_restore_exact_bytes_and_check_ranges(tmp_path):
+    from taichi_forge_runtime.aot._entry_blocks import (
+        BLOCK_LIMIT, INDEX_PREFIX, indexed_entry_names, pack_entry_blocks, read_entry,
+    )
+    from taichi_forge.tools._component_archive import share_component_contracts
+
+    common = random.Random(783).randbytes(4096).hex()
+    documents = {f"component_entries/{i}.json": json.dumps({"entry": str(i), "text": common}).encode()
+                 for i in range(75)}
+    documents["component_entries/large.json"] = json.dumps({"text": "x" * BLOCK_LIMIT}).encode()
+    packed = dict(pack_entry_blocks(documents, documents.__getitem__, level=1))
+    assert packed["component_entries/large.json"] == documents["component_entries/large.json"]
+    path = tmp_path / "packed.tcm"
+    with ZipFile(path, "w") as archive:
+        for name, payload in packed.items():
+            archive.writestr(name, payload)
+    with ZipFile(path) as archive:
+        assert set(indexed_entry_names(archive)) == documents.keys() - packed.keys()
+        archive.extractall(tmp_path / "directory")
+    for source in (path, tmp_path / "directory"):
+        with _document_reader(source) as read:
+            assert all(read(name) == data for name, data in documents.items())
+    rewritten = tmp_path / "rewritten.tcm"
+    assert share_component_contracts(path, rewritten)["entries"] == len(documents)
+    with _document_reader(rewritten) as read:
+        assert all(json.loads(read(name)) == json.loads(data) for name, data in documents.items())
+    # A lookup reads only its own bucket and payload block.
+    reads = []
+
+    def read(name):
+        reads.append(name)
+        return packed[name]
+
+    first = next(iter(documents))
+    assert read_entry(first, read, packed.__contains__) == documents[first]
+    index, block = reads
+    assert index.startswith(INDEX_PREFIX) and len(packed[block]) <= BLOCK_LIMIT
+    records = json.loads(packed[index])
+    for bad in ([True, 0, 1], [0, -1, 1], [0, 0, BLOCK_LIMIT + 1], [0, len(packed[block]), 1]):
+        records[first] = bad
+        with pytest.raises(ValueError, match="Invalid packed component entry"):
+            read_entry(first, {**packed, index: json.dumps(records).encode()}.__getitem__, packed.__contains__)
+    ambiguous = {**packed, first: documents[first]}
+    with pytest.raises(ValueError, match="Duplicate logical component entry"):
+        read_entry(first, ambiguous.__getitem__, ambiguous.__contains__)
+
+
 def test_shared_entry_groups_preserve_binding_names_and_exact_schema_strings(tmp_path):
     rng = random.Random(52)
     # Schema JSON is itself a string in entry contracts. Preserve its exact
