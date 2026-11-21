@@ -3115,7 +3115,11 @@ def _export_package(output, declarations, source_root, caps, artifact_format, co
             for name, path, *_ in sources
         ):
             raise PackageExportError("Source changed during export")
-        (staging / "package.json").write_text(json.dumps(manifest, separators=(",", ":")), encoding="utf8")
+        from taichi_forge_runtime.aot._package_manifest import encode_manifest
+
+        (staging / "package.json").write_text(
+            json.dumps(encode_manifest(manifest), separators=(",", ":")), encoding="utf8"
+        )
         complete = True
         _publish_package(staging, output)
     finally:

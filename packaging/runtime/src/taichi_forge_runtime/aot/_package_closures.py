@@ -8,7 +8,7 @@ from ._package_values import path_value, owner_type
 
 
 def _declared_field_path(package, owner, path):
-    schema = package.manifest["owners"].get(owner, {})
+    schema = package._manifest["owners"].get(owner, {})
     for name, item in schema.items():
         prefix = item.get("path", [name])
         if prefix == path:
@@ -23,7 +23,7 @@ def bind_closure(package, identity, values, *, options=None):
     matches, templates = [], []
     options = {} if options is None else options
     option_keys = {name: static_key(value) for name, value in options.items()}
-    for candidate in package.manifest.get("closure_entries", {}).get(identity, ()):
+    for candidate in package._manifest.get("closure_entries", {}).get(identity, ()):
         expected_options = {
             name: static_key(read_static_key(value)) for name, value in candidate.get("options", {}).items()
         }
@@ -145,7 +145,7 @@ class _FunctionEntry:
         from ._runtime import _DTYPES
 
         self.package = package
-        spec = package.manifest.get("function_entries", {}).get(identity)
+        spec = package._manifest.get("function_entries", {}).get(identity)
         if not isinstance(spec, dict) or set(spec) != {"receiver", "parameters", "templates", "owners"}:
             raise ValueError("Free Kernel requires a complete receiver contract")
         parameters, receiver, owners = spec["parameters"], spec["receiver"], spec["owners"]
@@ -174,7 +174,7 @@ class _FunctionEntry:
         self._resource_entries = {}
         self._input_entries = {}
         for owner, cases in owners.items():
-            if owner not in package.manifest["owners"] or not isinstance(cases, list) or not cases:
+            if owner not in package._manifest["owners"] or not isinstance(cases, list) or not cases:
                 raise ValueError("Free Kernel receiver is outside the declared package")
             choices, resource_choices, input_choices, seen = {}, [], [], set()
             for case in cases:
@@ -192,7 +192,7 @@ class _FunctionEntry:
                 context = case.get("context", owner)
                 fields = case.get("fields", {})
                 if "fields" in case:
-                    if (package.manifest["version"] < 92 or "inputs" not in case
+                    if (package._manifest["version"] < 92 or "inputs" not in case
                             or not isinstance(fields, dict) or not fields
                             or not fields.keys() <= set(self.static_parameters)
                             or any(not isinstance(spec, dict) or set(spec) != {"element", "ndim"}
@@ -210,13 +210,13 @@ class _FunctionEntry:
                                    for spec in fields.values())):
                         raise ValueError("Free Kernel has an invalid independent Field input")
                 if "inputs" in case:
-                    if (package.manifest["version"] < 91 or not isinstance(inputs, dict)
+                    if (package._manifest["version"] < 91 or not isinstance(inputs, dict)
                             or len(inputs) < (1 if fields else 2) or inputs.get(receiver) != owner
                             or not inputs.keys() <= set(templates)
                             or not isinstance(context, str)
-                            or any(not isinstance(kind, str) or kind not in package.manifest["owners"]
+                            or any(not isinstance(kind, str) or kind not in package._manifest["owners"]
                                    for kind in inputs.values())
-                            or package.manifest["owners"].get(context) != {
+                            or package._manifest["owners"].get(context) != {
                                 **{"_arg_" + key: dict(kind="owner_input", owner_type=value)
                                    for key, value in inputs.items()},
                                 **{"_arg_" + key: dict(kind="ndarray", **value) for key, value in fields.items()}}):
@@ -230,7 +230,7 @@ class _FunctionEntry:
                     raise ValueError("Free Kernel has an invalid template input case")
                 if (
                     resources
-                    and package.manifest["version"] < 52
+                    and package._manifest["version"] < 52
                     or any(
                         not isinstance(path, list)
                         or not path
@@ -262,7 +262,7 @@ class _FunctionEntry:
                         [bound.contract]
                         if bound.family is None
                         else [
-                            _entry_contract(package.manifest, variant["symbol"]) for variant in bound.family["variants"]
+                            _entry_contract(package._manifest, variant["symbol"]) for variant in bound.family["variants"]
                         ]
                     )
                     template_paths = {**resources, **{name: ["_arg_" + name] for name in (*inputs, *fields)}}
@@ -375,7 +375,7 @@ class _MethodEntry(_FunctionEntry):
 
     def __init__(self, package, identity):
         super().__init__(package, identity)
-        if next(iter(self.signature.parameters)) != self.receiver or package.manifest["version"] < 51:
+        if next(iter(self.signature.parameters)) != self.receiver or package._manifest["version"] < 51:
             raise ValueError("Method template inputs require a leading receiver and package format 51")
 
     def __get__(self, owner, cls=None):

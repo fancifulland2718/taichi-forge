@@ -400,7 +400,9 @@ class PackageBuildCache:
             raw = (previous / "package.json").read_bytes()
             if hashlib.sha256(raw).hexdigest() != record["manifest_sha256"]:
                 return None
-            manifest = json.loads(raw)
+            from taichi_forge_runtime.aot._package_manifest import decode_manifest, materialize_manifest
+
+            manifest = materialize_manifest(decode_manifest(json.loads(raw)))
             if manifest["sources"] != {name: facts[2] for name, facts in self.inputs["sources"].items()}:
                 return None
         except (OSError, ValueError, KeyError, TypeError):

@@ -18,6 +18,27 @@ from tests import test_utils
 from taichi_forge_runtime.aot import Runtime, load_package
 
 
+def test_definition_package_shared_entry_contracts():
+    from taichi_forge_runtime.aot._package_manifest import decode_manifest, encode_manifest, materialize_manifest
+
+    # Different entries share many rules, but each has its own source selection.
+    rules = {f"input_{i}": {"path": ["solver", f"field_{i}"], "rank": 1} for i in range(50)}
+    entries = {str(i): dict(admission={"inputs": {**rules, "which": i}},
+                            dependencies={"sources": [f"module_{i}", "common"]}) for i in range(120)}
+    manifest = dict(version=98, entries=entries)
+    wire = encode_manifest(manifest)
+    assert wire["version"] > manifest["version"]
+    assert encode_manifest(dict(version=98, entries={})) == dict(version=98, entries={})
+    document = decode_manifest(json.loads(json.dumps(wire)))
+    assert json.dumps(materialize_manifest(document)) == json.dumps(manifest)
+    document["entries"]["0"]["admission"]["inputs"]["input_0"]["rank"] = 2
+    assert document["entries"]["1"]["admission"]["inputs"]["input_0"]["rank"] == 1
+    malformed = json.loads(json.dumps(wire))
+    malformed["entries"]["0"]["admission"] = -1
+    with pytest.raises(ValueError, match="entry contract reference"):
+        decode_manifest(malformed)["entries"]["0"]
+
+
 SAMPLED_TEXTURE_SOURCE = """
 import taichi_forge as ti
 @ti.data_oriented
@@ -131,6 +152,7 @@ class Model:
     assert (cold / 'code.tcm').read_bytes() == (warm / 'code.tcm').read_bytes()
     assert not any((tmp_path / 'cache').rglob('*.tcm'))
     with Runtime(arch.name) as runtime, load_package(runtime, warm) as code:
+        assert json.loads(json.dumps(code.manifest)) == warm_manifest
         for n in (3, 13):
             aot, jit = code.host.Model(n), package.model.Model(n)
             for value in (2, 11):
@@ -7336,7 +7358,7 @@ def test_package_binding_guard_observes_optional_parent_and_live_host_values(bor
     from taichi_forge_runtime.aot._package_calls import OwnerGuard
     from taichi_forge_runtime.aot._package_values import HostTensor
 
-    package = SimpleNamespace(manifest={'owners': {}})
+    package = SimpleNamespace(_manifest={'owners': {}})
     if borrowed:
         from taichi_forge._lib import core
         package.runtime = SimpleNamespace(_owner_namespace_versions=getattr(core, "_aot_namespace_versions", None))
@@ -7375,7 +7397,7 @@ def test_package_binding_guard_observes_namespace_and_descriptor_changes():
     owner = Owner()
     owner.resource = object()
     runtime = SimpleNamespace(_owner_namespace_versions=getattr(core, "_aot_namespace_versions", None))
-    package = SimpleNamespace(runtime=runtime, manifest={'owners': {}})
+    package = SimpleNamespace(runtime=runtime, _manifest={'owners': {}})
     contract = dict(captures=[dict(name=name, kind='value') for name in ('policy', 'optional', 'resource')])
     guard = OwnerGuard.for_graph(package, owner, [contract])
     assert guard.matches(owner)
@@ -7408,7 +7430,7 @@ def test_package_binding_guard_uses_dimension_paths_and_observes_deleted_attribu
             return super().__getattribute__(name)
 
     owner = Owner(child=SimpleNamespace(n=4), extent=4, live=7)
-    package = SimpleNamespace(manifest={'owners': {}})
+    package = SimpleNamespace(_manifest={'owners': {}})
     contract = dict(captures=[
         dict(name='symbol_extent', kind='dimension', dimension_relations={
             'symbol_extent': dict(path=['extent'], kind='extent', expression=['dim', 'symbol_n']),
@@ -7446,7 +7468,7 @@ def test_package_binding_guard_short_circuits_inactive_inputs():
             raise AssertionError('Inactive numerical input must not be read')
 
     owner = SimpleNamespace(enabled=False, nested=Inactive())
-    package = SimpleNamespace(manifest={'owners': {}})
+    package = SimpleNamespace(_manifest={'owners': {}})
     contract = dict(captures=[dict(name='data', kind='value', path=['nested', 'data'],
                                  nullable_booleans=[dict(path=['enabled'])])],
                     admission=dict(
@@ -7990,11 +8012,13 @@ def test_package_typed_owner_inputs_separate_type_admission_from_identical_code(
         )
     package = _source_package(tmp_path, monkeypatch, source)
     manifest = ti.aot.export_package(package, tmp_path / "sdk")
-    assert manifest["version"] == 68  # constructor owner contracts are included in the package
+    assert manifest["version"] == (81 if static else 68)  # prepared static input or constructor owner contract
+    assert any("prepare_static" in capture for entry in manifest["entries"].values()
+               for capture in entry["captures"]) == static
     assert len(manifest["input_families"]["definition_fixture.model.Reader"]) == 2
     assert manifest["entry_bindings"]
     with zipfile.ZipFile(tmp_path / "sdk/code.tcm") as archive:
-        assert len([name for name in archive.namelist() if name.endswith((".ll", ".bc", ".spv"))]) == 3 + static
+        assert len([name for name in archive.namelist() if name.endswith((".ll", ".bc", ".spv"))]) == 3
     with Runtime(manifest["target"]) as runtime, load_package(runtime, tmp_path / "sdk") as code:
         model = code.host.Model(7, 11)
         model.scalar.values.from_numpy(np.arange(7, dtype=np.float32))

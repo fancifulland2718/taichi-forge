@@ -228,7 +228,7 @@ class OwnerGuard:
                 allocated = path_value(owner, prefix)
                 if allocated is None:
                     continue
-                schema = package.manifest["owners"].get(owner_type(allocated), {})
+                schema = package._manifest["owners"].get(owner_type(allocated), {})
                 selections = getattr(allocated, "_forge_package_member_layouts", {}).get(
                     spec.get("layout_member", spec["name"]), {})
                 for name in selections:

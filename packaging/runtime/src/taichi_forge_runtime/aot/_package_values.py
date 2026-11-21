@@ -25,7 +25,7 @@ def path_value(owner, path):
             package = getattr(owner, "_forge_package_owner", None)
             if index != len(path) - 1 or package is None:
                 raise
-            item = package.manifest["owners"].get(owner_type(owner), {}).get(part, {})
+            item = package._manifest["owners"].get(owner_type(owner), {}).get(part, {})
             conditions = item.get("conditions", {})
             if item.get("kind") != "owner" or not conditions:
                 raise

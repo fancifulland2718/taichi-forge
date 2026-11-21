@@ -170,7 +170,7 @@ class GraphBuilder:
     def _record_plan_values(self, owner):
         if owner is None:
             return
-        schema = self.package.manifest["owners"].get(owner_type(owner), {})
+        schema = self.package._manifest["owners"].get(owner_type(owner), {})
         for name, item in schema.items():
             if not item.get("affects_plan"):
                 continue
@@ -606,7 +606,7 @@ class Graph:
                         written.update(value for key, value in operation.items() if key != "kind")
                         continue
                     raise ValueError("Write inspection has no effect contract for this operation")
-                contract = self.package.manifest["entries"][operation["entry"]]
+                contract = self.package._manifest["entries"][operation["entry"]]
                 descriptors = [*contract["arguments"], *contract["captures"]]
                 resources = {
                     str(index)
@@ -775,16 +775,16 @@ class Graph:
                     pending.extend(region)
             elif (kind == "kernel" and "launch" not in operation
                   and operation["entry"] in self.package._specialization_entries):
-                contract = self.package.manifest["entries"][operation["entry"]]
+                contract = self.package._manifest["entries"][operation["entry"]]
                 if not all(spec["kind"] in ordinary for spec in (*contract["arguments"], *contract["captures"])):
                     continue  # Managed resources retain a qualified kernel identity.
                 schema = {}
                 if contract["captures"]:
                     capture = operation["arguments"][len(contract["arguments"])]
                     owner = self.captures[capture][0]
-                    schema = self.package.manifest["owners"].get(owner_type(owner), {})
+                    schema = self.package._manifest["owners"].get(owner_type(owner), {})
                 operation["specialization"] = dict(
-                    constant_args=list(specialization_constant_args(contract, schema, self.package.manifest["owners"])))
+                    constant_args=list(specialization_constant_args(contract, schema, self.package._manifest["owners"])))
                 changed = True
         if not changed:
             return plan

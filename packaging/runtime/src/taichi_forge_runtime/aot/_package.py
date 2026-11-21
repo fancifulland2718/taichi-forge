@@ -23,6 +23,7 @@ import threading
 import weakref
 from types import SimpleNamespace
 
+from ._package_manifest import decode_manifest, entry_headers, materialize_manifest
 from ._runtime import NdArray, Scalar
 from ._package_values import StructField, capture_value, path_value, dimension_value, check_admission
 from .._dimensions import Extent, evaluate_extent, local_workspace_shape, check_model_static_ranges
@@ -209,7 +210,7 @@ class _ModuleBinding:
                               sampling=SimpleNamespace(SamplerConfig=SamplerConfig)),
             Texture=functools.partial(Texture, package),
             Format=SimpleNamespace(**{arg["fmt"]: arg["fmt"]
-                for entry in package.manifest["entries"].values() for arg in entry["arguments"]
+                for entry in entry_headers(package._manifest).values() for arg in entry["arguments"]
                 if arg["kind"] == "rw_texture"}),
             TaichiRuntimeError=AotError,
             graph=SimpleNamespace(
@@ -296,7 +297,7 @@ class _ModuleBinding:
         construction = _construction.get()
         if construction is None or construction[0] is not self.package or construction[2] is not owner:
             raise ValueError("Scoped array allocation requires its managed construction")
-        member = self.package.manifest["owners"][owner_type(owner)][name]
+        member = self.package._manifest["owners"][owner_type(owner)][name]
         if member.get("kind") != "ndarray" or "array_extents" not in member:
             raise ValueError("Scoped array requires its declared allocation")
         if any(dimension_value(owner, flag) is not expected for flag, expected in member.get("conditions", {}).items()):
@@ -407,12 +408,12 @@ class _ModuleBinding:
 
     def import_module(self, name):
         self.package._check()
-        modules = self.package.manifest.get("application_modules")
+        modules = self.package._manifest.get("application_modules")
         if modules is not None:
             if name not in modules:
                 raise ImportError("Module is outside this definition package: " + name)
             return importlib.import_module(self.package._name + "." + name)
-        root = self.package.manifest["module_root"]
+        root = self.package._manifest["module_root"]
         if name != root and not name.startswith(root + "."):
             raise ImportError("Module is outside this definition package: " + name)
         return importlib.import_module(self.package._name + name[len(root) :])
@@ -440,11 +441,11 @@ class _ModuleBinding:
     def dynamic_import(self, name, package=None):
         self.package._check()
         resolved = importlib.util.resolve_name(name, package) if name.startswith(".") else name
-        modules = self.package.manifest.get("application_modules")
+        modules = self.package._manifest.get("application_modules")
         prefix = self.package._name + "."
         public = resolved[len(prefix):] if resolved.startswith(prefix) else resolved
         if (modules is not None and public not in modules
-                and public.split(".")[0] in self.package.manifest["dependencies"]["local_roots"]):
+                and public.split(".")[0] in self.package._manifest["dependencies"]["local_roots"]):
             from ..execution import _hybrid_public_import
 
             if _hybrid_public_import.get():
@@ -454,10 +455,10 @@ class _ModuleBinding:
         if modules is not None:
             if resolved in modules:
                 return self.import_module(resolved)
-            if resolved.split(".")[0] in self.package.manifest["dependencies"]["local_roots"]:
+            if resolved.split(".")[0] in self.package._manifest["dependencies"]["local_roots"]:
                 raise ImportError("Dynamic local dependency was not exported: " + resolved)
         else:
-            root = self.package.manifest["module_root"]
+            root = self.package._manifest["module_root"]
             if resolved == root or resolved.startswith(root + "."):
                 return self.import_module(resolved)
         if resolved.split(".")[0] in ("taichi", "taichi_forge"):
@@ -486,7 +487,7 @@ class _ModuleBinding:
             actual = self.extent(value.expression, owner) if isinstance(value, Extent) else operator.index(value)
             if actual != self.extent(expression, owner):
                 raise ValueError(f"Dimension alias {alias!r} changed before its Field allocation")
-        member = self.package.manifest["owners"][owner_key][name]
+        member = self.package._manifest["owners"][owner_key][name]
         if "dtype_policy" in member:
             policy = member["dtype_policy"]
             enabled = path_value(owner, policy.get("condition_path", [policy["condition"]]))
@@ -509,7 +510,7 @@ class _ModuleBinding:
             ):
                 raise ValueError("Local element type changed before its Field allocation")
         group_key = member.get("field_group", owner_key)
-        contract = self.package.manifest["field_groups"][group_key]
+        contract = self.package._manifest["field_groups"][group_key]
         if dimensions.keys() != set(contract["dimensions"]):
             raise ValueError("Field group dimensions differ from its native schema")
         declared_members = contract["members"]
@@ -638,7 +639,7 @@ class _ModuleBinding:
         ):
             raise ValueError("Owner input requires its managed owner scope")
         owner_key = self.owner_contract(scope._root, owner_key)
-        declaration = self.package.manifest["owners"][owner_key].get(name, {})
+        declaration = self.package._manifest["owners"][owner_key].get(name, {})
         if declaration.get("kind") != "owner_input":
             raise ValueError("Owner input differs from its declared reference")
         if declaration.get("binding_phase") != "preparation" and (
@@ -704,15 +705,15 @@ class _ModuleBinding:
             ):
                 raise ValueError("Typed external resource requires its managed package scope")
             owner_key = self.owner_contract(scope._root, owner_key)
-            contract = self.package.manifest["owners"][owner_key].get(scope._identity(name), {})
+            contract = self.package._manifest["owners"][owner_key].get(scope._identity(name), {})
             for flag, expected in contract.get("conditions", {}).items():
-                guard = self.package.manifest["owners"][owner_key][flag]
+                guard = self.package._manifest["owners"][owner_key][flag]
                 selected = path_value(scope._root, guard.get("path", (flag,)))
                 if type(selected) is not bool or selected is not expected:
                     raise ValueError("External resource binding contradicts its declared presence")
             if contract.get("dtype_policy"):
                 policy = contract["dtype_policy"]
-                guard = self.package.manifest["owners"][owner_key][policy["condition"]]
+                guard = self.package._manifest["owners"][owner_key][policy["condition"]]
                 selected = path_value(scope._root, guard.get("path", (policy["condition"],)))
                 if type(selected) is not bool:
                     raise ValueError("External dtype selection requires a boolean configuration")
@@ -720,7 +721,7 @@ class _ModuleBinding:
                     **contract["element"], "dtype": policy["if_true" if selected else "if_false"]}}
             if contract.get("shape_policy"):
                 policy = contract["shape_policy"]
-                guard = self.package.manifest["owners"][owner_key][policy["condition"]]
+                guard = self.package._manifest["owners"][owner_key][policy["condition"]]
                 selected = path_value(scope._root, guard.get("path", (policy["condition"],)))
                 if type(selected) is not bool:
                     raise ValueError("External shape selection requires a boolean configuration")
@@ -762,10 +763,10 @@ class _ModuleBinding:
         ):
             raise ValueError("Borrowed Field requires its managed source-scope construction")
         owner_key = self.owner_contract(scope._root, owner_key)
-        contract = self.package.manifest["owners"][owner_key].get(scope._identity(name), {})
+        contract = self.package._manifest["owners"][owner_key].get(scope._identity(name), {})
         if contract.get("source_policy"):
             policy = contract["source_policy"]
-            guard = self.package.manifest["owners"][owner_key][policy["condition"]]
+            guard = self.package._manifest["owners"][owner_key][policy["condition"]]
             selected = path_value(scope._root, guard.get("path", (policy["condition"],)))
             if type(selected) is not bool:
                 raise ValueError("Borrow source selection requires a boolean configuration")
@@ -861,14 +862,14 @@ class _ModuleBinding:
         from ._package_values import owner_type
 
         for phase in ("preparation_owners", "construction_owners"):
-            if key in self.package.manifest.get(phase, {}):
+            if key in self.package._manifest.get(phase, {}):
                 selected = owner_type(owner)
-                if selected not in self.package.manifest[phase][key]:
+                if selected not in self.package._manifest[phase][key]:
                     raise ValueError("Inherited resource method has no declared receiver contract")
                 return selected
-        if key in self.package.manifest.get("input_families", {}):
+        if key in self.package._manifest.get("input_families", {}):
             selected = owner_type(owner)
-            if not any(item["owner"] == selected for item in self.package.manifest["input_families"][key]):
+            if not any(item["owner"] == selected for item in self.package._manifest["input_families"][key]):
                 raise ValueError("Typed owner has no selected resource contract")
             return selected
         return key
@@ -885,7 +886,7 @@ class _ModuleBinding:
         construction = _construction.get()
         if (
             getattr(owner, "_forge_package_owner", None) is not self.package
-            or key not in self.package.manifest["field_groups"]
+            or key not in self.package._manifest["field_groups"]
             or construction is None
             or construction[0] is not self.package
             or construction[2] is not owner
@@ -895,7 +896,7 @@ class _ModuleBinding:
 
     def context_function(self, module, name):
         self.package._check()
-        spec = self.package.manifest.get("host_contexts", {}).get(module)
+        spec = self.package._manifest.get("host_contexts", {}).get(module)
         if spec is None or name not in spec["definitions"]:
             raise ValueError("Unknown retained Host context definition")
         module = (
@@ -925,7 +926,7 @@ class _ModuleBinding:
         key = self.owner_contract(owner, identity) + separator + group
         if (
             getattr(owner, "_forge_package_owner", None) is not self.package
-            or key not in self.package.manifest["field_groups"]
+            or key not in self.package._manifest["field_groups"]
         ):
             raise ValueError("Preparation requires its declared owner and resource group")
         if key in getattr(owner, "_forge_package_preparing", ()):
@@ -991,7 +992,7 @@ class _ModuleBinding:
             getattr(owner, "_forge_package_owner", None) is not self.package
             or not keys
             or len(set(keys)) != len(keys)
-            or any(key not in self.package.manifest["field_groups"] for key in keys)
+            or any(key not in self.package._manifest["field_groups"] for key in keys)
         ):
             raise ValueError("Preparation requires its declared resource groups")
         active = getattr(owner, "_forge_package_preparation_methods", None)
@@ -1013,7 +1014,7 @@ class _ModuleBinding:
                         # A successful explicit None binding can retire its
                         # whole optional group without entering an allocation
                         # context. An early return before binding does nothing.
-                        schema = self.package.manifest["owners"][keys[0].partition(":")[0]]
+                        schema = self.package._manifest["owners"][keys[0].partition(":")[0]]
                         inactive = []
                         for key in keys:
                             members = [item for item in schema.values() if item.get("field_group") == key]
@@ -1038,7 +1039,7 @@ class _ModuleBinding:
         members = {
             attribute
             for key in keys
-            for attribute, item in self.package.manifest["owners"][key.partition(":")[0]].items()
+            for attribute, item in self.package._manifest["owners"][key.partition(":")[0]].items()
             if item.get("field_group") == key
         }
         missing = object()
@@ -1120,7 +1121,7 @@ class _ModuleBinding:
         self.resource_scope(parent)
         if owner is parent or type(name) is not str or not name.isidentifier():
             raise ValueError("A child resource scope requires a distinct owner and a name")
-        declaration = self.package.manifest["owners"][owner_type(parent)].get(name, {})
+        declaration = self.package._manifest["owners"][owner_type(parent)].get(name, {})
         declaration = selected_owner_declaration(parent, declaration)
         if declaration.get("kind") != "owner" or declaration.get("owner_type") != owner_type(owner):
             raise ValueError("Child registration differs from the parent's declared owner contract")
@@ -1151,7 +1152,7 @@ class _ModuleBinding:
         from ._package_values import owner_type
 
         key = owner_type(owner)
-        declaration = self.package.manifest["owners"][key][name]
+        declaration = self.package._manifest["owners"][key][name]
         if declaration["kind"] != "constant":
             raise ValueError("Missing definition constant contract")
         check_constant(owner, (name,), declaration["value"])
@@ -1258,7 +1259,7 @@ class _ResourceScope:
             or getattr(self._root, name, None) is not values
         ):
             raise ValueError("Host owner sequence requires its declared managed construction")
-        declaration = package.manifest["owners"][owner_type(self._root)].get(name, {})
+        declaration = package._manifest["owners"][owner_type(self._root)].get(name, {})
         if declaration.get("kind") != "host_owner_sequence" or any(
             getattr(value, "_forge_package_owner", None) is not package
             or owner_type(value) not in declaration["owner_types"]
@@ -1275,7 +1276,7 @@ class _ResourceScope:
         package = self._root._forge_package_owner
         from ._package_values import owner_type
 
-        schema = package.manifest["owners"][owner_type(self._root)]
+        schema = package._manifest["owners"][owner_type(self._root)]
         path = (reference, name)
         identity = "__record_" + "_".join(f"{len(part)}_{part}" for part in path)
         if schema.get(identity, {}).get("owner_dimension") != list(path):
@@ -1309,7 +1310,7 @@ class _ResourceScope:
         from ._package_values import owner_type
 
         package = getattr(self._root, "_forge_package_owner", None)
-        contract = package.manifest["owners"].get(owner_type(self._root), {}).get(name, {}) if package else {}
+        contract = package._manifest["owners"].get(owner_type(self._root), {}).get(name, {}) if package else {}
         if (self._parent is not None or type(name) is not str or optional is not True or value is not None
                 or contract.get("kind") != "owner_input" or not contract.get("optional_presence")):
             raise ValueError("Absent owner reference requires a declared optional input")
@@ -1337,7 +1338,7 @@ class _ResourceScope:
 
         package = getattr(self._root, "_forge_package_owner", None)
         contract = (
-            package.manifest["owners"].get(owner_type(self._root), {}).get(self._identity(name), {})
+            package._manifest["owners"].get(owner_type(self._root), {}).get(self._identity(name), {})
             if package is not None
             else {}
         )
@@ -1385,15 +1386,15 @@ def managed_class(package, cls):
     relative = cls.__module__[len(package._name) :]
     module = (
         relative.lstrip(".")
-        if "application_modules" in package.manifest
-        else package.manifest["module_root"] + relative
+        if "application_modules" in package._manifest
+        else package._manifest["module_root"] + relative
     )
     key = module + "." + cls.__name__
-    family = package.manifest.get("input_families", {}).get(key)
+    family = package._manifest.get("input_families", {}).get(key)
     parameter_key = family[0]["owner"] if family else key
     parameters = {
         name: item["presence_parameter"]
-        for name, item in package.manifest["owners"].get(parameter_key, {}).items()
+        for name, item in package._manifest["owners"].get(parameter_key, {}).items()
         # Family contexts specialize input contracts; presence belongs to the
         # original Python constructor, including its absent-input branch.
         if item.get("presence_owner") == key
@@ -1402,7 +1403,7 @@ def managed_class(package, cls):
     optional_inputs = {
         candidate["owner"]: {
             item["input_parameter"]
-            for item in package.manifest["owners"][candidate["owner"]].values()
+            for item in package._manifest["owners"][candidate["owner"]].values()
             if item.get("kind") == "owner_input"
             and item.get("optional_presence")
             and "input_parameter" in item
@@ -1462,7 +1463,7 @@ def managed_class(package, cls):
             bound.apply_defaults()
             for attribute, parameter in parameters.items():
                 value = bound.arguments[parameter]
-                if package.manifest["owners"][selected_key][attribute].get("presence_nonnull"):
+                if package._manifest["owners"][selected_key][attribute].get("presence_nonnull"):
                     value = value is not None
                 elif type(value) is not bool:
                     raise ValueError(f"Optional resource parameter {parameter!r} requires a boolean")
@@ -1482,14 +1483,14 @@ def managed_class(package, cls):
         # groups. Do not evaluate the referenced values until they are used.
         self._forge_package_dimension_paths = {
             name: tuple(item["path"])
-            for name, item in package.manifest["owners"].get(selected_key, {}).items()
+            for name, item in package._manifest["owners"].get(selected_key, {}).items()
             if item["kind"] == "dimension" and item.get("path")
         }
         # Optional ports start unbound. A normal constructor may leave their
         # source attributes at None without invoking a later preparation method.
         # Only ResourceScope binding publishes presence; assigning a non-null
         # object directly must still fail the ordinary admission check.
-        for name, item in package.manifest["owners"].get(selected_key, {}).items():
+        for name, item in package._manifest["owners"].get(selected_key, {}).items():
             if item.get("input_presence"):
                 setattr(self, name, False)
         allocated = []
@@ -1503,13 +1504,13 @@ def managed_class(package, cls):
                 self,
                 (
                     dict(path=item.get("path", [name]), owner_type=selected_owner_declaration(self, item)["owner_type"])
-                    for name, item in package.manifest["owners"].get(selected_key, {}).items()
+                    for name, item in package._manifest["owners"].get(selected_key, {}).items()
                     if item["kind"] in ("owner", "owner_input")
                     and item.get("binding_phase") != "preparation"
                     and all(getattr(self, flag) is expected for flag, expected in item.get("conditions", {}).items())
                 ),
             )
-            for name, item in package.manifest["owners"].get(selected_key, {}).items():
+            for name, item in package._manifest["owners"].get(selected_key, {}).items():
                 if item["kind"] == "host_owner_sequence":
                     _ResourceScope(self).owner_sequence(name, getattr(self, name))
         except BaseException:
@@ -1544,21 +1545,22 @@ class _UnboundEntry:
         raise TypeError("Numerical mixin entry requires its exported concrete receiver: " + self.definition)
 
 
-def _entry_contract(manifest, symbol):
+def _entry_contract(manifest, symbol, *, header_only=False):
     bindings = manifest.get("entry_bindings", {})
+    entries = entry_headers(manifest) if header_only else manifest["entries"]
     if symbol not in bindings:
-        return manifest["entries"].get(symbol)
+        return entries.get(symbol)
     binding = bindings[symbol]
     if (
         not isinstance(binding, dict)
         or set(binding) not in ({"code", "admission"}, {"code", "admission", "captures"})
         or type(binding["code"]) is not str
-        or binding["code"] not in manifest["entries"]
+        or binding["code"] not in entries
         or binding["admission"] is not None
         and not isinstance(binding["admission"], dict)
     ):
         raise ValueError("Logical entry binding requires existing code and an admission contract")
-    contract = {**manifest["entries"][binding["code"]]}
+    contract = {**entries[binding["code"]]}
     if "captures" in binding:
         if manifest["version"] < 84:
             raise ValueError("Logical capture bindings require definition package version 84")
@@ -1591,13 +1593,14 @@ def _entry_contract(manifest, symbol):
 class entry:
     def __init__(self, package, symbol):
         self.symbol = symbol
+        self._logical_symbol = symbol
         self.package = package
-        self.family = package.manifest.get("entry_families", {}).get(symbol)
-        self.contract = self.family if self.family is not None else _entry_contract(package.manifest, symbol)
-        if self.contract is None:
+        self.family = package._manifest.get("entry_families", {}).get(symbol)
+        header = self.family if self.family is not None else _entry_contract(package._manifest, symbol, header_only=True)
+        if header is None:
             raise ValueError("Package entry references missing numerical code")
         if self.family is None:
-            self.symbol = self.contract["symbol"]
+            self.symbol = header["symbol"]
         self._variants = []
         self._domain = {}
         self._selected = {}
@@ -1606,11 +1609,11 @@ class entry:
         self._selection_tree = None
         if self.family is not None and "owner_inputs" in self.family:
             for identity, target in self.family["owner_inputs"].items():
-                contract = package.manifest.get("entry_families", {}).get(target) or _entry_contract(
-                    package.manifest, target
+                contract = package._manifest.get("entry_families", {}).get(target) or _entry_contract(
+                    package._manifest, target, header_only=True
                 )
                 if (
-                    identity not in package.manifest["owners"]
+                    identity not in package._manifest["owners"]
                     or contract is None
                     or "owner_inputs" in contract
                     or contract["arguments"] != self.family["arguments"]
@@ -1631,7 +1634,7 @@ class entry:
             ):
                 raise ValueError("Record presence differs from its declared package domain")
             for variant in self.family["variants"]:
-                if _entry_contract(package.manifest, variant["symbol"]) is None:
+                if _entry_contract(package._manifest, variant["symbol"], header_only=True) is None:
                     raise ValueError("Static entry family references missing numerical code")
                 selection = {name: static_key(read_static_key(key)) for name, key in variant["selection"].items()}
                 if not selection.keys() <= self._domain.keys():
@@ -1690,10 +1693,16 @@ class entry:
         self.signature = inspect.Signature(
             [
                 inspect.Parameter(item["name"], inspect.Parameter.POSITIONAL_OR_KEYWORD)
-                for item in self.contract["arguments"]
+                for item in header["arguments"]
             ]
         )
         self.__signature__ = self.signature
+
+    @functools.cached_property
+    def contract(self):
+        if self.family is not None:
+            return self.family
+        return _entry_contract(self.package._manifest, self._logical_symbol)
 
     def __get__(self, owner, cls=None):
         if owner is None:
@@ -1798,7 +1807,7 @@ class entry:
                 call = kernel.bind(*prepared)
                 specialize = selected.symbol in package._specialization_entries
                 constant_args = specialization_constant_args(
-                    contract, package.manifest["owners"].get(owner_type(owner), {}), package.manifest["owners"]
+                    contract, package._manifest["owners"].get(owner_type(owner), {}), package._manifest["owners"]
                 ) if specialize else ()
                 # Host arrays must upload/download on every call. Mutable
                 # tensor/scalar wrappers also require a fresh value snapshot.
@@ -1852,7 +1861,7 @@ class entry:
             if capture_is_absent(owner, item):
                 continue
             allocated_owner = path_value(owner, item.get("layout_owner_path", ()))
-            schema = self.package.manifest["owners"].get(owner_type(allocated_owner), {})
+            schema = self.package._manifest["owners"].get(owner_type(allocated_owner), {})
             for name, value in allocated_owner._forge_package_member_layouts.get(
                 item.get("layout_member", item["name"]), {}
             ).items():
@@ -1935,12 +1944,17 @@ class LoadedPackage:
     capture. Existing Host calls keep their original scheduling semantics.
     """
 
+    @property
+    def manifest(self):
+        """Expose the complete mutable manifest when requested by an application."""
+        return materialize_manifest(self._manifest)
+
     def __init__(self, runtime, directory):
         self.runtime, self.directory = runtime, Path(directory).resolve(strict=True)
         self._public_hybrid_imports = False
-        self.manifest = json.loads((self.directory / "package.json").read_text(encoding="utf8"))
+        self._manifest = manifest = decode_manifest(json.loads((self.directory / "package.json").read_bytes()))
         if (
-            self.manifest.get("version")
+            manifest.get("version")
             not in (
                 1,
                 2,
@@ -2041,64 +2055,72 @@ class LoadedPackage:
                 97,
                 98,
             )
-            or self.manifest.get("kind") != "forge_definition_package_prototype"
+            or manifest.get("kind") != "forge_definition_package_prototype"
         ):
             raise ValueError("Unsupported definition package")
         boundary = {"application_modules", "entry_module", "dependencies"}
-        if (self.manifest["version"] == 2 or boundary & self.manifest.keys()) and not boundary <= self.manifest.keys():
+        if (manifest["version"] == 2 or boundary & manifest.keys()) and not boundary <= manifest.keys():
             raise ValueError("Application source package is missing its import boundary")
-        if self.manifest["target"] != runtime.arch:
+        if manifest["target"] != runtime.arch:
             raise ValueError("Package target differs from Runtime")
-        if self.manifest['version'] < 95 and any(
+        bindings = manifest.get("entry_bindings", {})
+        if not isinstance(bindings, dict) or bindings and manifest["version"] < 47:
+            raise ValueError("Logical entry bindings require definition package format 47")
+        if bindings.keys() & (manifest["entries"].keys() | manifest.get("entry_families", {}).keys()):
+            raise ValueError("Logical entry binding collides with another package entry")
+        for symbol in bindings:
+            _entry_contract(manifest, symbol, header_only=True)
+        if manifest['version'] < 95 and any(
                 'required_when' in resource
-                for entry in (*self.manifest['entries'].values(), *self.manifest.get('entry_bindings', {}).values())
+                for entry in (*manifest['entries'].values(), *manifest.get('entry_bindings', {}).values())
                 for resource in (entry.get('admission') or {}).get('conditional_resources', {}).values()):
             raise ValueError('Conditional member read admission requires definition package version 95')
-        if self.manifest['version'] < 94 and (any(
+        if manifest['version'] < 94 and (any(
                 (entry.get('admission') or {}).get('constraint_conditions') or any(
                     set(binding) & {'nullable_record', 'nullable_boolean', 'nullable_booleans'}
                     for binding in (entry.get('admission') or {}).get('input_guard_values', {}).values())
-                for entry in self.manifest['entries'].values()) or any(
+                for entry in manifest['entries'].values()) or any(
                 binding.get('presence_conditions')
-                for entry in self.manifest['entries'].values()
+                for entry in manifest['entries'].values()
                 for group in (entry.get('admission') or {}).values()
                 if isinstance(group, dict)
                 for binding in group.values() if isinstance(binding, dict))):
             raise ValueError('Nested query inputs require definition package version 94')
-        if self.manifest["version"] < 93 and (any(
+        if manifest["version"] < 93 and (any(
             item["kind"] in ("owner", "owner_input") and item.get("dynamic_input_record")
-            for schema in self.manifest.get("owners", {}).values() for item in schema.values()
+            for schema in manifest.get("owners", {}).values() for item in schema.values()
         ) or any(binding.get("optional")
-                 for entry in self.manifest["entries"].values()
+                 for entry in manifest["entries"].values()
                  for binding in entry.get("admission", {}).get("owner_bindings", {}).values())):
             raise ValueError("Optional typed owner records require definition package version 93")
-        if self.manifest["version"] < 88 and any(
+        if manifest["version"] < 88 and any(
             member.get("external") and member.get("shape_policy")
-            for schema in self.manifest.get("owners", {}).values() for member in schema.values()
+            for schema in manifest.get("owners", {}).values() for member in schema.values()
         ):
             raise ValueError("External shape selection requires definition package version 88")
-        if self.manifest["version"] < 90 and any(
+        if manifest["version"] < 90 and any(
             item.get("external") and item.get("conditions")
-            for schema in self.manifest.get("owners", {}).values() for item in schema.values()
+            for schema in manifest.get("owners", {}).values() for item in schema.values()
         ):
             raise ValueError("Conditional external inputs require definition package version 90")
-        if self.manifest["version"] < 89 and any(
+        if manifest["version"] < 89 and any(
             member.get("external") and member.get("dtype_policy")
-            for owner in self.manifest["owners"].values() for member in owner.values()
+            for owner in manifest["owners"].values() for member in owner.values()
         ):
             raise ValueError("External dtype selection requires definition package version 89")
-        requirements = self.manifest.get("runtime_requirements", [])
+        requirements = manifest.get("runtime_requirements", [])
         if not isinstance(requirements, list) or any(item != "fault_snapshot" for item in requirements):
             raise ValueError("Unsupported package runtime requirement")
         if requirements:
-            if self.manifest["version"] < 87:
+            if manifest["version"] < 87:
                 raise ValueError("Runtime fault snapshots require definition package version 87")
             runtime._require_fault_snapshot()
-        hardware_arguments = [argument for entry in self.manifest["entries"].values()
+        headers = entry_headers(manifest)
+        hardware_arguments = [argument for entry in headers.values()
                               for argument in entry["arguments"]
                               if argument.get("kind") in ("rw_texture", "acceleration_structure")]
         if hardware_arguments:
-            if self.manifest["version"] < 98:
+            if manifest["version"] < 98:
                 raise ValueError("Vulkan resource inputs require definition package version 98")
             if runtime.arch != "vulkan":
                 raise ValueError("Vulkan resource inputs require a Vulkan Runtime")
@@ -2112,89 +2134,82 @@ class LoadedPackage:
                              and type(argument["lod"]) is int and argument["lod"] >= 0)
                 if not valid:
                     raise ValueError("Invalid Vulkan resource input contract")
-        texture_arguments = [argument for entry in self.manifest["entries"].values()
+        texture_arguments = [argument for entry in headers.values()
                              for argument in entry["arguments"] if argument.get("kind") == "texture"]
         if texture_arguments:
-            if self.manifest["version"] < 86:
+            if manifest["version"] < 86:
                 raise ValueError("Sampled texture inputs require definition package version 86")
             if runtime.arch not in ("cuda", "vulkan") or any(
                     set(argument) != {"name", "kind", "ndim"}
                     or type(argument["ndim"]) is not int or argument["ndim"] not in (1, 2, 3)
                     for argument in texture_arguments):
                 raise ValueError("Invalid sampled texture input contract")
-        if self.manifest["version"] < 85 and any(
+        if manifest["version"] < 85 and any(
                 member.get("kind") == "owner_input" and member.get("binding_phase") == "preparation"
-                for owner in self.manifest["owners"].values() for member in owner.values()):
+                for owner in manifest["owners"].values() for member in owner.values()):
             raise ValueError("Prepared owner inputs require definition package version 85")
-        if self.manifest["version"] < 81 and any(
+        if manifest["version"] < 81 and any(
             "prepare_static" in capture
-            for entry in self.manifest["entries"].values() for capture in entry.get("captures", ())
+            for entry in headers.values() for capture in entry.get("captures", ())
         ):
             raise ValueError("Prepared static inputs require definition package version 81")
-        if self.manifest["version"] < 78 and any(
+        if manifest["version"] < 78 and any(
             member.get("dynamic_storage_condition")
-            for owner in self.manifest["owners"].values()
+            for owner in manifest["owners"].values()
             for member in owner.values()
         ):
             raise ValueError("Boolean optional workspaces require definition package format 78")
-        if self.manifest["version"] < 79 and any(
+        if manifest["version"] < 79 and any(
             member.get("input_conditions")
-            for owner in self.manifest["owners"].values()
+            for owner in manifest["owners"].values()
             for member in owner.values()
         ):
             raise ValueError("Nested optional workspaces require definition package format 79")
-        if self.manifest["version"] < 71 and any(
-            "array_extents" in member for owner in self.manifest["owners"].values() for member in owner.values()
+        if manifest["version"] < 71 and any(
+            "array_extents" in member for owner in manifest["owners"].values() for member in owner.values()
         ):
             raise ValueError("Scoped arrays require definition package format 71")
-        if self.manifest["version"] < 72 and any(
-            contract.get("dtypes") for contract in self.manifest.get("field_groups", {}).values()
+        if manifest["version"] < 72 and any(
+            contract.get("dtypes") for contract in manifest.get("field_groups", {}).values()
         ):
             raise ValueError("Field dtype selection requires definition package format 72")
-        if self.manifest["version"] < 73 and any(
-            member.get("source_policy") for owner in self.manifest["owners"].values() for member in owner.values()
+        if manifest["version"] < 73 and any(
+            member.get("source_policy") for owner in manifest["owners"].values() for member in owner.values()
         ):
             raise ValueError("Borrow source selection requires definition package format 73")
-        if self.manifest["version"] < 82 and any(
+        if manifest["version"] < 82 and any(
             member.get("source_policy", {}).get("presence")
-            for owner in self.manifest["owners"].values()
+            for owner in manifest["owners"].values()
             for member in owner.values()
         ):
             raise ValueError("Borrow source presence selection requires definition package format 82")
-        if self.manifest["version"] < 76 and any(
-            "condition_path" in policy for contract in self.manifest.get("field_groups", {}).values()
+        if manifest["version"] < 76 and any(
+            "condition_path" in policy for contract in manifest.get("field_groups", {}).values()
             for kind in ("shapes", "dtypes") for policy in contract.get(kind, {}).values()
         ):
             raise ValueError("field_like layout selection requires definition package format 76")
-        if self.manifest["version"] < 77 and any(
+        if manifest["version"] < 77 and any(
             member["kind"] == "ndarray" and member.get("dtype_policy")
-            for owner in self.manifest["owners"].values() for member in owner.values()
+            for owner in manifest["owners"].values() for member in owner.values()
         ):
             raise ValueError("Scoped array dtype selection requires definition package format 77")
-        if self.manifest["version"] < 70 and any(
-            contract.get("shapes") for contract in self.manifest.get("field_groups", {}).values()
+        if manifest["version"] < 70 and any(
+            contract.get("shapes") for contract in manifest.get("field_groups", {}).values()
         ):
             raise ValueError("Field shape selection requires definition package format 70")
-        bindings = self.manifest.get("entry_bindings", {})
-        if not isinstance(bindings, dict) or bindings and self.manifest["version"] < 47:
-            raise ValueError("Logical entry bindings require definition package format 47")
-        if bindings.keys() & (self.manifest["entries"].keys() | self.manifest.get("entry_families", {}).keys()):
-            raise ValueError("Logical entry binding collides with another package entry")
-        for symbol in bindings:
-            _entry_contract(self.manifest, symbol)
-        if self.manifest["version"] < 80 and any(
+        if manifest["version"] < 80 and any(
             (contract.get("admission") or {}).get("input_guard_values")
-            for contract in (*self.manifest["entries"].values(), *bindings.values())
+            for contract in (*manifest["entries"].values(), *bindings.values())
         ):
             raise ValueError("Prepared input guards require definition package format 80")
-        functions = self.manifest.get("function_entries", {})
-        if not isinstance(functions, dict) or functions and self.manifest["version"] < 50:
+        functions = manifest.get("function_entries", {})
+        if not isinstance(functions, dict) or functions and manifest["version"] < 50:
             raise ValueError("Free Kernel input bindings require definition package format 50")
         from ._package_closures import _FunctionEntry
 
         for identity in functions:
             _FunctionEntry(self, identity)
-        files = self.manifest["files"]
+        files = manifest["files"]
         if not {"code.tcm", "host/__init__.py"} <= files.keys():
             raise ValueError("Package is missing code or Host entry")
         for relative, digest in files.items():
@@ -2207,11 +2222,11 @@ class LoadedPackage:
         from ._package_calls import specialization_entries
 
         self._specialization_entries = specialization_entries(
-            self.directory / "code.tcm", runtime.arch, self.manifest["entries"]
+            self.directory / "code.tcm", runtime.arch, headers
         )
         if any(
             name not in self._specialization_entries and any("prepare_static" in c for c in entry.get("captures", ()))
-            for name, entry in self.manifest["entries"].items()
+            for name, entry in headers.items()
         ):
             raise ValueError("Prepared static inputs require a specialization-capable numerical entry")
         self._module = runtime.load_module(self.directory / "code.tcm")
@@ -2269,8 +2284,8 @@ class LoadedPackage:
                 self.host._forge_package_owner = self
                 sys.modules[self._name] = self.host
                 spec.loader.exec_module(self.host)
-                if self.manifest.get("entry_module"):
-                    self.host = importlib.import_module(self._name + "." + self.manifest["entry_module"])
+                if self._manifest.get("entry_module"):
+                    self.host = importlib.import_module(self._name + "." + self._manifest["entry_module"])
             return self
         except BaseException:
             self.__exit__(*sys.exc_info())
