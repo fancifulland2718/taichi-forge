@@ -52,7 +52,37 @@ class _InventoryLocalAliases(ast.NodeTransformer):
         return part
 
 
-class _InventoryIteration(ast.NodeTransformer):
+class _SourceProjection(ast.NodeVisitor):
+    """Replace source expressions without mutating the input or losing call-site identity."""
+
+    def generic_visit(self, node):
+        # Per-iteration call IDs track local uses; the source ID tracks coverage
+        # across iterations. Preserve both even when a call has no replacements.
+        result = copy.copy(node) if isinstance(node, ast.Call) else node
+        if result is not node:
+            result._package_call_site = getattr(node, '_package_call_site', id(node))
+        for field, original in ast.iter_fields(node):
+            if isinstance(original, list):
+                updated = original
+                for index, item in enumerate(original):
+                    if isinstance(item, ast.AST):
+                        replacement = self.visit(item)
+                        if replacement is not item:
+                            if updated is original:
+                                updated = list(original)
+                            updated[index] = replacement
+            elif isinstance(original, ast.AST):
+                updated = self.visit(original)
+            else:
+                continue
+            if updated is not original:
+                if result is node:
+                    result = copy.copy(node)
+                setattr(result, field, updated)
+        return result
+
+
+class _InventoryIteration(_SourceProjection):
     def __init__(self, projector, bindings):
         self.projector, self.bindings = projector, bindings
 
@@ -67,33 +97,39 @@ class _InventoryIteration(ast.NodeTransformer):
     visit_AsyncFunctionDef = visit_ClassDef = visit_FunctionDef
 
 
-def _copy_call_sites(node):
-    """Retain coverage of the source call when projecting a finite Host loop."""
-    copied = copy.deepcopy(node)
-    for original, projected in zip(ast.walk(node), ast.walk(copied)):
-        if isinstance(original, ast.Call):
-            projected._package_call_site = getattr(original, '_package_call_site', id(original))
-    return copied
+class _DeclarationSyntax:
+    def __init__(self):
+        self.imports = WeakKeyDictionary()
+        self.functions = WeakKeyDictionary()
+        self.calls = WeakKeyDictionary()
 
 
-_source_imports = ContextVar("aot_declaration_imports", default=None)
+_declaration_syntax = ContextVar("aot_declaration_syntax", default=None)
 
 
 @contextmanager
-def reuse_declaration_imports():
-    # Normalization precedes these passes. A projected/copied body has its own
-    # AST identity. Keep no live namespace, owner or synthetic tree in the index.
-    token = _source_imports.set(WeakKeyDictionary())
+def reuse_declaration_syntax():
+    # A projected body has its own AST identity. In-place constructor
+    # normalization invalidates that body. Live bindings are resolved per pass.
+    token = _declaration_syntax.set(_DeclarationSyntax())
     try:
         yield
     finally:
-        _source_imports.reset(token)
+        _declaration_syntax.reset(token)
+
+
+def invalidate_declaration_syntax(node):
+    cache = _declaration_syntax.get()
+    if cache is not None:
+        cache.imports.pop(node, None)
+        cache.functions.pop(node, None)
+        cache.calls.pop(node, None)
 
 
 def _local_imports(node):
-    cache = _source_imports.get()
-    if cache is not None and node in cache:
-        return cache[node]
+    cache = _declaration_syntax.get()
+    if cache is not None and node in cache.imports:
+        return cache.imports[node]
     imports, shadowed = [], set()
     pending = list(reversed(node.body))
     while pending:
@@ -110,7 +146,7 @@ def _local_imports(node):
         pending.extend(reversed(tuple(ast.iter_child_nodes(part))))
     result = (imports, shadowed) if imports else ((), ())
     if cache is not None:
-        cache[node] = result
+        cache.imports[node] = result
     return result
 
 
@@ -358,7 +394,7 @@ def _returns_on_all_paths(body):
 
 
 class _FunctionSyntax:
-    """Conservative lexical facts shared by one discovery pass's input contexts.
+    """Conservative lexical facts shared by a normalized body's input contexts.
 
     These facts depend only on the original source, never on a receiver, a
     selected branch or a projected source sequence. Keep all argument-dependent
@@ -367,22 +403,31 @@ class _FunctionSyntax:
 
     def __init__(self, node):
         nodes = []
-        pending = list(reversed(node.body))
+        self.regions = {}
+        pending = [(part, None) for part in reversed(node.body)]
 
         while pending:
-            part = pending.pop()
+            part, region = pending.pop()
+            control = isinstance(part, (ast.If, ast.IfExp, ast.For))
+            if region is None and not control:
+                region = self.regions[part] = []
             if isinstance(part, ast.Lambda):
                 parameters = part.args
                 if not (parameters.posonlyargs or parameters.args or parameters.kwonlyargs
                         or parameters.vararg or parameters.kwarg
                         or any(isinstance(child, (ast.NamedExpr, ast.Yield, ast.YieldFrom))
                                for child in ast.walk(part.body))):
-                    pending.append(part.body)
+                    pending.append((part.body, region))
                 continue
             if isinstance(part, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
                 continue
             nodes.append(part)
-            pending.extend(reversed(list(ast.iter_child_nodes(part))))
+            # Between control decisions, only these nodes are consumed by
+            # call/return discovery or the source resource inventory.
+            if region is not None and (control or isinstance(part, (ast.Call, ast.Return, ast.Name, ast.Attribute))):
+                region.append(part)
+            child_region = None if control else region
+            pending.extend((child, child_region) for child in reversed(list(ast.iter_child_nodes(part))))
 
         self.stores, self.imports, self.aliases, self.reads = {}, {}, {}, {}
         self.calls, self.writes = [], set()
@@ -448,7 +493,7 @@ def discover(sources, imported, *, preparation_receivers=None, resource_inventor
 
     owners, classes, functions, kernels, kernel_definitions = {}, {}, {}, {}, {}
     cached_sources = set()
-    member_writes = {}
+    class_nodes, member_writes = {}, {}
     for module, _, _, _, tree, _, schemas, definitions in sources:
         namespace = vars(imported[module])
         for name, schema in schemas.items():
@@ -464,11 +509,7 @@ def discover(sources, imported, *, preparation_receivers=None, resource_inventor
                 cls = namespace.get(node.name)
                 if inspect.isclass(cls):
                     if resource_inventory is not None:
-                        member_writes[cls] = {
-                            part.attr for part in ast.walk(node)
-                            if isinstance(part, ast.Attribute) and not isinstance(part.ctx, ast.Load)
-                            and isinstance(part.value, ast.Name) and part.value.id == 'self'
-                        }
+                        class_nodes[cls] = node
                     for method in node.body:
                         if isinstance(method, ast.FunctionDef) and not method.decorator_list:
                             function = vars(cls).get(method.name)
@@ -680,7 +721,29 @@ def discover(sources, imported, *, preparation_receivers=None, resource_inventor
     invalid = set()
     return_cache = {}
     binding_domains = {}
-    syntax = {}
+    declaration_syntax = _declaration_syntax.get()
+    syntax = declaration_syntax.functions if declaration_syntax is not None else {}
+
+    def source_calls(node):
+        # Coverage includes calls in nested definitions and annotations, unlike
+        # the calls in _FunctionSyntax's lexical scope. Keep ast.walk order.
+        cache = declaration_syntax.calls if declaration_syntax is not None else None
+        if cache is None:
+            return (part for part in ast.walk(node) if isinstance(part, ast.Call))
+        if node not in cache:
+            cache[node] = tuple(part for part in ast.walk(node) if isinstance(part, ast.Call))
+        return cache[node]
+
+    def shadows_cached_member(base, name):
+        if base not in class_nodes:
+            return False
+        if base not in member_writes:
+            member_writes[base] = {
+                part.attr for part in ast.walk(class_nodes[base])
+                if isinstance(part, ast.Attribute) and not isinstance(part.ctx, ast.Load)
+                and isinstance(part.value, ast.Name) and part.value.id == 'self'
+            }
+        return name in member_writes[base]
 
     def record(callee, inputs, call, module, chain=()):
         call_site = getattr(call, '_package_call_site', id(call))
@@ -927,6 +990,14 @@ def discover(sources, imported, *, preparation_receivers=None, resource_inventor
 
                 def walk(statement):
                     nonlocal sequence_projector
+                    region = lexical.regions.get(statement)
+                    if region is not None:
+                        for part in region:
+                            if isinstance(part, (ast.If, ast.IfExp, ast.For)):
+                                walk(part)
+                            else:
+                                nodes.append(part)
+                        return
                     if isinstance(statement, ast.Lambda):
                         parameters = statement.args
                         if not (
@@ -987,7 +1058,7 @@ def discover(sources, imported, *, preparation_receivers=None, resource_inventor
                                 sequence_projector.bind(statement.target, item, bindings)
 
                                 for body in statement.body:
-                                    walk(_InventoryIteration(sequence_projector, bindings).visit(_copy_call_sites(body)))
+                                    walk(_InventoryIteration(sequence_projector, bindings).visit(body))
                             for body in statement.orelse:
                                 walk(body)
                             return
@@ -1048,7 +1119,7 @@ def discover(sources, imported, *, preparation_receivers=None, resource_inventor
                                         isinstance(arm, _Literal) and arm.value is None for arm in left.alternatives):
                                     selections[left.source] = present[0]
                             if selections:
-                                class SelectPresent(ast.NodeTransformer):
+                                class SelectPresent(_SourceProjection):
                                     def visit(self, part):
                                         if isinstance(part, (ast.Name, ast.Attribute)) and isinstance(part.ctx, ast.Load):
                                             original = value(part)
@@ -1056,13 +1127,14 @@ def discover(sources, imported, *, preparation_receivers=None, resource_inventor
                                             for source, index in selections.items():
                                                 selected = _select_source_fact(selected, source, index)
                                             if selected != original:
+                                                part = copy.copy(part)
                                                 part._package_input_fact = selected
                                                 return part
                                         return super().visit(part)
                                 walk(statement.test)
                                 body = statement.body if isinstance(statement.body, list) else [statement.body]
                                 for child in body:
-                                    walk(SelectPresent().visit(_copy_call_sites(child)))
+                                    walk(SelectPresent().visit(child))
                                 other = statement.orelse if isinstance(statement.orelse, list) else [statement.orelse]
                                 for child in other:
                                     walk(child)
@@ -1070,9 +1142,9 @@ def discover(sources, imported, *, preparation_receivers=None, resource_inventor
                     for child in ast.iter_child_nodes(statement):
                         walk(child)
 
-                if function not in syntax:
-                    syntax[function] = _FunctionSyntax(node)
-                lexical = syntax[function]
+                if node not in syntax:
+                    syntax[node] = _FunctionSyntax(node)
+                lexical = syntax[node]
                 stores, aliases = lexical.stores, lexical.aliases
                 # Imported names invalidate only matching incoming arguments, as
                 # before. Never add that context-specific fact to the summary.
@@ -1619,11 +1691,10 @@ def discover(sources, imported, *, preparation_receivers=None, resource_inventor
                     receiver = value(expression.value)
                     if isinstance(receiver, _Owner):
                         cls = classes[receiver.identity]
-                        if (expression.attr in owners[receiver.identity]
-                                or any(expression.attr in member_writes.get(base, ()) for base in cls.__mro__)):
-                            return None
                         descriptor = static_member(cls, expression.attr, None)
-                        if type(descriptor) is functools.cached_property and descriptor.func in cached_sources:
+                        if (type(descriptor) is functools.cached_property and descriptor.func in cached_sources
+                                and expression.attr not in owners[receiver.identity]
+                                and not any(shadows_cached_member(base, expression.attr) for base in cls.__mro__)):
                             return descriptor.func
                     return None
 
@@ -1964,8 +2035,8 @@ def discover(sources, imported, *, preparation_receivers=None, resource_inventor
             # Use the same source flow as free Kernels, before new preparation
             # declarations exist. Numerical/input validation runs after this pass.
             for function, (module, node) in functions.items():
-                for call in ast.walk(node):
-                    if not isinstance(call, ast.Call) or id(call) in covered:
+                for call in source_calls(node):
+                    if id(call) in covered:
                         continue
                     callee = source_callable(call.func, function_namespace(function))
                     if inspect.isfunction(callee) and callee in preparation_receivers:
@@ -1983,8 +2054,8 @@ def discover(sources, imported, *, preparation_receivers=None, resource_inventor
                 failures.append(message)
                 invalid.add(callee)
         for function, (module, node) in functions.items():
-            for call in ast.walk(node):
-                if isinstance(call, ast.Call) and id(call) not in covered:
+            for call in source_calls(node):
+                if id(call) not in covered:
                     callee = source_callable(call.func, function_namespace(function))
                     if isinstance(call.func, ast.Attribute) and call.func.attr == "dispatch" and call.args:
                         callee = _source_value(call.args[0], function.__globals__)

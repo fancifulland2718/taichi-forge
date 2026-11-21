@@ -548,7 +548,10 @@ def scope_declarations(
 ):
     if constructor is None:
         return {}
+    from ._package_function_inputs import invalidate_declaration_syntax
+
     initial_conditions = initial_conditions or {}
+    invalidate_declaration_syntax(constructor)
     _normalize_scope_aliases(constructor, kind)
     _normalize_field_loops(module, constructor, kind, fail, namespace)
     scopes, declarations, allowed = {}, {}, set()

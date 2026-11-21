@@ -27,6 +27,13 @@ class Sequence:
     def __init__(self, values, *, mutable=False, domain=False):
         self.values, self.mutable, self.domain = list(values), mutable, domain
 
+    def fork(self, copies):
+        if self not in copies:
+            result = Sequence((), mutable=self.mutable, domain=self.domain)
+            copies[self] = result
+            result.values.extend(item.fork(copies) if isinstance(item, Sequence) else item for item in self.values)
+        return copies[self]
+
 
 class SourceSequences:
     def __init__(self, sources, imported, *, inventory=False):
@@ -64,6 +71,8 @@ class SourceSequences:
 
     def join(self, left, right, choice, memo=None):
         """Merge sources without inventing an ordered concatenation of branches."""
+        if left is right and isinstance(left, ast.AST):
+            return left
         memo = {} if memo is None else memo
         key = id(left), id(right)
         if key in memo:
@@ -532,9 +541,17 @@ class SourceSequences:
             raise UnprovenSourceSequence("Inventory iteration requires a finite source sequence")
         return value
 
+    @staticmethod
+    def fork_environment(environment):
+        # Projected expressions are read-only. Only sequence containers accept
+        # append/extend. Preserve aliases within the arm, including nested ones.
+        sequences = {}
+        return {name: value.fork(sequences) if isinstance(value, Sequence) else value
+                for name, value in environment.items()}
+
     def refined(self, test, environment, take):
         """Narrow only explicit optional source tests; never evaluate user data."""
-        result = copy.deepcopy(environment)
+        result = self.fork_environment(environment)
         if (not isinstance(test, ast.Compare) or len(test.ops) != 1
                 or not isinstance(test.left, ast.Name)
                 or not isinstance(test.comparators[0], ast.Constant)
@@ -604,7 +621,7 @@ class SourceSequences:
                                           and part.id in inputs for part in ast.walk(node)):
                     raise UnprovenSourceSequence('Inventory loop cannot rebind an existing source')
                 for value in values.values:
-                    local = copy.deepcopy(environment) if self.inventory else dict(environment)
+                    local = self.fork_environment(environment) if self.inventory else dict(environment)
                     self.bind(node.target, value, local)
                     if self.body(node.body, local, namespace, active, branch=branch) is not None:
                         raise UnprovenSourceSequence("Inventory loops cannot return early")
@@ -707,7 +724,7 @@ class SourceSequences:
                     continue
                 branches = []
                 for branch in (node.body, node.orelse):
-                    local = copy.deepcopy(environment)
+                    local = self.fork_environment(environment)
                     result.extend(self.generator_body(branch, local, namespace, active).values)
                     branches.append(local)
                 joined = self.join_environments(*branches, predicate)

@@ -31543,7 +31543,7 @@ def test_package_declaration_imports_follow_current_bindings():
     import ast
     from types import ModuleType
 
-    from taichi_forge.aot._package_function_inputs import reuse_declaration_imports, source_function_namespace
+    from taichi_forge.aot._package_function_inputs import reuse_declaration_syntax, source_function_namespace
 
     def entry(shadow):
         pass
@@ -31551,12 +31551,49 @@ def test_package_declaration_imports_follow_current_bindings():
     tree = ast.parse("def entry(shadow):\n from target_module import query, other as shadow").body[0]
     target = ModuleType("target_module")
     target.query, target.other = object(), object()
-    with reuse_declaration_imports():
+    with reuse_declaration_syntax():
         namespace = source_function_namespace(entry, tree, {"target_module": target})
         assert namespace["query"] is target.query and "shadow" not in namespace
         target.query = object()
         assert source_function_namespace(entry, tree, {"target_module": target})["query"] is target.query
         assert "query" not in source_function_namespace(entry, tree, {})
+
+
+def test_package_source_iterations_preserve_call_sites():
+    import ast
+
+    from taichi_forge.aot._package_function_inputs import _InventoryIteration
+    from taichi_forge.aot._package_source_sequences import SourceSequences
+
+    projector = SourceSequences([], {}, inventory=True)
+    source = ast.parse("submit(item, poll())").body[0]
+    first, second = (
+        _InventoryIteration(projector, {"item": ast.Constant(item)}).visit(source)
+        for item in (1, 2)
+    )
+    assert isinstance(source.value.args[0], ast.Name)
+    assert [part.value.args[0].value for part in (first, second)] == [1, 2]
+
+    def calls(tree):
+        return tree.value, tree.value.args[1]
+
+    for original, left, right in zip(calls(source), calls(first), calls(second)):
+        assert left is not right and left._package_call_site == right._package_call_site == id(original)
+        assert not hasattr(original, "_package_call_site")
+
+
+def test_package_inventory_branches_copy_nested_mutable_aliases():
+    import ast
+
+    from taichi_forge.aot._package_source_sequences import Sequence, SourceSequences
+
+    item = ast.Name("value", ast.Load())
+    shared = Sequence([item], mutable=True)
+    env = {"direct": shared, "nested": Sequence([shared])}
+    branch = SourceSequences.fork_environment(env)
+    branch["nested"].values[0].values.append(ast.Constant(3))
+    assert branch["direct"] is branch["nested"].values[0]
+    assert len(branch["direct"].values) == 2 and shared.values == [item]
 
 
 def test_package_method_declarations_follow_transitive_sources_and_live_bindings(monkeypatch):
