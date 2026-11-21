@@ -6,6 +6,10 @@ import inspect
 
 
 class FunctionLibrary:
+    # A consumer that lowers typed array references can retain the descriptor
+    # across a helper call. Native LLVM calls use their ordinary expanded ABI.
+    array_descriptor_arguments = False
+
     def __init__(self):
         self.functions = {}
         self._function_variants = {}
@@ -13,7 +17,6 @@ class FunctionLibrary:
         self.function_library = False
         self.thread_local_call = False
         self.allow_spirv = False
-        self.spirv_descriptor_arguments = False
 
     def _function_template(self, source):
         if source not in self._function_templates:
@@ -181,10 +184,10 @@ class FunctionLibrary:
                 from taichi_forge.types.ndarray_type import NdarrayType
 
                 parameter_types = (MatrixType, template)
-                if self.spirv_descriptor_arguments:
+                if self.array_descriptor_arguments:
                     parameter_types += (NdarrayType,)
                 if (
-                    (not returns and not self.spirv_descriptor_arguments)
+                    (not returns and not self.array_descriptor_arguments)
                     or any(
                         id(dtype) not in primitive_types.type_ids and not isinstance(dtype, MatrixType)
                         for dtype in returns or ()

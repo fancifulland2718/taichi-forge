@@ -64,7 +64,7 @@ class PackageCompilation(FunctionLibrary):
                 return capture is not None and capture.producer_static_member(owner, path)
 
             self.allow_spirv = True
-            self.spirv_descriptor_arguments = True
+            self.array_descriptor_arguments = True
             self.spirv_dependencies = FunctionDependencyAnalysis(
                 allow_fields=False, package_fields=True, declared_static=declared_static)
         # Discovery has finished. Keep short-lived lowering cycles in the young
@@ -114,7 +114,7 @@ class PackageCompilation(FunctionLibrary):
             # Archive a callable body. Materialization applies the hint after
             # any binding-specific constants have been supplied.
             function._backend_inline_function = True
-            function._spirv_descriptor_arguments = self.spirv_descriptor_arguments
+            function._array_descriptor_arguments = self.array_descriptor_arguments
         return function
 
     def reuse_function(self, identity, context):
