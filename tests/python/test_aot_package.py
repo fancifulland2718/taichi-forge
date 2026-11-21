@@ -393,6 +393,9 @@ def test_package_build_cache_recovers_bound_vector_entry_before_capture(tmp_path
 
     ti.lang.impl.current_cfg().offline_cache_file_path = str(tmp_path / "native")
     source = """import taichi_forge as ti
+from typing import NoReturn
+def unsupported() -> NoReturn:
+    raise NotImplementedError("unsupported target")
 @ti.data_oriented
 class Model:
     def __init__(self, n):
@@ -404,8 +407,11 @@ class Model:
         return 2 * x
     @ti.kernel
     def update(self, delta: ti.types.vector(2, ti.i32)) -> ti.i32:
-        self.cells[0] += delta[0] - delta[1]
-        return ti.cast(self.cells[0], ti.i32)
+        if ti.static(ti.lang.impl.current_cfg().arch in (ti.cpu, ti.vulkan)):
+            self.cells[0] += delta[0] - delta[1]
+            return ti.cast(self.cells[0], ti.i32)
+        else:
+            unsupported()
     @ti.kernel
     def evaluate(self, x: ti.i32) -> ti.i32:
         return self.scale(x)
@@ -458,6 +464,59 @@ class Model:
     assert captures == ["update"]
     export("layout", edited.replace("scope.field(ti.i32", "scope.field(ti.f32"))
     assert "update" in captures
+
+
+@test_utils.test(arch=ti.cpu)
+def test_package_capture_rechecks_target_bindings_and_active_resource_abi(tmp_path, monkeypatch):
+    from types import SimpleNamespace
+    from taichi_forge.aot import _package_capture_cache as cache
+
+    source = """import os as external
+import taichi_forge as ti
+from taichi_forge import static as guard, cpu as backend
+from taichi_forge.lang.impl import current_cfg as config
+live = 2
+@ti.kernel
+def both(image: ti.types.rw_texture(2, fmt=ti.Format.rgba32f)) -> ti.i32:
+    if guard(config().arch == backend):
+        return live
+    else:
+        return external.call(image)
+"""
+    (tmp_path / "guard_bindings.py").write_text(source, encoding="utf8")
+    monkeypatch.syspath_prepend(str(tmp_path))
+    monkeypatch.delitem(sys.modules, "guard_bindings", raising=False)
+    module = importlib.import_module("guard_bindings")
+    kernel = module.both._primal
+    code = SimpleNamespace(methods={}, functions={}, constants={}, struct_types={})
+    memo = {}
+
+    def facts():
+        return cache._source_facts(kernel, code, memo, None, None)
+
+    first = facts()
+    monkeypatch.setattr(module, "external", sys)
+    assert facts() == first
+    monkeypatch.setattr(kernel.arguments[0].annotation, "fmt", ti.Format.r32f)
+    assert facts() != first
+    monkeypatch.setattr(kernel.arguments[0].annotation, "fmt", ti.Format.rgba32f)
+    assert facts() == first
+    monkeypatch.setattr(module, "live", 3)
+    assert facts() != first
+    monkeypatch.setattr(module, "backend", ti.cuda)
+    with pytest.raises(cache.Unavailable, match="external module"):
+        facts()
+    monkeypatch.setattr(module, "backend", ti.cpu)
+    monkeypatch.setattr(module, "guard", bool)
+    assert "external" in cache._syntax(kernel._definition, memo)[1]
+
+    rw = ti.types.rw_texture
+    annotations = [ti.types.acceleration_structure(), ti.types.texture(2), ti.types.texture(3),
+                   ti.types.texture_collection(2, 1), ti.types.texture_collection(2, 4),
+                   rw(2, fmt=ti.Format.rgba32f), rw(2, fmt=ti.Format.r32f),
+                   rw(2, lod=1, fmt=ti.Format.r32f)]
+    assert len({cache._annotation(a) for a in annotations}) == len(annotations)
+    assert cache._annotation(ti.types.acceleration_structure()) == cache._annotation(annotations[0])
 
 
 def test_build_cache_toolchain_digest_reuses_only_unchanged_files(tmp_path, monkeypatch):
@@ -1823,9 +1882,11 @@ def test_package_sampled_texture_inputs_preserve_live_data_and_bindings(tmp_path
     ti.reset()
 
 
-@test_utils.test(arch=ti.vulkan, offline_cache=False)
+@test_utils.test(arch=ti.vulkan, offline_cache=True)
 @pytest.mark.parametrize("resource_kind", ("rw_texture", "acceleration_structure"))
 def test_package_vulkan_resource_parameters_keep_native_abi(tmp_path, monkeypatch, resource_kind):
+    from taichi_forge.aot._package_build_cache import PackageBuildCache
+
     if resource_kind == "acceleration_structure" and not ti.hardware.ray.is_available():
         pytest.skip("Vulkan ray query features are unavailable")
     source = """import taichi_forge as ti
@@ -1876,8 +1937,26 @@ class Model:
     if resource_kind == "rw_texture":
         normal.read(resource)
     expected = normal.out.to_numpy()
-    manifest = ti.aot.export_package(package, tmp_path / 'sdk',
-        caps=['spirv_has_ray_query'] if resource_kind == 'acceleration_structure' else None)
+    ti.cfg.offline_cache_file_path = str(tmp_path / "native")
+    caps = ['spirv_has_ray_query'] if resource_kind == 'acceleration_structure' else None
+    cache = tmp_path / "cache"
+    ti.aot.export_package(package, tmp_path / "seed", caps=caps, build_cache=cache)
+    with Path(package.__file__).open("a", encoding="utf8") as initializer:
+        initializer.write("\n# Host-only edit\n")
+    restored = []
+    restore = PackageBuildCache.restore_capture
+
+    def observe(cache, *args):
+        result = restore(cache, *args)
+        if result is not None:
+            restored.append(result.kernel.func.__name__)
+        return result
+
+    monkeypatch.setattr(PackageBuildCache, "restore_capture", observe)
+    manifest = ti.aot.export_package(package, tmp_path / 'sdk', caps=caps, build_cache=cache)
+    assert "run" in restored
+    if resource_kind == "rw_texture":
+        assert "read" in restored
     assert manifest['version'] == 98
     with ti.aot.borrow_runtime() as runtime, load_package(runtime, tmp_path / 'sdk') as code:
         image = (runtime.import_texture(resource) if resource_kind == "rw_texture"
@@ -1901,12 +1980,32 @@ class Model:
             assert cached is not None
             graph.run(dict(image=image, gain=gain))
             assert graph._cached_call is cached
+        if resource_kind == "acceleration_structure":
+            # Same recovered executable, two TLAS descriptors and independent
+            # model storage. Translating the triangle makes the second ray miss.
+            away = (1., 0., 0., 8., 0., 1., 0., 0., 0., 0., 1., 0.)
+            other_owner = code.host.Model(3)
+            with ti.hardware.ray.InstanceTLAS([ti.hardware.ray.RayInstance(blas, transform=away)]) as other:
+                other_owner.run(runtime.import_acceleration_structure(other), 7.0)
+                np.testing.assert_array_equal(other_owner.out.to_numpy(), [-1.] * 3)
+                other_owner.run(image, 3.0)
+                np.testing.assert_array_equal(other_owner.out.to_numpy(), expected[:3])
+                np.testing.assert_array_equal(model.out.to_numpy(), expected + 4.0)
         graph.close()
     manifest['version'] = 97
     (tmp_path / 'sdk/package.json').write_text(json.dumps(manifest), encoding='utf8')
     with Runtime('vulkan') as runtime:
         with pytest.raises(ValueError, match='version 98'):
             load_package(runtime, tmp_path / 'sdk')
+    if resource_kind == "rw_texture":
+        edited = source.replace("ti.Format.rgba32f", "ti.Format.rgba16f")
+        path = Path(package.model.__file__)
+        path.write_text(edited, encoding="utf8")
+        exec(compile(edited, str(path), "exec"), vars(package.model))
+        package.Model = package.model.Model
+        restored.clear()
+        ti.aot.export_package(package, tmp_path / "changed", caps=caps, build_cache=cache)
+        assert "read" in restored and "run" not in restored
 
 
 @test_utils.test(arch=ti.vulkan, offline_cache=False)
