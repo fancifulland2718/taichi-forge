@@ -46,6 +46,20 @@ inline void seal_cpu_chunk_counts(llvm::Module &module) {
   }
 }
 
+// An optional archive optimization runs after CPU codegen has sealed these
+// defaults. Restore the declaration used during codegen so the optimizer
+// cannot fold the load whose value prepare will specialize.
+inline void unseal_cpu_chunk_counts(llvm::Module &module) {
+  for (auto &entry : module) {
+    if (auto *node = entry.getMetadata(kCpuChunkCount)) {
+      auto *count = llvm::mdconst::extract<llvm::GlobalVariable>(
+          node->getOperand(0));
+      count->setLinkage(llvm::GlobalValue::ExternalLinkage);
+      count->setInitializer(nullptr);
+    }
+  }
+}
+
 // Change only this preparation's copy. Both the ThreadPool submission and
 // its callback see the same end even if the scheduler was already inlined.
 inline void specialize_cpu_chunk_count(llvm::Function &entry,

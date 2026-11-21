@@ -8,6 +8,7 @@
 #include "taichi/runtime/llvm/aot_graph_data.h"
 #include "taichi/runtime/llvm/llvm_aot_metadata.h"
 #include "taichi/runtime/llvm/aot_kernel_contract.h"
+#include "taichi/runtime/llvm/aot_cpu_range.h"
 #include "taichi/codegen/llvm/compiled_kernel_data.h"
 #include "taichi/codegen/llvm/range_dispatch.h"
 #include "taichi/codegen/llvm/cuda_graph_gate.h"
@@ -288,7 +289,12 @@ void LlvmAotModuleBuilder::dump(const std::string &output_dir,
           LLVMModuleOptions::read(*module, compile_config_).opt_level > 0;
       if (artifact_format_ == "bc-library")
         ir_finalizer_->export_units(*module, optimize, true);
+      const bool preserve_cpu_chunks = optimize && arch_is_cpu(compile_config_.arch);
+      if (preserve_cpu_chunks)
+        LLVM::unseal_cpu_chunk_counts(*module);
       ir_finalizer_->finalize_root(module, optimize);
+      if (preserve_cpu_chunks)
+        LLVM::seal_cpu_chunk_counts(*module);
       ir_finalizer_->emit_dependencies(*module, [&](const std::string &name,
                                                     const std::string &bytes) {
         if (!emitted_units.insert(name).second)

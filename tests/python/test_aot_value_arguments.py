@@ -91,7 +91,8 @@ def test_jit_aot_function_contract_matches_values_effects_and_static_inputs(tmp_
 
 
 @test_utils.test(arch=ti.cpu, cpu_max_num_threads=8, offline_cache=False)
-def test_cpu_prepare_specializes_only_fixed_range_chunks(tmp_path):
+@pytest.mark.parametrize("cleanup", [False, True])
+def test_cpu_prepare_specializes_only_fixed_range_chunks(tmp_path, cleanup):
     from taichi_forge.profiler.cpu_scheduler import (
         query_cpu_scheduler_telemetry, set_cpu_scheduler_telemetry,
     )
@@ -108,6 +109,7 @@ def test_cpu_prepare_specializes_only_fixed_range_chunks(tmp_path):
             data[i] += 4
 
     module = ti.aot.Module(artifact_format="bc")
+    module._aot_builder._set_ir_cleanup_for_testing(cleanup)
     module.add_kernel(fill)
     artifact = tmp_path / "cpu_chunks.tcm"
     module.archive(str(artifact))
