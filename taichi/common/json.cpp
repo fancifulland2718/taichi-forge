@@ -29,6 +29,7 @@
 // JSON serialization/deserialization.
 // @PENGUINLIONG
 #include <sstream>
+#include <algorithm>
 #include <charconv>
 #include <cmath>
 #include <locale>
@@ -386,12 +387,13 @@ JsonValue parse(const char *beg, const char *end, const StreamedArrayField &fiel
 JsonValue parse(const std::string &json_lit) {
   return parse(json_lit.c_str(), json_lit.c_str() + json_lit.size());
 }
-JsonValue parse_complete(const std::string &json_lit) {
-  if (json_lit.empty() || json_lit.find('\0') != std::string::npos)
+static JsonValue parse_complete_document(const char *beg, const char *end,
+                                         const StreamedArrayField *field) {
+  if (!beg || beg >= end || std::find(beg, end, '\0') != end)
     throw JsonException("json text is empty or contains NUL");
-  Tokenizer tokenizer(json_lit.data(), json_lit.data() + json_lit.size());
+  Tokenizer tokenizer(beg, end);
   JsonValue result;
-  if (!try_parse_impl(tokenizer, result, true))
+  if (!try_parse_impl(tokenizer, result, true, field))
     throw JsonException("unexpected close token");
   while (tokenizer.pos != tokenizer.end) {
     const char value = *tokenizer.pos++;
@@ -399,6 +401,12 @@ JsonValue parse_complete(const std::string &json_lit) {
       throw JsonException("unexpected content after json document");
   }
   return result;
+}
+JsonValue parse_complete(const std::string &json_lit) {
+  return parse_complete_document(json_lit.data(), json_lit.data() + json_lit.size(), nullptr);
+}
+JsonValue parse_complete(const char *beg, const char *end, const StreamedArrayField &field) {
+  return parse_complete_document(beg, end, &field);
 }
 bool try_parse(const std::string &json_lit, JsonValue &out) {
   try {

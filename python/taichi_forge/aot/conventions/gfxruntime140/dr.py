@@ -193,7 +193,54 @@ class Metadata:
         self.root_buffer_size: int = int(root_buffer_size)
 
 
+def _decode_kernel_rows(document):
+    # Header generation consumes the same logical ABI as ordinary module.save().
+    # Runtime execution resolves these references in the native module loader.
+    pools = {}
+
+    def rows(values, group):
+        if not isinstance(values, list):
+            raise ValueError("Invalid GFX metadata row array")
+        pool = pools.setdefault(group, [])
+        result = []
+        for value in values:
+            if isinstance(value, dict):
+                pool.append(value)
+            elif type(value) is int and 0 <= value < len(pool):
+                value = pool[value]
+            else:
+                raise ValueError("Invalid GFX metadata row reference")
+            result.append(value)
+        return result
+
+    version = document["source_metadata_version"]
+    if type(version) is not int or not 17 <= version <= 24:
+        raise ValueError("Unsupported GFX source metadata version")
+    kernels = []
+    for kernel in document["kernels"]:
+        if type(kernel.get("row_storage")) is not int or kernel["row_storage"] != 1:
+            raise ValueError("Invalid GFX kernel row storage")
+        ctx = kernel["ctx_attribs"].copy()
+        for key in ("arg_attribs_vec_", "ret_attribs_vec_", "arr_access", "grad_arr_access"):
+            ctx[key] = rows(ctx[key], key)
+        for key in ("args_type_", "rets_type_"):
+            if ctx[key] is not None:
+                content = ctx[key]["content"]
+                ctx[key] = dict(ctx[key], content=dict(content, elements_=rows(content["elements_"], "abi_elements")))
+        tasks = [dict(task, **{key: rows(task[key], key)
+                               for key in ("buffer_binds", "texture_binds", "acceleration_structure_binds")})
+                 for task in kernel["tasks_attribs"]]
+        decoded = dict(kernel, ctx_attribs=ctx, tasks_attribs=tasks)
+        del decoded["row_storage"]
+        kernels.append(decoded)
+    result = dict(document, kernels=kernels, metadata_version=version)
+    del result["source_metadata_version"]
+    return result
+
+
 def from_json_metadata(j: Dict[str, Any]) -> Metadata:
+    if j.get("metadata_version") == 25:
+        j = _decode_kernel_rows(j)
     return Metadata(j)
 
 

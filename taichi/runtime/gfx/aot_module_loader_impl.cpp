@@ -13,6 +13,7 @@
 #include "external/PicoSHA2/picosha2.h"
 #include "spirv/unified1/spirv.hpp"
 #include "taichi/runtime/gfx/runtime.h"
+#include "taichi/runtime/gfx/aot_metadata_rows.h"
 #include "taichi/runtime/gfx/descriptor_binding.h"
 #include "taichi/runtime/gfx/range_dispatch.h"
 #include "taichi/runtime/gfx/cooperative_matrix.h"
@@ -164,19 +165,9 @@ class AotModuleImpl : public aot::Module {
         return;
       }
       try {
-        // Decode each kernel into its final ABI descriptor before reading the
-        // next one. The archive may describe thousands of independent kernels.
-        decltype(ti_aot_data_.kernels) kernels;
-        const liong::json::StreamedArrayField kernel_field{
-            "kernels", [&] { kernels.clear(); },
-            [&](const liong::json::JsonValue &value) {
-              liong::json::deserialize(value, kernels.emplace_back());
-            }};
-        auto json = liong::json::parse(
-            (const char *)metadata_json.data(),
-            (const char *)(metadata_json.data() + metadata_json.size()), kernel_field);
-        liong::json::deserialize(json, ti_aot_data_);
-        ti_aot_data_.kernels = std::move(kernels);
+        const auto *begin = reinterpret_cast<const char *>(metadata_json.data());
+        read_kernel_metadata(begin, begin + metadata_json.size(), ti_aot_data_,
+                             device_api_backend_ == Arch::vulkan);
         if (!ti_aot_data_.shader_aliases.empty() || !ti_aot_data_.task_shader_sources.empty() ||
             !ti_aot_data_.shader_functions.empty()) {
           if (ti_aot_data_.metadata_version < 19)
@@ -212,12 +203,6 @@ class AotModuleImpl : public aot::Module {
                 device_api_backend_ != Arch::vulkan)
               throw std::invalid_argument("Invalid Vulkan shared shader function source");
           }
-        }
-        // Legacy metadata permits omitted fields. A selected strategy is an
-        // explicit versioned contract and must never inherit a missing field.
-        for (const auto &[name, value] : json.fields()) {
-          if (name == "device_range_dispatch")
-            aot::decode_device_range_dispatch(value, ti_aot_data_.device_range_dispatch);
         }
         for (const auto &kernel : ti_aot_data_.kernels) {
           if (ti_aot_data_.metadata_version < 17 && !kernel.runtime_affine_arrays.empty())

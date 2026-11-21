@@ -6041,6 +6041,11 @@ void export_lang(py::module &m) {
              }
              builder->add_initial_root_data(data);
            })
+#ifdef TI_WITH_VULKAN
+      .def("_dump_vulkan_package", [](const AotModuleBuilder &builder, const std::string &path) {
+        dynamic_cast<const gfx::AotModuleBuilderImpl &>(builder).dump_vulkan_package(path);
+      })
+#endif
       .def("dump", &AotModuleBuilder::dump);
 
   py::class_<Axis>(m, "Axis").def(py::init<int>());

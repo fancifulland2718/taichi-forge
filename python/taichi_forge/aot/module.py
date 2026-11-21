@@ -809,7 +809,8 @@ class Module:
         kt = KernelTemplate(kernel_fn, self)
         yield kt
 
-    def save(self, filepath, *, shared_component_contracts=False, shared_execution_plans=False):
+    def save(self, filepath, *, shared_component_contracts=False, shared_execution_plans=False,
+             _share_kernel_rows=False):
         """
         Args:
           filepath (str): path to a folder to store aot files.
@@ -824,7 +825,10 @@ class Module:
         output_dir = Path(filepath)
         output_dir.mkdir(parents=True, exist_ok=True)
         filepath = output_dir.as_posix()
-        self._aot_builder.dump(filepath, "")
+        if _share_kernel_rows:
+            self._aot_builder._dump_vulkan_package(filepath)
+        else:
+            self._aot_builder.dump(filepath, "")
         data_entries = {key for plan in self._execution_plans.values() for key in plan.data_entries}
         data_entries.update(descriptor[3] for descriptor in self._initial_root_data.values())
         if data_entries:
@@ -939,7 +943,8 @@ class Module:
         # work. Native VirtualDir readers already decompress requested entries.
         with TemporaryDirectory(prefix="tcm_") as temp_dir:
             self.save(temp_dir, shared_component_contracts=shared_component_contracts,
-                      shared_execution_plans=shared_execution_plans)
+                      shared_execution_plans=shared_execution_plans,
+                      _share_kernel_rows=_pack_shader_members and self._arch == _ti_core.vulkan)
             with ZipFile(tcm_path, "w", compression=ZIP_DEFLATED, compresslevel=1) as z:
                 packed_entries = set()
                 has_entry_blocks = False

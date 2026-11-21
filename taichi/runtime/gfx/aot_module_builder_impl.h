@@ -29,9 +29,11 @@ class AotModuleBuilderImpl : public AotModuleBuilder {
 
   void dump(const std::string &output_dir,
             const std::string &filename) const override;
+  void dump_vulkan_package(const std::string &output_dir) const;
   std::map<int, int> exported_snode_tree_bindings() const override;
 
  private:
+  void dump_impl(const std::string &output_dir, bool share_kernel_rows) const;
   void add_per_backend(const std::string &identifier, Kernel *kernel) override;
 
   const std::vector<int> &kernel_snode_tree_ids(

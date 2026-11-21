@@ -13,6 +13,7 @@ target_sources(gfx_runtime
     range_dispatch.cpp
     snode_tree_manager.cpp
     snode_tree_resources.cpp
+    aot_metadata_rows.cpp
     aot_snode_resources.cpp
     aot_shader_functions.cpp
     aot_module_builder_impl.cpp

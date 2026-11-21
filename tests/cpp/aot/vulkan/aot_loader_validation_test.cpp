@@ -1,4 +1,5 @@
 #include "gtest/gtest.h"
+#include "taichi/runtime/gfx/aot_metadata_rows.h"
 #include "taichi/runtime/gfx/aot_module_loader_impl.h"
 
 namespace taichi::lang {
@@ -132,6 +133,132 @@ TEST(GfxAotValidation, RejectsMissingShortAndInvalidShaderReads) {
   dir.files["test_task.spv"].resize(4);
   EXPECT_TRUE(dir.load()->is_corrupted());
   dir.files.erase("test_task.spv");
+  EXPECT_TRUE(dir.load()->is_corrupted());
+}
+
+TEST(GfxAotValidation, KernelRowStoragePreservesAbiAndResourceKinds) {
+  using namespace liong::json;
+  using Context = spirv::KernelContextAttributes;
+  gfx::TaichiAotData data;
+  data.metadata_version = 21;
+  auto &kernel = data.kernels.emplace_back();
+  auto ctx = serialize(kernel.ctx_attribs);
+  Context::ArgAttributes arg;
+  arg.indices = {1, 3};
+  arg.element_shape = {2, 2};
+  arg.dtype = PrimitiveTypeID::f32;
+  arg.texture_lod = 2;
+  ctx["arg_attribs_vec_"] = serialize(
+      std::vector<std::pair<std::vector<int>, Context::ArgAttributes>>{
+          {arg.indices, arg}});
+  Context::RetAttributes ret;
+  ret.index = 2;
+  ret.offset_in_mem = 16;
+  ctx["ret_attribs_vec_"] = serialize(std::vector<Context::RetAttributes>{ret});
+  const auto *record = TypeFactory::get_instance().get_struct_type(
+      {{PrimitiveType::i32, "n", 0}});
+  const auto *arg_type = TypeFactory::get_instance().get_struct_type(
+      {{record, "nested", 8}}, "1-");
+  ctx["args_type_"] = serialize(arg_type);
+  ctx["rets_type_"] = serialize(arg_type);
+  deserialize(ctx, kernel.ctx_attribs);
+  kernel.ctx_attribs.arr_access = {{{1, 3}, irpass::ExternalPtrAccess::READ}};
+  kernel.ctx_attribs.grad_arr_access = {
+      {{1, 3}, irpass::ExternalPtrAccess::WRITE}};
+  auto &task = kernel.tasks_attribs.emplace_back();
+  task.texture_binds = {{{1, 3}, 4, true, 2, false, false}};
+  task.acceleration_structure_binds = {{{0}, 7}};
+  data.kernels.push_back(kernel);
+  const auto original = print(serialize(data));
+  std::ostringstream stored;
+  gfx::write_kernel_row_metadata(stored, std::move(data));
+  const auto text = stored.str();
+  const auto json = parse(text);
+  const auto &second = json["kernels"][1]["ctx_attribs"];
+  for (const auto key : {"arg_attribs_vec_", "ret_attribs_vec_", "arr_access",
+                         "grad_arr_access"})
+    EXPECT_EQ(print(second[key]), "[0]");
+  for (const auto key : {"args_type_", "rets_type_"})
+    EXPECT_EQ(print(second[key]["content"]["elements_"]), "[0]");
+  for (const auto key : {"texture_binds", "acceleration_structure_binds"})
+    EXPECT_EQ(print(json["kernels"][1]["tasks_attribs"][size_t(0)][key]),
+              "[0]");
+  gfx::TaichiAotData decoded;
+  gfx::read_kernel_metadata(text.data(), text.data() + text.size(), decoded,
+                            true);
+  EXPECT_EQ(print(serialize(decoded)), original);
+  EXPECT_THROW(gfx::read_kernel_metadata(text.data(), text.data() + text.size(),
+                                         decoded, false),
+               std::invalid_argument);
+}
+
+TEST(GfxAotValidation, KernelRowStoragePreservesAndValidatesReferences) {
+  MemoryAotDir dir;
+  dir.add_shader({0x07230203, 0x10300, 0, 1, 0});
+  gfx::TaichiAotData data;
+  liong::json::deserialize(liong::json::parse(dir.files["metadata.json"]),
+                           data);
+  using Bind = spirv::TaskAttributes::BufferBind;
+  using Buffer = spirv::TaskAttributes::BufferType;
+  Bind read{{Buffer::GlobalTmps}, 0, 0, Bind::kAccessRead};
+  Bind write = read;
+  write.access = Bind::kAccessWrite;
+  data.kernels[0].tasks_attribs[0].buffer_binds = {read, write};
+  data.kernels.push_back(data.kernels.front());
+  data.kernels.back().name = "second";
+  data.kernels.back().tasks_attribs[0].buffer_binds = {write, read};
+  data.kernel_metadata.emplace_back();
+  const auto original = liong::json::print(liong::json::serialize(data));
+  std::ostringstream stored;
+  gfx::write_kernel_row_metadata(stored, std::move(data));
+  const auto text = stored.str();
+  gfx::TaichiAotData decoded;
+  gfx::read_kernel_metadata(text.data(), text.data() + text.size(), decoded,
+                            true);
+  EXPECT_EQ(original, liong::json::print(liong::json::serialize(decoded)));
+  auto json = liong::json::parse(text);
+  auto &binds = json["kernels"][1]["tasks_attribs"][size_t(0)]["buffer_binds"];
+  EXPECT_EQ(liong::json::print(binds), "[1,0]");
+  dir.files["metadata.json"] = text;
+  ASSERT_FALSE(dir.load()->is_corrupted());
+  auto rejected = [&] {
+    dir.files["metadata.json"] = liong::json::print(json);
+    return dir.load()->is_corrupted();
+  };
+  using liong::json::JsonValue;
+  for (const auto &invalid :
+       {JsonValue(-1), JsonValue(2), JsonValue(0.5), JsonValue(true)}) {
+    binds[size_t(0)] = invalid;
+    EXPECT_TRUE(rejected());
+  }
+  binds[size_t(0)] = JsonValue(1);
+  json["kernels"][size_t(0)]["tasks_attribs"][size_t(0)]["buffer_binds"]
+      [size_t(0)] = JsonValue(0);
+  EXPECT_TRUE(rejected());  // Forward reference.
+  json = liong::json::parse(text);
+  json["kernels"][size_t(0)]["ctx_attribs"]["arr_access"]
+      .arr.inner.emplace_back(0);
+  EXPECT_TRUE(rejected());  // Index in a different row group.
+  json = liong::json::parse(text);
+  json["source_metadata_version"] = JsonValue(26);
+  EXPECT_TRUE(rejected());
+  json = liong::json::parse(text);
+  json["metadata_version"] = JsonValue(24);
+  EXPECT_TRUE(rejected());
+  json = liong::json::parse(text);
+  json["kernels"][size_t(0)].obj.inner.erase("row_storage");
+  EXPECT_TRUE(rejected());
+  json = liong::json::parse(text);
+  json["kernels"][size_t(0)]["tasks_attribs"][size_t(0)]["buffer_binds"]
+      [size_t(0)]
+          .obj.inner.erase("access");
+  EXPECT_TRUE(rejected());  // Losing a read/write qualifier is corruption.
+  dir.files["metadata.json"] = text + "false";
+  EXPECT_TRUE(dir.load()->is_corrupted());
+  dir.files["metadata.json"] = "{\"kernels\":[]," + text.substr(1);
+  EXPECT_TRUE(dir.load()->is_corrupted());
+  dir.files["metadata.json"] = text;
+  dir.short_read = "metadata.json";
   EXPECT_TRUE(dir.load()->is_corrupted());
 }
 

@@ -363,12 +363,13 @@ JsonValue parse(const std::string &json_lit);
 struct StreamedArrayField {
   std::string name;
   std::function<void()> begin;
-  std::function<void(const JsonValue &)> element;
+  std::function<void(JsonValue &)> element;
 };
 JsonValue parse(const char *beg, const char *end, const StreamedArrayField &field);
 // Parse one complete document. Legacy parse() permits a trailing document;
 // versioned execution descriptions must not silently ignore trailing content.
 JsonValue parse_complete(const std::string &json_lit);
+JsonValue parse_complete(const char *beg, const char *end, const StreamedArrayField &field);
 // Returns true when JSON parsing successfully finished and parsed value is
 // returned via `out`. Otherwise, false is returned and out contains incomplete
 // result.

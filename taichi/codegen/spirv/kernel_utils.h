@@ -15,6 +15,9 @@ namespace taichi::lang {
 
 class Kernel;
 class SNode;
+namespace gfx {
+class AotMetadataRowReader;
+}
 
 namespace spirv {
 
@@ -290,6 +293,8 @@ struct TaskAttributes {
  */
 class KernelContextAttributes {
  private:
+  friend class gfx::AotMetadataRowReader;
+
   /**
    * Attributes that are shared by the input arg and the return value.
    */

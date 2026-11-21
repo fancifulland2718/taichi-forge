@@ -1,5 +1,6 @@
 #include "taichi/runtime/gfx/aot_module_builder_impl.h"
 #include "taichi/runtime/gfx/aot_shader_functions.h"
+#include "taichi/runtime/gfx/aot_metadata_rows.h"
 #include "taichi/runtime/gfx/range_dispatch.h"
 #include "taichi/program/kernel_compile_request.h"
 
@@ -55,6 +56,16 @@ void AotModuleBuilderImpl::dump(const std::string &output_dir,
   TI_WARN_IF(!filename.empty(),
              "Filename prefix is ignored on Unified Device API backends.");
 
+  dump_impl(output_dir, false);
+}
+
+void AotModuleBuilderImpl::dump_vulkan_package(const std::string &output_dir) const {
+  TI_ERROR_IF(config_.arch != Arch::vulkan, "Kernel row storage requires Vulkan");
+  dump_impl(output_dir, true);
+}
+
+void AotModuleBuilderImpl::dump_impl(const std::string &output_dir,
+                                     bool share_kernel_rows) const {
   const auto &spirv_codes = ti_aot_data_.spirv_codes;
   // The words stay owned by the builder for the duration of dump(). Compare
   // complete byte strings, leaving launch, binding and specialization metadata
@@ -189,11 +200,15 @@ void AotModuleBuilderImpl::dump(const std::string &output_dir,
     if (!artifact.task_shader_sources.empty())
       artifact.metadata_version = std::max(artifact.metadata_version, uint32_t(20));
     artifact.metadata_version = std::max(artifact.metadata_version, shader_version);
-    std::string json = liong::json::print(liong::json::serialize(artifact));
     aot::write_root_storage_views(root_storage_views_, module_ids, output_dir);
-    std::fstream f(output_dir + "/metadata.json",
-                   std::ios::trunc | std::ios::out);
-    f.write(json.data(), json.size());
+    std::ofstream f;
+    f.exceptions(std::ios::failbit | std::ios::badbit);
+    f.open(output_dir + "/metadata.json", std::ios::binary | std::ios::trunc);
+    if (share_kernel_rows)
+      write_kernel_row_metadata(f, std::move(artifact));
+    else
+      f << liong::json::print(liong::json::serialize(artifact));
+    f.close();
   }
 
   {
