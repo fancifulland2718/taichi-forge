@@ -23,6 +23,7 @@
 #endif
 #ifdef TI_WITH_VULKAN
 #include "taichi_vulkan_impl.h"
+#include "taichi/runtime/gfx/aot_module_loader_impl.h"
 #include "vulkan_execution_domain.h"
 #include "taichi/runtime/vulkan_execution_domain.h"
 #include "taichi/rhi/vulkan/vulkan_device.h"
@@ -110,7 +111,9 @@ class BorrowedSampledImage final : public NativeSampledImage {
 #ifdef TI_WITH_VULKAN
 class BorrowedVulkanRuntime final : public ::VulkanRuntime {
  public:
-  explicit BorrowedVulkanRuntime(gfx::GfxRuntime &runtime) : runtime_(runtime) {
+  BorrowedVulkanRuntime(gfx::GfxRuntime &runtime, const CompileConfig &config)
+      : runtime_(runtime),
+        prepare_compile_threads_(config.spirv_parallel_codegen ? config.num_compile_threads : 1) {
   }
   Device &get() override {
     return *runtime_.get_ti_device();
@@ -118,9 +121,18 @@ class BorrowedVulkanRuntime final : public ::VulkanRuntime {
   gfx::GfxRuntime &get_gfx_runtime() override {
     return runtime_;
   }
+  Error create_aot_module(std::shared_ptr<const io::VirtualDir> dir,
+                          TiAotModule &out) override {
+    auto result = ::VulkanRuntime::create_aot_module(std::move(dir), out);
+    if (result.error == TI_ERROR_SUCCESS && prepare_compile_threads_ > 1)
+      gfx::set_aot_prepare_compile_threads(
+          reinterpret_cast<::AotModule *>(out)->get(), prepare_compile_threads_);
+    return result;
+  }
 
  private:
   gfx::GfxRuntime &runtime_;
+  const int prepare_compile_threads_;
 };
 #endif
 
@@ -138,7 +150,7 @@ std::unique_ptr<::Runtime> borrow_backend(Program &program) {
     auto *runtime = program.get_gfx_runtime_for_borrowing();
     if (!runtime)
       throw std::runtime_error("The Vulkan runtime is not materialized");
-    return std::make_unique<BorrowedVulkanRuntime>(*runtime);
+    return std::make_unique<BorrowedVulkanRuntime>(*runtime, program.compile_config());
   }
 #endif
   throw std::invalid_argument(

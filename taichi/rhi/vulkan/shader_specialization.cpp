@@ -5,19 +5,21 @@
 #include <limits>
 
 #include "spirv-tools/libspirv.hpp"
-#include "spirv-tools/optimizer.hpp"
 #include "source/opt/aggressive_dead_code_elim_pass.h"
 #include "source/opt/build_module.h"
 #include "source/opt/ccp_pass.h"
 #include "source/opt/dead_branch_elim_pass.h"
 #include "source/opt/eliminate_dead_functions_pass.h"
 #include "source/opt/flatten_decoration_pass.h"
+#include "source/opt/fold_spec_constant_op_and_composite_pass.h"
+#include "source/opt/freeze_spec_constant_value_pass.h"
 #include "source/opt/inline_exhaustive_pass.h"
 #include "source/opt/ir_context.h"
 #include "source/opt/constants.h"
 #include "source/opt/local_single_block_elim_pass.h"
 #include "source/opt/merge_return_pass.h"
 #include "source/opt/pass_manager.h"
+#include "source/opt/set_spec_constant_default_value_pass.h"
 #include "source/opt/simplification_pass.h"
 #include "source/opt/type_manager.h"
 #include "source/util/parse_number.h"
@@ -100,21 +102,22 @@ std::vector<uint32_t> specialize_spirv_shader(
       throw std::invalid_argument("Unknown specialization constant ID " +
                                   std::to_string(id));
   }
-  context.reset();
-  spvtools::Optimizer optimizer(environment);
-  optimizer.SetMessageConsumer(consumer);
-  // The pinned upstream passes understand grouped decorations and scalar types.
-  // Keep this a small explicit transform, not the full optimization pipeline.
-  optimizer.RegisterPass(spvtools::CreateSetSpecConstantDefaultValuePass(bits));
-  optimizer.RegisterPass(spvtools::CreateFlattenDecorationPass());
-  optimizer.RegisterPass(spvtools::CreateFreezeSpecConstantValuePass());
-  optimizer.RegisterPass(spvtools::CreateFoldSpecConstantOpAndCompositePass());
+  // The scalar declarations and their grouped decorations were resolved on
+  // this private module. Freeze its values without parsing the code again.
+  spvtools::opt::PassManager passes;
+  passes.SetTargetEnv(environment);
+  passes.SetMessageConsumer(consumer);
+  passes.AddPass<spvtools::opt::SetSpecConstantDefaultValuePass>(std::move(bits));
+  passes.AddPass<spvtools::opt::FlattenDecorationPass>();
+  passes.AddPass<spvtools::opt::FreezeSpecConstantValuePass>();
+  passes.AddPass<spvtools::opt::FoldSpecConstantOpAndCompositePass>();
+  if (passes.Run(context.get()) == spvtools::opt::Pass::Status::Failure)
+    throw std::invalid_argument("Invalid specialized Vulkan 1.3 shader: " +
+                                diagnostic);
   std::vector<uint32_t> output;
-  spvtools::OptimizerOptions options;
-  options.set_run_validator(
-      false);  // source validated above; check the result below
-  if (!optimizer.Run(code.data(), code.size(), &output, options) ||
-      !validator.Validate(output))
+  context->module()->ToBinary(&output, true);
+  context.reset();
+  if (!validator.Validate(output))
     throw std::invalid_argument("Invalid specialized Vulkan 1.3 shader: " +
                                 diagnostic);
   return output;

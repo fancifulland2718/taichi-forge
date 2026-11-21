@@ -1,8 +1,11 @@
 #include "taichi/runtime/gfx/aot_module_loader_impl.h"
 
 #include <algorithm>
+#include <atomic>
 #include <cstring>
+#include <future>
 #include <limits>
+#include <numeric>
 #include <set>
 #include <type_traits>
 #include <unordered_set>
@@ -10,6 +13,7 @@
 #include "external/PicoSHA2/picosha2.h"
 #include "spirv/unified1/spirv.hpp"
 #include "taichi/runtime/gfx/runtime.h"
+#include "taichi/runtime/gfx/descriptor_binding.h"
 #include "taichi/runtime/gfx/range_dispatch.h"
 #include "taichi/runtime/gfx/cooperative_matrix.h"
 #include "taichi/aot/graph_data.h"
@@ -22,6 +26,75 @@
 namespace taichi::lang {
 namespace gfx {
 namespace {
+#ifdef TI_WITH_VULKAN
+size_t specialize_task_arguments(
+    GfxRuntime::RegisterParams &params,
+    const std::vector<vulkan::ShaderArgumentConstant> &values,
+    size_t max_workers) {
+  if (values.empty())
+    return 0;
+  const auto &tasks = params.kernel_attribs.tasks_attribs;
+  auto &codes = params.task_spirv_source_codes;
+  auto run_task = [&](size_t i) {
+    size_t folded = 0;
+    for (const auto &bind : tasks[i].buffer_binds) {
+      if (bind.buffer.type == TaskAttributes::BufferType::Args && bind.binding >= 0) {
+        size_t count = 0;
+        codes[i] = vulkan::specialize_spirv_arguments(codes[i], bind.binding, values, &count);
+        folded += count;
+      }
+    }
+    return folded;
+  };
+
+  // Only overlap independent large IR contexts. Light shaders and kernels
+  // dominated by one large shader get the ordinary sequential pass.
+  size_t large = 0;
+  if (max_workers > 1 && tasks.size() > 1) {
+    constexpr size_t min_parallel_words = 64 * 1024;
+    for (size_t i = 0; i < tasks.size(); ++i) {
+      const auto &binds = tasks[i].buffer_binds;
+      if (codes[i].size() >= min_parallel_words &&
+          std::any_of(binds.begin(), binds.end(), [](const auto &bind) {
+            return bind.buffer.type == TaskAttributes::BufferType::Args && bind.binding >= 0;
+          }))
+        ++large;
+    }
+  }
+  size_t folded = 0;
+  const auto workers = std::min(max_workers, large);
+  if (workers < 2) {
+    for (size_t i = 0; i < tasks.size(); ++i)
+      folded += run_task(i);
+    return folded;
+  }
+  // Start the longest jobs first. Each task owns its original output slot,
+  // and registration sees the results only after every worker succeeds.
+  std::vector<size_t> order(tasks.size());
+  std::iota(order.begin(), order.end(), size_t{0});
+  std::sort(order.begin(), order.end(), [&](size_t a, size_t b) {
+    return codes[a].size() > codes[b].size();
+  });
+  std::atomic<size_t> next{0};
+  auto run = [&] {
+    size_t total = 0;
+    for (;;) {
+      const auto n = next.fetch_add(1, std::memory_order_relaxed);
+      if (n >= order.size())
+        return total;
+      total += run_task(order[n]);
+    }
+  };
+  std::vector<std::future<size_t>> work;
+  for (size_t i = 1; i < workers; ++i)
+    work.push_back(std::async(std::launch::async | std::launch::deferred, run));
+  folded = run();
+  for (auto &worker : work)
+    folded += worker.get();
+  return folded;
+}
+#endif
+
 class SNodeInstanceImpl final : public AotSNodeInstance {
  public:
   SNodeInstanceImpl(std::shared_ptr<aot::Module> code, GfxRuntime *runtime)
@@ -703,19 +776,43 @@ class AotModuleImpl : public aot::Module {
                     &source->runtime() != runtime_ || !source->device_range_tasks().empty() ||
                     !kernel_indices_.count(kernel.name),
                 "Prepared specialization requires an ordinary Vulkan kernel");
-    const auto constants = aot::specialization_constants(kernel, context, constant_args);
+    auto constants = aot::specialization_constants(kernel, context, constant_args);
+    const auto &source_params = source->params();
+    const auto &abi = source_params.kernel_attribs.ctx_attribs;
+    // In the descriptor ABI the pointer slot carries the byte displacement
+    // inside the aligned binding. Its value belongs to this prepared view.
+    if (abi.descriptor_array_offsets && abi.args_type()->get_layout() != "1b") {
+      const auto limits = runtime_->get_ti_device()->get_storage_buffer_binding_limits();
+      for (const auto &[path, parameter] : kernel.nested_parameters) {
+        if (parameter.ptype != ParameterType::kNdarray)
+          continue;
+        auto member = path;
+        member.push_back(TypeFactory::DATA_PTR_POS_IN_NDARRAY);
+        auto add_bias = [&] {
+          const auto bias = descriptor_array_byte_bias(
+              limits, context.find_resolved_dense_storage_buffer(member));
+          constants.emplace(abi.args_type()->get_element_offset(member),
+                            aot::ArgumentConstant{32, bias});
+        };
+        add_bias();
+        if (parameter.needs_grad) {
+          member.back() = TypeFactory::GRAD_PTR_POS_IN_NDARRAY;
+          add_bias();
+        }
+      }
+    }
     const auto index = kernel_indices_.at(kernel.name);
     const auto code_key = aot::specialization_key(std::to_string(index), constants);
-    auto params = source->params();
     // Code is shared, while independent SNode instances retain their own
     // resource view. The resource-view cache never rewrites module bindings.
     std::string key = code_key;
-    for (auto root : params.root_buffer_bindings)
+    for (auto root : source_params.root_buffer_bindings)
       key += fmt::format("|r:{}", root);
-    key += fmt::format("|d:{}", params.sparse_diagnostic_domain);
+    key += fmt::format("|d:{}", source_params.sparse_diagnostic_domain);
     auto found = specialized_kernels_.find(key);
     if (found != specialized_kernels_.end())
       return found->second.get();
+    auto params = source_params;
     const auto shared = specialized_code_.find(code_key);
     std::unique_ptr<KernelImpl> result;
     if (shared != specialized_code_.end()) {
@@ -727,18 +824,7 @@ class AotModuleImpl : public aot::Module {
       std::vector<vulkan::ShaderArgumentConstant> values;
       for (const auto &[offset, value] : constants)
         values.push_back({static_cast<uint32_t>(offset), value.bits, value.value});
-      size_t folded = 0;
-      for (size_t i = 0; i < params.kernel_attribs.tasks_attribs.size(); ++i) {
-        const auto &task = params.kernel_attribs.tasks_attribs[i];
-        for (const auto &bind : task.buffer_binds) {
-          if (bind.buffer.type != TaskAttributes::BufferType::Args || bind.binding < 0)
-            continue;
-          size_t count = 0;
-          params.task_spirv_source_codes[i] = vulkan::specialize_spirv_arguments(
-              params.task_spirv_source_codes[i], bind.binding, values, &count);
-          folded += count;
-        }
-      }
+      const auto folded = specialize_task_arguments(params, values, prepare_compile_threads_);
       TI_DEBUG("Prepared Vulkan specialization {} folded {} ABI loads", kernel.name, folded);
       result = std::make_unique<KernelImpl>(runtime_, std::move(params));
       specialized_code_.emplace(code_key, result->handle());
@@ -750,7 +836,12 @@ class AotModuleImpl : public aot::Module {
   }
 #endif
 
+  void set_prepare_compile_threads(int threads) {
+    prepare_compile_threads_ = std::max(1, threads);
+  }
+
  private:
+  int prepare_compile_threads_{1};
   std::map<std::string, std::vector<uint32_t>> range_selections_;
 
   bool get_field_data_by_name(const std::string &name,
@@ -1098,6 +1189,10 @@ void allocate_aot_root_buffers(aot::Module *module) {
   auto *gfx_module = dynamic_cast<AotModuleImpl *>(module);
   TI_ERROR_IF(!gfx_module, "Expected a GFX AOT module.");
   gfx_module->allocate_root_buffers();
+}
+
+void set_aot_prepare_compile_threads(aot::Module &module, int threads) {
+  dynamic_cast<AotModuleImpl &>(module).set_prepare_compile_threads(threads);
 }
 
 std::unique_ptr<AotSNodeInstance> make_aot_snode_instance(

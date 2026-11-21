@@ -42,6 +42,9 @@ TI_DLL_EXPORT std::unique_ptr<aot::Module> make_aot_module(
 // The module then owns independent roots and its execution registrations.
 TI_DLL_EXPORT void allocate_aot_root_buffers(aot::Module *module);
 
+// The borrowing Program supplies its worker limit before publishing the module.
+void set_aot_prepare_compile_threads(aot::Module &module, int threads);
+
 // Empty, private state reconstructed from the loaded module's validated tree
 // recipes. Kernel views retain its executable pipelines and have immutable
 // instance-local resource bindings; they never rewrite module bindings.

@@ -397,7 +397,9 @@ def test_prepared_specialization_preserves_storage_relations_and_aliases(tmp_pat
 
         # Equal layouts on separate allocations, negative offsets, exact and
         # partial aliases, then independent allocations with the same ABI.
-        for index, (left, right) in enumerate(((0, 6), (0, 6), (6, 0), (0, 0), (0, 2), (0, None))):
+        # Shifting both slices preserves their relative layout but changes
+        # their byte offsets inside aligned Vulkan descriptor bindings.
+        for index, (left, right) in enumerate(((0, 6), (0, 6), (1, 7), (6, 0), (0, 0), (0, 2), (0, None))):
             source, sentinel = make_storage()
             other, other_sentinel = make_storage() if right is None else (source, sentinel)
             initial = np.arange(16, dtype=np.int32) + 100 * index

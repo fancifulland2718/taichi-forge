@@ -12,7 +12,7 @@ class GfxRuntime : public Runtime {
   virtual taichi::lang::gfx::GfxRuntime &get_gfx_runtime() = 0;
 
   virtual Error create_aot_module(std::shared_ptr<const taichi::io::VirtualDir> dir,
-                                  TiAotModule &out) override final;
+                                  TiAotModule &out) override;
   virtual void buffer_copy(const taichi::lang::DevicePtr &dst,
                            const taichi::lang::DevicePtr &src,
                            size_t size) override final;

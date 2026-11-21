@@ -820,17 +820,13 @@ class HostDeviceContextBlitter {
                     alloc_type ==
                         LaunchContextBuilder::DevAllocType::kDenseStorage)) {
           const auto limits = device_->get_storage_buffer_binding_limits();
-          auto bias = [&](const storage::ResolvedDenseBinding *binding) {
-            return binding ? describe_descriptor_buffer_slice(
-                                 limits, binding->byte_offset,
-                                 binding->byte_size, true)
-                                 .byte_bias
-                           : uint32_t(0);
+          auto byte_bias = [&](const std::vector<int> &member) {
+            return descriptor_array_byte_bias(
+                limits, host_ctx_.find_resolved_dense_storage_buffer(member));
           };
           host_ctx_.set_struct_arg_impl<uint32_t>(
               array_arg.data_ptr_indices,
-              bias(host_ctx_.find_resolved_dense_storage_buffer(
-                  array_arg.data_ptr_indices)));
+              byte_bias(array_arg.data_ptr_indices));
           const auto *array_type = ctx_attribs_->args_type()
                                        ->get_element_type(indices)
                                        ->as<lang::StructType>();
@@ -838,8 +834,7 @@ class HostDeviceContextBlitter {
               TypeFactory::GRAD_PTR_POS_IN_NDARRAY)
             host_ctx_.set_struct_arg_impl<uint32_t>(
                 array_arg.grad_ptr_indices,
-                bias(host_ctx_.find_resolved_dense_storage_buffer(
-                    array_arg.grad_ptr_indices)));
+                byte_bias(array_arg.grad_ptr_indices));
         }
     }
 

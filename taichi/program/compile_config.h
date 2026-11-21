@@ -72,6 +72,8 @@ struct CompileConfig {
   // legacy serial behaviour for all existing users; opt-in via
   // ti.init(spirv_parallel_codegen=True). Not part of the offline-cache
   // key (per-task SPIR-V output must be byte-identical between OFF and ON).
+  // Vulkan AOT modules borrowing this Program also use the worker limit to
+  // specialize independent large tasks during prepare.
   bool spirv_parallel_codegen{false};
   // V6 (2026-04-26): when true and spv_opt_level == 3, the SPIR-V backend
   // skips spvtools' CreateLoopUnrollPass(true) — the single most expensive

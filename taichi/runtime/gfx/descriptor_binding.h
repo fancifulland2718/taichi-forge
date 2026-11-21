@@ -5,6 +5,7 @@
 #include <stdexcept>
 
 #include "taichi/rhi/device.h"
+#include "taichi/program/storage_view.h"
 
 namespace taichi::lang::gfx {
 
@@ -34,6 +35,15 @@ inline DescriptorBufferSlice describe_descriptor_buffer_slice(
     throw std::invalid_argument(
         "Array descriptor exceeds the device range or shader offset ABI");
   return {offset - bias, size + bias, uint32_t(bias)};
+}
+
+inline uint32_t descriptor_array_byte_bias(
+    Device::StorageBufferBindingLimits limits,
+    const storage::ResolvedDenseBinding *view) {
+  return view ? describe_descriptor_buffer_slice(
+                    limits, view->byte_offset, view->byte_size, true)
+                    .byte_bias
+              : 0;
 }
 
 }  // namespace taichi::lang::gfx
