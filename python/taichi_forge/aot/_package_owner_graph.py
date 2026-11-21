@@ -6,6 +6,8 @@ import copy
 import inspect
 from types import FunctionType, MappingProxyType, ModuleType, SimpleNamespace
 
+from taichi_forge.lang._build_cache import file_digest, value_digest
+
 
 def _member_paths(node, receiver, forwarded=None, method_reads=None, nodes=None, aliases=None, alias_values=()):
     """Read explicit device member paths, without traversing Host construction."""
@@ -64,6 +66,78 @@ def _member_paths(node, receiver, forwarded=None, method_reads=None, nodes=None,
     paths.update(path for path in presence
                  if not any(len(member) > len(path) and member[:len(path)] == path for member in paths))
     return paths
+
+
+class _MethodDeclarationCache:
+    """Warm producer summaries of what each device method reads from its inputs."""
+
+    def __init__(self, build_cache, reads):
+        self.previous = build_cache.previous.get("method_inputs", {})
+        self.current = build_cache.method_inputs
+        self.reads = reads
+        self.version = file_digest(__file__)
+        self.syntax = {}
+        self.keys = {}
+
+    def key(self, owner, node, bound, visiting):
+        identity = owner, node, bound
+        if identity in self.keys:
+            return self.keys[identity]
+        if identity in visiting:
+            return None
+        if node not in self.syntax:
+            module = self.reads.modules.get(id(node))
+            namespace = vars(module) if module is not None else {}
+            calls = []
+            for call in (part for part in ast.walk(node) if isinstance(part, ast.Call)):
+                expression = call.func
+                names = []
+                while isinstance(expression, ast.Attribute):
+                    names.append(expression.attr)
+                    expression = expression.value
+                if not isinstance(expression, ast.Name):
+                    continue
+                target = namespace.get(expression.id)
+                for name in reversed(names):
+                    target = vars(target).get(name) if isinstance(target, ModuleType) else None
+                # Include both possible resolutions of a local/receiver alias.
+                # The analysis itself still applies shadowing and argument rules.
+                calls.append((target is self.reads.static_function, self.reads.functions.get(id(target)),
+                              names[0] if len(names) == 1 else None))
+            self.syntax[node] = (value_digest(ast.dump(node)), calls,
+                                 namespace.get('getattr', builtins.getattr) is builtins.getattr)
+        syntax, calls, built_in_getattr = self.syntax[node]
+        dependencies = []
+        for is_static, free, member in calls:
+            resolved = [is_static]
+            for callee, is_method in ((free, False), (self.reads.methods[owner].get(member) if bound else None, True)):
+                dep = None
+                if callee is not None:
+                    dep = self.key(owner, callee, is_method, visiting | {identity})
+                    if dep is None:
+                        self.keys[identity] = None
+                        return None
+                resolved.append(dep)
+            dependencies.append(resolved)
+        result = value_digest((self.version, syntax, bound, built_in_getattr, dependencies))
+        self.keys[identity] = result
+        return result
+
+    def parameters(self, owner, method, node, parameters):
+        key = self.key(owner, node, True, set())
+        if key is not None:
+            record = self.current.get(key) or (self.previous.get(key) if isinstance(self.previous, dict) else None)
+            if isinstance(record, dict):
+                paths = record.get("paths")
+                if (isinstance(paths, dict) and set(paths) == set(parameters) and
+                        record.get("digest") == value_digest((key, paths))):
+                    self.current[key] = record
+                    return {p: frozenset(map(tuple, members)) for p, members in paths.items()}
+        result = {p: self.reads.parameter(owner, method, p) for p in parameters}
+        if key is not None:
+            paths = {p: sorted(members) for p, members in result.items()}
+            self.current[key] = dict(paths=paths, digest=value_digest((key, paths)))
+        return result
 
 
 class _MethodInputPaths:
@@ -297,7 +371,7 @@ def layout_owner(environment, schema, name):
 
 
 class OwnerGraph:
-    def __init__(self, sources, imported, module, *, field_trees):
+    def __init__(self, sources, imported, module, *, field_trees, build_cache=None):
         from ._package_input_families import source_class
         from taichi_forge.lang.impl import static
 
@@ -351,6 +425,7 @@ class OwnerGraph:
         # These summaries survive the scan; the temporary method/parent AST
         # indices do not. They do not own or construct application resources.
         reads = _MethodInputPaths(methods, node_modules, device_functions, static)
+        declarations = _MethodDeclarationCache(build_cache, reads) if build_cache is not None else None
         self._method_input_paths = {}
         self.method_implementations = {}
         for identity, nodes in methods.items():
@@ -369,14 +444,12 @@ class OwnerGraph:
                     if isinstance(original, FunctionType) and original.__name__ == method:
                         implementations[method] = original.__module__ + '.' + original.__qualname__
                 parameters = (*node.args.posonlyargs, *node.args.args, *node.args.kwonlyargs)
-                for parameter in parameters:
-                    self._method_input_paths[identity, id(node), parameter.arg] = reads.parameter(
-                        identity, method, parameter.arg)
-                paths = set(reads.parameter(identity, method, parameters[0].arg))
-                if any(isinstance(part, ast.Call) and isinstance(part.func, ast.Name)
-                       and part.func.id == 'super' for part in ast.walk(node)):
-                    paths.add(())
-                summaries[method] = frozenset(paths)
+                names = [parameter.arg for parameter in parameters]
+                inputs = (declarations.parameters(identity, method, node, names) if declarations is not None else
+                          {name: reads.parameter(identity, method, name) for name in names})
+                for parameter, paths in inputs.items():
+                    self._method_input_paths[identity, id(node), parameter] = paths
+                summaries[method] = inputs[names[0]]
             self._device_paths[identity] = frozenset(path for paths in summaries.values() for path in paths)
         for identity in self.definitions:
             self._validate(identity, ())

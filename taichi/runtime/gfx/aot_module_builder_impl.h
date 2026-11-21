@@ -11,6 +11,9 @@
 #include "taichi/compilation_manager/kernel_compilation_manager.h"
 
 namespace taichi::lang {
+namespace spirv {
+class CompiledKernelData;
+}
 namespace gfx {
 
 class AotModuleBuilderImpl : public AotModuleBuilder {
@@ -20,6 +23,9 @@ class AotModuleBuilderImpl : public AotModuleBuilder {
       KernelCompilationManager &compilation_manager,
       const CompileConfig &compile_config,
       const DeviceCapabilityConfig &caps);
+
+  std::string build_object_key(const std::string &name, Kernel *kernel) const;
+  bool restore_build_object(const std::string &name, const std::string &key);
 
   void dump(const std::string &output_dir,
             const std::string &filename) const override;
@@ -32,6 +38,10 @@ class AotModuleBuilderImpl : public AotModuleBuilder {
       const std::string &identifier) const override;
 
   void add_compiled_kernel(const std::string &identifier, Kernel *kernel);
+
+  void store_compiled_kernel(const std::string &identifier,
+                             const spirv::CompiledKernelData &object,
+                             std::vector<uint32_t> range_tasks);
 
   void add_field_per_backend(const std::string &identifier,
                              const SNode *rep_snode,

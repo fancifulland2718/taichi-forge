@@ -111,7 +111,7 @@ def is_preparation(function):
     )
 
 
-def _candidates(sources, imported):
+def preparation_candidates(sources, imported):
     candidates = {}
     for module, _, _, _, tree, kind, _, _ in sources:
         namespace = vars(imported[module])
@@ -215,7 +215,7 @@ def _normalize(function, original, module, kind, receiver, fail, namespace):
     return owner, normalized, facts
 
 
-def declaration_dependencies(sources, imported, fail):
+def declaration_dependencies(sources, imported, fail, candidates):
     """Read declared domains before interpreting a caller's resource guards.
 
     Only source-proven owner receivers supply these facts. They are temporary
@@ -224,7 +224,6 @@ def declaration_dependencies(sources, imported, fail):
     """
     from ._package_resources import scope_declarations
 
-    candidates = _candidates(sources, imported)
     if not candidates:
         return {}
     receivers = {function: set() for function in candidates}
@@ -303,8 +302,7 @@ def declaration_dependencies(sources, imported, fail):
     return result
 
 
-def resolve(sources, imported, owner_schema, fail, host_contexts):
-    candidates = _candidates(sources, imported)
+def resolve(sources, imported, owner_schema, fail, host_contexts, candidates):
     if not candidates:
         return
     receivers = {function: set() for function in candidates}

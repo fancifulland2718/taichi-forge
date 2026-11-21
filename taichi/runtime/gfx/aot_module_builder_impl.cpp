@@ -247,6 +247,45 @@ void AotModuleBuilderImpl::add_compiled_kernel(const std::string &identifier,
     range_tasks = plan->device_range_tasks;
     RangeDispatch::validate_selection(compiled.metadata.kernel_attribs, range_tasks, kGtmpBufferSize);
   }
+  store_compiled_kernel(identifier, spirv_ckd, std::move(range_tasks));
+}
+
+std::string AotModuleBuilderImpl::build_object_key(const std::string &name,
+                                                   Kernel *kernel) const {
+  if (config_.arch != Arch::vulkan || !config_.offline_cache ||
+      kernel->get_offload_execution_plan() || argument_origins_.count(name) ||
+      !kernel_snode_tree_ids(name).empty())
+    return {};
+  const auto request = resolve_kernel_compile_request(
+      config_, caps_, kernel->get_compile_tier_override(), CompilePurpose::aot,
+      compile_options_);
+  return aot::build_object_record(kernel->get_or_create_kernel_key_for_cache(
+                                      request.config(), request.device_caps()),
+                                  name, value_parameters_);
+}
+
+bool AotModuleBuilderImpl::restore_build_object(const std::string &name,
+                                                const std::string &record) {
+  if (config_.arch != Arch::vulkan || !config_.offline_cache ||
+      kernel_names_.count(name))
+    return false;
+  auto object = compilation_manager_.load_build_object(
+      record.substr(0, record.find('\n')), config_.arch);
+  const auto *spirv = dynamic_cast<const spirv::CompiledKernelData *>(object.get());
+  if (!spirv || spirv->has_snode_tree_dependencies())
+    return false;
+  const auto &ctx = spirv->get_internal_data().metadata.kernel_attribs.ctx_attribs;
+  if (!aot::restore_build_object_values(record, name, ctx.args_type(), value_parameters_))
+    return false;
+  store_compiled_kernel(name, *spirv, {});
+  record_sealed_kernel_export(name, spirv->graph_metadata());
+  return true;
+}
+
+void AotModuleBuilderImpl::store_compiled_kernel(
+    const std::string &identifier, const spirv::CompiledKernelData &object,
+    std::vector<uint32_t> range_tasks) {
+  const auto &compiled = object.get_internal_data();
   // Global tree counts are compilation-time observations, not dependencies.
   // A module may add fields later or reuse kernels compiled before unrelated
   // layouts were created. Validate its actual closure; dump() assigns compact

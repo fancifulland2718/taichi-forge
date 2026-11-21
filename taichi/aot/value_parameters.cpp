@@ -169,6 +169,44 @@ NamedValueParameters load_value_parameter_artifact(const io::VirtualDir *source)
       std::string(bytes.begin(), bytes.end())));
 }
 
+std::string build_object_record(std::string key, const std::string &name,
+                                const NamedValueParameters &parameters) {
+  const auto values = parameters.find(name);
+  if (values == parameters.end())
+    return key;
+  for (const auto &[indices, type] : values->second)
+    if (indices.size() != 1)
+      return {};
+  return key + "\n" + liong::json::print(liong::json::serialize(
+                          make_value_parameter_artifact({*values})));
+}
+
+bool restore_build_object_values(const std::string &record,
+                                 const std::string &name,
+                                 const StructType *args_type,
+                                 NamedValueParameters &parameters) {
+  const auto separator = record.find('\n');
+  if (separator == std::string::npos)
+    return true;
+  try {
+    auto types = parse_value_parameter_artifact(
+        liong::json::parse_complete(record.substr(separator + 1)));
+    const auto values = types.find(name);
+    if (types.size() != 1 || values == types.end() || !args_type)
+      return false;
+    const auto &slots = args_type->elements();
+    for (const auto &[indices, logical] : values->second) {
+      if (indices.size() != 1 || indices.front() >= slots.size())
+        return false;
+      validate_value_parameter_type(logical, slots[indices.front()].type);
+    }
+    parameters.emplace(name, std::move(values->second));
+    return true;
+  } catch (const std::exception &) {
+    return false;
+  }
+}
+
 void write_value_parameter_artifact(const NamedValueParameters &parameters,
                                     const std::string &directory) {
   const auto path = std::filesystem::path(directory) / kFilename;

@@ -11,12 +11,14 @@ import functools
 from collections import deque
 from collections.abc import Mapping
 from contextlib import contextmanager
+from contextvars import ContextVar
 from dataclasses import dataclass, fields, is_dataclass, MISSING
 import inspect
 import importlib.util
 import json
 import types
 import typing
+from weakref import WeakKeyDictionary
 
 from taichi_forge_runtime._static_values import static_key
 from ._package_factories import _source_value
@@ -74,52 +76,74 @@ def _copy_call_sites(node):
     return copied
 
 
-def source_function_namespace(function, node, imported):
-    """Resolve local imports only from the already admitted source closure."""
-    bindings, shadowed = {}, set(inspect.signature(function).parameters)
+_source_imports = ContextVar("aot_declaration_imports", default=None)
 
-    def walk(part):
+
+@contextmanager
+def reuse_declaration_imports():
+    # Normalization precedes these passes. A projected/copied body has its own
+    # AST identity. Keep no live namespace, owner or synthetic tree in the index.
+    token = _source_imports.set(WeakKeyDictionary())
+    try:
+        yield
+    finally:
+        _source_imports.reset(token)
+
+
+def _local_imports(node):
+    cache = _source_imports.get()
+    if cache is not None and node in cache:
+        return cache[node]
+    imports, shadowed = [], set()
+    pending = list(reversed(node.body))
+    while pending:
+        part = pending.pop()
         if isinstance(part, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
             shadowed.add(part.name)
-            return
+            continue
         if isinstance(part, ast.Lambda):
-            return
+            continue
         if isinstance(part, ast.Name) and not isinstance(part.ctx, ast.Load):
             shadowed.add(part.id)
         if isinstance(part, (ast.Import, ast.ImportFrom)):
-            origin = None
-            if isinstance(part, ast.ImportFrom):
-                name = "." * part.level + (part.module or "")
-                if part.level:
-                    name = importlib.util.resolve_name(name, function.__globals__["__package__"])
-                origin = imported.get(name)
-            for alias in part.names:
-                if origin is not None:
-                    value = vars(origin).get(alias.name, imported.get(name + "." + alias.name))
-                elif isinstance(part, ast.Import):
-                    value = imported.get(alias.name if alias.asname else alias.name.split(".")[0])
-                else:
-                    value = None
-                key = alias.asname or (alias.name if isinstance(part, ast.ImportFrom) else alias.name.split(".")[0])
-                if key in bindings and bindings[key] is not value:
-                    shadowed.add(key)
-                bindings[key] = value
-        for child in ast.iter_child_nodes(part):
-            walk(child)
+            imports.append(part)
+        pending.extend(reversed(tuple(ast.iter_child_nodes(part))))
+    result = (imports, shadowed) if imports else ((), ())
+    if cache is not None:
+        cache[node] = result
+    return result
 
-    try:
-        for statement in node.body:
-            walk(statement)
-        namespace = dict(function.__globals__)
-        for name, value in bindings.items():
-            # Read only modules already admitted to the source closure. Imports
-            # remain ordinary Host statements; discovery does not execute them.
-            namespace.pop(name, None)
-            if name not in shadowed and value is not None:
-                namespace[name] = value
+
+def source_function_namespace(function, node, imported):
+    """Resolve lexical imports against the live bindings in the current closure."""
+    imports, writes = _local_imports(node)
+    namespace = dict(function.__globals__)
+    if not imports:
         return namespace
-    finally:
-        walk = None
+    bindings, shadowed = {}, set(inspect.signature(function).parameters).union(writes)
+    for part in imports:
+        origin = None
+        if isinstance(part, ast.ImportFrom):
+            name = "." * part.level + (part.module or "")
+            if part.level:
+                name = importlib.util.resolve_name(name, namespace["__package__"])
+            origin = imported.get(name)
+        for alias in part.names:
+            if origin is not None:
+                value = vars(origin).get(alias.name, imported.get(name + "." + alias.name))
+            elif isinstance(part, ast.Import):
+                value = imported.get(alias.name if alias.asname else alias.name.split(".")[0])
+            else:
+                value = None
+            key = alias.asname or (alias.name if isinstance(part, ast.ImportFrom) else alias.name.split(".")[0])
+            if key in bindings and bindings[key] is not value:
+                shadowed.add(key)
+            bindings[key] = value
+    for name, value in bindings.items():
+        namespace.pop(name, None)
+        if name not in shadowed and value is not None:
+            namespace[name] = value
+    return namespace
 
 
 @dataclass(frozen=True)

@@ -1,4 +1,4 @@
-"""Producer warm start and dependency-based reuse of CPU package objects."""
+"""Producer warm start and dependency-based reuse of native package objects."""
 
 import ast
 import base64
@@ -216,6 +216,7 @@ class PackageBuildCache:
         self.modules = modules
         self.objects = {}
         self.captures = {}
+        self.method_inputs = {}
         self.capture_syntax = {}
         self.object_context = None
         self.toolchain_files = {}
@@ -234,7 +235,7 @@ class PackageBuildCache:
         )
         if not supported:
             raise ValueError("build_cache requires CUDA bc-library, CPU bc, or Vulkan default export")
-        self.cpu_objects_enabled = arch in (core.x64, core.arm64) and impl.current_cfg().offline_cache
+        self.objects_enabled = arch in (core.x64, core.arm64, core.vulkan) and impl.current_cfg().offline_cache
         self.build_settings = dict(
             config=core._build_cache_config_key(impl.current_cfg(), impl.get_runtime().prog.get_device_caps(), True),
             option_sources=core._get_compile_option_sources(impl.current_cfg()),
@@ -264,7 +265,7 @@ class PackageBuildCache:
         return context
 
     def scalar_object_key(self, kernel):
-        if not self.cpu_objects_enabled:
+        if not self.objects_enabled:
             return None
         dependencies = _scalar_kernel_inputs(kernel, self.modules)
         if dependencies is None:
@@ -273,7 +274,7 @@ class PackageBuildCache:
             try:
                 self._compiler_inputs()
             except _UntrackedInput:
-                self.cpu_objects_enabled = False
+                self.objects_enabled = False
                 return None
         return value_digest((self.object_context, dependencies))
 
@@ -291,7 +292,7 @@ class PackageBuildCache:
                 return None  # Recompute aliases against this build's declarations.
         except (KeyError, TypeError, ValueError):
             return None
-        if not module._aot_builder._restore_cpu_build_object(symbol, native):
+        if not module._aot_builder._restore_build_object(symbol, native):
             return None
         module._component_entries[symbol] = component
         module._exported_kernels[symbol] = key
@@ -305,7 +306,7 @@ class PackageBuildCache:
         from ._package_capture_cache import _body, _callable
 
         fn = kernel.func
-        if (not self.cpu_objects_enabled or fn.__module__ not in self.modules
+        if (not self.objects_enabled or fn.__module__ not in self.modules
                 or environment._lexical_bindings):
             return None
         try:
@@ -337,7 +338,7 @@ class PackageBuildCache:
         facts = vars(code).pop("_cache_facts", None)
         if facts is None:
             return
-        native = module._aot_builder._cpu_build_object_key(symbol, code.kernel.compiled_kernels[code.key])
+        native = module._aot_builder._build_object_key(symbol, code.kernel.compiled_kernels[code.key])
         if not native:
             return
         payload = json.dumps((native, module._component_entries[symbol], facts), separators=(",", ":"))
@@ -372,7 +373,7 @@ class PackageBuildCache:
                 code._bind_arguments(component.declarations)
             except (KeyError, AttributeError, OSError, ValueError, TypeError, zlib.error, TaichiCompilationError):
                 continue
-            if not module._aot_builder._restore_cpu_build_object(symbol, native):
+            if not module._aot_builder._restore_build_object(symbol, native):
                 continue
             identity = kernel, key
             module._component_entries[symbol] = entry
@@ -446,13 +447,14 @@ class PackageBuildCache:
             self.reason = "hit"
             self.objects = record.get("objects", {})
             self.captures = record.get("captures", {})
+            self.method_inputs = record.get("method_inputs", {})
             return manifest
         finally:
             if not complete:
                 shutil.rmtree(staging)
 
     def record(self, output):
-        if self.identity is None and not (self.objects or self.captures):
+        if self.identity is None and not (self.objects or self.captures or self.method_inputs):
             return
         try:
             if self.identity is not None and _namespace_inputs(self.modules) != self.inputs["namespaces"]:
@@ -471,7 +473,7 @@ class PackageBuildCache:
         record = dict(version=1, key=self.identity.key if self.identity else None, output=str(output),
                       inputs=dict(self.identity.inputs) if self.identity else {}, toolchain_files=self.toolchain_files,
                       objects=self.objects,
-                      captures=self.captures,
+                      captures=self.captures, method_inputs=self.method_inputs,
                       manifest_sha256=file_digest(output / "package.json"))
         fd, temporary = tempfile.mkstemp(prefix=".latest-", suffix=".json", dir=self.directory)
         try:

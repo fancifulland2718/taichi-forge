@@ -43,6 +43,14 @@ ValueParameterArtifact make_value_parameter_artifact(
     const NamedValueParameters &parameters);
 NamedValueParameters parse_value_parameter_artifact(
     const liong::json::JsonValue &json);
+// A producer object may restore top-level value metadata after checking the
+// recovered physical ABI. Nested argument packs need their own contract.
+std::string build_object_record(std::string key, const std::string &name,
+                                const NamedValueParameters &parameters);
+bool restore_build_object_values(const std::string &record,
+                                 const std::string &name,
+                                 const StructType *args_type,
+                                 NamedValueParameters &parameters);
 NamedValueParameters load_value_parameter_artifact(const io::VirtualDir *source);
 void write_value_parameter_artifact(const NamedValueParameters &parameters,
                                     const std::string &directory);

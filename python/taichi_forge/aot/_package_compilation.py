@@ -184,7 +184,7 @@ class PackageCompilation(FunctionLibrary):
         if self.capture_scope is not None:
             self.capture_cache.remember_capture(self.capture_scope, code, self.module, symbol)
         if self.object_kernel is code.kernel:
-            code._cpu_build_object_key = self.module._aot_builder._cpu_build_object_key(
+            code._build_object_key = self.module._aot_builder._build_object_key(
                 symbol, code.kernel.compiled_kernels[code.key])
         self.resource_effects[identity] = self.module._aot_builder._kernel_resource_effects(symbol)
         self.module._aot_builder._seal_kernel_export(symbol)

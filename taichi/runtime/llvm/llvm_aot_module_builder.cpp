@@ -496,17 +496,7 @@ std::string LlvmAotModuleBuilder::cpu_build_object_key(
   const auto request = build_request(kernel);
   auto key = kernel->get_or_create_kernel_key_for_cache(request.config(),
                                                         request.device_caps());
-  const auto values = value_parameters_.find(name);
-  if (values != value_parameters_.end()) {
-    // Package component arguments are top-level slots. A nested argument pack
-    // needs its own physical contract before it can use this recovery path.
-    for (const auto &[indices, type] : values->second)
-      if (indices.size() != 1)
-        return {};
-    key += "\n" + liong::json::print(liong::json::serialize(
-                      aot::make_value_parameter_artifact({*values})));
-  }
-  return key;
+  return aot::build_object_record(std::move(key), name, value_parameters_);
 }
 
 bool LlvmAotModuleBuilder::restore_cpu_build_object(const std::string &name,
@@ -524,24 +514,8 @@ bool LlvmAotModuleBuilder::restore_cpu_build_object(const std::string &name,
     return false;
   llvm_object->set_kernel_identity(key);
   const auto &data = llvm_object->get_internal_data();
-  if (separator != std::string::npos) {
-    try {
-      auto types = aot::parse_value_parameter_artifact(
-          liong::json::parse_complete(record.substr(separator + 1)));
-      const auto values = types.find(name);
-      if (types.size() != 1 || values == types.end() || !data.args_type)
-        return false;
-      const auto &slots = data.args_type->elements();
-      for (const auto &[indices, logical] : values->second) {
-        if (indices.size() != 1 || indices.front() >= slots.size())
-          return false;
-        aot::validate_value_parameter_type(logical, slots[indices.front()].type);
-      }
-      value_parameters_.emplace(name, std::move(values->second));
-    } catch (const std::exception &) {
-      return false;
-    }
-  }
+  if (!aot::restore_build_object_values(record, name, data.args_type, value_parameters_))
+    return false;
   const auto &body = data.compiled_data;
   const auto identity = key + "\nordinary\n" +
       liong::json::print(liong::json::serialize(body));

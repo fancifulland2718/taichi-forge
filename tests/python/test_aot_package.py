@@ -353,7 +353,7 @@ def separate(x: ti.i32) -> ti.i32:
                     assert getattr(code.host, name)(x) == getattr(model, name)(x)
 
 
-@test_utils.test(arch=ti.cpu, offline_cache=True)
+@test_utils.test(arch=[ti.cpu, ti.vulkan], offline_cache=True)
 def test_package_build_cache_recovers_bound_vector_entry_before_capture(tmp_path, monkeypatch):
     from taichi_forge.lang.kernel_impl import Kernel
 
@@ -396,7 +396,8 @@ class Model:
         exec(compile(text, str(path), "exec"), vars(model))
         captures.clear()
         out = tmp_path / label
-        ti.aot.export_package(model, out, artifact_format="bc", build_cache=tmp_path / "cache")
+        ti.aot.export_package(model, out, artifact_format="bc" if ti.cfg.arch == ti.cpu else None,
+                              build_cache=tmp_path / "cache")
         return out
 
     monkeypatch.setattr(Kernel, "materialize", track)
@@ -31536,6 +31537,63 @@ def unknown_alias(self):
     for method, parameter in [('dynamic', 'provider'), ('unknown', 'provider'), ('shadowed', 'provider'),
                               ('rebound', 'provider'), ('literal_caller', 'self')]:
         assert () in reader.parameter('Owner', method, parameter)
+
+
+def test_package_declaration_imports_follow_current_bindings():
+    import ast
+    from types import ModuleType
+
+    from taichi_forge.aot._package_function_inputs import reuse_declaration_imports, source_function_namespace
+
+    def entry(shadow):
+        pass
+
+    tree = ast.parse("def entry(shadow):\n from target_module import query, other as shadow").body[0]
+    target = ModuleType("target_module")
+    target.query, target.other = object(), object()
+    with reuse_declaration_imports():
+        namespace = source_function_namespace(entry, tree, {"target_module": target})
+        assert namespace["query"] is target.query and "shadow" not in namespace
+        target.query = object()
+        assert source_function_namespace(entry, tree, {"target_module": target})["query"] is target.query
+        assert "query" not in source_function_namespace(entry, tree, {})
+
+
+def test_package_method_declarations_follow_transitive_sources_and_live_bindings(monkeypatch):
+    import ast
+    from types import ModuleType, SimpleNamespace
+
+    from taichi_forge.aot._package_owner_graph import _MethodDeclarationCache, _MethodInputPaths
+
+    module = ModuleType("owner_module")
+    module.library = ModuleType("query_library")
+    module.library.query = object()
+
+    def analyze(previous, leaf, *, expect_hit=False):
+        entry = ast.parse("def entry(self): return self.helper()").body[0]
+        helper = ast.parse("def helper(self): return library.query(self)").body[0]
+        target = ast.parse(leaf).body[0]
+        reader = _MethodInputPaths({"Owner": {"entry": entry, "helper": helper}},
+                                   {id(n): module for n in (entry, helper, target)},
+                                   {id(module.library.query): target}, object())
+        expected = reader.parameter("Owner", "entry", "self")
+        reader.cache.clear()
+        if expect_hit:
+            monkeypatch.setattr(reader, "parameter", lambda *args: pytest.fail("repeated method analysis"))
+        store = SimpleNamespace(previous={"method_inputs": previous}, method_inputs={})
+        result = _MethodDeclarationCache(store, reader).parameters("Owner", "entry", entry, ["self"])
+        assert result == {"self": expected}
+        return store.method_inputs, expected
+
+    original = "def query(owner): return getattr(owner, 'depth')"
+    first, paths = analyze({}, original)
+    assert paths == {("depth",)}
+    analyze(first, original, expect_hit=True)
+    changed, paths = analyze(first, original.replace("depth", "normal"))
+    assert paths == {("normal",)} and first.keys().isdisjoint(changed)
+    module.getattr = None
+    shadowed, paths = analyze(first, original)
+    assert paths == {()} and first.keys().isdisjoint(shadowed)
 
 
 def test_package_entry_query_paths_respect_selected_owner_and_unknown_override():

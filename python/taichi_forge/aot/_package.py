@@ -23,6 +23,7 @@ from taichi_forge.tools._compiled_host import decorator_resolver
 from ._package_types import qualified_kind, resolve_type, type_expression, type_spec
 from ._package_fields import field_declarations, field_allocation
 from ._package_factories import reuse_factory_sources
+from ._package_function_inputs import reuse_declaration_imports
 from ._package_sources import collect_sources, package_roots, shader_assets
 from ._package_owners import resolve_owners
 from ._package_errors import is_error_interface, project_error_interface
@@ -1611,6 +1612,7 @@ def _package_source_inputs(package, arch, source_root):
 
 
 @reuse_factory_sources()
+@reuse_declaration_imports()
 def _preflight_package(package, *, arch=None, source_root=None, inputs=None):
     """Resolve declarations once the current sources and imported bindings are known."""
     source_files, namespaces, dependency_report, application_modules, imported_modules, target_arch, packages = (
@@ -1643,10 +1645,11 @@ def _preflight_package(package, *, arch=None, source_root=None, inputs=None):
     # Resolve preparation declarations with the complete owner hierarchy. The
     # local declaration pass describes construction only; neither pass executes
     # Host preparation or infers its contract from a sample model.
-    from ._package_preparations import declaration_dependencies
+    from ._package_preparations import declaration_dependencies, preparation_candidates
 
     try:
-        preparation_dependencies = declaration_dependencies(sources, imported_modules, _fail)
+        candidates = preparation_candidates(sources, imported_modules)
+        preparation_dependencies = declaration_dependencies(sources, imported_modules, _fail, candidates)
     except ValueError as error:
         raise PackageExportError(str(error)) from error
 
@@ -1684,6 +1687,7 @@ def _preflight_package(package, *, arch=None, source_root=None, inputs=None):
             complete_owner_schema,
             _fail,
             host_contexts,
+            candidates,
         )
     except ValueError as error:
         raise PackageExportError(str(error)) from error
@@ -1802,7 +1806,7 @@ def export_package(package, output, *, arch=None, caps=None, source_root=None, a
     ``build_cache=directory`` opts into producer warm start for CUDA bc-library,
     CPU bc, and Vulkan default artifacts.
     Unchanged source-driven builds reuse the previous complete package before
-    declaration analysis. With CPU offline caching, free scalar kernels and
+    declaration analysis. With CPU or Vulkan offline caching, free scalar kernels and
     owner-bound entries with matching source, bindings and resource contracts
     can reuse their compiled objects before capture after a local edit.
     Keep the referenced output for full-package
@@ -1857,11 +1861,11 @@ def _export_package(output, declarations, source_root, caps, artifact_format, co
         module._arch in (ti.cpu, ti.cuda) and artifact_format in (None, "bc", "bc-library")
     )
     compilation.attach(module, function_library=portable_ir)
-    if cache is not None and cache.cpu_objects_enabled:
+    if cache is not None and cache.objects_enabled:
         compilation.capture_cache = cache
     from ._package_owner_graph import OwnerGraph, owner_bindings, layout_owner
 
-    owner_graph = OwnerGraph(sources, imported_modules, module, field_trees=compilation.field_trees)
+    owner_graph = OwnerGraph(sources, imported_modules, module, field_trees=compilation.field_trees, build_cache=cache)
     # Configuration classification belongs to the definition producer, not
     # the CUDA function-library storage format. All specialization-capable IR
     # routes must project the same numeric predicates and query resources
@@ -2917,8 +2921,8 @@ def _export_package(output, declarations, source_root, caps, artifact_format, co
                     shared_entries[identity] = entry_manifest
                 if admission:
                     entry_manifest["admission"] = admission
-                if object_key and getattr(code, "_cpu_build_object_key", None):
-                    cache.record_object(object_key, code._cpu_build_object_key, entry_manifest, module)
+                if object_key and getattr(code, "_build_object_key", None):
+                    cache.record_object(object_key, code._build_object_key, entry_manifest, module)
                 variants.append(
                     dict(
                         selection={

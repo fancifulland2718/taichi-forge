@@ -1,4 +1,4 @@
-"""Portable, owner-free dependency facts for the CPU package object cache."""
+"""Portable, owner-free dependency facts for the producer package object cache."""
 
 import ast
 import inspect

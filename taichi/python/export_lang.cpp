@@ -19,6 +19,10 @@
 #include "taichi/aot/argpack_layout.h"
 #include "taichi/rhi/cuda/cuda_capability.h"
 
+#ifdef TI_WITH_VULKAN
+#include "taichi/runtime/gfx/aot_module_builder_impl.h"
+#endif
+
 #if TI_WITH_LLVM
 #include "taichi/runtime/llvm/llvm_aot_module_builder.h"
 #include "llvm/Config/llvm-config.h"
@@ -5969,13 +5973,29 @@ void export_lang(py::module &m) {
   py::class_<AotModuleBuilder>(m, "AotModuleBuilder")
       .def("set_compile_options", &AotModuleBuilder::set_compile_options)
       .def("set_artifact_format", &AotModuleBuilder::set_artifact_format)
+      .def("_build_object_key", [](AotModuleBuilder &builder, const std::string &name, Kernel *kernel) {
+#ifdef TI_WITH_VULKAN
+        if (auto *gfx = dynamic_cast<gfx::AotModuleBuilderImpl *>(&builder))
+          return gfx->build_object_key(name, kernel);
+#endif
 #if TI_WITH_LLVM
-      .def("_cpu_build_object_key", [](AotModuleBuilder &builder, const std::string &name, Kernel *kernel) {
-        return dynamic_cast<LlvmAotModuleBuilder &>(builder).cpu_build_object_key(name, kernel);
+        if (auto *llvm = dynamic_cast<LlvmAotModuleBuilder *>(&builder))
+          return llvm->cpu_build_object_key(name, kernel);
+#endif
+        return std::string{};
       })
-      .def("_restore_cpu_build_object", [](AotModuleBuilder &builder, const std::string &name, const std::string &key) {
-        return dynamic_cast<LlvmAotModuleBuilder &>(builder).restore_cpu_build_object(name, key);
+      .def("_restore_build_object", [](AotModuleBuilder &builder, const std::string &name, const std::string &key) {
+#ifdef TI_WITH_VULKAN
+        if (auto *gfx = dynamic_cast<gfx::AotModuleBuilderImpl *>(&builder))
+          return gfx->restore_build_object(name, key);
+#endif
+#if TI_WITH_LLVM
+        if (auto *llvm = dynamic_cast<LlvmAotModuleBuilder *>(&builder))
+          return llvm->restore_cpu_build_object(name, key);
+#endif
+        return false;
       })
+#if TI_WITH_LLVM
       .def("_set_ir_cleanup_for_testing",
            [](AotModuleBuilder &builder, bool enabled) {
              auto *llvm_builder =
