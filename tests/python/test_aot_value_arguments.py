@@ -236,8 +236,8 @@ def test_prepared_metadata_reuse_preserves_artifact_snapshot(tmp_path, archive, 
     from zipfile import ZipFile, ZIP_DEFLATED
     from taichi_forge_runtime.aot import Scalar
 
-    if artifact_format == "bc-library" and ti.cfg.arch != ti.cuda:
-        pytest.skip("bc-library is CUDA-only")
+    if artifact_format == "bc-library" and ti.cfg.arch not in (ti.x64, ti.cuda):
+        pytest.skip("bc-library requires x64 or CUDA")
 
     @ti.kernel
     def update(data: ti.types.ndarray(ti.i32, 1), increment: ti.i32):
@@ -291,8 +291,8 @@ def test_prepared_metadata_reuse_preserves_artifact_snapshot(tmp_path, archive, 
 def test_prepared_real_function_arguments_have_their_own_layout(tmp_path, artifact_format):
     from taichi_forge_runtime.aot import Scalar
 
-    if artifact_format == "bc-library" and ti.cfg.arch != ti.cuda:
-        pytest.skip("bc-library is CUDA-only")
+    if artifact_format == "bc-library" and ti.cfg.arch not in (ti.x64, ti.cuda):
+        pytest.skip("bc-library requires x64 or CUDA")
 
     @ti.real_func
     def leaf(value: ti.i32, count: ti.i32) -> ti.i32:

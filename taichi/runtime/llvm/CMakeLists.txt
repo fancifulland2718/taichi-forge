@@ -6,6 +6,7 @@ target_sources(llvm_runtime
     llvm_runtime_executor.cpp
     llvm_offline_cache.cpp
     llvm_context.cpp
+    aot_cpu_private_frames.cpp
     llvm_opt_pipeline.cpp
     llvm_module_codec.cpp
     llvm_aot_module_loader.cpp

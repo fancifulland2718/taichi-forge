@@ -23,6 +23,7 @@
 #include "taichi/runtime/llvm/aot_prepared_local_tensor.h"
 #include "taichi/runtime/llvm/aot_prepared_schedule.h"
 #include "taichi/runtime/llvm/aot_cpu_range.h"
+#include "taichi/runtime/llvm/aot_cpu_private_frames.h"
 #include "taichi/runtime/llvm/aot_snode_relocation.h"
 #include "taichi/runtime/llvm/aot_snode_resources.h"
 #include "taichi/codegen/llvm/cuda_graph_gate.h"
@@ -37,6 +38,46 @@
 namespace taichi::lang {
 namespace LLVM {
 namespace {
+
+// LLVM can combine adjacent ABI words into one load during production. Match
+// each lane to its own typed prepare fact. Other lanes still read the frame.
+bool fold_prepared_vector(llvm::LoadInst &load, int offset,
+                          const aot::ArgumentConstants &constants) {
+  auto *type = llvm::cast<llvm::FixedVectorType>(load.getType());
+  auto *word = type->getElementType();
+  if (!word->isIntegerTy(32) && !word->isIntegerTy(64))
+    return false;
+  const unsigned bits = word->getIntegerBitWidth();
+  const unsigned lanes = type->getNumElements();
+  llvm::SmallVector<llvm::Constant *, 4> values;
+  llvm::SmallVector<int, 4> indices;
+  unsigned known = 0;
+  for (unsigned i = 0; i < lanes; ++i) {
+    const int64_t address = int64_t(offset) + int64_t(i) * (bits / 8);
+    const auto fact = address <= INT_MAX ? constants.find(static_cast<int>(address))
+                                         : constants.end();
+    if (fact != constants.end() && fact->second.bits == bits) {
+      values.push_back(llvm::ConstantInt::get(word, fact->second.value));
+      indices.push_back(lanes + i);
+      ++known;
+    } else {
+      values.push_back(llvm::PoisonValue::get(word));
+      indices.push_back(i);
+    }
+  }
+  if (!known)
+    return false;
+  auto *fixed = llvm::ConstantVector::get(values);
+  if (known == lanes) {
+    load.replaceAllUsesWith(fixed);
+    load.eraseFromParent();
+  } else {
+    llvm::IRBuilder<> builder(load.getNextNode());
+    auto *mixed = builder.CreateShuffleVector(&load, fixed, indices);
+    load.replaceUsesWithIf(mixed, [&](llvm::Use &u) { return u.getUser() != mixed; });
+  }
+  return true;
+}
 
 void optimize_cpu_materialization(llvm::Module &module, const CompileConfig &config) {
   auto target = llvm::cantFail(llvm::orc::JITTargetMachineBuilder::detectHost());
@@ -726,7 +767,8 @@ aot::Kernel *LlvmAotModule::specialize_kernel(
       for (auto it = block.begin(); it != block.end();) {
         auto *load = llvm::dyn_cast<llvm::LoadInst>(&*it++);
         if (!load || load->isVolatile() || load->isAtomic() ||
-            (!load->getType()->isIntegerTy() && !load->getType()->isPointerTy()))
+            (!load->getType()->isIntegerTy() && !load->getType()->isPointerTy() &&
+             !llvm::isa<llvm::FixedVectorType>(load->getType())))
           continue;
         int64_t offset = 0;
         auto *base = llvm::GetPointerBaseWithConstantOffset(load->getPointerOperand(), offset, layout);
@@ -758,6 +800,10 @@ aot::Kernel *LlvmAotModule::specialize_kernel(
           load->replaceAllUsesWith(pointer);
           load->eraseFromParent();
           ++pointer_replacements;
+          continue;
+        }
+        if (llvm::isa<llvm::FixedVectorType>(load->getType())) {
+          replacements += fold_prepared_vector(*load, static_cast<int>(offset), constants);
           continue;
         }
         const auto value = constants.find(static_cast<int>(offset));
@@ -802,8 +848,11 @@ aot::Kernel *LlvmAotModule::specialize_kernel(
   }
   TI_DEBUG("Prepared specialization {} folded {} ABI loads and {} storage relations",
            code, replacements, pointer_replacements);
-  if (arch_is_cpu(arch()))
+  if (arch_is_cpu(arch())) {
     optimize_cpu_materialization(module, executor_->get_config());
+    if (LLVMModuleOptions::read(module, executor_->get_config()).opt_level > 0)
+      promote_cpu_private_frames(module);
+  }
   CompiledKernelData compiled{arch(), std::move(data).take_llvm_ckd_data()};
   KernelRegistrationState registration;
   auto handle = kernel_launcher_->register_llvm_kernel(compiled, registration);

@@ -5,6 +5,7 @@
 #include "llvm/IR/Module.h"
 #include "llvm/IR/Verifier.h"
 #include "llvm/Support/SourceMgr.h"
+#include "taichi/runtime/llvm/aot_cpu_private_frames.h"
 #include "taichi/runtime/llvm/aot_prepared_range.h"
 #include "taichi/runtime/llvm/aot_prepared_local_tensor.h"
 #include "taichi/runtime/llvm/aot_prepared_schedule.h"
@@ -12,6 +13,42 @@
 
 namespace taichi::lang {
 namespace {
+
+TEST(AotPreparedCpu, PromotesMixedPrivateWordsAndRetainsEscapedStorage) {
+  llvm::LLVMContext context;
+  llvm::SMDiagnostic error;
+  auto module = llvm::parseAssemblyString(R"(
+    declare void @observe(ptr)
+    define <2 x i32> @local(<2 x i32> %values, i32 %last) {
+      %frame = alloca [3 x i32], align 8
+      %middle = getelementptr i32, ptr %frame, i64 1
+      %end = getelementptr i32, ptr %frame, i64 2
+      store <2 x i32> %values, ptr %frame, align 8
+      store i32 %last, ptr %end, align 4
+      %result = load <2 x i32>, ptr %middle, align 4
+      ret <2 x i32> %result
+    }
+    define i32 @escaped(ptr %out, <2 x i32> %values) {
+      %frame = alloca [2 x i32], align 8
+      store <2 x i32> %values, ptr %frame, align 8
+      call void @observe(ptr %frame)
+      %result = load i32, ptr %frame, align 4
+      store volatile <2 x i32> %values, ptr %out, align 4
+      ret i32 %result
+    }
+  )", error, context);
+  ASSERT_NE(module, nullptr);
+  auto &escaped = module->getFunction("escaped")->getEntryBlock();
+  const auto original = escaped.size();
+  LLVM::promote_cpu_private_frames(*module);
+  ASSERT_FALSE(llvm::verifyModule(*module));
+  const auto &local = module->getFunction("local")->getEntryBlock();
+  EXPECT_FALSE(llvm::any_of(local, [](const auto &inst) {
+    return inst.mayReadOrWriteMemory() || llvm::isa<llvm::AllocaInst>(inst);
+  }));
+  EXPECT_EQ(escaped.size(), original);
+  EXPECT_TRUE(llvm::isa<llvm::AllocaInst>(escaped.front()));
+}
 
 std::unique_ptr<llvm::Module> range_module(llvm::LLVMContext &context,
                                          const std::string &body,
