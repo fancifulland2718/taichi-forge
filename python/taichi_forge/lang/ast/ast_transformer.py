@@ -2144,6 +2144,11 @@ class ASTTransformer(Builder):
     def build_IfExp(ctx, node):
         build_stmt(ctx, node.test)
         is_static_if = ASTTransformer.get_decorator(ctx, node.test) == "static"
+        # In static(x if target else y), select the arm before capturing
+        # resources or model dimensions from a different target.
+        if ctx.is_in_static_scope() and isinstance(node.test.ptr, (bool, np.bool_, int, np.integer)):
+            node.ptr = build_stmt(ctx, node.body if node.test.ptr else node.orelse)
+            return node.ptr
 
         if is_static_if and is_model_value(node.test.ptr):
             truth = getattr(node.test.ptr, "_uniform_truth", None)

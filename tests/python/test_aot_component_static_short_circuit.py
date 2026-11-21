@@ -49,3 +49,24 @@ def test_normal_jit_static_short_circuit_does_not_evaluate_dead_operations():
     state = State(4)
     state.run()
     np.testing.assert_array_equal(state.out.to_numpy(), np.arange(4) + 7)
+
+
+@test_utils.test(arch=ti.cpu, offline_cache=False)
+def test_static_conditional_folds_target_before_capturing_workgroup_width():
+    @ti.kernel
+    def run(state: ti.template()):
+        width = ti.static(state.n if ti.lang.impl.current_cfg().arch in (ti.cuda, ti.vulkan) else 1)
+        if ti.static(width > 1):
+            state.out[0] = state.gpu_only
+        else:
+            value = ti.static(13 if width == 1 else state.gpu_only)
+            state.out[0] = value
+
+    state = State(9)
+    run(state)
+    assert state.out[0] == 13
+    state.out[0] = 0
+    component = ti.aot.Component.from_owner(state)
+    code = component.compile(run, owner=state, template_args={"state": state})
+    code.run(component, state)
+    assert state.out[0] == 13
