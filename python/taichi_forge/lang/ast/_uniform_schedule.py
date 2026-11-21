@@ -11,22 +11,25 @@ import copy
 from itertools import chain
 
 
-def _bound(node):
+def _bound(node, descriptor_bound=None):
+    if isinstance(node, ast.Subscript):
+        return descriptor_bound is not None and descriptor_bound(node)
     if isinstance(node, (ast.Name, ast.Constant)):
         return True
     if isinstance(node, ast.Attribute):
-        return _bound(node.value)
+        return _bound(node.value, descriptor_bound)
     if isinstance(node, ast.Tuple):
-        return all(_bound(item) for item in node.elts)
+        return all(_bound(item, descriptor_bound) for item in node.elts)
     if isinstance(node, ast.UnaryOp) and isinstance(node.op, (ast.UAdd, ast.USub, ast.Not)):
-        return _bound(node.operand)
+        return _bound(node.operand, descriptor_bound)
     if isinstance(node, ast.BinOp) and isinstance(node.op, (ast.Add, ast.Sub, ast.Mult)):
-        return _bound(node.left) and _bound(node.right)
+        return _bound(node.left, descriptor_bound) and _bound(node.right, descriptor_bound)
     if isinstance(node, ast.BoolOp):
-        return all(_bound(value) for value in node.values)
+        return all(_bound(value, descriptor_bound) for value in node.values)
     if isinstance(node, ast.Compare):
         return (all(isinstance(op, (ast.Lt, ast.LtE, ast.Gt, ast.GtE, ast.Eq, ast.NotEq)) for op in node.ops)
-                and _bound(node.left) and all(_bound(value) for value in node.comparators))
+                and _bound(node.left, descriptor_bound)
+                and all(_bound(value, descriptor_bound) for value in node.comparators))
     return False
 
 

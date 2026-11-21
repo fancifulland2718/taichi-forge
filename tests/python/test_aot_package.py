@@ -3418,7 +3418,7 @@ class Model:
                                               reference + (gain - 9 if owner.enabled else 0))
 
 
-@test_utils.test(arch=ti.cuda, offline_cache=False)
+@test_utils.test(arch=[ti.cpu, ti.cuda], offline_cache=False)
 def test_package_library_guards_live_device_range_bounds(tmp_path, monkeypatch):
     from itertools import product
     from taichi_forge.aot._component import _ComponentCode
@@ -3448,6 +3448,8 @@ class Model:
             self.out[i] = -1
         if ti.static(self.enabled):
             self.emit()
+            for i in range(self.out.shape[0]):
+                self.out[i] += 1
         if ti.static(self.add):
             ti.loop_config(block_dim=128)
             for i in range(self.start[None], ti.min(self.count[None], self.n) + 2):
@@ -3469,9 +3471,15 @@ class Model:
     assert len(entries) == 1
     assert {v['name'] for v in entries[0]['captures'] if 'prepare_static' in v} == {'enabled', 'add'}
     parallel = [task for task in tasks if task['task_type'] == 'range_for']
-    assert len(parallel) == 3, tasks
-    assert [task['selected_block_size'] for task in parallel[1:]] == [64, 128]
-    with Runtime('cuda') as runtime, load_package(runtime, tmp_path / 'sdk') as code:
+    assert len(parallel) == 4, tasks
+    arch = ti.lang.impl.current_cfg().arch
+    if arch == ti.cuda:
+        # CPU adds the chunk-count contract to the archived kernel after this
+        # frontend task manifest is collected.
+        assert parallel[1]['range_bounds']['host_launch'] is None
+        assert parallel[2]['range_bounds']['host_launch'] is not None
+        assert [parallel[i]['selected_block_size'] for i in (1, 3)] == [64, 128]
+    with Runtime(arch.name) as runtime, load_package(runtime, tmp_path / 'sdk') as code:
         for flags in product((False, True), repeat=2):
             aot, jit = code.host.Model(17, *flags), package.model.Model(17, *flags)
             for count in (0, 7, 17, 2, 0):

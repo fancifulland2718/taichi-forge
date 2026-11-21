@@ -2191,6 +2191,29 @@ class _Capture:
         prefix = self._receiver_path(owner)
         return prefix is not None and type(self.declarations.get(_capture_id((*prefix, *path)))) is StaticValue
 
+    def descriptor_shape_bound(self, ctx, subscript):
+        """A constant axis of an ordinary argument descriptor needs no device read."""
+        shape, axis = subscript.value, subscript.slice
+        if not (isinstance(shape, ast.Attribute) and shape.attr == "shape"
+                and isinstance(axis, ast.Constant) and type(axis.value) is int and axis.value >= 0):
+            return False
+        resource = shape.value
+        base = resource.value if isinstance(resource, ast.Attribute) else resource
+        if not isinstance(base, ast.Name):
+            return False
+        owner = ctx.get_var_by_name(base.id) if ctx.is_var_declared(base.id) else ctx.global_vars.get(base.id)
+        if isinstance(resource, ast.Name):
+            from taichi_forge._lib import core
+            from taichi_forge.lang.any_array import AnyArray
+            return type(owner) is AnyArray and axis.value < core.get_external_tensor_dim(owner.ptr)
+        prefix = self._receiver_path(owner)
+        if prefix is None:
+            return False
+        declaration = self.declarations.get(_capture_id((*prefix, resource.attr)))
+        if type(declaration) is DenseField:
+            return axis.value < len(declaration.shape)
+        return type(declaration) in (Array, _ExternalField) and axis.value < declaration.ndim
+
     def call_real_function(self, function, args):
         from taichi_forge._lib import core
         from taichi_forge.lang._local_tensor import is_model_value

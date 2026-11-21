@@ -1534,7 +1534,11 @@ class ASTTransformer(Builder):
     @staticmethod
     def build_range_bounds(ctx, node):
         guard = getattr(node, '_uniform_loop_guard', None)
-        deferred = guard is not None and not all(_bound(arg) for arg in node.iter.args)
+        # Descriptor dimensions can be read unconditionally. Keep actual
+        # device loads, including indexed counters, under their original guard.
+        deferred = guard is not None and not all(
+            _bound(arg, lambda sub: ctx.deployment.descriptor_shape_bound(ctx, sub))
+            for arg in node.iter.args)
         dbg_info = _ti_core.DebugInfo(ctx.get_pos_info(node))
         if deferred:
             impl.begin_frontend_if(ctx.ast_builder, guard, dbg_info)
