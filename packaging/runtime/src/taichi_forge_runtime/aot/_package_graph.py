@@ -557,13 +557,14 @@ class Graph:
                 if spec["kind"] == "value" and spec.get("dtype") in ("i32", "u32", "i64", "u64", "f32", "f64"))
             if not self._live_parameters:
                 raise ValueError("Package workspace lanes require explicit live scalar arguments")
-        self._vulkan_parameters = self._vulkan_integer_parameters() if package.runtime.arch == "vulkan" else ()
+        self._integer_parameters = (self._ordinary_integer_parameters()
+                                    if package.runtime.arch in ("cpu", "x64", "arm64", "vulkan") else ())
         package._graphs.add(self)
 
-    def _vulkan_integer_parameters(self):
+    def _ordinary_integer_parameters(self):
         names = tuple(name for name, spec in self.arguments.items()
                       if spec["kind"] == "value" and spec.get("dtype") in ("i32", "u32", "i64", "u64"))
-        if not names or self.package.runtime._api.vulkan_parameter_launch() is None:
+        if not names or self.package.runtime._api.ordinary_parameter_launch(self.package.runtime.arch) is None:
             return ()
         # Array owners and captured model facts retain their original admission.
         # Mutable Python value captures need the implicit binding's value checks.
@@ -662,8 +663,8 @@ class Graph:
         """Prepare the recorded package plan with optional live submission values.
 
         Captures and resources retain the same immutable binding and leases as
-        bind(). Explicit scalar arguments may use the ordinary CUDA queue or
-        an independent execution domain's parameter-update protocol.
+        bind(). Explicit scalar arguments can use the selected backend's
+        ordinary or independent-domain parameter-update protocol.
         """
         from ._parameters import SubmissionParameters
 
@@ -896,23 +897,26 @@ class Graph:
             self._cached_tokens, self._cached_guards = tokens, guards
         return prepared
 
-    def _observe_vulkan_parameters(self, arguments):
-        if self._vulkan_parameters and not self._live_parameters and self._cached_call is not None:
+    def _observe_integer_parameters(self, arguments):
+        if self._integer_parameters and not self._live_parameters and self._cached_call is not None:
             from ._package_calls import _token
-            if any(name in arguments and _token(arguments[name]) != token
-                   for name, token in zip(self.arguments, self._cached_tokens) if name in self._vulkan_parameters):
-                self._live_parameters = self._vulkan_parameters
+            changed = tuple(name for name, token in zip(self.arguments, self._cached_tokens)
+                            if name in self._integer_parameters and name in arguments
+                            and _token(arguments[name]) != token)
+            if changed:
+                # Keep stable CPU extents available to prepare-time specialization.
+                self._live_parameters = self._integer_parameters if self.package.runtime.arch == "vulkan" else changed
 
     def run(self, arguments):
-        if self._live_parameters and not self._vulkan_parameters and not isinstance(arguments, PreparedCall):
+        if self._live_parameters and not self._integer_parameters and not isinstance(arguments, PreparedCall):
             self.submit(arguments).close()
             return
         with self.package._call_lock:
-            if self._vulkan_parameters and not isinstance(arguments, PreparedCall):
-                self._observe_vulkan_parameters(arguments)
+            if self._integer_parameters and not isinstance(arguments, PreparedCall):
+                self._observe_integer_parameters(arguments)
                 if self._live_parameters:
                     frames, values = self._parameter_bindings(arguments)
-                    frames[0]._run_vulkan_parameters(values)
+                    frames[0]._run_ordinary_parameters(values)
                     return
             self._prepared(arguments).run()
 
@@ -922,14 +926,22 @@ class Graph:
             raise ValueError("Graph binding must supply exactly its declared arguments")
         from ._package_calls import _token
 
-        tokens = tuple(_token(arguments[name]) for name in self.arguments if name not in self._live_parameters)
+        live = self._live_parameters
+        tokens = tuple(_token(arguments[name]) for name in self.arguments if name not in live)
         if (not self._parameter_frames or tokens != self._frame_tokens
                 or not all(guard.matches(owner) for owner, guard in self._frame_guards)):
+            if self._parameter_frames and tokens != self._frame_tokens and self._integer_parameters:
+                fixed = tuple(name for name in self.arguments if name not in live)
+                changed = tuple(name for name, old, new in zip(fixed, self._frame_tokens, tokens)
+                                if name in self._integer_parameters and old != new)
+                if changed:
+                    live += changed
+                    tokens = tuple(token for name, token in zip(fixed, tokens) if name not in changed)
             guards = self._binding_guards()
             frames = []
             try:
                 for _ in range(self._workspace_lanes):
-                    frame = self.prepare(arguments, mutable_parameters=self._live_parameters)
+                    frame = self.prepare(arguments, mutable_parameters=live)
                     frames.append(frame)
                     frame.initialize()
             except BaseException:
@@ -937,12 +949,13 @@ class Graph:
                     frame.close()
                 raise
             self._clear_cached()
+            self._live_parameters = live
             self._parameter_frames = frames
             self._cached_values = tuple(arguments[name] for name in self.arguments if name not in self._live_parameters)
             self._frame_tokens, self._frame_guards = tokens, guards
             self._next_parameter_frame = 0
         values = {name: arguments[name] for name in self._live_parameters}
-        if self._vulkan_parameters:
+        if self._integer_parameters:
             # The implicit integer scalar ABI also accepts Python booleans.
             values = {name: int(value) if type(value) is bool else value for name, value in values.items()}
         return self._parameter_frames, values
@@ -962,9 +975,9 @@ class Graph:
     def submit(self, arguments, *, pacer=None, lane=None, on_saturation="wait", telemetry=False):
         """Replay a prepared binding and return a completion ticket.
 
-        CUDA workspace lanes reuse scalar parameter frames. Ordinary Vulkan
-        kernel Graphs can record changing integer arguments on the replay
-        queue. Other changed bindings re-enter preparation. Explicit bind()
+        CUDA workspace lanes reuse scalar parameter frames. Ordinary CPU and
+        Vulkan kernel Graphs can replay changing integer arguments on their
+        prepared bindings. Other changed bindings re-enter preparation. Explicit bind()
         retains an independent snapshot. The ticket and Runtime retain leases.
         A hybrid package may share its JIT runtime's SubmissionPacer. Admission
         precedes binding; standalone Runtime submission needs no frontend.
@@ -982,8 +995,8 @@ class Graph:
             arguments = dict(arguments)
         while True:
             with self.package._call_lock:
-                if self._vulkan_parameters and not isinstance(arguments, PreparedCall):
-                    self._observe_vulkan_parameters(arguments)
+                if self._integer_parameters and not isinstance(arguments, PreparedCall):
+                    self._observe_integer_parameters(arguments)
                 if not self._live_parameters or isinstance(arguments, PreparedCall):
                     return self._prepared(arguments).submit()
                 ticket, pending = self._submit_parameter_frame(arguments)

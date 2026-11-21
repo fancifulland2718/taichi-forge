@@ -1532,16 +1532,16 @@ static TiPreparedExecution prepare_execution_plan_impl(
   // exclusion; default CUDA support is checked by FixedExecution before use.
   const bool prepared_external_access = bool(domain) ||
       (rt.arch == taichi::Arch::cuda && !family);
-  if (parameter_count && !domain && rt.arch == taichi::Arch::vulkan &&
+  if (parameter_count && !domain && (arch_is_cpu(rt.arch) || rt.arch == taichi::Arch::vulkan) &&
       (snode_instance || plan.vulkan_submission || plan.storage_ring ||
        !std::all_of(plan.operations.begin(), plan.operations.end(), [](const auto &op) {
          return std::holds_alternative<aot::ExecutionPlan::Kernel>(op);
        })))
-    throw MemoryBindingError("Ordinary Vulkan parameters require a flat kernel plan");
-  if (parameter_count && (family || (!domain && rt.arch != taichi::Arch::cuda &&
+    throw MemoryBindingError("Ordinary CPU/Vulkan parameters require a flat kernel plan");
+  if (parameter_count && (family || (!domain && !arch_is_cpu(rt.arch) && rt.arch != taichi::Arch::cuda &&
                                     rt.arch != taichi::Arch::vulkan)))
     throw MemoryBindingError(
-        "Submission parameters require ordinary CUDA/Vulkan or an independent execution domain");
+        "Submission parameters require ordinary CPU/CUDA/Vulkan or an independent execution domain");
   if (plan.vulkan_submission && rt.arch != taichi::Arch::vulkan)
     throw MemoryBindingError("Selected Vulkan submission requires Vulkan");
   const auto &resource_description =
@@ -3309,7 +3309,7 @@ void ti_wait_prepared_parameter_frame_ext(TiRuntime runtime, TiPreparedExecution
 
 static TiBool launch_ordinary_parameters(
     TiRuntime runtime, TiPreparedExecution execution, uint32_t parameter_count,
-    const uint64_t *parameters, TiSubmissionTicket *ticket) {
+    const uint64_t *parameters, TiSubmissionTicket *ticket, bool vulkan_only = false) {
   TI_CAPI_TRY_CATCH_BEGIN();
   TI_CAPI_ARGUMENT_NULL_RV(runtime);
   TI_CAPI_ARGUMENT_NULL_RV(execution);
@@ -3319,8 +3319,9 @@ static TiBool launch_ordinary_parameters(
   std::lock_guard<std::recursive_mutex> lock(rt.submission_mutex());
   auto &entry = rt.prepared_registry().get(execution);
   if (!entry.live || entry.domain || entry.family || entry.ordinary_parameter_failed ||
-      (rt.arch != taichi::Arch::cuda && rt.arch != taichi::Arch::vulkan) ||
-      (!ticket && rt.arch != taichi::Arch::vulkan) || !parameter_count ||
+      (vulkan_only && rt.arch != taichi::Arch::vulkan) ||
+      (!taichi::arch_is_cpu(rt.arch) && rt.arch != taichi::Arch::cuda && rt.arch != taichi::Arch::vulkan) ||
+      (!ticket && rt.arch == taichi::Arch::cuda) || !parameter_count ||
       entry.submission_values.size() != parameter_count || !parameters)
     throw MemoryBindingError("Invalid ordinary parameter submission");
   for (uint32_t i = 0; i < parameter_count; ++i)
@@ -3364,6 +3365,12 @@ TiBool ti_try_submit_prepared_ordinary_parameters_ext(
 }
 
 void ti_launch_prepared_vulkan_parameters_ext(
+    TiRuntime runtime, TiPreparedExecution execution, uint32_t parameter_count,
+    const uint64_t *parameters) {
+  launch_ordinary_parameters(runtime, execution, parameter_count, parameters, nullptr, true);
+}
+
+void ti_launch_prepared_ordinary_parameters_ext(
     TiRuntime runtime, TiPreparedExecution execution, uint32_t parameter_count,
     const uint64_t *parameters) {
   launch_ordinary_parameters(runtime, execution, parameter_count, parameters, nullptr);

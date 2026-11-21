@@ -19877,6 +19877,15 @@ def test_package_graph_prepares_live_parameters_in_execution_domain(tmp_path, mo
 
 @test_utils.test(arch=ti.vulkan, offline_cache=False)
 def test_package_vulkan_graph_updates_queued_integer_arguments(tmp_path, monkeypatch):
+    _check_graph_live_integer_arguments(tmp_path, monkeypatch)
+
+
+@test_utils.test(arch=ti.cpu, offline_cache=False)
+def test_package_cpu_graph_reuses_live_integer_arguments(tmp_path, monkeypatch):
+    _check_graph_live_integer_arguments(tmp_path, monkeypatch)
+
+
+def _check_graph_live_integer_arguments(tmp_path, monkeypatch):
     from contextlib import closing
 
     source = """
@@ -19900,9 +19909,10 @@ def graph():
     return builder.compile()
 """
     source_package = _source_package(tmp_path, monkeypatch, source, initializer="from .model import graph, write, mark_end\n")
-    ti.aot.export_package(source_package, tmp_path / "sdk", caps=["spirv_has_int64"])
-    device = int(os.environ.get("TI_TEST_VULKAN_DEVICE_INDEX", 0))
-    with Runtime("vulkan", device_index=device) as runtime, load_package(runtime, tmp_path / "sdk") as code:
+    vulkan = ti.cfg.arch == ti.vulkan
+    ti.aot.export_package(source_package, tmp_path / "sdk", caps=["spirv_has_int64"] if vulkan else [])
+    device = int(os.environ.get("TI_TEST_VULKAN_DEVICE_INDEX", 0)) if vulkan else 0
+    with Runtime(ti.cfg.arch.name, device_index=device) as runtime, load_package(runtime, tmp_path / "sdk") as code:
         graph = code.host.graph()
         first, second = (runtime.ndarray("i64", (1030,)) for _ in range(2))
         counts = []
@@ -19933,6 +19943,25 @@ def graph():
             assert output[4 + extents[i]] == epochs[i]
         np.testing.assert_array_equal(second.to_numpy()[:5], [0, -(2**50), 0, 0, 0])
 
+        with graph.bind(dict(out=second, slot=0, epoch=-9, count=1)) as frozen:
+            graph.run(dict(out=second, slot=0, epoch=12, count=1))
+            frozen.run()
+            assert second.to_numpy()[0] == -9
+
+        if not vulkan:
+            graph = code.host.graph()
+            args = dict(out=second, slot=0, epoch=1, count=1)
+            graph.run(args)
+            graph.run(dict(args, epoch=2))
+            assert graph._live_parameters == ("epoch",)
+            graph.run(dict(args, epoch=3, count=2))
+            frame, = graph._parameter_frames
+            graph.run(dict(args, epoch=4, count=3))
+            assert graph._parameter_frames == [frame]
+            np.testing.assert_array_equal(second.to_numpy()[5:8], [2, 3, 4])
+
+    if not vulkan:
+        return
     # Inspect the shared Vulkan queue before any readback can flush it.
     program = ti.lang.impl.get_runtime().prog
     queue_stats = program._debug_vulkan_queue_submission_stats

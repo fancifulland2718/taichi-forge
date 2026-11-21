@@ -1685,13 +1685,13 @@ class PreparedCall(_Resource):
             runtime._pending.clear()
             return layout.decode(data)
 
-    def _run_vulkan_parameters(self, values):
+    def _run_ordinary_parameters(self, values):
         runtime = self._runtime
         with runtime._lock:
             self._check()
             parameters = self._submission_parameters.snapshot(values)
             runtime._pending.add(self)
-            runtime._api.call(runtime._api.vulkan_parameter_launch(), runtime._handle, self._handle,
+            runtime._api.call(runtime._api.ordinary_parameter_launch(runtime.arch), runtime._handle, self._handle,
                               len(parameters), self._submission_parameters.bind(parameters))
 
     def _wait_parameter_frame(self):

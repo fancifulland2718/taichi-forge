@@ -744,11 +744,12 @@ class ExecutionPlan:
         from ._parameters import SubmissionParameters
         submission_parameters = SubmissionParameters(mutable_parameters)
         if submission_parameters.names and execution_domain is None:
-            vulkan_parameters = (runtime.arch == "vulkan" and snode_instance is None
-                                 and runtime._api.vulkan_parameter_launch() is not None)
-            if ((runtime.arch != "cuda" and not vulkan_parameters)
+            ordinary_integers = (runtime.arch in ("cpu", "x64", "arm64", "vulkan")
+                                 and snode_instance is None
+                                 and runtime._api.ordinary_parameter_launch(runtime.arch) is not None)
+            if ((runtime.arch != "cuda" and not ordinary_integers)
                     or source is not None or self.binding_strategy is not None):
-                raise ValueError("mutable_parameters requires an ordinary CUDA/Vulkan kernel plan or an independent execution domain")
+                raise ValueError("mutable_parameters requires an ordinary CPU/CUDA/Vulkan kernel plan or an independent execution domain")
         with runtime._lock:
             module._check()
             if execution_domain is not None:

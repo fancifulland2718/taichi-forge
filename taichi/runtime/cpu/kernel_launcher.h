@@ -46,6 +46,18 @@ class KernelLauncher : public LLVM::KernelLauncher {
     PreparedLaunch(const PreparedLaunch &) = delete;
     PreparedLaunch &operator=(const PreparedLaunch &) = delete;
 
+    // The argument allocation stays at the same address when the prepared
+    // launch moves. Offsets are relative to the ABI, after any range prefix.
+    char *scalar_argument(std::size_t offset, std::size_t bytes) {
+      auto *base = context_.arg_buffer;
+      if (!base || (bytes != 4 && bytes != 8))
+        throw std::invalid_argument("Invalid CPU scalar argument binding");
+      const std::size_t size = arguments_.size() - (base - arguments_.data());
+      if (offset > size || bytes > size - offset)
+        throw std::invalid_argument("CPU scalar argument exceeds its binding");
+      return base + offset;
+    }
+
    private:
     friend class KernelLauncher;
     std::shared_ptr<const Context> registration_;

@@ -73,6 +73,13 @@ struct FixedExecution::State {
     std::function<void()> native;
   };
   std::vector<CpuStep> cpu_steps;
+  struct CpuParameter {
+    char *destination;
+    std::size_t slot;
+    std::size_t bytes;
+  };
+  std::vector<CpuParameter> cpu_parameters;
+  std::size_t cpu_parameter_count{0};
   static void run_cpu_steps(std::vector<CpuStep> &steps) {
     for (auto &step : steps) {
       if (step.launcher)
@@ -1082,6 +1089,14 @@ FixedExecution::FixedExecution(
             steps.push_back({launcher, {}, {}});
           steps.back().launches.push_back(
               launcher->prepare_launch(loaded->handle(), *dispatch->context, cpu_view));
+          auto &launch = steps.back().launches.back();
+          for (const auto &patch : dispatch->parameters) {
+            state_->cpu_parameters.push_back({
+                launch.scalar_argument(patch.argument_offset, patch.bytes),
+                patch.slot, patch.bytes});
+            state_->cpu_parameter_count =
+                std::max(state_->cpu_parameter_count, patch.slot + 1);
+          }
           state_->bytes += dispatch->context->arg_buffer_size +
                            dispatch->context->arg_buffer_prefix_size();
         } else if (const auto *native =
@@ -2075,6 +2090,10 @@ RuntimeCompletion FixedExecution::submit(
       "Fixed execution was not prepared for an independent domain");
 }
 void FixedExecution::validate_ordinary_parameters(std::size_t count) const {
+#ifdef TI_WITH_LLVM
+  if (count && state_->cpu_parameter_count == count)
+    return;
+#endif
 #ifdef TI_WITH_VULKAN
   if (state_->vulkan_parameters && state_->vulkan_parameters->size() == count)
     return;
@@ -2084,12 +2103,20 @@ void FixedExecution::validate_ordinary_parameters(std::size_t count) const {
     return;
 #endif
   throw std::invalid_argument(
-      "Ordinary submission parameters require a fixed CUDA or Vulkan kernel graph");
+      "Ordinary submission parameters require a matching CPU, CUDA or Vulkan kernel graph");
 }
 
 void FixedExecution::run_parameters(
     const std::vector<SubmissionParameterValue> &parameters) {
   validate_ordinary_parameters(parameters.size());
+#ifdef TI_WITH_LLVM
+  if (state_->cpu_parameter_count) {
+    for (const auto &patch : state_->cpu_parameters)
+      std::memcpy(patch.destination, &parameters[patch.slot], patch.bytes);
+    run();
+    return;
+  }
+#endif
 #ifdef TI_WITH_VULKAN
   if (state_->vulkan_parameters) {
     *state_->vulkan_parameters = parameters;

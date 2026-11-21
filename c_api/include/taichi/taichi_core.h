@@ -1671,6 +1671,11 @@ TI_DLL_EXPORT void TI_API_CALL
 ti_launch_prepared_vulkan_parameters_ext(
     TiRuntime runtime, TiPreparedExecution execution, uint32_t parameter_count,
     const uint64_t *parameters);
+// Replay live integer arguments on CPU (synchronous) or the ordinary Vulkan queue.
+TI_DLL_EXPORT void TI_API_CALL
+ti_launch_prepared_ordinary_parameters_ext(
+    TiRuntime runtime, TiPreparedExecution execution, uint32_t parameter_count,
+    const uint64_t *parameters);
 // Wait only this frame's previous use, without holding the submission lock.
 TI_DLL_EXPORT void TI_API_CALL
 ti_wait_prepared_parameter_frame_ext(TiRuntime runtime, TiPreparedExecution execution);

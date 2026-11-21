@@ -662,14 +662,17 @@ class Api:
         function.restype = None
         self.ti_get_aot_snode_plan_layouts_ext = function
 
-    def vulkan_parameter_launch(self):
-        if not hasattr(self, "_vulkan_parameter_launch"):
-            function = getattr(self.library, "ti_launch_prepared_vulkan_parameters_ext", None)
+    def ordinary_parameter_launch(self, arch):
+        # The optional native entry also signals CPU argument-frame support.
+        name = ("ti_launch_prepared_vulkan_parameters_ext" if arch == "vulkan"
+                else "ti_launch_prepared_ordinary_parameters_ext")
+        if not hasattr(self, name):
+            function = getattr(self.library, name, None)
             if function is not None:
                 function.argtypes = [Handle, Handle, UInt, C.POINTER(C.c_uint64)]
                 function.restype = None
-            self._vulkan_parameter_launch = function
-        return self._vulkan_parameter_launch
+            setattr(self, name, function)
+        return getattr(self, name)
 
     def load_ordinary_submission_parameters(self):
         if getattr(self, "_ordinary_submission_parameters_loaded", False):
