@@ -2224,6 +2224,7 @@ def _export_package(output, declarations, source_root, caps, artifact_format, co
                     if key
                     not in (
                         "allocation",
+                        "allocation_members",
                         "dimension_sources",
                         "local_type_source",
                         "dimension_alias_checks",

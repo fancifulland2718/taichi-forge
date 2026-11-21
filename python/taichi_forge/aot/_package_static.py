@@ -693,6 +693,8 @@ class StaticPreparation:
 
     def classify(self, schema, paths, identity=None, *, uses=None):
         """Read-only facts; useful before allocating a producer witness."""
+        from ._package_optional import guards_caller_storage
+
         protected = set()
         for item in schema.values():
             for key in ("conditions", "choice_guards", "shape_guards", "dtype_guards", "source_guards"):
@@ -715,7 +717,7 @@ class StaticPreparation:
                 # build time also keeps unsupported/dead branches unreachable;
                 # turning it into a runtime value would capture both arms.
                 reason = "single_choice"
-            elif name in protected:
+            elif name in protected or guards_caller_storage(schema, name, uses):
                 reason = "resource_or_layout"
             elif not all(v[0] in ("bool", "int") and -(2**31) <= v[1] < 2**31 for v in choices):
                 reason = "type_or_non_i32_value"

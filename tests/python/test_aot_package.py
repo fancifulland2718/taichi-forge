@@ -24643,6 +24643,67 @@ def _resource_context_fixture(
     return package, source
 
 
+@pytest.mark.parametrize("extra_group", [False, True])
+@test_utils.test(arch=ti.cpu, offline_cache=False)
+def test_package_caller_guarded_workspace(tmp_path, monkeypatch, extra_group):
+    helper = """
+import taichi_forge as ti
+from resource_contexts import resource_group
+def allocate(owner):
+    with resource_group(owner, 'scratch', initialization='zero') as scope:
+        scope.scratch = scope.field(ti.i32, shape=())
+"""
+    model = """
+import taichi_forge as ti
+from .storage import allocate
+from resource_contexts import resource_group
+@ti.data_oriented
+class Model:
+    def __init__(self, enabled):
+        self.enabled = enabled
+        scope = ti.experimental.ResourceScope(self)
+        scope.static('enabled', choices=(False, True))
+        scope.out = scope.field(ti.i32, shape=())
+        if self.enabled:
+            allocate(self)
+    @ti.kernel
+    def step(self):
+        self.out[None] = 1
+        if ti.static(self.enabled):
+            self.scratch[None] += 2
+            self.out[None] += self.scratch[None]
+    @ti.kernel
+    def arithmetic(self):
+        if ti.static(self.enabled):
+            self.out[None] += 1
+    def graph(self):
+        builder = ti.graph.GraphBuilder()
+        builder.dispatch(self.step)
+        return builder.compile()
+"""
+    if extra_group:
+        # The same flag also governs a separately declared complete group.
+        # That group's nullable ABI cannot make scratch nullable.
+        model = model.replace("            allocate(self)", """            allocate(self)
+            with resource_group(self, 'extra', initialization='zero') as fields:
+                fields.extra = fields.field(ti.i32, shape=())""")
+    package, _ = _resource_context_fixture(tmp_path, monkeypatch, model=model, extra_modules={"storage": helper})
+    manifest = ti.aot.export_package(package, tmp_path / "sdk")
+    assert all("allocation_members" not in item for owner in manifest["owners"].values() for item in owner.values())
+    steps = [e for e in manifest["entries"].values() if e["definition"].endswith(".Model.step")]
+    assert sorted(any(c["name"] == "scratch" for c in e["captures"]) for e in steps) == [False, True]
+    arithmetic = [e for e in manifest["entries"].values() if e["definition"].endswith(".Model.arithmetic")]
+    if not extra_group:
+        assert len(arithmetic) == 1
+        assert any(c.get("prepare_static") for c in arithmetic[0]["captures"])
+    with Runtime("x64") as runtime, load_package(runtime, tmp_path / "sdk") as code:
+        for enabled in (False, True):
+            model = code.host.Model(enabled)
+            model.graph().run({})
+            model.arithmetic()
+            assert int(model.out[None]) == (4 if enabled else 1)
+
+
 @test_utils.test(arch=[ti.cpu, ti.cuda], offline_cache=False)
 def test_package_preparation_groups_distinguish_module_definitions(tmp_path, monkeypatch):
     helper = """

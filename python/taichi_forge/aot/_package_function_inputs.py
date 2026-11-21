@@ -471,7 +471,7 @@ class _FunctionSyntax:
         return frozenset(part.id for part in ast.walk(expression) if isinstance(part, ast.Name))
 
 
-def discover(sources, imported, *, preparation_receivers=None, resource_inventory=None):
+def discover(sources, imported, *, preparation_receivers=None, preparation_guards=None, resource_inventory=None):
     from taichi_forge.types.annotations import Template
     from taichi_forge.graph import GraphBuilder
     from taichi_forge.lang.field import ScalarField
@@ -721,6 +721,7 @@ def discover(sources, imported, *, preparation_receivers=None, resource_inventor
     invalid = set()
     return_cache = {}
     binding_domains = {}
+    guard_parents = {}
     declaration_syntax = _declaration_syntax.get()
     syntax = declaration_syntax.functions if declaration_syntax is not None else {}
 
@@ -1894,6 +1895,24 @@ def discover(sources, imported, *, preparation_receivers=None, resource_inventor
                             for item in [*values, *kwargs.values()]:
                                 inventory_input(item)
                         return
+                    if preparation_guards is not None and callee in preparation_receivers:
+                        # A caller may own the layout choice for a free allocation
+                        # helper. Associate its guards with the actual owner only.
+                        if function not in guard_parents:
+                            guard_parents[function] = {
+                                child: parent for parent in ast.walk(functions[function][1])
+                                for child in ast.iter_child_nodes(parent)
+                            }
+                        parents = guard_parents[function]
+                        child = call
+                        while (parent := parents.get(child)) is not None:
+                            if isinstance(parent, (ast.If, ast.IfExp)) and child is not parent.test:
+                                for predicate in ast.walk(parent.test):
+                                    if isinstance(predicate, ast.Attribute):
+                                        owner = value(predicate.value)
+                                        if isinstance(owner, _Owner) and owner in bound.arguments.values():
+                                            preparation_guards.setdefault((callee, owner.identity), set()).add(predicate.attr)
+                            child = parent
                     if callee in kernels:
                         for context in _choice_contexts(bound.arguments):
                             record(callee, context, call, module, chain)

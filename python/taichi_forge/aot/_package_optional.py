@@ -5,6 +5,17 @@ Borrowed query ports may project conditional members of a shared allocation;
 the original owner still retains its complete layout contract.
 """
 
+
+def guards_caller_storage(schema, flag, uses=None):
+    """Does the caller guard a used Field whose declaration has no matching nullable port?"""
+    for name in schema[flag].get("allocation_members", ()):
+        member = schema.get(name)
+        if member is not None and flag not in member.get("conditions", ()):
+            if uses is None or member.get("path", (name,))[-1] in uses:
+                return True
+    return False
+
+
 def project_input_records(owner, schema, declarations):
     from taichi_forge.types import primitive_types
     from ._component import _InputPresence, _InputRecord
@@ -97,6 +108,7 @@ def project_boolean_groups(schema, declarations):
         name
         for name, predicate in schema.items()
         if predicate["kind"] == "static"
+        and not guards_caller_storage(schema, name)
         and not predicate.get("conditions")
         and not predicate.get("kernel_only")
         and not predicate.get("static_dtype")
@@ -188,6 +200,8 @@ def project_owned_records(environment, schema, *, borrowed=False, uses=()):
         flag, expected = local[0]
         parents = {key: value for key, value in conditions.items() if key != flag}
         predicate = schema[flag]
+        if guards_caller_storage(schema, flag, uses if borrowed else None):
+            continue
         if (parents and not nested_view or expected is not True or predicate["kind"] != "static"
                 or predicate.get("conditions", {}) != parents
                 or any(schema[key]["kind"] != "static" or schema[key].get("dynamic_storage_condition")
@@ -289,6 +303,7 @@ def project_query_groups(environment, schema, uses):
             continue  # Host sequences have no numerical capture path.
         path = environment._paths[flag]
         if (predicate.get("dynamic_storage_condition")
+                or guards_caller_storage(schema, flag, uses)
                 or not any(path[:len(prefix)] == prefix for prefix in inputs)
                 or {tuple(v) for v in predicate["choices"]} != {("bool", False), ("bool", True)}
                 or uses.get(path[-1], {"prepare_condition"}) != {"prepare_condition"}):
@@ -393,6 +408,7 @@ def project_nested_query_records(environment, schema, uses, *, query_paths=None)
             pending.append(key)
     candidates = {key for key, item in schema.items()
                   if key in required and item['kind'] == 'static'
+                  and not guards_caller_storage(schema, key, uses)
                   and {tuple(value) for value in item.get('choices', ())} == {('bool', False), ('bool', True)}
                   # Existing nullable query schedules retain their guarded
                   # parallel lowering. Type/alias/early-return uses do not.

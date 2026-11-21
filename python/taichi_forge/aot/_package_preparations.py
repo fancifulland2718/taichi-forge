@@ -306,7 +306,9 @@ def resolve(sources, imported, owner_schema, fail, host_contexts, candidates):
     if not candidates:
         return
     receivers = {function: set() for function in candidates}
-    discover(sources, imported, preparation_receivers=receivers)
+    guards = {}
+    discover(sources, imported, preparation_receivers=receivers, preparation_guards=guards)
+    allocation_members = {}
     owners = {
         module + "." + name: (schemas, name, vars(imported[module])[source_class(tree, name)])
         for module, _, _, _, tree, _, schemas, _ in sources
@@ -351,6 +353,10 @@ def resolve(sources, imported, owner_schema, fail, host_contexts, candidates):
                 fail(module, original, "Preparation declarations differ between owner contracts")
             local = signature, copy.deepcopy(declarations)
             schemas[name] = schema
+            fields = {key for key, item in declarations.items() if item["kind"] == "dense_field"}
+            for flag in guards.get((function, target), ()):
+                if fields:
+                    allocation_members.setdefault((target, flag), set()).update(fields)
         if not hasattr(tree, "_package_preparation_schemas"):
             tree._package_preparation_schemas = {}
             tree._package_preparation_owners = {}
@@ -371,3 +377,9 @@ def resolve(sources, imported, owner_schema, fail, host_contexts, candidates):
             recipe = getattr(part, "_package_resource_context", None)
             if recipe is not None:
                 host_contexts.add(_source_value(part.items[0].context_expr.func, namespace), recipe)
+    # The flag itself can be declared by a different preparation helper.
+    for (target, flag), fields in allocation_members.items():
+        schemas, name, _ = owners[target]
+        control = schemas[name].get(flag)
+        if control is not None and control["kind"] == "static":
+            control["allocation_members"] = sorted(fields)

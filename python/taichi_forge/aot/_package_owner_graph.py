@@ -1120,6 +1120,8 @@ def _compose(environment, schema, children):
                 # compose into its parent; its entries are exported separately.
                 continue
             transformed = {**item, "path": [attribute, *item.get("path", (key,))]}
+            if "allocation_members" in item:
+                transformed["allocation_members"] = [names[n] for n in item["allocation_members"] if n in names]
             if "source_path" in item:
                 transformed["source_path"] = [attribute, *item["source_path"]]
             if "source_policy" in item:
