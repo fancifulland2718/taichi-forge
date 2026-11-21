@@ -66,12 +66,13 @@ void LlvmAotModuleBuilder::set_artifact_format(const std::string &format) {
               "AOT PTX/cubin artifacts require CUDA");
   TI_ERROR_IF(format == "cubin" && !explicit_cuda_target_,
               "AOT cubin requires an explicit cuda_compute_capability in caps");
+  TI_ERROR_IF(format == "bc-library" && compile_config_.arch != Arch::cuda &&
+                  compile_config_.arch != Arch::x64,
+              "AOT bitcode libraries require x64 or CUDA");
   artifact_format_ = format;
-  TI_ERROR_IF(format == "bc-library" && compile_config_.arch != Arch::cuda,
-              "Experimental AOT code libraries currently require CUDA");
   function_code_cache_ = format == "bc-library"
       ? std::make_shared<LLVM::FunctionCodeCache>() : nullptr;
-  // Finalize CUDA library artifacts on private copies before publication.
+  // Finalize library artifacts on private copies before publication.
   // Per-module effective options still preserve explicit opt_level=0.
   ir_finalizer_ = format == "bc-library"
       ? std::make_shared<LLVM::AotIRFinalizer>() : nullptr;
@@ -495,7 +496,7 @@ KernelCompileRequest LlvmAotModuleBuilder::build_request(Kernel *kernel) const {
 std::string LlvmAotModuleBuilder::cpu_build_object_key(
     const std::string &name, Kernel *kernel) const {
   if (!arch_is_cpu(compile_config_.arch) || !compile_config_.offline_cache ||
-      artifact_format_ != "bc" || !streaming_compilation_manager_ ||
+      !LLVM::is_llvm_aot_bitcode_format(artifact_format_) || !streaming_compilation_manager_ ||
       kernel->get_offload_execution_plan() ||
       argument_origins_.count(name) || !kernel_snode_tree_ids(name).empty())
     return {};
@@ -508,7 +509,7 @@ std::string LlvmAotModuleBuilder::cpu_build_object_key(
 bool LlvmAotModuleBuilder::restore_cpu_build_object(const std::string &name,
                                                     const std::string &record) {
   if (!arch_is_cpu(compile_config_.arch) || !compile_config_.offline_cache ||
-      artifact_format_ != "bc" || !streaming_compilation_manager_ ||
+      !LLVM::is_llvm_aot_bitcode_format(artifact_format_) || !streaming_compilation_manager_ ||
       kernel_names_.count(name))
     return false;
   const auto separator = record.find('\n');

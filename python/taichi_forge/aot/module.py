@@ -299,7 +299,7 @@ class Module:
           artifact_format (str): Optional ``bc`` for CPU/CUDA LLVM bitcode or
             ``ptx`` or ``cubin`` for CUDA device code. PTX moves user-kernel LLVM compilation
             to export; driver compilation and runtime initialization remain.
-            Experimental CUDA ``bc-library`` stores compatible real-function
+            On x64 and CUDA, ``bc-library`` stores compatible real-function
             definitions separately and links them before consumer specialization.
             Lookup validates its contracts without compiling unused generic
             device code; ordinary execution materializes that code on demand.
@@ -327,8 +327,8 @@ class Module:
         if artifact_format is not None:
             if artifact_format not in ("bc", "bc-library", "ptx", "cubin"):
                 raise ValueError("AOT artifact_format must be bc, bc-library, ptx or cubin")
-            if artifact_format == "bc-library" and arch != taichi_forge.cuda:
-                raise TaichiRuntimeError("Experimental AOT code libraries currently require CUDA")
+            if artifact_format == "bc-library" and arch not in (taichi_forge.x64, taichi_forge.cuda):
+                raise TaichiRuntimeError("AOT bitcode libraries require x64 or CUDA")
             if artifact_format in ("ptx", "cubin") and arch != taichi_forge.cuda:
                 raise TaichiRuntimeError(f"AOT {artifact_format.upper()} artifacts require CUDA")
             if artifact_format == "bc" and arch not in (taichi_forge.cpu, taichi_forge.cuda):

@@ -231,12 +231,12 @@ class PackageBuildCache:
         self.reason = "miss"
         arch = impl.current_cfg().arch
         supported = (
-            (arch == core.cuda and artifact_format == "bc-library")
+            (arch in (core.x64, core.cuda) and artifact_format == "bc-library")
             or (arch in (core.x64, core.arm64) and artifact_format == "bc")
             or (arch == core.vulkan and artifact_format is None)
         )
         if not supported:
-            raise ValueError("build_cache requires CUDA bc-library, CPU bc, or Vulkan default export")
+            raise ValueError("build_cache requires x64/CUDA bc-library, CPU bc, or Vulkan default export")
         self.objects_enabled = arch in (core.x64, core.arm64, core.vulkan) and impl.current_cfg().offline_cache
         self.build_settings = dict(
             config=core._build_cache_config_key(impl.current_cfg(), impl.get_runtime().prog.get_device_caps(), True),

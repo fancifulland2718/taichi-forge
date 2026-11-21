@@ -1021,7 +1021,7 @@ std::unique_ptr<llvm_aot::KernelImpl> LlvmAotModule::load_kernel_payload(
   auto &module = *compiled.get_internal_data().compiled_data.module;
   if (arch_is_cpu(arch()) && std::any_of(module.begin(), module.end(), [](const auto &fn) {
         return !fn.isDeclaration() && fn.hasFnAttribute("taichi.aot.real_function") &&
-               fn.hasFnAttribute(llvm::Attribute::AlwaysInline);
+               !fn.hasFnAttribute(llvm::Attribute::NoInline);
       }))
     optimize_cpu_materialization(module, executor_->get_config());
   KernelLaunchHandle handle;

@@ -1833,13 +1833,14 @@ def export_package(package, output, *, arch=None, caps=None, source_root=None, a
     Selects ``arch`` on a cold Runtime or validates the active backend.
     A completed package is retained at the reported staging path if publication fails.
     CPU/CUDA bitcode and Vulkan SPIR-V retain eligible typed helper calls for
-    consumer specialization and backend inlining. CUDA ``artifact_format="bc-library"``
-    also stores compatible bitcode units once across entry points.
+    consumer specialization and backend inlining. x64 packages default to
+    ``bc-library`` to share compatible bitcode units across entry points.
+    CUDA accepts the same format. Explicit ``bc`` keeps self-contained roots.
     Vulkan Host code can load compiled shader assets with
     ``from pkgutil import get_data`` and ``get_data(__package__, "path/to/shader.spv")``.
     Literal package-relative paths are included in the export and its cache identity.
     ``build_cache=directory`` opts into producer warm start for CUDA bc-library,
-    CPU bc, and Vulkan default artifacts.
+    x64 bc-library, CPU bc, and Vulkan default artifacts.
     Unchanged source-driven builds reuse the previous complete package before
     declaration analysis. With CPU or Vulkan offline caching, free scalar kernels and
     owner-bound entries with matching source, bindings and resource contracts
@@ -1858,6 +1859,8 @@ def export_package(package, output, *, arch=None, caps=None, source_root=None, a
         raise ValueError("Build cache index must be outside the package output")
     inputs = _package_source_inputs(package, arch, source_root)
     source_files, _, dependencies, _, imported_modules, target_arch, packages = inputs
+    if artifact_format is None and target_arch.name == "x64":
+        artifact_format = "bc-library"
     assets = shader_assets(source_files, imported_modules) if target_arch.name == "vulkan" else {}
     cache = None
     if build_cache is not None:

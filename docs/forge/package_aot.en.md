@@ -10,7 +10,7 @@ No export decorator, per-kernel registration or component root is required.
 This is a limited prototype, not a complete engine distribution interface.
 Its format and supported scope are experimental.
 
-An optional producer warm start is available for CUDA bitcode libraries, CPU
+An optional producer warm start is available for x64 and CUDA bitcode libraries, CPU
 bitcode (`artifact_format="bc"`), and Vulkan's default format (omit `artifact_format`):
 
 ```python
@@ -282,7 +282,11 @@ adds no consumer checks and does not bound total asset or metadata memory.
 Resource access facts in the manifest come from the exported target code,
 without another compilation using the Producer's ordinary JIT configuration.
 
-CUDA exports can explicitly try `artifact_format="bc-library"`. Build copies
+x64 package exports default to `bc-library`. CUDA exports can select
+`artifact_format="bc-library"` explicitly. Use `bc` for self-contained LLVM
+roots. CPU producer optimization preserves numerical calls while optimizing
+the scheduler. The consumer applies the helper's inline policy after linking.
+Build copies
 retain typed `ti.func` boundaries and store compatible implementations as shared
 bitcode units. Parent units reference child units instead of embedding their
 bodies again. Unannotated numerical parameters can use the scalar or fixed tensor
@@ -321,7 +325,7 @@ Shared units are extracted when sealing entries; units requiring final resource
 numbering wait for archive remapping. Host arrays still transfer on each invocation;
 reusing specialized code does not cache their contents.
 
-CUDA `bc-library` export removes function-local redundant IR on private build
+x64 and CUDA `bc-library` export removes function-local redundant IR on private build
 copies before finalizing dependencies and content hashes. It preserves the
 effective optimization and floating-point options, including `opt_level=0`,
 and leaves model specialization and final device optimization to consumption.
@@ -620,7 +624,7 @@ owner, and instances retain separate resources. Calls reuse the existing Runtime
 argument snapshots and leases; no shared module resource pointer is switched
 to select an instance. Ordinary package calls, including hybrid mode, default
 to eligible CPU/CUDA bitcode or Vulkan 1.3 SPIR-V specialization. CPU/CUDA `bc`
-and CUDA `bc-library` specialize on the first binding; SPIR-V specializes on the
+and x64/CUDA `bc-library` specialize on the first binding; SPIR-V specializes on the
 first reuse, after an initial generic call. Fixed scalar facts come from
 declared dimensions, prepare-static captures and integer scalar captures marked
 `affects_plan=True`, with matching names, paths and dtypes. Ordinary arguments,

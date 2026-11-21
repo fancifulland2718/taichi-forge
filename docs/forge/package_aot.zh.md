@@ -7,7 +7,7 @@
 `@ti.func`、`@ti.real_func`、`@ti.pyfunc`、`@ti.dataclass` 和 `@ti.data_oriented`，无需增加导出装饰器、逐 Kernel 注册或组件根。
 这个接口目前是小范围原型，不是完整引擎的一键发行接口，格式和支持范围尚未稳定。
 
-CUDA bitcode 库、CPU bitcode（`artifact_format="bc"`）与 Vulkan 默认格式
+x64 和 CUDA bitcode 库、CPU bitcode（`artifact_format="bc"`）与 Vulkan 默认格式
 （省略 `artifact_format`）可以显式开启生产端热启动：
 
 ```python
@@ -196,7 +196,9 @@ Field 的选择机制。例如 `shape=(rows, columns) if self.batched else (colu
 清单中的资源读写事实直接取自已导出的目标代码，不再为查询这些事实按 Producer
 的普通 JIT 配置额外编译一次。
 
-CUDA 可显式试用 `artifact_format="bc-library"`：构建副本保留类型明确的
+x64 定义包默认使用 `bc-library`，CUDA 可显式选择 `artifact_format="bc-library"`。
+需要每个 LLVM 入口自包含时可选择 `bc`。CPU 生产端优化调度器时保留数值 helper 调用，
+消费端链接后再应用各函数的内联策略。构建副本保留类型明确的
 `ti.func` 调用边界，并把相容实现存为共享 bitcode 单元；上层单元引用下层单元，
 不重复装入其实体。未注解的数值参数可从当前 DSL 调用的标量/固定向量矩阵类型确定；
 末尾只返回这些值参数（或它们的 tuple）时，也可保留函数边界。参数仍是原 `ti.func`
@@ -219,7 +221,7 @@ Python/资源返回、静态重绑定及其他未能证明返回类型的函数�
 `Matrix.zero`，且要求没有静态重绑定。相应数值分支可以共用一份实现，原 DSL
 仍检查赋值类型与形状；资源/类型别名和未能证明的初始化继续使用保守规则。
 共享单元在入口封口时提取并复用；需要最终资源编号的单元仍在归档重映射后提取。
-CUDA `bc-library` 在构建私有副本上清除函数内部的冗余 IR，再确定依赖和内容 hash。
+x64 和 CUDA 的 `bc-library` 在构建私有副本上清除函数内部的冗余 IR，再确定依赖和内容 hash。
 清理遵守有效优化与浮点选项，包括 `opt_level=0`；模型特化和最终设备优化继续在消费期完成。
 正常导出不启用编译生命周期遥测或逐入口诊断。其他产物格式及普通 JIT 保持原有策略。
 Host 数组仍按调用传输数据，不能因复用特化代码而缓存数组内容。
@@ -424,7 +426,7 @@ with Runtime("cuda") as runtime:
 调用复用已有 Runtime 的参数快照/租约，不通过切换模块共享资源指针选实例。
 
 普通 package 调用（包括混合模式）默认对适用的 CPU/CUDA bitcode 或 Vulkan 1.3
-SPIR-V 执行消费时特化并保留原生准备。适用的 CPU/CUDA `bc` 和 CUDA `bc-library`
+SPIR-V 执行消费时特化并保留原生准备。适用的 CPU/CUDA `bc` 和 x64/CUDA `bc-library`
 在首次绑定时特化；SPIR-V 在相同绑定首次复用时特化，首次调用仍使用通用 AOT。
 固定标量来自原合同的模型维度、prepare-static 及 `affects_plan=True` 的整数标量捕获；
 声明的名称、路径和 dtype 须与入口一致。普通参数、未标记值、数组内容和实例地址不固定。

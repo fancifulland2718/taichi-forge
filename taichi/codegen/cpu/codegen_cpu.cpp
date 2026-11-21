@@ -540,10 +540,12 @@ void KernelCodeGenCPU::optimize_module(llvm::Module *module) {
     if (compile_config.llvm_aot_relocatable_roots) {
       for (auto &fn : *module) {
         if (!fn.isDeclaration() && fn.hasFnAttribute("taichi.aot.real_function") &&
-            fn.hasFnAttribute(llvm::Attribute::AlwaysInline)) {
+            !fn.hasFnAttribute(llvm::Attribute::NoInline)) {
+          const bool always_inline =
+              fn.hasFnAttribute(llvm::Attribute::AlwaysInline);
           fn.removeFnAttr(llvm::Attribute::AlwaysInline);
           fn.addFnAttr(llvm::Attribute::NoInline);
-          fn.addFnAttr(deferred);
+          fn.addFnAttr(deferred, always_inline ? "always" : "default");
         }
       }
     }
@@ -551,9 +553,12 @@ void KernelCodeGenCPU::optimize_module(llvm::Module *module) {
     if (compile_config.llvm_aot_relocatable_roots) {
       for (auto &fn : *module) {
         if (fn.hasFnAttribute(deferred)) {
+          const bool always_inline =
+              fn.getFnAttribute(deferred).getValueAsString() == "always";
           fn.removeFnAttr(deferred);
           fn.removeFnAttr(llvm::Attribute::NoInline);
-          fn.addFnAttr(llvm::Attribute::AlwaysInline);
+          if (always_inline)
+            fn.addFnAttr(llvm::Attribute::AlwaysInline);
         }
       }
     }

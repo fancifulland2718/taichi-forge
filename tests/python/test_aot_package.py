@@ -320,10 +320,14 @@ def test_package_module_syntax_retains_declaration_errors(source, diagnostic):
         _analyze("fixture", source, {}, "vulkan", defer_owners=True)
 
 
+@pytest.mark.parametrize("artifact_format", ["bc", None])
 @test_utils.test(arch=ti.cpu, offline_cache=True)
-def test_package_build_cache_reuses_independent_cpu_object(tmp_path, monkeypatch):
+def test_package_build_cache_reuses_independent_cpu_object(tmp_path, monkeypatch, artifact_format):
     from taichi_forge.aot import _package
     from taichi_forge.aot._package_compilation import PackageCompilation
+
+    if artifact_format is None and ti.cfg.arch != ti.x64:
+        pytest.skip("The default library format is selected on x64")
 
     ti.lang.impl.current_cfg().offline_cache_file_path = str(tmp_path / 'native')
     source = '''import taichi_forge as ti
@@ -359,12 +363,14 @@ def separate(x: ti.i32) -> ti.i32:
     def export(name):
         captures.clear()
         output = tmp_path / name
-        ti.aot.export_package(model, output, artifact_format='bc', build_cache=tmp_path / 'cache')
+        ti.aot.export_package(model, output, artifact_format=artifact_format, build_cache=tmp_path / 'cache')
         return output
 
     monkeypatch.setattr(PackageCompilation, 'compile', track_compile)
     cold = export('cold')
     assert sorted(captures) == ['left', 'right', 'separate']
+    with zipfile.ZipFile(cold / 'code.tcm') as archive:
+        assert json.loads(archive.read('aot_metadata.json'))['kernel_format'] == (artifact_format or 'bc-library')
     with monkeypatch.context() as guard:
         guard.setattr(_package, '_preflight_package', lambda *a, **kw: pytest.fail('warm declaration analysis'))
         warm = export('warm')
@@ -3639,8 +3645,8 @@ class Model:
 def test_package_library_prepares_host_arrays_and_preserves_live_arguments(tmp_path, monkeypatch, artifact_format):
     from taichi_forge_runtime.aot import _runtime
 
-    if artifact_format == "bc-library" and ti.cfg.arch != ti.cuda:
-        pytest.skip("bc-library is CUDA-only")
+    if artifact_format == "bc-library" and ti.cfg.arch not in (ti.x64, ti.cuda):
+        pytest.skip("bc-library requires x64 or CUDA")
     source = '''import taichi_forge as ti
 @ti.data_oriented
 class Model:
@@ -17199,8 +17205,8 @@ class Model:
 @pytest.mark.parametrize("function", ["func", "real_func", "library"])
 @test_utils.test(arch=[ti.cpu, ti.cuda], offline_cache=False)
 def test_package_optional_arrays_share_code_and_check_branch_requirements(tmp_path, monkeypatch, function):
-    if function == "library" and ti.cfg.arch != ti.cuda:
-        pytest.skip("bc-library requires CUDA")
+    if function == "library" and ti.cfg.arch not in (ti.x64, ti.cuda):
+        pytest.skip("bc-library requires x64 or CUDA")
     source = """
 import taichi_forge as ti
 @ti.data_oriented
@@ -19073,8 +19079,8 @@ def test_package_uses_native_struct_layout_and_compound_values(tmp_path, monkeyp
 def test_package_live_value_snapshots_share_specialized_code(tmp_path, monkeypatch, artifact_format):
     from taichi_forge_runtime.aot import _runtime
 
-    if artifact_format == "bc-library" and ti.cfg.arch != ti.cuda:
-        pytest.skip("CPU bitcode libraries are not qualified")
+    if artifact_format == "bc-library" and ti.cfg.arch not in (ti.x64, ti.cuda):
+        pytest.skip("bc-library requires x64 or CUDA")
     package = _source_package(tmp_path, monkeypatch, """
 import taichi_forge as ti
 @ti.data_oriented
@@ -21140,8 +21146,8 @@ def test_package_model_tensor_copy_rejects_incompatible_values(tmp_path, monkeyp
 @test_utils.test(arch=[ti.cpu, ti.cuda, ti.vulkan], offline_cache=False)
 def test_package_model_local_tensors_use_invocation_workspace(tmp_path, monkeypatch, ndrange, helper_kind):
     source = MODEL_LOCAL_TENSOR_SOURCE
-    if helper_kind == "library" and ti.cfg.arch != ti.cuda:
-        pytest.skip("bc-library requires CUDA")
+    if helper_kind == "library" and ti.cfg.arch not in (ti.x64, ti.cuda):
+        pytest.skip("bc-library requires x64 or CUDA")
     if helper_kind != "func":
         if ti.cfg.arch == ti.vulkan:
             pytest.skip("Vulkan does not support real functions")

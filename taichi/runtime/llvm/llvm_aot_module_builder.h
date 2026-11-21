@@ -22,7 +22,7 @@ class LlvmAotModuleBuilder : public AotModuleBuilder {
             const std::string &filename) const override;
 
   void set_artifact_format(const std::string &format) override;
-  // Internal comparison override. CUDA bc-library enables cleanup by default;
+  // Internal comparison override. bc-library enables cleanup by default;
   // other artifact formats retain their existing production policy.
   void set_ir_cleanup_for_testing(bool enabled);
   std::string cpu_build_object_key(const std::string &name, Kernel *kernel) const;

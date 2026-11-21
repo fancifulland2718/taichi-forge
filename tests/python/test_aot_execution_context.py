@@ -644,7 +644,7 @@ def test_runtime_wait_completes_retained_ordinary_prepared_replay(tmp_path):
                 assert pop(C.byref(previous)) == 0
 
 
-@test_utils.test(arch=ti.cuda, offline_cache=False)
+@test_utils.test(arch=[ti.x64, ti.cuda], offline_cache=False)
 @pytest.mark.parametrize("cleanup", [None, False, True])
 def test_bitcode_library_shares_real_function_and_validates_dependencies(tmp_path, cleanup):
     import numpy as np
@@ -690,7 +690,7 @@ def test_bitcode_library_shares_real_function_and_validates_dependencies(tmp_pat
         units = [name for name in archive.namelist() if name.startswith("code_units/")]
         assert len(units) == 1  # Actual shared storage, not two equal copies.
 
-    with Runtime("cuda") as runtime:
+    with Runtime(ti.cfg.arch.name) as runtime:
         loaded = runtime.load_module(str(artifact))
         a = runtime.ndarray("f32", (37,))
         b = runtime.ndarray("f32", (37,))
@@ -728,7 +728,7 @@ def test_bitcode_library_shares_real_function_and_validates_dependencies(tmp_pat
                 if name == units[0]:
                     contents += b"corrupted"
                 output.writestr(name, contents)
-        with Runtime("cuda") as runtime:
+        with Runtime(ti.cfg.arch.name) as runtime:
             with pytest.raises(RuntimeError, match=message):
                 runtime.load_module(str(broken)).kernel("first")
 
