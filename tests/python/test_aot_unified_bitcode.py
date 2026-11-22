@@ -8,6 +8,156 @@ import taichi_forge as ti
 from tests import test_utils
 
 
+@test_utils.test(arch=ti.vulkan, offline_cache=False)
+def test_unified_preserves_quarter_turn_rounding_for_prepare(tmp_path, monkeypatch):
+    import numpy as np
+    from taichi_forge_runtime.aot import load_package
+
+    src = tmp_path / "source"
+    src.mkdir()
+    path = src / "portable_rotation.py"
+    path.write_text("""import taichi_forge as ti
+@ti.func
+def normalized(q):
+    length = ti.sqrt(q.dot(q))
+    unit = ti.Vector([1., 0., 0., 0.])
+    if length >= 1e-8:
+        unit = q / length
+    return unit
+
+@ti.kernel
+def rotate(quaternions: ti.types.ndarray(ti.f32, 2), matrices: ti.types.ndarray(ti.f32, 3)):
+    for i in range(quaternions.shape[0]):
+        q = normalized(ti.Vector([quaternions[i, j] for j in ti.static(range(4))]))
+        w, x, y, z = q
+        rotation = ti.Matrix([
+            [1 - 2*y*y - 2*z*z, 2*x*y - 2*z*w, 2*x*z + 2*y*w],
+            [2*x*y + 2*z*w, 1 - 2*x*x - 2*z*z, 2*y*z - 2*x*w],
+            [2*x*z - 2*y*w, 2*y*z + 2*x*w, 1 - 2*x*x - 2*y*y],
+        ])
+        for row, col in ti.static(ti.ndrange(3, 3)):
+            matrices[i, row, col] = rotation[row, col]
+""", encoding="utf8")
+    monkeypatch.syspath_prepend(str(src))
+    module = importlib.import_module(path.stem)
+    output = tmp_path / "library"
+    try:
+        ti.aot.export_package(module, output, arch=[ti.vulkan], artifact_format="unified-bc-library")
+        half = np.float32(np.sqrt(0.5))
+        rotations = np.array([[half, 0, 0, half], [half, 0, 0, -half]], dtype=np.float32)
+        source = ti.ndarray(ti.f32, rotations.shape)
+        source.from_numpy(rotations)
+        dest = ti.ndarray(ti.f32, (2, 3, 3))
+        module.rotate(source, dest)
+        expected = dest.to_numpy()
+        with ti.aot.borrow_runtime() as runtime, load_package(runtime, output) as package:
+            data = runtime.ndarray("f32", rotations.shape)
+            data.write(rotations.tobytes())
+            result = runtime.ndarray("f32", expected.shape)
+            package.host.rotate(data, result)
+            actual = np.frombuffer(result.read(), np.float32).reshape(expected.shape)
+            # Near zero, the change in contraction caused by producer-side
+            # expression sharing was large in ULPs despite a tiny absolute delta.
+            np.testing.assert_array_max_ulp(actual, expected, maxulp=1)
+    finally:
+        sys.modules.pop(path.stem, None)
+
+
+@test_utils.test(arch=ti.vulkan, offline_cache=False)
+def test_unified_sampled_image_keeps_numeric_options_for_prepare(tmp_path, monkeypatch):
+    import numpy as np
+    from taichi_forge_runtime.aot import load_package
+    from taichi_forge_runtime.aot._unified_library import select_manifest
+
+    src = tmp_path / "src"
+    src.mkdir()
+    monkeypatch.syspath_prepend(str(src))
+    (src / "portable_sampler.py").write_text("""import taichi_forge as ti
+@ti.data_oriented
+class Sampler:
+    def __init__(self, bright):
+        self.bright = bright
+        scope = ti.experimental.ResourceScope(self)
+        scope.static("bright", choices=(False, True), kernel_only=True)
+    @ti.kernel
+    def read(self, image: ti.types.texture(2), out: ti.types.ndarray(ti.f32, 1)):
+        for i in range(4):
+            value = image.fetch(ti.Vector([0, 0]), 0).x
+            if ti.static(self.bright):
+                value *= 2.0
+            out[i] = value
+""", encoding="utf8")
+    output = tmp_path / "library"
+    document = ti.aot.export_package(importlib.import_module("portable_sampler"), output,
+                                     arch=["cpu", "cuda", "vulkan"], source_root=src,
+                                     artifact_format="unified-bc-library")
+    manifest = select_manifest(document, "vulkan")
+    assert len(manifest["entries"]) == 1
+    entry = next(iter(manifest["entries"].values()))
+    assert any(capture.get("prepare_static") for capture in entry["captures"])
+    with zipfile.ZipFile(output / "code.tcm") as archive:
+        assert len(json.loads(archive.read("unified_llvm.json"))["entries"]) == 1
+    with ti.aot.borrow_runtime() as runtime, load_package(runtime, output) as package:
+        pixels = runtime.ndarray("f32", (2, 2))
+        pixels.write(np.full((2, 2), 3, np.float32))
+        image = runtime.native_resource("image", "sampled", parameters=dict(shape=(2, 2), format="r32f",
+                                        filter="nearest"), bindings=dict(pixels=pixels))
+        result = runtime.ndarray("f32", (4,))
+        for bright in (False, True):
+            sampler = package.host.Sampler(bright)
+            for _ in range(2):
+                sampler.read(image, result)
+                np.testing.assert_array_equal(np.frombuffer(result.read(), np.float32), [6 if bright else 3] * 4)
+
+
+def test_unified_incremental_capture_preserves_helper_closures(tmp_path, monkeypatch):
+    import pytest
+    from taichi_forge_runtime.aot import load_package
+
+    targets = [arch for arch in (ti.cpu, ti.cuda, ti.vulkan) if arch in test_utils.expected_archs()]
+    if not targets:
+        pytest.skip("No unified LLVM frontend selected")
+    folder = tmp_path / "source"
+    folder.mkdir()
+    monkeypatch.syspath_prepend(str(folder))
+    path = folder / "unified_cache_inputs.py"
+    original = """import taichi_forge as ti
+@ti.real_func
+def scale(value: ti.i32) -> ti.i32:
+    return 2 * value
+@ti.real_func
+def forward(value: ti.i32) -> ti.i32:
+    return scale(value)
+@ti.kernel
+def apply(x: ti.i32) -> ti.i32:
+    return forward(x)
+@ti.kernel
+def vector(x: ti.types.vector(2, ti.i32)) -> ti.i32:
+    return x[0] - x[1]
+"""
+    cache = tmp_path / "cache"
+    for name, text, multiplier in (("cold", original, 2), ("warm", original, 2),
+                                   ("edited", original.replace("2 * value", "11 * value"), 11)):
+        ti.reset()
+        path.write_text(text, encoding="utf8")
+        module = importlib.import_module(path.stem)
+        try:
+            output = tmp_path / name
+            ti.aot.export_package(module, output, arch=targets, artifact_format="unified-bc-library",
+                                  build_cache=cache)
+        finally:
+            sys.modules.pop(path.stem, None)
+        stats = json.loads((cache / "unified/latest.json").read_bytes())["produce"]
+        assert stats["unified_capture_restores"] >= {"cold": 0, "warm": 2, "edited": 1}[name]
+        for target in targets:
+            ti.init(arch=target, enable_fallback=False)
+            with ti.aot.borrow_runtime() as runtime, load_package(runtime, output) as pkg:
+                assert pkg.host.apply(7) == multiplier * 7
+                assert pkg.host.vector([9, 4]) == 5
+        if name == "warm":
+            assert (tmp_path / "cold/code.tcm").read_bytes() == (output / "code.tcm").read_bytes()
+
+
 @test_utils.test(arch=[ti.cpu, ti.cuda, ti.vulkan], offline_cache=False)
 def test_unified_prepare_forwards_runtime_arrays_through_helpers(tmp_path):
     import numpy as np
@@ -93,3 +243,578 @@ def test_unified_library_retains_independent_dense_bindings(tmp_path):
         assert layout == storage["trees"][right_tree]
         assert len(storage["schemas"]) == 1
         assert storage["schemas"][layout]["nodes"][1]["extents"][0]["constant"] == 8
+
+
+def test_unified_device_resource_extents_use_one_kernel(tmp_path, monkeypatch):
+    import struct
+    import pytest
+    from taichi_forge_runtime.aot import load_package
+
+    targets = [arch for arch in (ti.cpu, ti.cuda, ti.vulkan) if arch in test_utils.expected_archs()]
+    if not targets:
+        pytest.skip("No portable consumer selected")
+    path = tmp_path / "unified_device_fields.py"
+    path.write_text(
+        """import taichi_forge as ti
+from typing import Final, NoReturn
+HAS_OFFSET: Final[bool] = True
+
+@ti.data_oriented
+class Work:
+    def __init__(self, cooperative):
+        self.cooperative = cooperative
+        scope = ti.experimental.ResourceScope(self)
+        scope.static("cooperative", choices=(False, True), kernel_only=True)
+    @ti.kernel
+    def publish(self, data: ti.types.ndarray(dtype=ti.i32, ndim=1)):
+        for i in range(32):
+            data[i] = i
+        if ti.static(self.cooperative):
+            ti.loop_config(block_dim=32)
+            for i in range(32):
+                ti.simt.block.sync()
+                data[i] = ti.simt.warp.shfl_sync_i32(ti.u32(0xffffffff), i + 1, 0)
+
+def unavailable(message: str) -> NoReturn:
+    raise RuntimeError(message)
+
+@ti.kernel
+def exchange(data: ti.types.ndarray(dtype=ti.i32, ndim=1)):
+    if ti.static(ti.lang.impl.current_cfg().arch in (ti.cuda, ti.vulkan)):
+        ti.loop_config(block_dim=8)
+        for i in range(8):
+            slots = ti.simt.block.SharedArray((8,), ti.i32)
+            slots[i] = i + 1
+            ti.simt.block.sync()
+            data[i] = slots[(i + 1) % 8]
+    else:
+        unavailable("exchange requires shared workgroup memory")
+
+@ti.real_func
+def device_offset(i: ti.i32) -> ti.i32:
+    value = i
+    if ti.static(HAS_OFFSET and ti.lang.impl.current_cfg().arch == ti.vulkan):
+        value += 19
+    else:
+        value += 4
+    return value
+@ti.data_oriented
+class Buffer:
+    FIRST = 1
+    SECOND = 2
+    def __init__(self, n, unsigned=False):
+        self.n = n
+        self.unsigned = unsigned
+        scope = ti.experimental.ResourceScope(self)
+        for name in ('FIRST', 'SECOND'):
+            scope.constant(name)
+        scope.static('unsigned', choices=(False, True))
+        scope.keys = scope.ndarray(ti.u32 if self.unsigned else ti.f32, shape=scope.dim('n'), initialization='zero')
+        if ti.lang.impl.current_cfg().arch == ti.cuda:
+            scope.data = scope.field(ti.i32, shape=scope.dim('n'))
+            scope.scratch = scope.field(ti.i32, shape=scope.dim('n'))
+        else:
+            scope.data = scope.field(ti.i32, shape=1)
+        scope.backup = scope.field_like(self.data, initialization="zero")
+    @ti.kernel
+    def update(self, i: ti.i32) -> ti.i32:
+        self.data[i] = device_offset(i)
+        if ti.static(ti.lang.impl.current_cfg().arch == ti.cuda):
+            self.scratch[i] = self.data[i] + 2
+            self.data[i] = self.scratch[i]
+        for _ in range(1 if ti.static(ti.lang.impl.current_cfg().arch == ti.cuda) else 0):
+            self.scratch[i] += 1
+        return self.data[i]
+    @ti.kernel
+    def read_scratch(self, i: ti.i32) -> ti.i32:
+        return self.scratch[i]
+    @ti.kernel
+    def exchange_tail(self, data: ti.types.ndarray(dtype=ti.i32, ndim=1)):
+        if ti.static(ti.lang.impl.current_cfg().arch in (ti.cuda, ti.vulkan)):
+            ti.loop_config(block_dim=8)
+            for i in range(8):
+                slots = ti.simt.block.SharedArray(
+                    (16 if ti.static(ti.lang.impl.current_cfg().arch == ti.vulkan) else self.n,), ti.i32)
+                width = 16 if ti.static(ti.lang.impl.current_cfg().arch == ti.vulkan) else self.n
+                slots[width - 8 + i] = width + i
+                ti.simt.block.sync()
+                data[i] = slots[width - 8 + (i + 1) % 8]
+        else:
+            unavailable("exchange requires shared workgroup memory")
+    @ti.kernel
+    def lanes(self, data: ti.types.ndarray(dtype=ti.i32, ndim=1)):
+        if ti.static(ti.lang.impl.current_cfg().arch == ti.vulkan):
+            ti.loop_config(block_dim=self.n)
+            for i in range(32):
+                data[i] = ti.simt.block.thread_idx()
+        else:
+            for i in range(32):
+                data[i] = i + 32
+""", encoding="utf8")
+    monkeypatch.syspath_prepend(str(tmp_path))
+    root = importlib.import_module(path.stem)
+    output = tmp_path / "package"
+    try:
+        ti.aot.export_package(root, output, arch=targets, artifact_format="unified-bc-library")
+    finally:
+        sys.modules.pop(path.stem, None)
+    with zipfile.ZipFile(output / "code.tcm") as archive:
+        index = json.loads(archive.read("unified_llvm.json"))
+        assert len(index["entries"]) == 6
+    for target in targets:
+        ti.init(arch=target, enable_fallback=False)
+        with ti.aot.borrow_runtime() as runtime, load_package(runtime, output) as package:
+            model = package.module(path.stem)
+            for n in (3, 8):
+                owner = model.Buffer(n, n == 8)
+                assert owner.keys.to_numpy().dtype.name == ("uint32" if n == 8 else "float32")
+                width = n if target == ti.cuda else 1
+                assert tuple(owner.data.shape) == (width,)
+                assert tuple(owner.backup.shape) == (width,)
+                assert owner.backup._group_owner is not owner.data._group_owner
+                assert hasattr(owner, "scratch") == (target == ti.cuda)
+                assert owner.update(width - 1) == width - 1 + {ti.cpu: 4, ti.cuda: 6, ti.vulkan: 19}[target]
+                if target == ti.cuda:
+                    assert owner.read_scratch(width - 1) == width - 1 + 7
+                else:
+                    with pytest.raises(RuntimeError, match="unavailable resource slot"):
+                        owner.read_scratch(0)
+            data = runtime.ndarray("i32", (8,))
+            lane_data = runtime.ndarray("i32", (32,))
+            model.Work(False).publish(lane_data)
+            assert struct.unpack("32i", lane_data.read()) == tuple(range(32))
+            if target == ti.cuda:
+                model.Work(True).publish(lane_data)
+                assert struct.unpack("32i", lane_data.read()) == (1,) * 32
+            else:
+                with pytest.raises(RuntimeError, match="cuda_shfl_sync_i32 requires CUDA"):
+                    model.Work(True).publish(lane_data)
+            for width in (8, 16):
+                model.Buffer(width).lanes(lane_data)
+                expected = tuple(i % width if target == ti.vulkan else i + 32 for i in range(32))
+                assert struct.unpack("32i", lane_data.read()) == expected
+            if target == ti.cpu:
+                with pytest.raises(RuntimeError, match="(another device|shared workgroup memory)"):
+                    model.exchange(data)
+            else:
+                model.exchange(data)
+                assert struct.unpack("8i", data.read()) == (2, 3, 4, 5, 6, 7, 8, 1)
+                for n in (8, 12):
+                    model.Buffer(n).exchange_tail(data)
+                    width = 16 if target == ti.vulkan else n
+                    assert struct.unpack("8i", data.read()) == tuple(width + (i + 1) % 8 for i in range(8))
+
+
+def test_unified_workgroup_width_and_exchange_bind_at_prepare(tmp_path, monkeypatch):
+    import numpy as np
+    import pytest
+    from taichi_forge_runtime.aot import load_package
+
+    targets = [arch for arch in (ti.cpu, ti.cuda, ti.vulkan) if arch in test_utils.expected_archs()]
+    if not targets:
+        pytest.skip("No portable consumer selected")
+    src = tmp_path / "source"
+    src.mkdir()
+    path = src / "group_exchange.py"
+    path.write_text("""import taichi_forge as ti
+@ti.data_oriented
+class Exchange:
+    def __init__(self, width):
+        self.width = width
+        scope = ti.experimental.ResourceScope(self)
+        scope.dim("width")
+
+    @ti.kernel
+    def run(self, data: ti.types.ndarray(dtype=ti.i32, ndim=1)):
+        ti.loop_config(block_dim=self.width)
+        for i in range(data.shape[0]):
+            lane = ti.simt.block.thread_idx()
+            slots = ti.simt.block.SharedArray((self.width,), ti.i32)
+            old = data[i]
+            if lane % 2:
+                slots[lane] = old + 1
+            else:
+                slots[lane] = old
+            ti.simt.block.sync()
+            live = ti.min(self.width, data.shape[0] - (i - lane))
+            neighbor = (lane + 1) % live
+            other = slots[neighbor]
+            ti.simt.block.sync()
+            slots[lane] = old + 2 * other
+            ti.simt.block.sync()
+            data[i] = slots[neighbor] + old + ti.simt.block.global_thread_idx()
+""", encoding="utf8")
+    monkeypatch.syspath_prepend(str(src))
+    root = importlib.import_module(path.stem)
+    output = tmp_path / "library"
+    try:
+        ti.aot.export_package(root, output, arch=targets, source_root=src,
+                              artifact_format="unified-bc-library")
+    finally:
+        sys.modules.pop(path.stem, None)
+    with zipfile.ZipFile(output / "code.tcm") as archive:
+        assert len(json.loads(archive.read("unified_llvm.json"))["entries"]) == 1
+    for arch in targets:
+        ti.init(arch=arch, enable_fallback=False)
+        with ti.aot.borrow_runtime() as runtime, load_package(runtime, output) as pkg:
+            for width in (1, 8, 16, 32, 8):
+                size = 99 if arch == ti.cpu else 96
+                data = runtime.ndarray("i32", (size,))
+                model = pkg.host.Exchange(width)
+                for salt in (7, 23):
+                    before = (np.arange(size, dtype=np.int32) + salt) ** 2
+                    expected = before.copy()
+                    for start in range(0, size, width):
+                        part = before[start:start + width]
+                        initial = part + np.arange(len(part), dtype=np.int32) % 2
+                        expected[start:start + width] = part + np.roll(part + 2 * np.roll(initial, -1), -1)
+                    expected += np.arange(size, dtype=np.int32)
+                    data.write(before.tobytes())
+                    model.run(data)
+                    np.testing.assert_array_equal(np.frombuffer(data.read(), np.int32), expected)
+                    if arch == ti.cuda and width == 16 and salt == 7:
+                        jit_data = before.copy()
+                        root.Exchange(width).run(jit_data)
+                        np.testing.assert_array_equal(jit_data, expected)
+
+
+def test_unified_cpu_uses_consumer_default_workgroup_width(tmp_path, monkeypatch):
+    import numpy as np
+    import pytest
+    from taichi_forge_runtime.aot import load_package
+
+    if ti.cpu not in test_utils.expected_archs():
+        pytest.skip("No CPU consumer selected")
+    path = tmp_path / "default_group_width.py"
+    path.write_text("""import taichi_forge as ti
+@ti.kernel
+def lanes(data: ti.types.ndarray(dtype=ti.i32, ndim=1)):
+    for i in range(data.shape[0]):
+        data[i] = ti.simt.block.thread_idx()
+""", encoding="utf8")
+    monkeypatch.syspath_prepend(str(tmp_path))
+    output = tmp_path / "library"
+    try:
+        ti.aot.export_package(importlib.import_module(path.stem), output, arch=[ti.cpu],
+                              artifact_format="unified-bc-library")
+    finally:
+        sys.modules.pop(path.stem, None)
+    for width in (4, 16):
+        ti.init(arch=ti.cpu, default_cpu_block_dim=width, enable_fallback=False)
+        with ti.aot.borrow_runtime() as runtime, load_package(runtime, output) as package:
+            data = runtime.ndarray("i32", (35,))
+            package.host.lanes(data)
+            np.testing.assert_array_equal(np.frombuffer(data.read(), np.int32), np.arange(35) % width)
+
+
+def test_unified_cpu_requires_convergent_group_barriers(tmp_path, monkeypatch):
+    import pytest
+    from taichi_forge_runtime.aot import load_package
+
+    if ti.cpu not in test_utils.expected_archs():
+        pytest.skip("No CPU consumer selected")
+    path = tmp_path / "conditional_group.py"
+    path.write_text("""import taichi_forge as ti
+@ti.kernel
+def incompatible(data: ti.types.ndarray(dtype=ti.i32, ndim=1)):
+    ti.loop_config(block_dim=8)
+    for i in range(data.shape[0]):
+        if data[i] > 0:
+            ti.simt.block.sync()
+        data[i] = 5
+
+@ti.kernel
+def device_vote(data: ti.types.ndarray(dtype=ti.i32, ndim=1)):
+    ti.loop_config(block_dim=8)
+    for i in range(data.shape[0]):
+        data[i] = ti.simt.block.sync_count_nonzero(i % 2)
+
+@ti.kernel
+def warp_mask(data: ti.types.ndarray(dtype=ti.i32, ndim=1)):
+    for i in range(data.shape[0]):
+        data[i] = ti.simt.warp.active_mask()
+""", encoding="utf8")
+    monkeypatch.syspath_prepend(str(tmp_path))
+    root = importlib.import_module(path.stem)
+    output = tmp_path / "library"
+    try:
+        ti.aot.export_package(root, output, arch=[ti.cpu], artifact_format="unified-bc-library")
+    finally:
+        sys.modules.pop(path.stem, None)
+    ti.init(arch=ti.cpu)
+    with ti.aot.borrow_runtime() as runtime, load_package(runtime, output) as pkg:
+        data = runtime.ndarray("i32", (16,))
+        with pytest.raises(RuntimeError, match="convergent top-level phases"):
+            pkg.host.incompatible(data)
+        with pytest.raises(RuntimeError, match="requires CUDA"):
+            pkg.host.device_vote(data)
+        with pytest.raises(RuntimeError, match="cuda_active_mask requires CUDA"):
+            pkg.host.warp_mask(data)
+
+
+def test_unified_prepare_specializes_device_branches_and_auto_loops(tmp_path, monkeypatch):
+    from taichi_forge_runtime.aot._unified_library import select_manifest
+
+    targets = [arch for arch in (ti.cpu, ti.cuda, ti.vulkan) if arch in test_utils.expected_archs()]
+    if not targets:
+        import pytest
+
+        pytest.skip("No unified LLVM frontend selected")
+    source = tmp_path / "unified_source.py"
+    source.write_text(
+        """import taichi_forge as ti
+
+@ti.kernel
+def common(data: ti.types.ndarray(dtype=ti.i32, ndim=1)):
+    for i in range(data.shape[0]):
+        data[i] += 1
+
+@ti.kernel
+def explicit_threads(data: ti.types.ndarray(dtype=ti.i32, ndim=1)):
+    ti.loop_config(parallelize=8)
+    for i in range(data.shape[0]):
+        data[i] += 1
+
+@ti.kernel
+def update_second_row(data: ti.types.ndarray(dtype=ti.i32, ndim=2)):
+    data[1, 0] += 7
+
+@ti.kernel
+def upload_pair(data: ti.types.ndarray(dtype=ti.i32, ndim=1), pair: ti.types.vector(2, ti.i32)):
+    data[0] = pair[0]
+    data[1] = pair[1]
+
+@ti.kernel
+def transpose(src: ti.types.ndarray(dtype=ti.types.matrix(2, 3, ti.f32), ndim=1),
+              dst: ti.types.ndarray(dtype=ti.types.matrix(3, 2, ti.f32), ndim=1)):
+    for i in range(src.shape[0]):
+        dst[i] = src[i].transpose()
+        old = ti.atomic_add(dst[i], src[i].transpose())
+        dst[i] += old
+
+@ti.kernel
+def control(data: ti.types.ndarray(dtype=ti.i32, ndim=1)):
+    for i in range(data.shape[0]):
+        total = 0
+        for j in range(data[i]):
+            if j % 2:
+                if j == 3:
+                    continue
+                total += j
+            else:
+                total -= 2
+            total += 5
+        k = 0
+        while k < data[i]:
+            k += 1
+            if k == 2:
+                total += 7
+                break
+            total -= 1
+        k = 0
+        while k < data[i]:
+            k += 1
+            if k % 2:
+                total += 10
+            else:
+                total += 20
+                if k >= 4:
+                    break
+            total += 1
+        data[i] = total
+
+@ti.func
+def feature_pair(x):
+    if ti.static(ti.lang.impl.current_cfg().arch == ti.vulkan
+                 and ti.lang.impl.get_runtime().prog.get_device_caps().get(ti.DeviceCapability.spirv_has_float64)):
+        return x + 2, x + 3
+    else:
+        return x - 2, x - 3
+
+@ti.kernel
+def routed(data: ti.types.ndarray(dtype=ti.i32, ndim=1)):
+    data[1], data[2] = feature_pair(data[1])
+    if ti.static(ti.lang.misc.is_extension_supported(ti.lang.impl.current_cfg().arch, ti.extension.data64)):
+        data[3] += 4
+    if ti.static(ti.lang.impl.current_cfg().arch == ti.cuda):
+        data[0] = 17
+    else:
+        data[0] = 23
+
+@ti.kernel
+def scheduled(data: ti.types.ndarray(dtype=ti.i32, ndim=1)):
+    ti.loop_config(block_dim=8)
+    if ti.static(ti.lang.impl.current_cfg().arch == ti.cuda):
+        ti.loop_config(block_dim=1)
+    if ti.static(ti.lang.impl.current_cfg().arch == ti.cpu):
+        ti.loop_config(serialize=True)
+    for i in range(8):
+        if ti.static(ti.lang.impl.current_cfg().arch == ti.vulkan):
+            data[i] = ti.simt.block.thread_idx()
+        else:
+            data[i] = i + 8
+""", encoding="utf8")
+    monkeypatch.syspath_prepend(str(tmp_path))
+    root = importlib.import_module("unified_source")
+    try:
+        output = tmp_path / "package"
+        document = ti.aot.export_package(root, output, artifact_format="unified-bc-library")
+        restricted = tmp_path / "restricted"
+        restricted_document = ti.aot.export_package(
+            root, restricted, arch=targets[0], artifact_format="unified-bc-library")
+        assert set(document["targets"]) == {"x64", "cuda", "vulkan"}
+        assert restricted_document["targets"] == [targets[0].name]
+    finally:
+        import sys
+
+        sys.modules.pop(root.__name__, None)
+    with zipfile.ZipFile(output / "code.tcm") as archive:
+        table = json.loads(archive.read("unified_llvm.json"))
+        assert set(table) == {"version", "entries", "members"} and table["version"] == 2
+        with zipfile.ZipFile(restricted / "code.tcm") as subset:
+            assert json.loads(subset.read("unified_llvm.json"))["entries"] == table["entries"]
+            units = {item for item in archive.namelist() if item.startswith("code_units/")}
+            assert units == {item for item in subset.namelist() if item.startswith("code_units/")}
+            assert all(archive.read(unit) == subset.read(unit) for unit in units)
+        functions = {}
+        for target in targets:
+            manifest = select_manifest(document, target.name)
+            functions[target] = {manifest["entries"][name]["definition"].split(".")[-1]: unit
+                                 for name, unit in table["entries"].items()}
+            assert "unified_abi.json" in table["members"]
+        assert len({row["common"] for row in functions.values()}) == 1
+        assert len({row["explicit_threads"] for row in functions.values()}) == 1
+        assert all(row["common"] != row["explicit_threads"] for row in functions.values())
+        assert len({row["routed"] for row in functions.values()}) == 1
+        assert len({row["transpose"] for row in functions.values()}) == 1
+        assert len(units) == 8
+    import numpy as np
+    from unittest.mock import patch
+    from taichi_forge_runtime.execution import ExecutionSession
+    from taichi_forge_runtime.aot import _unified_library
+
+    for target in targets:
+        ti.init(arch=target, enable_fallback=False)
+        with (
+            ti.aot.borrow_runtime() as runtime,
+            patch.object(_unified_library, "select_manifest", wraps=select_manifest) as select,
+            ExecutionSession(mode="aot", arch=target.name, runtime=runtime, package_paths=[output]) as session,
+        ):
+            model = importlib.import_module("unified_source")
+            pair = runtime.ndarray("i32", (2,))
+            for values in ([9, -2], [-5, 11]):
+                model.upload_pair(pair, values)
+                runtime.wait()
+                np.testing.assert_array_equal(np.frombuffer(pair.read(), np.int32), values)
+            lanes = runtime.ndarray("i32", (8,))
+            model.scheduled(lanes)
+            expected_lanes = np.arange(8) + (0 if target == ti.vulkan else 8)
+            np.testing.assert_array_equal(np.frombuffer(lanes.read(), np.int32), expected_lanes)
+            assert session.loaded_packages == (output,)
+            assert sum(call.args[0].get("tcm_sha256") == document["tcm_sha256"]
+                       for call in select.call_args_list) == 1
+            values = runtime.ndarray("i32", (4,))
+            src = runtime.ndarray("f32", (4,), element_shape=(2, 3))
+            dst = runtime.ndarray("f32", (4,), element_shape=(3, 2))
+            for start in (3, 11):
+                expected = np.full(4, start, np.int32)
+                values.write(expected.tobytes())
+                model.routed(values)
+                model.common(values)
+                runtime.wait()
+                expected[0] = 17 if target == ti.cuda else 23
+                has_fp64 = ti.lang.impl.get_runtime().prog.get_device_caps().get(ti.DeviceCapability.spirv_has_float64)
+                sign = 1 if target == ti.vulkan and has_fp64 else -1
+                expected[1:3] += sign * np.array([2, 3], np.int32)
+                if ti.lang.misc.is_extension_supported(target, ti.extension.data64):
+                    expected[3] += 4
+                np.testing.assert_array_equal(np.frombuffer(values.read(), np.int32), expected + 1)
+                matrices = np.arange(24, dtype=np.float32).reshape(4, 2, 3) + start
+                src.write(matrices.tobytes())
+                model.transpose(src, dst)
+                runtime.wait()
+                actual = np.frombuffer(dst.read(), np.float32).reshape(4, 3, 2)
+                np.testing.assert_array_equal(actual, 3 * matrices.transpose(0, 2, 1))
+                counts = np.array([0, 1, 3, 7], dtype=np.int32)
+                values.write(counts.tobytes())
+                model.control(values)
+                runtime.wait()
+                expected = [sum(5 + (j if j % 2 else -2) for j in range(n) if j != 3)
+                            + (6 if n >= 2 else -n)
+                            + sum(11 if k % 2 else 20 + (k < 4)
+                                  for k in range(1, min(n, 4) + 1)) for n in counts]
+                np.testing.assert_array_equal(np.frombuffer(values.read(), np.int32), expected)
+            # A specialized first use can leave the generic executable
+            # unmaterialized. Direct callers can still request it later.
+            view = select_manifest(document, target.name)
+            symbol, = (name for name, header in view["entries"].items()
+                       if header["definition"].endswith(".common"))
+            module = session._packages[output]._module
+            values.write(np.zeros(4, np.int32).tobytes())
+            with module.kernel(symbol).bind(values).prepare(specialize=False) as generic:
+                generic.submit().wait()
+            np.testing.assert_array_equal(np.frombuffer(values.read(), np.int32),
+                                          np.ones(4, np.int32))
+            if target in (ti.cpu, ti.cuda):
+                # The same callable can later receive one member of an
+                # interleaved field. Writes must skip the adjacent member.
+                from contextlib import closing
+                fields = ti.FieldsBuilder()
+                member, adjacent = ti.field(ti.i32), ti.field(ti.i32)
+                fields.dense(ti.i, 4).place(member, adjacent)
+                tree = fields.finalize()
+                try:
+                    initial = np.arange(4, dtype=np.int32)
+                    member.from_numpy(initial)
+                    adjacent.fill(71)
+                    with closing(runtime.import_dense_view(ti.experimental.ndarray_view(member))) as sliced:
+                        with module.kernel(symbol).bind(sliced).prepare(specialize=True) as ready:
+                            ready.submit().wait()
+                    np.testing.assert_array_equal(member.to_numpy(), initial + 1)
+                    np.testing.assert_array_equal(adjacent.to_numpy(), np.full(4, 71))
+                finally:
+                    tree.destroy()
+            # This kernel reads no explicit shape. Only physical addressing
+            # depends on the row stride, which differs between these bindings.
+            update, = (name for name, header in view["entries"].items()
+                       if header["definition"].endswith(".update_second_row"))
+            wide = runtime.ndarray("i32", (2, 3))
+            narrow = runtime.ndarray("i32", (3, 2))
+            zeros = np.zeros(6, np.int32)
+            wide.write(zeros.tobytes())
+            narrow.write(zeros.tobytes())
+            with (module.kernel(update).bind(wide).prepare(specialize=True) as first,
+                  module.kernel(update).bind(narrow).prepare(specialize=True) as second):
+                first.submit().wait()
+                second.submit().wait()
+                first.submit().wait()
+            np.testing.assert_array_equal(np.frombuffer(wide.read(), np.int32), [0, 0, 0, 14, 0, 0])
+            np.testing.assert_array_equal(np.frombuffer(narrow.read(), np.int32), [0, 0, 7, 0, 0, 0])
+
+    if ti.vulkan in targets:
+        # A standalone Runtime can expose fewer capabilities than the
+        # compiler's default Vulkan device. The helper must see that Runtime.
+        import ctypes
+        from taichi_forge_runtime.aot import Runtime, load_package
+        from taichi_forge_runtime.aot import _c_api as abi
+
+        ti.reset()
+        with Runtime("vulkan") as runtime:
+            api = runtime._api
+            count = abi.UInt()
+            api.call(api.ti_get_runtime_capabilities, runtime._handle, ctypes.byref(count), None)
+            entries = (abi.CapabilityLevelInfo * count.value)()
+            api.call(api.ti_get_runtime_capabilities, runtime._handle, ctypes.byref(count), entries)
+            for item in entries:
+                if abi.CAPABILITY_NAMES.get(item.capability) == "spirv_has_float64":
+                    item.level = 0
+            setter = api.library.ti_set_runtime_capabilities_ext
+            setter.argtypes = [abi.Handle, abi.UInt, ctypes.POINTER(abi.CapabilityLevelInfo)]
+            setter.restype = None
+            api.call(setter, runtime._handle, count, entries)
+            with load_package(runtime, output) as package:
+                data = runtime.ndarray("i32", (4,))
+                data.write(np.array([0, 10, 0, 0], np.int32).tobytes())
+                package.module("unified_source").routed(data)
+                runtime.wait()
+                np.testing.assert_array_equal(np.frombuffer(data.read(), np.int32)[:3], [23, 8, 7])

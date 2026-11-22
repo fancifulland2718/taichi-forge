@@ -401,6 +401,60 @@ inputs or restrict ordinary JIT specialization from actual arguments.
 
 ## Producing and consuming a package
 
+### One LLVM library for x64, CUDA and Vulkan
+
+For the experimental unified format, pass the imported application roots and
+the list of consumer targets to the same export call. For example, to produce
+a clean baseline and then rebuild after editing one of its definitions,
+
+```python
+def build(output):
+    return ti.aot.export_package(
+        roots, output, arch=["x64", "cuda", "vulkan"],
+        source_root="path/to/src", artifact_format="unified-bc-library",
+        build_cache="build/unified-cache",
+    )
+
+build("build/unified-v1")
+# Edit an application definition, then run the next build in a fresh process.
+build("build/unified-v2")
+```
+
+Start with an empty cache for the first build and keep its output directory.
+Give each new build its own output path. Omitting `arch` enables all three
+consumer backends. Passing one backend or a list limits the allowed consumers
+and produces the same portable numerical units. Supply any target-specific
+capabilities using `caps`.
+
+In version 2, **produce** writes one LLVM root per numerical implementation and
+stores its shared helpers by content hash in `code.tcm`. Supported static
+device predicates remain in the bitcode. The producer cache can restore a
+captured entry with its signature and helper dependencies. **Prepare** resolves
+the predicates for the actual device, specializes for the bound resources and
+compiles the resulting code with that device's backend. **Perform** submits
+that executable with live input. All three consumers open the same package.
+An entry that uses an external provider still requires that provider on the device.
+
+In a unified library, one declared model dimension can supply both
+`ti.loop_config(block_dim=self.width)` and `ti.simt.block.SharedArray((self.width,), dtype)`.
+Produce records the width expression, local lane index and synchronization operations once.
+Prepare binds the width and scratch extents for the instance. CUDA and Vulkan use native
+workgroups. On x64, a CPU worker executes a logical group with its own scratch array.
+When a cooperative parallel range omits its width, x64 uses the consuming
+Program's `default_cpu_block_dim`. A serialized range without a width uses one lane.
+At each execution barrier the worker finishes the current phase for every active lane
+before running the next phase. Ordinary CPU ranges retain their existing scheduling.
+
+The x64 lowering supports branches within a phase and scalar values live across
+barriers. Multi-lane execution barriers must be at the top level of the workgroup
+loop body. Cooperative nested loops and device-specific subgroup instructions have
+separate support requirements. Widths can vary by instance, and each call reads live data.
+The logical group's local index starts at zero. The global invocation index on x64
+counts active lanes from the beginning of the parallel range. CUDA-only block vote
+operations require a CUDA device branch.
+
+### Checking application declarations
+
 During development, optionally use
 `ti.aot.check_package(module, arch="cuda", source_root="path/to/src")`
 to inspect the exporter's declarations without constructing application
@@ -2030,7 +2084,8 @@ width and each model-sized shared array. Binding a direct call or recording a
 Graph resolves them from the immutable model arguments and checks the physical
 device limits. Matching dimensions reuse the task pipeline across resource views.
 CPU accepts model-sized block hints for ordinary parallel ranges and uses its own
-scheduler. SharedArray still requires a GPU workgroup. Declarations inside
+scheduler. The single-target formats described here require a GPU workgroup for
+SharedArray. The unified LLVM format also supports the x64 logical groups described above. Declarations inside
 real_func and device-determined sizes remain unsupported.
 The CUDA implementation introduced LLVM AOT task schema **21** and compiled cache schema **101**. Older
 build artifacts must be rebuilt; there is no legacy task-record compatibility layer.

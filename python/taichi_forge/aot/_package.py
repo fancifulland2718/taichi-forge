@@ -56,7 +56,7 @@ def _fail(module, node, message):
     raise PackageExportError(f"{module}:{getattr(node, 'lineno', 1)}: {message}")
 
 
-def _describe_entry_argument(argument):
+def _describe_entry_argument(argument, *, portable=False):
     """Check the existing package ABI before creating any representative arrays."""
     from taichi_forge.types._argument_descriptor import describe_annotation
     from taichi_forge.types.annotations import Template
@@ -75,7 +75,7 @@ def _describe_entry_argument(argument):
     if descriptor.kind in ("acceleration_structure", "rw_texture"):
         from taichi_forge.lang import impl
 
-        if impl.current_cfg().arch.name != "vulkan":
+        if not portable and impl.current_cfg().arch.name != "vulkan":
             raise ValueError("acceleration structures and storage image inputs require Vulkan")
         if descriptor.kind == "rw_texture" and descriptor.ndim not in (1, 2, 3):
             raise ValueError("storage image arguments require rank 1, 2 or 3")
@@ -87,7 +87,7 @@ def _describe_entry_argument(argument):
 
         if type(descriptor.ndim) is not int or descriptor.ndim not in (1, 2, 3):
             raise ValueError("sampled texture arguments require rank 1, 2 or 3")
-        if impl.current_cfg().arch.name not in ("cuda", "vulkan"):
+        if not portable and impl.current_cfg().arch.name not in ("cuda", "vulkan"):
             raise ValueError("sampled texture arguments require CUDA or Vulkan")
         if argument.default is not inspect.Parameter.empty:
             raise ValueError("kernel default arguments are not yet supported")
@@ -107,7 +107,7 @@ def _describe_entry_argument(argument):
 def _signature_failures(sources, imported_modules):
     """Report independent kernel signature gaps together, without compilation."""
     failures = []
-    for module, _, _, _, _, _, _, definitions in sources:
+    for module, _, _, _, tree, _, _, definitions in sources:
         imported = imported_modules[module]
         for definition in definitions:
             if definition["kind"] != "kernel" or definition.get("requires_owner") or definition.get("error_interface"):
@@ -123,7 +123,7 @@ def _signature_failures(sources, imported_modules):
                 if argument.name in definition.get("function_templates", ()):
                     continue
                 try:
-                    _describe_entry_argument(argument)
+                    _describe_entry_argument(argument, portable=getattr(tree, "_package_portable", False))
                 except (TypeError, ValueError) as error:
                     failures.append(
                         f"{module}:{definition['node'].lineno}: {definition['name']} "
@@ -272,7 +272,55 @@ def _owner_schema(
     return schema
 
 
+_SOURCE_RESOURCE_FIELDS = frozenset((
+    "type_node",
+    "allocation",
+    "allocation_members",
+    "dimension_sources",
+    "local_type_source",
+    "dimension_alias_checks",
+    "declaration_module",
+    "type_declaration_module",
+    "declaration_owner",
+    "value_declaration",
+    "static_declaration",
+    "constant_declaration",
+    "constant_from_class",
+    "scope_allocation",
+    "scope_allocations",
+    "group_builder",
+    "placement",
+    "placement_alias",
+    "borrow_declaration",
+    "reference_declaration",
+    "reference_assignment",
+    "constructor_call",
+    "input_references",
+    "default_constructor_call",
+    "order_source",
+    "sequence_declaration",
+    "constructors",
+    "owner_alternatives",
+    "choice_guards",
+    "shape_guards",
+    "source_guards",
+    "_device_declarations",
+))
+
+
+def _public_resource(item):
+    return {key: value for key, value in item.items() if key not in _SOURCE_RESOURCE_FIELDS}
+
+
 def _construction_schema(module, node, constructor, kind, namespace, earlier=None, *, owner_class=None):
+    from ._package_targets import common_resource_schema, resource_views
+
+    variants = {}
+    for targets, branch in resource_views(constructor, module, kind, _fail, namespace):
+        schema = _construction_schema(module, node, branch, kind, namespace, earlier, owner_class=owner_class)
+        variants.update(dict.fromkeys(targets, schema))
+    if variants:
+        return common_resource_schema(variants, lambda message: _fail(module, constructor, message))
     conditions = getattr(constructor, "_package_construction_conditions", {})
     for name in conditions:
         declaration = (earlier or {}).get(name, {})
@@ -388,7 +436,9 @@ def _analyze(module, source, namespace, target, *, defer_owners=False, build_cac
         nested, target_reference = build_cache.module_syntax(module, source, lambda: _module_syntax(module, tree, kind))
     construction = materialize_inherited_construction(tree, namespace, module, _fail, kind)
     construction.extend(discover_construction_methods(tree, namespace, module, _fail, kind))
-    tree._package_target_selections = select_target_branches(tree, kind, target, module, _fail) if target_reference else []
+    tree._package_portable = target is None
+    tree._package_target_selections = (select_target_branches(tree, kind, target, module, _fail,
+                                                            include_host=target is None) if target_reference else [])
     from ._package_factories import normalize_factories
     from ._package_contexts import discover_contexts
 
@@ -641,6 +691,26 @@ def _host_projection(
             return self._allocation(node)
 
         def visit_If(self, node):
+            mask = getattr(node, "_package_target_mask", None)
+            schema = binding_schemas.get(self.owner)
+            if mask is not None and schema is not None and any("_device_declarations" in item for item in schema.values()):
+                from ._package_targets import PORTABLE_TARGETS, resource_schema_for_mask
+
+                outer = getattr(self, "target_mask", (1 << len(PORTABLE_TARGETS)) - 1)
+                node.test = self.visit(node.test)
+                try:
+                    for key, active in (("body", outer & mask), ("orelse", outer & ~mask)):
+                        if not active:
+                            setattr(node, key, [ast.copy_location(ast.Pass(), node)] if key == "body" else [])
+                            continue
+                        self.target_mask = active
+                        binding_schemas[self.owner] = resource_schema_for_mask(schema, active)
+                        suite = ast.Module(body=getattr(node, key), type_ignores=[])
+                        setattr(node, key, self.generic_visit(suite).body)
+                finally:
+                    binding_schemas[self.owner] = schema
+                    self.target_mask = outer
+                return node
             optional = getattr(node, "_package_optional_input_borrows", ())
             if optional:
                 absent = []
@@ -717,6 +787,10 @@ def _host_projection(
                     variants = []
                     for identity in sorted(receivers):
                         concrete = construction_schema(identity)
+                        if getattr(self, "target_mask", None) is not None and concrete.get(target.attr, {}).get("_device_declarations"):
+                            from ._package_targets import resource_schema_for_mask
+
+                            concrete = resource_schema_for_mask(concrete, self.target_mask)
                         if concrete.get(target.attr, {}).get("allocation") == [node.lineno, node.col_offset]:
                             variants.append({"owner": identity, "schema": concrete})
                     if not variants:
@@ -1554,7 +1628,7 @@ def _host_projection(
         host_tree = ast.Module(body=tree.body, type_ignores=tree.type_ignores)
         host_tree = copy.deepcopy(host_tree, memo)
         memo.clear()
-        if getattr(builder, "_arch", None) is not None:
+        if getattr(builder, "_arch", None) is not None and not getattr(tree, "_package_portable", False):
             # Select ordinary Host backend branches only after discovering
             # typed numerical call tuples. Changing that discovery syntax can
             # lose receiver provenance for Host-selected Kernel references.
@@ -1645,7 +1719,7 @@ def _package_source_inputs(package, arch, source_root):
 
 @reuse_factory_sources()
 @reuse_declaration_syntax()
-def _preflight_package(package, *, arch=None, source_root=None, inputs=None, build_cache=None):
+def _preflight_package(package, *, arch=None, source_root=None, inputs=None, build_cache=None, portable=False):
     """Resolve declarations once the current sources and imported bindings are known."""
     source_files, namespaces, dependency_report, application_modules, imported_modules, target_arch, packages = (
         inputs if inputs is not None else _package_source_inputs(package, arch, source_root)
@@ -1654,7 +1728,7 @@ def _preflight_package(package, *, arch=None, source_root=None, inputs=None, bui
     for name, path, relative, text in source_files:
         imported = imported_modules[name]
         try:
-            tree, kind, owners, definitions = _analyze(name, text, vars(imported), target_arch.name,
+            tree, kind, owners, definitions = _analyze(name, text, vars(imported), None if portable else target_arch.name,
                                                       defer_owners=True, build_cache=build_cache)
         except PackageExportError as error:
             failures.append(str(error))
@@ -1857,6 +1931,10 @@ def export_package(package, output, *, arch=None, caps=None, source_root=None, a
         raise ValueError("Package output must be outside its application source root")
     if build_cache is not None and Path(build_cache).resolve().is_relative_to(output):
         raise ValueError("Build cache index must be outside the package output")
+    if artifact_format == "unified-bc-library":
+        from ._unified_package import export_library
+
+        return export_library(package, output, arch, caps, source_root, build_cache)
     inputs = _package_source_inputs(package, arch, source_root)
     source_files, _, dependencies, _, imported_modules, target_arch, packages = inputs
     if artifact_format is None and target_arch.name == "x64":
@@ -1878,7 +1956,8 @@ def export_package(package, output, *, arch=None, caps=None, source_root=None, a
         return _export_package(output, declarations, source_root, caps, artifact_format, compilation, cache, assets)
 
 
-def _export_package(output, declarations, source_root, caps, artifact_format, compilation, cache, assets):
+def _export_package(output, declarations, source_root, caps, artifact_format, compilation, cache, assets,
+                    *, projection=None):
     import taichi_forge as ti
     from taichi_forge.aot._component import Component
     from taichi_forge_runtime._static_values import static_key, read_static_key
@@ -1895,9 +1974,13 @@ def _export_package(output, declarations, source_root, caps, artifact_format, co
     ) = declarations
     package = packages[0]
     module = Module(caps=caps, artifact_format=artifact_format)
+    if projection is not None:
+        module._aot_builder._set_unified_build_directory(str(projection.directory.parent / "bodies"), cache is not None)
     portable_ir = module._arch == ti.vulkan or (
-        module._arch in (ti.cpu, ti.cuda) and artifact_format in (None, "bc", "bc-library")
+        module._arch in (ti.cpu, ti.cuda) and artifact_format in (None, "bc", "bc-library", "unified-bc-library")
     )
+    if artifact_format == "unified-bc-library":
+        compilation.array_descriptor_arguments = True
     compilation.attach(module, function_library=portable_ir)
     if cache is not None and cache.objects_enabled:
         compilation.capture_cache = cache
@@ -1912,7 +1995,7 @@ def _export_package(output, declarations, source_root, caps, artifact_format, co
         from ._package_static import StaticPreparation
 
         compilation.static_preparation = StaticPreparation(
-            sources, method_implementations=owner_graph.method_implementations)
+            sources, method_implementations=owner_graph.method_implementations, portable=compilation.portable)
     manifest = dict(
         version=(
             3
@@ -1925,7 +2008,7 @@ def _export_package(output, declarations, source_root, caps, artifact_format, co
         ),
         kind="forge_definition_package_prototype",
         artifact_format=artifact_format or "default",
-        target=module._arch.name,
+        target="unified-llvm" if artifact_format == "unified-bc-library" else module._arch.name,
         target_capabilities=list(caps or ()),
         module_root=package.__name__,
         module_roots=[item.__name__ for item in packages],
@@ -1978,6 +2061,10 @@ def _export_package(output, declarations, source_root, caps, artifact_format, co
         ],
     )
     payloads = assets.copy()
+    if artifact_format == "unified-bc-library":
+        # A target-neutral body may still have different source-level
+        # implementations selected by ti.static or a hardware provider.
+        manifest["frontend_target"] = module._arch.name
     if manifest["input_families"]:
         manifest["version"] = 43
     if manifest["preparation_owners"]:
@@ -2221,46 +2308,24 @@ def _export_package(output, declarations, source_root, caps, artifact_format, co
             if any(item.get("optional_presence") for item in schema.values()):
                 manifest["version"] = max(13, manifest["version"])
             manifest["owners"][name + "." + class_name] = {
-                attribute: {
-                    key: value
-                    for key, value in item.items()
-                    if key
-                    not in (
-                        "allocation",
-                        "allocation_members",
-                        "dimension_sources",
-                        "local_type_source",
-                        "dimension_alias_checks",
-                        "declaration_module",
-                        "type_declaration_module",
-                        "declaration_owner",
-                        "value_declaration",
-                        "static_declaration",
-                        "constant_declaration",
-                        "constant_from_class",
-                        "scope_allocation",
-                        "scope_allocations",
-                        "group_builder",
-                        "placement",
-                        "placement_alias",
-                        "borrow_declaration",
-                        "reference_declaration",
-                        "reference_assignment",
-                        "constructor_call",
-                        "input_references",
-                        "default_constructor_call",
-                        "order_source",
-                        "sequence_declaration",
-                        "constructors",
-                        "owner_alternatives",
-                        "choice_guards",
-                        "shape_guards",
-                        "source_guards",
-                    )
-                }
+                attribute: _public_resource(item)
                 for attribute, item in schema.items()
             }
             for attribute, item in schema.items():
+                if "_device_declarations" in item:
+                    from ._package_targets import device_resource
+                    from taichi_forge_runtime.aot._unified_library import differences
+
+                    for target in item["_device_declarations"]:
+                        selected_resource = device_resource(item, target)
+                        path = [name + "." + class_name, attribute]
+                        if selected_resource is None:
+                            changes = [[path]]
+                        else:
+                            changes = [[path + suffix, *replacement] for suffix, *replacement in
+                                       differences(_public_resource(item), _public_resource(selected_resource))]
+                        if changes:
+                            manifest.setdefault("device_resources", {}).setdefault(target, []).extend(changes)
                 if item.get("owner_alternatives"):
                     manifest["version"] = max(69, manifest["version"])
                     manifest["owners"][name + "." + class_name][attribute]["owner_alternatives"] = [
@@ -2296,6 +2361,11 @@ def _export_package(output, declarations, source_root, caps, artifact_format, co
                         for attribute in members
                         if member_schemas[attribute].get("shape_policy")
                     }
+                    for attribute, item in member_schemas.items():
+                        for target, view in item.get("_device_declarations", {}).items():
+                            if view is None or view.get("shape") != item.get("shape"):
+                                device_members = manifest["field_groups"][key].setdefault("device_field_declarations", {})
+                                device_members.setdefault(target, {})[attribute] = view["shape"] if view else None
                     if shapes:
                         manifest["field_groups"][key]["shapes"] = shapes
                         # The generated Host allocation supplies dimensions for
@@ -2481,7 +2551,7 @@ def _export_package(output, declarations, source_root, caps, artifact_format, co
             for argument in arguments:
                 annotation = argument.annotation
                 try:
-                    descriptor = _describe_entry_argument(argument)
+                    descriptor = _describe_entry_argument(argument, portable=compilation.portable)
                 except (TypeError, ValueError) as error:
                     _fail(name, node, f"argument {argument.name!r}: {error}")
                 dtype = str(descriptor.element.scalar_type) if descriptor.element is not None else None
@@ -2492,13 +2562,13 @@ def _export_package(output, declarations, source_root, caps, artifact_format, co
                     argument_schema.append(dict(name=argument.name, kind="acceleration_structure"))
                     manifest["version"] = max(98, manifest["version"])
                 elif descriptor.kind == "rw_texture":
-                    values.append(ti.Texture(descriptor.fmt, (2,) * descriptor.ndim))
+                    values.append(annotation if compilation.portable else ti.Texture(descriptor.fmt, (2,) * descriptor.ndim))
                     argument_schema.append(dict(name=argument.name, kind="rw_texture",
                                                 ndim=descriptor.ndim, fmt=descriptor.fmt.name,
                                                 lod=annotation.lod))
                     manifest["version"] = max(98, manifest["version"])
                 elif descriptor.kind == "texture":
-                    values.append(ti.Texture(ti.Format.rgba8, (2,) * descriptor.ndim))
+                    values.append(annotation if compilation.portable else ti.Texture(ti.Format.rgba8, (2,) * descriptor.ndim))
                     argument_schema.append(dict(name=argument.name, kind="texture", ndim=descriptor.ndim))
                     manifest["version"] = max(86, manifest["version"])
                 elif isinstance(annotation, NdarrayType):
@@ -2867,6 +2937,11 @@ def _export_package(output, declarations, source_root, caps, artifact_format, co
                     ]
                     for item in capture:
                         resource = compilation_schema.get(item["name"], {})
+                        if resource.get("_device_declarations") and item["kind"] == "dense_field":
+                            absent = [target for target, view in resource["_device_declarations"].items() if view is None]
+                            if absent:
+                                item["absent_devices"] = sorted(absent)
+                                item["optional_array"] = dict(element=resource["element"], ndim=len(resource["shape"]))
                         if resource.get("prepare_static"):
                             item["prepare_static"] = resource["choices"]
                             manifest["version"] = max(81, manifest["version"])
@@ -2905,12 +2980,17 @@ def _export_package(output, declarations, source_root, caps, artifact_format, co
                     projected_captures = entry_manifest["captures"] != capture
                     if projected_captures:
                         layout_keys = {"layout_owner_path", "layout_member"}
-                        if len(capture) != len(entry_manifest["captures"]) or any(
-                            {key: value for key, value in original.items() if key not in layout_keys}
-                            != {key: value for key, value in current.items() if key not in layout_keys}
-                            for original, current in zip(entry_manifest["captures"], capture)
-                        ):
-                            raise PackageExportError("Shared numerical capture binding changed its parameter contract")
+                        original_captures = entry_manifest["captures"]
+                        if len(capture) != len(original_captures):
+                            raise PackageExportError(f"{definition_name}: shared numerical capture count changed")
+                        for original, current in zip(original_captures, capture):
+                            changed = sorted(key for key in (original.keys() | current.keys()) - layout_keys
+                                             if original.get(key) != current.get(key) or
+                                             (key in original) != (key in current))
+                            if changed:
+                                raise PackageExportError(
+                                    f"{definition_name}: shared numerical capture {current['name']} differs from "
+                                    f"{entry_manifest['definition']} in {', '.join(changed)}")
                     if entry_manifest.get("admission") != admission or projected_captures:
                         # The compiler's code/ABI identity is already equal.
                         # Instance type/provenance checks are a separate logical
@@ -3136,6 +3216,11 @@ def _export_package(output, declarations, source_root, caps, artifact_format, co
     payloads.update(context_payloads)
     if not manifest["entries"]:
         raise PackageExportError("Package contains no supported decorated kernels")
+    if projection is not None:
+        if any(hashlib.sha256(path.read_text(encoding="utf8").encode("utf8")).hexdigest() != manifest["sources"][name]
+               for name, path, *_ in sources):
+            raise PackageExportError("Source changed during unified export")
+        return projection.finish(module, manifest, payloads)
     output.parent.mkdir(parents=True, exist_ok=True)
     staging = Path(tempfile.mkdtemp(prefix=".forge-package-", dir=output.parent))
     complete = False

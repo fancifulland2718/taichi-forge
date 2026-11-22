@@ -2046,7 +2046,8 @@ class Model:
 
 @test_utils.test(arch=ti.vulkan, offline_cache=False)
 @pytest.mark.parametrize("write", [False, True])
-def test_package_ray_filter_checks_effects_of_nested_array_helper(tmp_path, monkeypatch, write):
+@pytest.mark.parametrize("portable", [False, True])
+def test_package_ray_filter_checks_effects_of_nested_array_helper(tmp_path, monkeypatch, write, portable):
     source = """import taichi_forge as ti
 
 @ti.func
@@ -2067,11 +2068,30 @@ def trace(scene: ti.types.acceleration_structure(), flags: ti.types.ndarray(ti.i
     if write:
         source = source.replace("    return flags[i]", "    flags[i] = 0\n    return flags[i]")
     package = _source_package(tmp_path, monkeypatch, source, initializer="from .model import trace\n")
+    options = dict(arch=["cpu", "cuda", "vulkan"], artifact_format="unified-bc-library",
+                   caps={"vulkan": ["spirv_has_ray_query"]}) if portable else dict(caps=["spirv_has_ray_query"])
     if write:
         with pytest.raises(ti.aot.PackageExportError, match="read-only"):
-            ti.aot.export_package(package, tmp_path / "sdk", caps=["spirv_has_ray_query"])
-    else:
-        ti.aot.export_package(package, tmp_path / "sdk", caps=["spirv_has_ray_query"])
+            ti.aot.export_package(package, tmp_path / "sdk", **options)
+        return
+    ti.aot.export_package(package, tmp_path / "sdk", **options)
+    if portable:
+        if not ti.hardware.ray.is_available():
+            pytest.skip("Vulkan ray query is unavailable on the selected device")
+        vertices = ti.ndarray(ti.f32, (3, 3))
+        indices = ti.ndarray(ti.i32, (1, 3))
+        vertices.from_numpy(np.array([[-1., -1., 0.], [1., -1., 0.], [0., 1., 0.]], np.float32))
+        indices.from_numpy(np.array([[0, 1, 2]], np.int32))
+        with ti.hardware.ray.TriangleBLAS(vertices, indices) as blas, \
+                ti.hardware.ray.InstanceTLAS([ti.hardware.ray.RayInstance(blas)]) as scene, \
+                ti.aot.borrow_runtime() as runtime, load_package(runtime, tmp_path / "sdk") as code:
+            resource = runtime.import_acceleration_structure(scene)
+            flags = runtime.ndarray("i32", (1,))
+            out = runtime.ndarray("i32", (2,))
+            for accepted in (1, 0, 1):
+                flags.write(np.array([accepted], np.int32))
+                code.host.trace(resource, flags, out)
+                np.testing.assert_array_equal(np.frombuffer(out.read(), np.int32), [accepted, accepted])
 
 
 @test_utils.test(arch=ti.vulkan, offline_cache=False)
