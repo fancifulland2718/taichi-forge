@@ -139,8 +139,14 @@ def test_aot_module_array_opt_in_preserves_legacy_field_export(tmp_path):
     module.save(tmp_path)
     assert not (tmp_path / "root_storage.json").exists()
     module.add_field("value", value, as_array=True)
-    with pytest.raises(RuntimeError, match="relocatable dense trees"):
-        module.save(tmp_path)
+    # Dense roots are relocatable even when struct-for lowering keeps lists.
+    # Array exposure remains explicit and preserves the legacy Field export.
+    module.save(tmp_path)
+    metadata = json.loads((tmp_path / "root_storage.json").read_text())
+    assert set(metadata["views"]) == {"value"}
+    view = metadata["views"]["value"]
+    assert view["shape"] == [4]
+    assert view["index_strides_bytes"] == [4]
 
 
 @test_utils.test(arch=[ti.cpu], offline_cache=False)
