@@ -158,6 +158,47 @@ def vector(x: ti.types.vector(2, ti.i32)) -> ti.i32:
             assert (tmp_path / "cold/code.tcm").read_bytes() == (output / "code.tcm").read_bytes()
 
 
+@test_utils.test(arch=ti.cpu, offline_cache=False)
+def test_unified_incremental_capture_survives_moving_host_declarations(tmp_path, monkeypatch):
+    from taichi_forge_runtime.aot import load_package
+
+    src = tmp_path / "source"
+    src.mkdir()
+    monkeypatch.syspath_prepend(str(src))
+    path = src / "moved_declaration.py"
+    original = """import taichi_forge as ti
+@ti.data_oriented
+class Model:
+    def __init__(self, bias):
+        self.bias = bias
+        self.host_value = 2
+        scope = ti.experimental.ResourceScope(self)
+        scope.static('bias', choices=(3,), kernel_only=True)
+    @ti.kernel
+    def apply(self, x: ti.i32) -> ti.i32:
+        return x + ti.static(self.bias)
+"""
+    moved = original.replace("self.host_value = 2", "# Updated Host default\n        self.host_value = 17")
+    expanded = moved.replace("choices=(3,)", "choices=(3, 9)")
+    cache = tmp_path / "cache"
+    for label, source in (("initial", original), ("moved", moved), ("expanded", expanded)):
+        path.write_text(source, encoding="utf8")
+        module = importlib.import_module(path.stem)
+        output = tmp_path / label
+        try:
+            ti.aot.export_package(module, output, arch=[ti.cpu], artifact_format="unified-bc-library",
+                                  build_cache=cache)
+        finally:
+            sys.modules.pop(path.stem, None)
+        stats = json.loads((cache / "unified/latest.json").read_bytes())["produce"]
+        assert stats["unified_capture_restores"] == (1 if label == "moved" else 0)
+        with ti.aot.borrow_runtime() as runtime, load_package(runtime, output) as package:
+            for bias in ((3, 9) if label == "expanded" else (3,)):
+                model = package.host.Model(bias)
+                assert model.apply(7) == 7 + bias
+                assert model.host_value == (2 if label == "initial" else 17)
+
+
 @test_utils.test(arch=[ti.cpu, ti.cuda, ti.vulkan], offline_cache=False)
 def test_unified_prepare_forwards_runtime_arrays_through_helpers(tmp_path):
     import numpy as np

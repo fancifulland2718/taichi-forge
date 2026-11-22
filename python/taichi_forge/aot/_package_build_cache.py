@@ -25,6 +25,25 @@ class _UntrackedInput(Exception):
     pass
 
 
+# Consumed by the Host source rewriter after declaration resolution. The
+# numerical capture uses the resolved declaration, including its binding path.
+_HOST_SOURCE_POSITIONS = frozenset((
+    "scope_allocation", "scope_allocations", "allocation", "static_declaration",
+    "constant_declaration", "value_declaration", "sequence_declaration",
+    "reference_declaration", "reference_assignment", "borrow_declaration",
+))
+
+
+def _capture_declaration(item):
+    result = {key: value for key, value in item.items() if key not in _HOST_SOURCE_POSITIONS}
+    if "_device_declarations" in result:
+        result["_device_declarations"] = {
+            target: _capture_declaration(view) if view is not None else None
+            for target, view in item["_device_declarations"].items()
+        }
+    return result
+
+
 def _scalar_kernel_inputs(kernel, modules):
     """Dependency identity for free, lexically closed scalar numerical code.
 
@@ -324,7 +343,8 @@ class PackageBuildCache:
                     return ast.dump(node)
                 raise TypeError("Untracked producer declaration")
 
-            declaration = json.dumps(schema, sort_keys=True, default=syntax)
+            declaration = json.dumps({name: _capture_declaration(item) for name, item in schema.items()},
+                                     sort_keys=True, default=syntax)
             return value_digest((self.object_context, fn.__module__, fn.__qualname__, kernel.opt_level,
                                  declaration, environment._symbolic_dimensions, dict(environment._source_scope_paths)))
         except (TypeError, ValueError, AttributeError, _UntrackedInput):
