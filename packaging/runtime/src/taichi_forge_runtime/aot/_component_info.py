@@ -4,7 +4,8 @@ Inspection shares header/static validation with Component. It does not admit
 device execution, allocate resources, or interpret layouts or execution plans.
 """
 from collections import Counter
-from contextlib import contextmanager
+from contextlib import contextmanager, nullcontext
+import hashlib
 import json
 from pathlib import Path
 from urllib.parse import quote
@@ -25,51 +26,70 @@ def _valid_source_path(path, *, indexed=False):
 
 
 @contextmanager
-def _document_reader(path):
+def _document_reader(path, *, module=None):
     path = Path(path).resolve(strict=True)
-    if path.is_dir():
-        def read_file(relative):
-            target = path / relative
-            if relative.startswith(BLOCK_PREFIX) and relative.endswith(".bin") and target.stat().st_size > BLOCK_LIMIT:
+    with (nullcontext() if path.is_dir() else ZipFile(path)) as archive:
+        if archive is None:
+            exists = lambda name: (path / name).is_file()
+            size = lambda name: (path / name).stat().st_size
+            load = lambda name: (path / name).read_bytes()
+        else:
+            counts = Counter(archive.namelist())
+            exists = counts.__contains__
+            size = lambda name: archive.getinfo(name).file_size
+
+            def load(name):
+                if counts[name] != 1:
+                    raise ValueError(f"Artifact document must occur exactly once: {name!r}")
+                return archive.read(name)
+
+        members = None
+        if module is not None:
+            if not hasattr(module, "_document_members"):
+                if exists("unified_llvm.json"):
+                    from ._unified_library import select_records
+
+                    index = json.loads(load("unified_llvm.json"))
+                    if isinstance(index, dict) and index.get("version") == 2:
+                        members = index["members"]
+                    elif isinstance(index, dict):
+                        arch = module._runtime.arch
+                        target = "x64" if arch == "cpu" else arch
+                        members = select_records(index["base"], index["targets"][target])["members"]
+                module._document_members = members
+            members = module._document_members
+
+        def read_member(relative):
+            name = relative if members is None else members[relative]
+            if members is not None and (len(name) != 72 or not name.startswith("records/")
+                                        or any(c not in "0123456789abcdef" for c in name[8:])):
+                raise ValueError(f"Invalid unified record for {relative!r}")
+            if (relative.startswith(BLOCK_PREFIX) and relative.endswith(".bin")
+                    and exists(name) and size(name) > BLOCK_LIMIT):
                 raise ValueError("Oversized packed component entry block")
-            return target.read_bytes()
+            data = load(name)
+            if members is not None and hashlib.sha256(data).hexdigest() != name[8:]:
+                raise ValueError(f"Changed unified record for {relative!r}")
+            return data
 
         def read(relative):
             if relative.startswith(ENTRY_PREFIX):
-                return read_entry(relative, read_file, lambda name: (path / name).exists())
-            return read_file(relative)
+                return read_entry(relative, read_member, members.__contains__ if members is not None else exists)
+            return read_member(relative)
 
         yield read
-    else:
-        with ZipFile(path) as archive:
-            counts = Counter(archive.namelist())
-
-            def read_member(relative):
-                if counts[relative] != 1:
-                    raise ValueError(f"Artifact document must occur exactly once: {relative!r}")
-                if (relative.startswith(BLOCK_PREFIX) and relative.endswith(".bin")
-                        and archive.getinfo(relative).file_size > BLOCK_LIMIT):
-                    raise ValueError("Oversized packed component entry block")
-                return archive.read(relative)
-
-            def read(relative):
-                if relative.startswith(ENTRY_PREFIX):
-                    return read_entry(relative, read_member, counts.__contains__)
-                return read_member(relative)
-
-            yield read
 
 
-def _read_document(path, relative):
-    with _document_reader(path) as read:
+def _read_document(path, relative, *, module=None):
+    with _document_reader(path, module=module) as read:
         return json.loads(read(relative))
 
 
-def _read_contract(path, name):
+def _read_contract(path, name, *, module=None):
     from ._runtime import _name
 
     _name(name)
-    with _document_reader(path) as read:
+    with _document_reader(path, module=module) as read:
         document = json.loads(read("components/" + quote(name, safe="-_.") + ".json"))
         contract = decode_contract_document(document, read)
     _validate_header(contract, name)

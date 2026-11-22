@@ -1158,7 +1158,7 @@ class Module(_Resource):
             self._check()
             _name(name)
             relative = "component_entries/" + quote(name, safe="-_.") + ".json"
-            with _document_reader(self._source_path) as read:
+            with _document_reader(self._source_path, module=self) as read:
                 document = json.loads(read(relative), object_pairs_hook=_unique_record_fields)
                 value = decode_entry_document(document, read)
             if value.get("version") != 1 or value.get("entry") != name:
@@ -1193,7 +1193,7 @@ class Module(_Resource):
             self._check()
             _name(name)
             relative = "executions/" + quote(name, safe="-_.") + ".json"
-            with _document_reader(self._source_path) as read:
+            with _document_reader(self._source_path, module=self) as read:
                 payload = read(relative)
                 document = json.loads(payload, object_pairs_hook=_unique_fields)
                 if isinstance(document, dict) and "storage_format" in document:

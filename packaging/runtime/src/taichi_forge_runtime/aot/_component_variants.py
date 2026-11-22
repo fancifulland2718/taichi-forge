@@ -15,11 +15,11 @@ def _decode(configuration):
     return {name: read_static_key(value) for name, value in configuration.items()}
 
 
-def _read_family(path, name):
+def _read_family(path, name, *, module=None):
     from ._runtime import _name
 
     _name(name)
-    return _read_document(path, "component_families/" + quote(name, safe="-_.") + ".json")
+    return _read_document(path, "component_families/" + quote(name, safe="-_.") + ".json", module=module)
 
 
 class _FamilySelection:
@@ -180,7 +180,7 @@ class ComponentVariants(_FamilySelection):
         with module._runtime._lock:
             module._check()
             self._module = module
-            contract = _read_family(module._source_path, name)
+            contract = _read_family(module._source_path, name, module=module)
             super().__init__(contract, name, module._runtime.arch, module.component)
             kernels = set()
             for component in self._components.values():

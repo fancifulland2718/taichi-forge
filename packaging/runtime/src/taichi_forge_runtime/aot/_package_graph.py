@@ -204,7 +204,7 @@ class GraphBuilder:
         if not isinstance(kernel, entry) or kernel.package is not self.package:
             raise ValueError("Package Graph dispatch requires an entry in the same loaded package")
         kernel = kernel._select(owner)
-        check_admission(owner, kernel.contract)
+        check_admission(owner, kernel.contract, arch=self.package.runtime.arch)
         kernel._check_layout(owner)
         if template_args:
             # JIT Graph uses array exemplars to obtain argument types.
@@ -583,7 +583,7 @@ class Graph:
         """Inspect compiled effects without allocating, preparing or submitting."""
         self.package._check()
         for owner, contract in self.admissions:
-            check_admission(owner, contract)
+            check_admission(owner, contract, arch=self.package.runtime.arch)
         for owner, schema, previous in self.plan_values.values():
             if _plan_key(_plan_value(owner, schema)) != _plan_key(previous):
                 raise ValueError("Plan parameter changed before write inspection; rebuild the Graph")
@@ -678,7 +678,7 @@ class Graph:
         if arguments.keys() != self.arguments.keys():
             raise ValueError("Graph binding must supply exactly its declared arguments")
         for owner, contract in self.admissions:
-            check_admission(owner, contract)
+            check_admission(owner, contract, arch=self.package.runtime.arch)
         for owner, schema, previous in self.plan_values.values():
             if _plan_key(_plan_value(owner, schema)) != _plan_key(previous):
                 raise ValueError(f"Plan parameter {schema['name']!r} changed; rebuild the Graph before preparing")
@@ -701,11 +701,12 @@ class Graph:
             # the entry capture's nullable-record contract for an absent member.
             captured[name] = capture_value(owner, schema) if value is _MISSING_PLAN_VALUE else value
         for expressions, inputs in self.range_checks:
-            check_model_static_ranges(expressions, lambda name: captured[inputs[name]])
+            check_model_static_ranges(expressions, lambda name: captured[inputs[name]], arch=self.package.runtime.arch)
         resources = []
         for name, (owner, schema) in self.captures.items():
             if schema["kind"] == "local_tensor_workspace":
-                shape = local_workspace_shape(schema["shape"], lambda dim: captured[schema["inputs"][dim]])
+                shape = local_workspace_shape(schema["shape"], lambda dim: captured[schema["inputs"][dim]],
+                                              arch=self.package.runtime.arch)
                 resource = dict(kind="ndarray", name=name, dtype=schema["dtype"], shape=list(shape))
                 if self.package.runtime.arch == "cuda":
                     resource["usage"] = ["storage", "local_tensor"]

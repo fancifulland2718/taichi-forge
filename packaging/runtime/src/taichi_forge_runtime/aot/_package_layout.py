@@ -34,12 +34,14 @@ def layout_selection(contract, owner):
 
 
 def _select_members(contract, selected):
-    if not contract.get("conditions"):
+    unavailable = {name for name, shape in contract.get("device_members", {}).items() if shape is None}
+    if not contract.get("conditions") and not unavailable:
         return contract
     active = {
         name: paths
         for name, paths in contract["members"].items()
-        if all(selected[key] is value for key, value in contract["conditions"].get(name, {}).items())
+        if name not in unavailable and all(selected[key] is value
+                                            for key, value in contract.get("conditions", {}).get(name, {}).items())
     }
     source = json.loads(contract["schema"])
     source_paths, _ = _tree(source["nodes"])
@@ -186,14 +188,17 @@ def _select_orders(contract, selected):
 
 
 def _select_shapes(contract, selected):
-    if not contract.get("shapes"):
+    shapes = {name: shape for name, shape in contract.get("device_members", {}).items() if shape is not None}
+    if not contract.get("shapes") and not shapes:
         return contract
     source = json.loads(contract["schema"])
     nodes = source["nodes"]
     paths, children = _tree(nodes)
     by_path = {path: index for index, path in paths.items()}
     replaced = set()
-    for name, policy in contract["shapes"].items():
+    shapes.update({name: policy["if_true" if selected[policy["condition"]] else "if_false"]
+                   for name, policy in contract.get("shapes", {}).items() if name in contract["members"]})
+    for name, shape in shapes.items():
         if name not in contract["members"]:
             continue
         selector = contract["members"][name]
@@ -208,7 +213,6 @@ def _select_shapes(contract, selected):
             or any(children.get(leaf) for leaf in leaves)
         ):
             raise ValueError("Field shape selection requires an independent default AOS allocation")
-        shape = policy["if_true" if selected[policy["condition"]] else "if_false"]
         if not isinstance(shape, (tuple, list)) or any(
             not (type(axis) is str and axis or type(axis) is int and 0 < axis <= 2**31 - 1) for axis in shape
         ):

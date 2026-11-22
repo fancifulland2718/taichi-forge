@@ -59,7 +59,7 @@ def selected_owner_declaration(owner, item):
     return {**item, **matches[0]}
 
 
-def check_admission(owner, contract):
+def check_admission(owner, contract, *, arch=None):
     admission = contract.get("admission")
     if admission:
         for binding in admission.get("constants", {}).values():
@@ -99,7 +99,7 @@ def check_admission(owner, contract):
         def required(paths):
             return any(
                 all(
-                    bool(evaluate_extent(expression, guard_value, min_value=-(2**31), max_value=2**31 - 1))
+                    bool(evaluate_extent(expression, guard_value, min_value=-(2**31), max_value=2**31 - 1, arch=arch))
                     is truth
                     for expression, truth in path
                 )
@@ -220,7 +220,8 @@ def presence_active(owner, spec):
 
 def capture_is_absent(owner, spec):
     return bool(
-        any(not path_value(owner, predicate["path"]) for predicate in spec.get("nullable_booleans", ()))
+        spec.get("absent_devices") and owner._forge_package_owner._manifest["frontend_target"] in spec["absent_devices"]
+        or any(not path_value(owner, predicate["path"]) for predicate in spec.get("nullable_booleans", ()))
         or spec.get("nullable_record") and path_value(owner, spec["nullable_record"]) is None
         or spec.get("nullable_boolean") and not path_value(owner, spec["nullable_boolean"])
     )

@@ -170,6 +170,7 @@ class ExecutionSession:
         self._lock = threading.RLock()
         self._modules, self._packages = {}, {}
         self._index = None
+        self._discovered_projection = None
         self._roots = set()
         self._module_names = set()
         self._jit_dependencies = set()
@@ -276,6 +277,7 @@ class ExecutionSession:
                 if file.name == "package.json":
                     candidates.add(Path(distribution.locate_file(file)).resolve())
         index = []
+        self._discovered_projection = None
         jit_dependencies = set()
         package_owned = set()
         for path in sorted(candidates):
@@ -283,10 +285,22 @@ class ExecutionSession:
                 manifest = json.loads(path.read_text(encoding="utf8"))
             except (OSError, ValueError) as error:
                 raise ValueError(f"Cannot read package manifest: {path}") from error
+            unified = isinstance(manifest, dict) and manifest.get("kind") == "forge_unified_definition_library"
+            if unified:
+                from .aot._unified_library import select_manifest
+
+                if self.arch not in manifest["targets"]:
+                    continue
+                manifest = select_manifest(manifest, self.arch)
             if not isinstance(manifest, dict) or manifest.get("kind") != "forge_definition_package_prototype":
                 continue
             root = manifest.get("entry_module", manifest.get("module_root"))
-            modules = manifest.get("application_modules", ())
+            modules = manifest.get("application_modules")
+            if "application_modules" not in manifest and isinstance(root, str):
+                # A single-root package stores its Host tree relative to that
+                # root. Its source inventory also covers the public children.
+                modules = [name for name in manifest.get("sources", {})
+                           if name == root or name.startswith(root + ".")]
             if (
                 not isinstance(root, str)
                 or not isinstance(modules, list)
@@ -294,7 +308,8 @@ class ExecutionSession:
             ):
                 raise ValueError(f"Package has no valid module import boundary: {path}")
             module_names = frozenset(modules) | {root}
-            if self.mode == "hybrid" and manifest.get("target") == self.arch:
+            target = manifest.get("frontend_target", manifest.get("target"))
+            if self.mode == "hybrid" and target == self.arch:
                 helpers = manifest.get("jit_dependency_modules", [])
                 if not isinstance(helpers, list) or not all(isinstance(name, str) for name in helpers):
                     raise ValueError(f"Invalid JIT dependency module list: {path}")
@@ -308,7 +323,14 @@ class ExecutionSession:
                 for name in module_names
                 if "host/" + name.replace(".", "/") + "/__init__.py" in manifest.get("files", {})
             )
-            index.append((path.parent, manifest.get("target"), root, module_names, packages))
+            index.append((path.parent, target, root, module_names, packages))
+            # The ordinary single-library session already decoded this edition
+            # during import discovery. Transfer it to the loader on first use.
+            # Catalog discovery keeps only the small index for multiple SDKs.
+            if len(index) == 1 and unified:
+                self._discovered_projection = (path.parent, manifest)
+            else:
+                self._discovered_projection = None
         self._index = tuple(index)
         self._jit_dependencies = jit_dependencies - package_owned
 
@@ -319,6 +341,10 @@ class ExecutionSession:
         if isinstance(value, ModuleType):
             for package in self._packages.values():
                 prefix = package._name + "."
+                if "application_modules" not in package._manifest:
+                    if value.__name__ == package._name or value.__name__.startswith(prefix):
+                        return package._manifest["module_root"] + value.__name__[len(package._name):]
+                    continue
                 if value.__name__.startswith(prefix):
                     return value.__name__[len(prefix) :]
         return None
@@ -369,7 +395,15 @@ class ExecutionSession:
                     if self.runtime is None:
                         self.runtime = self._stack.enter_context(Runtime(self.arch, **self.runtime_options))
                     if directory not in self._packages:
-                        package = self._stack.enter_context(load_package(self.runtime, directory))
+                        projection = self._discovered_projection
+                        if projection is not None and projection[0] == directory:
+                            from .aot._package import LoadedPackage
+
+                            package = LoadedPackage(self.runtime, directory, _projection=projection[1])
+                            self._discovered_projection = None
+                        else:
+                            package = load_package(self.runtime, directory)
+                        package = self._stack.enter_context(package)
                         package._public_hybrid_imports = self.mode == "hybrid" and self._finder is not None
                         self._packages[directory] = package
                     module = self._packages[directory].module(name)
@@ -391,6 +425,7 @@ class ExecutionSession:
                 self._closed, self._active = True, False
                 self._modules.clear()
                 self._packages.clear()
+                self._discovered_projection = None
 
     def __exit__(self, *_):
         self.close()

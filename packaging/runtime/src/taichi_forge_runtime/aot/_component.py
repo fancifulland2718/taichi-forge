@@ -114,7 +114,7 @@ class Component:
     def __init__(self, module, name):
         with module._runtime._lock:
             module._check()
-            contract = _read_contract(module._source_path, name)
+            contract = _read_contract(module._source_path, name, module=module)
             host_resource_capability = "component_host_resources_v1" in contract["required_capabilities"]
             private_shape_capability = "component_private_array_extents_v1" in contract["required_capabilities"]
             capabilities = {"dense_snode_group_v1", "component_root_v1"}

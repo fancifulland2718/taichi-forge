@@ -17,7 +17,7 @@ _PATH_KEYS = frozenset(
 )
 
 
-def specialization_entries(path, target, entries):
+def specialization_entries(path, target, entries, *, unified=False):
     """Read native execution policy once, outside ordinary call dispatch.
 
     The native loader validates the same metadata. Unsupported formats/tasks
@@ -27,6 +27,10 @@ def specialization_entries(path, target, entries):
 
     if target not in ("x64", "arm64", "cuda", "vulkan"):
         return frozenset()
+    if unified:
+        # The shared library retains pre-offload loops. The selected device
+        # creates its task dispatch during prepare.
+        return frozenset(entries)
     llvm = target != "vulkan"
     metadata = _read_document(path, "aot_metadata.json" if llvm else "metadata.json")
     if llvm and metadata.get("kernel_format") not in ("bc", "bc-library"):
@@ -215,6 +219,8 @@ class OwnerGuard:
             visit(contract.get("admission", {}))
             captures.extend(contract["captures"])
         for spec in captures:
+            if package._manifest.get("frontend_target") in spec.get("absent_devices", ()):
+                continue
             if not visit(spec):
                 continue
             if spec["kind"] != "local_tensor_workspace" and not spec.get("dimension_relations"):

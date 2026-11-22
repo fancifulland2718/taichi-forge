@@ -511,7 +511,9 @@ class _ModuleBinding:
                 raise ValueError("Local element type changed before its Field allocation")
         group_key = member.get("field_group", owner_key)
         contract = self.package._manifest["field_groups"][group_key]
-        if dimensions.keys() != set(contract["dimensions"]):
+        declared_dimensions = set(contract["dimensions"])
+        if (dimensions.keys() - declared_dimensions if contract.get("device_members")
+                else dimensions.keys() != declared_dimensions):
             raise ValueError("Field group dimensions differ from its native schema")
         declared_members = contract["members"]
         from ._package_layout import layout_condition_paths, layout_selection, select_layout
@@ -1749,7 +1751,7 @@ class entry:
         from ._package_calls import CachedCall, OwnerGuard, reusable_value, specialization_constant_args
         from ._package_values import owner_type
 
-        check_admission(owner, contract)
+        check_admission(owner, contract, arch=package.runtime.arch)
         selected._check_layout(owner)
         guard = OwnerGuard(self, selected, owner)
         arguments = [
@@ -1764,7 +1766,7 @@ class entry:
             item["name"]: capture_value(owner, item)
             for item in contract["captures"] if item["kind"] != "local_tensor_workspace"
         }
-        check_model_static_ranges(contract.get("model_static_ranges", ()), captured.__getitem__)
+        check_model_static_ranges(contract.get("model_static_ranges", ()), captured.__getitem__, arch=package.runtime.arch)
         workspaces = []
         allocated_workspaces = []
         previous_workspaces = iter(previous.workspaces if previous is not None else ())
@@ -1774,7 +1776,7 @@ class entry:
                 if item["kind"] == "local_tensor_workspace":
                     # Size the workspace from the exact scalar argument
                     # snapshot, never a second read of mutable Host attributes.
-                    shape = local_workspace_shape(item["shape"], captured.__getitem__)
+                    shape = local_workspace_shape(item["shape"], captured.__getitem__, arch=package.runtime.arch)
                     value = next(previous_workspaces, None)
                     if (
                         value is not None
@@ -1949,10 +1951,23 @@ class LoadedPackage:
         """Expose the complete mutable manifest when requested by an application."""
         return materialize_manifest(self._manifest)
 
-    def __init__(self, runtime, directory):
+    def __init__(self, runtime, directory, *, _projection=None):
         self.runtime, self.directory = runtime, Path(directory).resolve(strict=True)
         self._public_hybrid_imports = False
-        self._manifest = manifest = decode_manifest(json.loads((self.directory / "package.json").read_bytes()))
+        if _projection is not None:
+            unified = True
+            manifest = _projection
+        else:
+            document = json.loads((self.directory / "package.json").read_bytes())
+            unified = document.get("kind") == "forge_unified_definition_library"
+            if unified:
+                from ._unified_library import select_manifest
+
+                manifest = select_manifest(document, runtime.arch)
+            else:
+                manifest = decode_manifest(document)
+            del document
+        self._manifest = manifest
         if (
             manifest.get("version")
             not in (
@@ -2061,7 +2076,7 @@ class LoadedPackage:
         boundary = {"application_modules", "entry_module", "dependencies"}
         if (manifest["version"] == 2 or boundary & manifest.keys()) and not boundary <= manifest.keys():
             raise ValueError("Application source package is missing its import boundary")
-        if manifest["target"] != runtime.arch:
+        if manifest.get("frontend_target", manifest["target"]) != runtime.arch:
             raise ValueError("Package target differs from Runtime")
         bindings = manifest.get("entry_bindings", {})
         if not isinstance(bindings, dict) or bindings and manifest["version"] < 47:
@@ -2126,7 +2141,7 @@ class LoadedPackage:
         if hardware_arguments:
             if manifest["version"] < 98:
                 raise ValueError("Vulkan resource inputs require definition package version 98")
-            if runtime.arch != "vulkan":
+            if runtime.arch != "vulkan" and not manifest.get("portable_llvm"):
                 raise ValueError("Vulkan resource inputs require a Vulkan Runtime")
             for argument in hardware_arguments:
                 if argument["kind"] == "acceleration_structure":
@@ -2143,7 +2158,7 @@ class LoadedPackage:
         if texture_arguments:
             if manifest["version"] < 86:
                 raise ValueError("Sampled texture inputs require definition package version 86")
-            if runtime.arch not in ("cuda", "vulkan") or any(
+            if (runtime.arch not in ("cuda", "vulkan") and not manifest.get("portable_llvm")) or any(
                     set(argument) != {"name", "kind", "ndim"}
                     or type(argument["ndim"]) is not int or argument["ndim"] not in (1, 2, 3)
                     for argument in texture_arguments):
@@ -2217,16 +2232,17 @@ class LoadedPackage:
         if not {"code.tcm", "host/__init__.py"} <= files.keys():
             raise ValueError("Package is missing code or Host entry")
         for relative, digest in files.items():
-            path = (self.directory / relative).resolve(strict=True)
+            path = (self.directory / manifest.get("host_paths", {}).get(relative, relative)).resolve(strict=True)
             if self.directory not in path.parents or hashlib.sha256(path.read_bytes()).hexdigest() != digest:
                 raise ValueError("Package payload changed: " + relative)
         actual = {p.relative_to(self.directory).as_posix() for p in (self.directory / "host").rglob("*.py")}
-        if actual != {p for p in files if p.startswith("host/") and p.endswith(".py")}:
+        expected = {p for p in files if p.startswith("host/") and p.endswith(".py")}
+        if not expected <= actual or (not unified and expected != actual):
             raise ValueError("Host source inventory differs from package manifest")
         from ._package_calls import specialization_entries
 
         self._specialization_entries = specialization_entries(
-            self.directory / "code.tcm", runtime.arch, headers
+            self.directory / "code.tcm", runtime.arch, headers, unified=unified
         )
         if any(
             name not in self._specialization_entries and any("prepare_static" in c for c in entry.get("captures", ()))
@@ -2242,6 +2258,11 @@ class LoadedPackage:
         self._graph_ids = itertools.count()
         self._closed, self._entered = False, False
         self._name = "_forge_package_loaded_" + str(next(_ids))
+        self._host_projection = None
+        if unified:
+            from ._unified_library import HostProjection
+
+            self._host_projection = HostProjection(self._name, self.directory, manifest)
         self.host = None
 
     def _check(self):
@@ -2280,10 +2301,14 @@ class LoadedPackage:
         self._entered = True
         try:
             if self.host is None:
-                path = self.directory / "host/__init__.py"
-                spec = importlib.util.spec_from_file_location(
-                    self._name, path, submodule_search_locations=[str(path.parent)]
-                )
+                if self._host_projection is not None:
+                    sys.meta_path.insert(0, self._host_projection)
+                    spec = self._host_projection.find_spec(self._name)
+                else:
+                    path = self.directory / "host/__init__.py"
+                    spec = importlib.util.spec_from_file_location(
+                        self._name, path, submodule_search_locations=[str(path.parent)]
+                    )
                 self.host = importlib.util.module_from_spec(spec)
                 self.host._forge_package_owner = self
                 sys.modules[self._name] = self.host
@@ -2298,6 +2323,8 @@ class LoadedPackage:
     def close(self):
         if self._closed:
             return
+        if self._host_projection is not None and self._host_projection in sys.meta_path:
+            sys.meta_path.remove(self._host_projection)
         for graph in tuple(self._graphs):
             graph._clear_cached()
         self._graphs.clear()
