@@ -14283,6 +14283,36 @@ def test_package_execution_discovery_rejects_ambiguous_or_wrong_target(tmp_path,
         assert session.runtime is None
 
 
+def test_package_discovery_resolves_every_explicit_root(tmp_path, monkeypatch):
+    from taichi_forge_runtime import ExecutionSession, execution
+
+    monkeypatch.setattr(execution.metadata, "distributions", lambda: ())
+    monkeypatch.delenv("FORGE_AOT_PACKAGE_PATH", raising=False)
+    primary, secondary = "module_a.project", "module_b.stress"
+
+    def write_index(directory, roots, modules):
+        directory.mkdir()
+        manifest = dict(kind="forge_definition_package_prototype", target="x64",
+                        entry_module=roots[0], module_roots=roots, application_modules=modules)
+        (directory / "package.json").write_text(json.dumps(manifest), encoding="utf8")
+
+    joint = tmp_path / "joint"
+    other = tmp_path / "other"
+    write_index(joint, [primary, secondary], [primary, "module_b", secondary])
+    write_index(other, ["module_b.flow"], ["module_b", "module_b.flow", secondary])
+    with ExecutionSession(mode="aot", arch="x64", package_paths=[tmp_path]) as session:
+        import module_b
+        assert session._resolve(secondary) == joint
+        assert session._resolve("module_b.flow") == other
+        assert session.runtime is None
+
+    write_index(tmp_path / "duplicate", [secondary], [secondary])
+    with ExecutionSession(mode="aot", arch="x64", package_paths=[tmp_path]) as session:
+        with pytest.raises(ValueError, match="Ambiguous AOT package"):
+            import module_b.stress
+        assert session.runtime is None
+
+
 def test_package_execution_independent_roots_share_only_namespace(tmp_path, monkeypatch):
     from taichi_forge_runtime import ExecutionSession, execution
 

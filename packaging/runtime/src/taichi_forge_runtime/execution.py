@@ -223,7 +223,7 @@ class ExecutionSession:
                         for count in range(1, name.count(".") + 1)
                     )
                     if self.mode == "hybrid":
-                        exported = {item[2] for item in self._index}
+                        exported = {root for item in self._index for root in item[2]}
                         existing = sorted(
                             name
                             for name in sys.modules
@@ -308,13 +308,19 @@ class ExecutionSession:
             ):
                 raise ValueError(f"Package has no valid module import boundary: {path}")
             module_names = frozenset(modules) | {root}
+            roots = manifest.get("module_roots", [root])
+            if not isinstance(roots, list) or root not in roots or not all(
+                isinstance(name, str) and name in module_names for name in roots
+            ):
+                raise ValueError(f"Package has invalid export roots: {path}")
+            exported = frozenset(roots)
             target = manifest.get("frontend_target", manifest.get("target"))
             if self.mode == "hybrid" and target == self.arch:
                 helpers = manifest.get("jit_dependency_modules", [])
                 if not isinstance(helpers, list) or not all(isinstance(name, str) for name in helpers):
                     raise ValueError(f"Invalid JIT dependency module list: {path}")
                 helpers = set(helpers)
-                if not helpers <= module_names or helpers.intersection(manifest.get("module_roots", [root])):
+                if not helpers <= module_names or helpers.intersection(exported):
                     raise ValueError(f"Invalid JIT dependency module list: {path}")
                 jit_dependencies.update(helpers)
                 package_owned.update(module_names.difference(helpers))
@@ -323,7 +329,7 @@ class ExecutionSession:
                 for name in module_names
                 if "host/" + name.replace(".", "/") + "/__init__.py" in manifest.get("files", {})
             )
-            index.append((path.parent, target, root, module_names, packages))
+            index.append((path.parent, target, exported, module_names, packages))
             # The ordinary single-library session already decoded this edition
             # during import discovery. Transfer it to the loader on first use.
             # Catalog discovery keeps only the small index for multiple SDKs.
@@ -353,8 +359,10 @@ class ExecutionSession:
         matches = [item for item in self._index if name in item[3] and item[1] == self.arch]
         # Shared ancestor namespaces can contain independent library roots.
         # Do not pick one library's __init__ as authority for the others.
-        descendants = [item for item in self._index if item[2].startswith(name + ".") and item[1] == self.arch]
-        if len(descendants) > 1 and not any(item[2] == name for item in matches):
+        prefix = name + "."
+        descendants = [item for item in self._index
+                       if item[1] == self.arch and any(root.startswith(prefix) for root in item[2])]
+        if len(descendants) > 1 and not any(name in item[2] for item in matches):
             return None
         if not matches and descendants:
             return None
@@ -366,7 +374,7 @@ class ExecutionSession:
         matches = [item for item in self._index if name in item[3] and item[1] == self.arch]
         # An explicit exported module wins over another package's retained Host
         # dependency. Multiple exports of the same root/target remain ambiguous.
-        roots = [item for item in matches if item[2] == name]
+        roots = [item for item in matches if name in item[2]]
         matches = roots or matches
         if not matches:
             available = sorted({str(item[1]) for item in self._index if name in item[3]})
