@@ -167,6 +167,8 @@ class _FunctionEntry:
         self.templates = tuple(templates)
         self.static_parameters = tuple(name for name in templates if name != receiver)
         numerical_parameters = [name for name in parameters if name not in templates]
+        self._template_positions = tuple((name, parameters.index(name)) for name in templates)
+        self._numerical_positions = tuple(parameters.index(name) for name in numerical_parameters)
         self.signature = inspect.Signature(
             [inspect.Parameter(name, inspect.Parameter.POSITIONAL_OR_KEYWORD) for name in parameters]
         )
@@ -286,6 +288,10 @@ class _FunctionEntry:
         identity = owner_type(owner)
         if getattr(owner, "_forge_package_owner", None) is not self.package or identity not in self._entries:
             raise ValueError("Free Kernel requires its declared receiver in the same package")
+        if not self.static_parameters:
+            # The receiver alone selects this entry. Construction has already
+            # rejected duplicate cases and verified the target signature.
+            return self._entries[identity][()].__get__(owner)
         selected = None
         if self._entries[identity]:
             try:
@@ -356,9 +362,10 @@ class _FunctionEntry:
                 and value.element_shape == tuple(element.get("element_shape", ())))
 
     def __call__(self, *args, **kwargs):
-        bound = self.signature.bind(*args, **kwargs)
-        inputs = {name: bound.arguments.pop(name) for name in self.templates}
-        return self._bind(inputs)(**bound.arguments)
+        if kwargs or len(args) != len(self.signature.parameters):
+            args = tuple(self.signature.bind(*args, **kwargs).arguments.values())
+        inputs = {name: args[index] for name, index in self._template_positions}
+        return self._bind(inputs)(*(args[index] for index in self._numerical_positions))
 
     def _graph_bind(self, args, templates):
         if not isinstance(templates, dict) or not set(self.templates) <= templates.keys():

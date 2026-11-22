@@ -408,8 +408,9 @@ class OwnerGuard:
 
 class CachedCall:
     def __init__(self, guard, values, call, workspaces, *, arguments, argument_specs,
-                 specialize=False, constant_args=(), specialized_launch=False):
+                 specialize=False, constant_args=(), specialized_launch=False, value_template=None):
         self.guard, self.values, self.call = guard, values, call
+        self._value_template = call if value_template is None else value_template
         self.value_layout = call._entry._argument_layout
         # Compare by-value tensors/records through their compiler-owned ABI,
         # never Python identity. The tokens describe the actual bound snapshot.
@@ -446,6 +447,7 @@ class CachedCall:
         from ._runtime import Scalar
 
         arguments = list(self.arguments)
+        updates = []
         for index, (spec, value) in enumerate(zip(self.argument_specs, values)):
             if spec["kind"] == "value":
                 if type(value) not in (bool, int, float):
@@ -455,14 +457,16 @@ class CachedCall:
                 arguments[index] = value
             elif _token(value) != self.tokens[index]:
                 return None
-        # The common ABI binder snapshots/validates all values before replacing
-        # the cached invocation. Fixed dimensions, workspaces, optional presence,
-        # resource layouts and selection are already covered by OwnerGuard.
-        call = self.call._entry.bind(*arguments)
+            else:
+                continue
+            updates.append((index, arguments[index]))
+        # Only explicit by-value slots can change here. Resource identity,
+        # owner captures and admission already matched this binding.
+        call = self.call._with_value_arguments(self._value_template, updates)
         return CachedCall(self.guard, values, call, self.workspaces,
                           specialize=self.specialize, constant_args=self.constant_args,
                           specialized_launch=True, arguments=arguments,
-                          argument_specs=self.argument_specs)
+                          argument_specs=self.argument_specs, value_template=self._value_template)
 
     def run(self, *, reuse=False):
         # The caller has already selected the entry's backend and task contract.

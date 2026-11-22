@@ -1699,6 +1699,7 @@ class entry:
             ]
         )
         self.__signature__ = self.signature
+        self._argument_count = len(header["arguments"])
 
     @functools.cached_property
     def contract(self):
@@ -1726,9 +1727,10 @@ class entry:
 
     def _call_locked(self, package, owner, args, kwargs):
         package._check()
-        values = tuple(self.signature.bind(*args, **kwargs).arguments.values()) if args or kwargs else ()
-        if not values and self.contract["arguments"]:
-            self.signature.bind(*args, **kwargs)  # Preserve missing-argument errors.
+        # Exported signatures have only required positional-or-keyword
+        # parameters. Positional calls already have the declared order.
+        values = (args if not kwargs and len(args) == self._argument_count else
+                  tuple(self.signature.bind(*args, **kwargs).arguments.values()))
         cache_owner = owner if owner is not None else self
         cache = getattr(cache_owner, "_forge_package_calls", None)
         if cache is None:
@@ -1738,8 +1740,8 @@ class entry:
             if construction is not None and construction[0] is package:
                 construction[3].callback(_discard_construction_calls, package, cache_owner, cache)
         previous = cache.get(self)
-        if previous is not None and previous.guard.matches(owner):
-            if previous.matches_values(values):
+        if previous is not None and (previous.guard is None or previous.guard.matches(owner)):
+            if not values or previous.matches_values(values):
                 return previous.run(reuse=True)
             updated = previous.bind_values(values)
             if updated is not None:
@@ -1753,7 +1755,7 @@ class entry:
 
         check_admission(owner, contract, arch=package.runtime.arch)
         selected._check_layout(owner)
-        guard = OwnerGuard(self, selected, owner)
+        guard = OwnerGuard(self, selected, owner) if owner is not None else None
         arguments = [
             (
                 Scalar(item["dtype"], value)

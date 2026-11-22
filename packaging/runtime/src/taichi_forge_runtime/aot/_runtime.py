@@ -1330,6 +1330,18 @@ class BoundCall:
             if self._binding_epoch is not None:
                 self._binding_epoch = runtime._binding_epoch
 
+    def _with_value_arguments(self, template, updates):
+        # Start from the original immutable frame each time. Its backing
+        # storage pins unchanged compound values without retaining older updates.
+        arguments = type(template._arguments).from_buffer_copy(template._arguments)
+        buffers = [template]
+        layout = self._entry._argument_layout
+        for index, value in updates:
+            arguments[index] = (layout.encode(index, value, buffers) if index in layout.encoders
+                                else value._argument())
+        return BoundCall(self._entry, arguments, self._bindings, self._owners, buffers,
+                         _validated_epoch=self._binding_epoch)
+
     def _run(self, *, constant_args=None):
         module = self._entry._module
         runtime = module._runtime

@@ -2440,11 +2440,12 @@ Qualification covers local array, model-size, alias, instance and preparation
 reuse fixtures, not the full engine. Eligible LLVM entry lookup validates code and
 dependencies, then releases private IR without compiling the generic executable.
 Specialization compiles the selected version; explicitly running generic code
-materializes it once. Aliases share that registration. Host transfers and changed
-live values still use fresh argument frames while compatible specialized code is
-reused. Frequent live-value changes can therefore incur preparation and retirement
-cost on each call, even without recompilation; first-use specialization does not
-guarantee lower total time for that workload. Independent CUDA-domain preflight
+materializes it once. Aliases share that registration. When only explicit scalar,
+vector or record values change, an eligible package call encodes the values into
+a fresh argument frame and reuses the bound resource descriptors and specialized
+code. Replacing a captured array triggers ordinary binding. Updating its contents
+in place is visible on the next launch. Host array transfers still run on each call.
+Independent CUDA-domain preflight
 may still materialize generic code.
 Cross-process specialization caching remains deferred. New processes can
 specialize again; compare preparation plus completed simulation steps over the
@@ -2460,6 +2461,10 @@ Other resources use their corresponding reconstruction contracts. Device Graph
 handles are not serialized into the artifact.
 
 Entries retain their module; submissions retain code and arrays until completion.
+Python Kernel and Graph bindings validate the resources at bind time. Stable
+submissions reuse that validation. After a resource retires or a component starts
+changing borrowed state, the next use rechecks the retained owners under the
+submission lock. A closed resource or stale borrow prevents submission.
 Closing an array/module waits before retiring it. The runtime context manager
 waits and closes its children; later calls on them fail. Prefer explicit lifetime
 management to GC timing. Optional `library_path` and `runtime_path` select the

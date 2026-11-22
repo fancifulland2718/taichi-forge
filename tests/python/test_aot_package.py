@@ -19876,6 +19876,10 @@ class Model:
     def step(self, gain: ti.f32):
         for i in range(self.n):
             self.output[i] = self.output[i] + gain + self.bias[0] + self.bias[1]
+    @ti.kernel
+    def shift(self, delta: ti.types.vector(2, ti.f32)):
+        for i in range(self.n):
+            self.output[i] += self.bias[0] + delta[1]
     def graph(self):
         b = ti.graph.GraphBuilder()
         b.dispatch(self.step, ti.graph.Arg(ti.graph.ArgKind.SCALAR, 'gain', ti.f32), template_args={'self': self})
@@ -19908,7 +19912,8 @@ class Model:
         # Updating only an explicit value must observe the owner once. Reading
         # it again during the refresh could also evaluate a descriptor twice.
         (cached,) = a._forge_package_calls.values()
-        with patch.object(cached.guard, "matches", wraps=cached.guard.matches) as observe:
+        with patch.object(cached.guard, "matches", wraps=cached.guard.matches) as observe, \
+                patch.object(cached.call._entry, "bind", side_effect=AssertionError("rebound fixed resources")):
             a.step(-3.0)  # Cancel the two components of bias; preserve output.
             observe.assert_called_once_with(a)
         np.testing.assert_array_equal(a.output.to_numpy(), np.full(7, 20))
@@ -19968,6 +19973,15 @@ class Model:
         a.output.close()
         with pytest.raises(RuntimeError, match='closed|retired dependency'):
             ga.run(dict(gain=4.0))
+
+        delta = [0., 0.]
+        b.shift(delta)
+        cached = b._forge_package_calls[type(b).shift]
+        with patch.object(cached.call._entry, "bind", side_effect=AssertionError("rebound fixed resources")):
+            for value in (1., 2.):
+                delta[1] = value
+                b.shift(delta)
+        np.testing.assert_array_equal(b.output.to_numpy(), np.full(13, 51))
 
 
 @test_utils.test(arch=ti.cuda, offline_cache=False)
@@ -30050,6 +30064,10 @@ def test_package_free_kernel_receiver_preserves_shared_code_and_instance_binding
         assert a.writes() == (a.values,)
         a.update(2)
         code.host.model.publish(gain=3, solver=b)
+        with pytest.raises(TypeError):
+            code.host.model.publish(3, b, solver=a)
+        with pytest.raises(TypeError):
+            code.host.model.publish(solver=a)
         prepared = a.graph().bind(dict(gain=4))
         b.update(7)
         prepared.run()
