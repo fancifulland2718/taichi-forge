@@ -25,8 +25,9 @@ class PackageCompilation(FunctionLibrary):
     their exported payload independently of the source-definition lease.
     """
 
-    def __init__(self):
+    def __init__(self, *, portable=False):
         super().__init__()
+        self.portable = portable
         self.module = None
         self.kernels = {}
         self.candidate_indices = {}

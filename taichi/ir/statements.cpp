@@ -254,9 +254,11 @@ RangeForStmt::RangeForStmt(Stmt *begin,
                            int num_cpu_threads,
                            int block_dim,
                            bool strictly_serialized,
-                           std::string range_hint)
+                           std::string range_hint,
+                           std::vector<Stmt *> device_options)
     : begin(begin),
       end(end),
+      device_options(std::move(device_options)),
       body(std::move(body)),
       is_bit_vectorized(is_bit_vectorized),
       num_cpu_threads(num_cpu_threads),
@@ -276,8 +278,9 @@ std::unique_ptr<RangeForStmt> RangeForStmt::clone_with_body(
     std::unique_ptr<Block> new_body) const {
   auto new_stmt = std::make_unique<RangeForStmt>(
       begin, end, std::move(new_body), is_bit_vectorized, num_cpu_threads,
-      block_dim, strictly_serialized, range_hint);
+      block_dim, strictly_serialized, range_hint, device_options);
   new_stmt->reversed = reversed;
+  new_stmt->requested_cpu_threads = requested_cpu_threads;
   new_stmt->one_to_one = one_to_one;
   new_stmt->model_block_dim = model_block_dim;
   return new_stmt;

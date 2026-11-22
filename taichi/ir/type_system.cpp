@@ -286,6 +286,15 @@ Operation *Operations::get(InternalOp opcode) {
   return internals_[opcode].get();
 }
 
+DataType Operations::fixed_return_type(const std::string &name) {
+  if (internals_.empty())
+    init_internals();
+  for (const auto &[opcode, operation] : internals_)
+    if (operation->name == name)
+      return operation->sig.fixed_return_type();
+  return PrimitiveType::unknown;
+}
+
 void Operations::init_internals() {
 #define PLAIN_OP(name, ret, ctx, ...)                                     \
   internals_[InternalOp::name] = std::make_unique<InternalCallOperation>( \
@@ -318,6 +327,10 @@ void Operations::init_internals() {
 #undef INSERT_TRIPLET
 
   PLAIN_OP(linear_thread_idx, i32, true);
+  PLAIN_OP(unified_target_matches, PrimitiveType::u1, false, i32);
+  PLAIN_OP(unified_require_device, i32_void, false, i32);
+  PLAIN_OP(unified_has_device_capability, PrimitiveType::u1, false, i32);
+  PLAIN_OP(unified_has_extension, PrimitiveType::u1, false, i32);
   PLAIN_OP(test_stack, i32_void, true);
   PLAIN_OP(test_active_mask, i32_void, true);
   PLAIN_OP(test_shfl, i32_void, true);

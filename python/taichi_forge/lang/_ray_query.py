@@ -209,7 +209,7 @@ class AccelerationStructureAccessor:
     ):
         if not isinstance(respect_opacity, bool):
             raise TypeError("respect_opacity must be a compile-time bool")
-        if impl.default_cfg().arch != _ti_core.Arch.vulkan:
+        if impl.default_cfg().arch != _ti_core.Arch.vulkan and not impl.inside_portable_capture():
             raise TypeError("filtered ray queries require the Vulkan backend")
         if (
             not getattr(accept, "_is_taichi_function", False)

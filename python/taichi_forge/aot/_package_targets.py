@@ -3,6 +3,8 @@
 import ast
 import copy
 
+from taichi_forge_runtime._dimensions import PORTABLE_TARGETS
+
 from ._package_types import qualified_kind
 
 BACKEND_NAMES = frozenset(("cpu", "x64", "arm64", "cuda", "vulkan"))
@@ -61,6 +63,174 @@ def target_condition(node, value):
     return (left == right) if isinstance(op, ast.Eq) else (left != right)
 
 
+def prepare_condition(node, kind):
+    """Describe pure device queries without consulting the producer's device."""
+    outcomes = [target_condition(node, lambda part: target if backend_query(part, kind)
+                                 else backend_constant(part, kind)) for target in PORTABLE_TARGETS]
+    if None not in outcomes:
+        return ("target_mask", sum(1 << i for i, result in enumerate(outcomes) if result))
+    if isinstance(node, ast.BoolOp):
+        items = [prepare_condition(part, kind) for part in node.values]
+        if all(items):
+            return ("and" if isinstance(node.op, ast.And) else "or", *items)
+    if isinstance(node, ast.UnaryOp) and isinstance(node.op, ast.Not):
+        item = prepare_condition(node.operand, kind)
+        return ("not", item) if item else None
+    if not isinstance(node, ast.Call) or node.keywords:
+        return None
+    if (len(node.args) == 2 and kind(node.func) == "is_extension_supported"
+            and backend_query(node.args[0], kind)):
+        arg = node.args[1]
+        if isinstance(arg, ast.Attribute) and kind(arg.value) == "extension":
+            return ("extension", arg.attr)
+    if len(node.args) != 1 or not isinstance(node.func, ast.Attribute) or node.func.attr != "get":
+        return None
+    caps = node.func.value
+    if not (isinstance(caps, ast.Call) and not caps.args and not caps.keywords
+            and isinstance(caps.func, ast.Attribute) and caps.func.attr == "get_device_caps"):
+        return None
+    program = caps.func.value
+    if not (isinstance(program, ast.Attribute) and program.attr == "prog"
+            and isinstance(program.value, ast.Call) and not program.value.args and not program.value.keywords
+            and kind(program.value.func) == "get_runtime"):
+        return None
+    arg = node.args[0]
+    if isinstance(arg, ast.Attribute) and kind(arg.value) == "DeviceCapability":
+        return ("capability", arg.attr)
+    if isinstance(arg, ast.Constant) and isinstance(arg.value, str):
+        return ("capability", arg.value)
+    return None
+
+
+def resource_views(function, module, kind, fail, namespace):
+    """Yield only distinct declaration paths. Device kernels are never visited here."""
+    guards = [n._package_target_mask for n in ast.walk(function) if hasattr(n, "_package_target_mask")]
+    if not guards:
+        return
+    # Normalize the retained Host constructor before copying it. Its literal
+    # declaration loops must have the same binding sites as each device view.
+    from ._package_resources import normalize_resource_declarations
+
+    normalize_resource_declarations(module, function, kind, fail, namespace)
+    paths = {}
+    for i, target in enumerate(PORTABLE_TARGETS):
+        key = tuple(bool(mask & (1 << i)) for mask in guards)
+        paths.setdefault(key, []).append(target)
+
+    for targets in paths.values():
+        bit = 1 << PORTABLE_TARGETS.index(targets[0])
+
+        class Select(ast.NodeTransformer):
+            def visit_If(self, node):
+                mask = getattr(node, "_package_target_mask", None)
+                if mask is None:
+                    return self.generic_visit(node)
+                branch = ast.Module(body=node.body if mask & bit else node.orelse, type_ignores=[])
+                return self.generic_visit(branch).body
+
+        yield targets, Select().visit(copy.deepcopy(function))
+
+
+def _same_declaration(left, right):
+    """Device views contain independent copies of the same constructor syntax."""
+    if left is right:
+        return True
+    if type(left) is not type(right):
+        return False
+    if isinstance(left, ast.AST):
+        return ast.dump(left, include_attributes=True) == ast.dump(right, include_attributes=True)
+    if isinstance(left, dict):
+        return left.keys() == right.keys() and all(_same_declaration(value, right[key]) for key, value in left.items())
+    if isinstance(left, (list, tuple)):
+        return len(left) == len(right) and all(_same_declaration(a, b) for a, b in zip(left, right))
+    return left == right
+
+
+def common_resource_schema(schemas, fail):
+    """Give the producer a common typed slot; preserve device-specific allocation facts for prepare."""
+    result = {}
+    names = dict.fromkeys(name for members in schemas.values() for name in members)
+    for name in names:
+        views = {target: members.get(name) for target, members in schemas.items()}
+        present = [item for item in views.values() if item is not None]
+        first = present[0]
+        if all(_same_declaration(item, first) for item in views.values()):
+            result[name] = first
+            continue
+        kinds = {item["kind"] for item in present}
+        item = first.copy()
+        if kinds == {"dimension"} and (len(present) == len(views) or not first.get("expression")) and all(
+            s.get("expression") == first.get("expression") for s in present
+        ):
+            # A dim() call in an extra allocation is another reference to the
+            # same model value. Its source location is not a new binding.
+            result[name] = item
+            continue
+        if kinds == {"static"}:
+            if len({s.get("kernel_only") for s in present}) != 1:
+                fail(f"Inconsistent static resource role for {name!r}")
+            item["choices"] = []
+            for declaration in present:
+                for choice in declaration["choices"]:
+                    if choice not in item["choices"]:
+                        item["choices"].append(choice)
+        elif kinds == {"constant", "dimension"}:
+            item = next(s for s in present if s["kind"] == "dimension").copy()
+            if any(s.get("value", ["unknown"])[0] != "int" for s in present if s["kind"] == "constant"):
+                fail(f"Non-integer device dimension for {name!r}")
+            item.pop("expression", None)
+        elif len(kinds) != 1:
+            fail(f"Inconsistent device resource types for {name!r}: {sorted(kinds)}")
+        elif kinds == {"dense_field"}:
+            def field_abi(decl):
+                syntax = decl.get("type_node")
+                return (decl.get("element"), ast.dump(syntax) if isinstance(syntax, ast.AST) else syntax,
+                        len(decl.get("shape", ())))
+            if any(field_abi(s) != field_abi(first) for s in present):
+                fail(f"Inconsistent device field ABI for {name!r}")
+            # A varying extent must remain a dimension in the common capture.
+            item = max(present, key=lambda decl: sum(isinstance(axis, str) for axis in decl["shape"])).copy()
+        item["_device_declarations"] = views
+        result[name] = item
+    return result
+
+
+def device_resource(item, target):
+    """Resolve the original declaration while retaining subsequent owner-graph inference."""
+    views = item.get("_device_declarations")
+    if views is None:
+        return item
+    selected = views[target]
+    if selected is None:
+        return None
+    result = item.copy()
+    missing = object()
+    for key in set().union(*(record for record in views.values() if record is not None)):
+        value = selected.get(key, missing)
+        if all(record is None or _same_declaration(record.get(key, missing), value) for record in views.values()):
+            continue
+        if value is missing:
+            result.pop(key, None)
+        else:
+            result[key] = value
+    return result
+
+
+def resource_schema_for_mask(schema, mask):
+    targets = [target for i, target in enumerate(PORTABLE_TARGETS) if mask & (1 << i)]
+    local = {}
+    for name, item in schema.items():
+        if "_device_declarations" not in item:
+            local[name] = item
+            continue
+        first, *rest = (device_resource(item, target) for target in targets)
+        if any(not _same_declaration(view, first) for view in rest):
+            local[name] = item
+        elif first is not None:
+            local[name] = first
+    return local
+
+
 def select_target_branches(tree, kind, target, module, fail, *, include_host=False):
     selections = []
 
@@ -110,12 +280,12 @@ def select_target_branches(tree, kind, target, module, fail, *, include_host=Fal
             del nodes
             aliases = set()
 
-            def value(node):
+            def value(node, arch=target):
                 constant = backend_constant(node, kind)
                 if constant is not None:
                     return constant
                 if backend_query(node, kind) or (not numerical and key(node) in aliases):
-                    return target
+                    return arch
                 return None
 
             def condition(node):
@@ -138,7 +308,11 @@ def select_target_branches(tree, kind, target, module, fail, *, include_host=Fal
                         test = (test.args[0] if isinstance(test, ast.Call)
                                 and qualified_kind(test, kind) == "static"
                                 and len(test.args) == 1 and not test.keywords else None)
-                    selected = condition(test) if test is not None else None
+                    selected = condition(test) if test is not None and target is not None else None
+                    if target is None and test is not None:
+                        matches = [target_condition(test, lambda expr: value(expr, arch)) for arch in PORTABLE_TARGETS]
+                        if None not in matches:
+                            node._package_target_mask = sum(1 << i for i, result in enumerate(matches) if result)
                     if selected is None:
                         # Resource contexts and model conditions do not hide
                         # backend-only decisions. Arm-local aliases must not

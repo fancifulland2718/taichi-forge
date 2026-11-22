@@ -1063,10 +1063,15 @@ class RangeForStmt : public Stmt {
  public:
   Stmt *begin, *end;
   Stmt *model_block_dim{nullptr};
+  // Ordered (device mask, option, value) triples for this exact range.
+  std::vector<Stmt *> device_options;
   std::unique_ptr<Block> body;
   bool reversed;
   bool is_bit_vectorized;
   int num_cpu_threads;
+  // Zero means the device materializer chooses. Synthesized loops inherit
+  // the policy explicitly supplied to their constructor.
+  int requested_cpu_threads{num_cpu_threads};
   int block_dim;
   bool strictly_serialized;
   bool one_to_one{false};
@@ -1079,7 +1084,8 @@ class RangeForStmt : public Stmt {
                int num_cpu_threads,
                int block_dim,
                bool strictly_serialized,
-               std::string range_hint = "");
+               std::string range_hint = "",
+               std::vector<Stmt *> device_options = {});
 
   bool is_container_statement() const override {
     return true;
@@ -1098,6 +1104,7 @@ class RangeForStmt : public Stmt {
   TI_STMT_DEF_FIELDS(begin,
                      end,
                      model_block_dim,
+                     device_options,
                      reversed,
                      is_bit_vectorized,
                      num_cpu_threads,

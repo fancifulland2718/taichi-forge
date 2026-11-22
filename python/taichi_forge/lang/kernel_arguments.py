@@ -234,7 +234,7 @@ def decl_acceleration_structure_arg(name, *, _origin=None):
     _record_argument_origin(arg_id, _origin)
     dbg_info = _ti_core.DebugInfo(impl.get_runtime().get_current_src_info())
     return AccelerationStructureAccessor(
-        _ti_core.make_acceleration_structure_ptr_expr(arg_id, 0, dbg_info)
+        _ti_core.make_acceleration_structure_ptr_expr(arg_id, 0, dbg_info, impl.inside_portable_capture())
     )
 
 

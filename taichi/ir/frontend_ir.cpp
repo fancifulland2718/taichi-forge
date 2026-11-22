@@ -61,6 +61,7 @@ FrontendAssignStmt::FrontendAssignStmt(const Expr &lhs,
 FrontendIfStmt::FrontendIfStmt(const FrontendIfStmt &o)
     : Stmt(o.dbg_info),
       condition(o.condition),
+      resolved_before_offload(o.resolved_before_offload),
       true_statements(o.true_statements->clone()),
       false_statements(o.false_statements->clone()) {
 }
@@ -119,19 +120,23 @@ FrontendForStmt::FrontendForStmt(const FrontendForStmt &o)
       loop_var_ids(o.loop_var_ids),
       is_bit_vectorized(o.is_bit_vectorized),
       num_cpu_threads(o.num_cpu_threads),
+      requested_cpu_threads(o.requested_cpu_threads),
       strictly_serialized(o.strictly_serialized),
       mem_access_opt(o.mem_access_opt),
       block_dim(o.block_dim),
       model_block_dim(o.model_block_dim),
+      device_options(o.device_options),
       one_to_one(o.one_to_one) {
 }
 
 void FrontendForStmt::init_config(Arch arch, const ForLoopConfig &config) {
+  requested_cpu_threads = config.num_cpu_threads;
   is_bit_vectorized = config.is_bit_vectorized;
   strictly_serialized = config.strictly_serialized;
   mem_access_opt = config.mem_access_opt;
   block_dim = config.block_dim;
   model_block_dim = config.model_block_dim;
+  device_options = config.device_options;
   one_to_one = config.one_to_one;
   if (arch == Arch::cuda || arch == Arch::amdgpu) {
     num_cpu_threads = 1;
@@ -222,7 +227,7 @@ void TexturePtrExpression::flatten(FlattenContext *ctx) {
 
 void AccelerationStructurePtrExpression::type_check(
     const CompileConfig *config) {
-  if (config->arch != Arch::vulkan) {
+  if (!portable_capture && config->arch != Arch::vulkan) {
     ErrorEmitter(TaichiTypeError(), this,
                  "Acceleration-structure kernel arguments require the "
                  "Vulkan backend");
@@ -1600,9 +1605,7 @@ void MeshIndexConversionExpression::flatten(FlattenContext *ctx) {
   stmt = ctx->back_stmt();
 }
 
-void DynamicSharedPtrExpression::type_check(const CompileConfig *config) {
-  TI_ASSERT_INFO(config->arch == Arch::cuda || config->arch == Arch::vulkan,
-                 "Model-sized SharedArray requires a CUDA or Vulkan workgroup");
+void DynamicSharedPtrExpression::type_check(const CompileConfig *) {
   TI_ASSERT_INFO(allocation_id >= 0 && !shape.exprs.empty() &&
                      element_type->is<PrimitiveType>(),
                  "Invalid model-sized SharedArray declaration");
@@ -1761,8 +1764,10 @@ void ASTBuilder::end_func(const std::string &funcid) {
 }
 
 void ASTBuilder::begin_frontend_if(const Expr &cond,
-                                   const DebugInfo &dbg_info) {
+                                   const DebugInfo &dbg_info,
+                                   bool resolved_before_offload) {
   auto stmt_tmp = std::make_unique<FrontendIfStmt>(cond, dbg_info);
+  stmt_tmp->resolved_before_offload = resolved_before_offload;
   this->insert(std::move(stmt_tmp));
 }
 
@@ -1828,7 +1833,7 @@ std::optional<Expr> ASTBuilder::insert_func_call(Function *func,
                                                  const ExprGroup &args,
                                                  const DebugInfo &dbg_info) {
   ExprGroup expanded_args;
-  if (func->backend_inline() && func->arch == Arch::vulkan) {
+  if (func->backend_inline()) {
     for (const auto &arg : args.exprs) {
       if (arg.is<ExternalTensorExpression>()) {
         // The task binds this descriptor. Keep its origin as one operand
@@ -2179,12 +2184,24 @@ Expr ASTBuilder::mesh_index_conversion(mesh::MeshPtr mesh_ptr,
       mesh_ptr.ptr.get(), idx_type, expanded_idx, conv_type, dbg_info);
 }
 
+bool ASTBuilder::at_kernel_range_scope() const {
+  if (!is_kernel_ || stack_.empty() || loop_state_stack_.back() != None)
+    return false;
+  for (size_t i = 1; i < stack_.size(); ++i) {
+    auto *owner = stack_[i]->parent_stmt();
+    auto *condition = owner ? owner->cast<FrontendIfStmt>() : nullptr;
+    if (!condition || !condition->resolved_before_offload)
+      return false;
+  }
+  return true;
+}
+
 void ASTBuilder::create_scope(std::unique_ptr<Block> &list, LoopType tp) {
   TI_ASSERT(list == nullptr);
   LoopState prev = loop_state_stack_.back();
   if (tp == NotLoop) {
     loop_state_stack_.push_back(prev);
-  } else if (tp == For && stack_.size() == 1 && is_kernel_) {
+  } else if (tp == For && at_kernel_range_scope()) {
     loop_state_stack_.push_back(Outermost);
   } else {
     loop_state_stack_.push_back(Inner);

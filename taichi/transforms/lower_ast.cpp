@@ -351,6 +351,17 @@ class LowerAST : public IRVisitor {
                      detected_fors_with_break_.count(stmt)),
                 "Model-dependent block size requires a parallel range without break");
     auto fctx = make_flatten_ctx();
+    TI_ERROR_IF(!stmt->device_options.empty() && (stmt->snode || stmt->mesh),
+                "Device-dependent scheduling requires a range or array loop");
+    auto device_options = [&]() {
+      std::vector<Stmt *> values;
+      for (const auto &option : stmt->device_options) {
+        values.push_back(fctx.push_back<ConstStmt>(TypedConstant(option.mask)));
+        values.push_back(fctx.push_back<ConstStmt>(TypedConstant(int(option.kind))));
+        values.push_back(flatten_rvalue(option.value, &fctx));
+      }
+      return values;
+    };
     if (stmt->snode) {
       auto snode = stmt->snode;
       std::vector<int> offsets;
@@ -424,7 +435,8 @@ class LowerAST : public IRVisitor {
       auto &&new_for = std::make_unique<RangeForStmt>(
           begin, end, std::move(stmt->body), stmt->is_bit_vectorized,
           stmt->num_cpu_threads, stmt->block_dim, stmt->strictly_serialized,
-          /*range_hint=*/fmt::format("arg ({})", fmt::join(arg_id, ", ")));
+          /*range_hint=*/fmt::format("arg ({})", fmt::join(arg_id, ", ")), device_options());
+      new_for->requested_cpu_threads = stmt->requested_cpu_threads;
       new_for->one_to_one = stmt->one_to_one;
       if (stmt->model_block_dim)
         new_for->model_block_dim = flatten_rvalue(stmt->model_block_dim, &fctx);
@@ -468,7 +480,8 @@ class LowerAST : public IRVisitor {
         auto &&new_for = std::make_unique<RangeForStmt>(
             begin_stmt, end_stmt, std::move(stmt->body),
             stmt->is_bit_vectorized, stmt->num_cpu_threads, stmt->block_dim,
-            stmt->strictly_serialized);
+            stmt->strictly_serialized, "", device_options());
+        new_for->requested_cpu_threads = stmt->requested_cpu_threads;
         new_for->one_to_one = stmt->one_to_one;
         if (stmt->model_block_dim) {
           TI_ERROR_IF(stmt->strictly_serialized,

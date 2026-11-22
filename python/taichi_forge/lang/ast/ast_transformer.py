@@ -1320,6 +1320,13 @@ class ASTTransformer(Builder):
 
     @staticmethod
     def build_Compare(ctx, node):
+        if (ctx.deployment is not None and any(isinstance(side, ast.Attribute) and side.attr == "arch"
+                                               for side in (node.left, *node.comparators))
+                and getattr(getattr(ctx.deployment.kernel, "_package_compilation", None), "portable", False)):
+            predicate = ASTTransformer.portable_device_predicate(ctx, node)
+            if predicate is not None:
+                node.ptr = predicate
+                return predicate
         build_stmt(ctx, node.left)
         build_stmts(ctx, node.comparators)
         ops = {
@@ -2026,7 +2033,8 @@ class ASTTransformer(Builder):
         # Prove the original numerical syntax against the same target facts;
         # actual lowering still visits the static arm in its lexical scope.
         if uniform_range_schedule(node, kind, helpers, scalar_helpers,
-                                  select_static=lambda test: target_condition(test, target_value)):
+                                  select_static=lambda test: None if getattr(compilation, "portable", False)
+                                  else target_condition(test, target_value)):
             for branch, truth in ((node.body, True), (node.orelse, False)):
                 if not branch:
                     continue
@@ -2097,9 +2105,132 @@ class ASTTransformer(Builder):
         return True
 
     @staticmethod
+    def portable_device_predicate(ctx, predicate):
+        """Return a prepare-time predicate for a source-level device comparison."""
+        from taichi_forge.aot._package_targets import prepare_condition
+        from taichi_forge.lang import misc
+        from taichi_forge.lang.enums import DeviceCapability
+
+        roles = (("lang.impl.current_cfg", impl.current_cfg), ("cfg", impl.current_cfg()),
+                 ("get_runtime", impl.get_runtime), ("DeviceCapability", DeviceCapability),
+                 ("is_extension_supported", misc.is_extension_supported), ("extension", misc.extension),
+                 *((name, getattr(misc, name)) for name in ("cpu", "x64", "arm64", "cuda", "vulkan")))
+
+        def kind(node):
+            root = node
+            while isinstance(root, ast.Attribute):
+                root = root.value
+            if isinstance(root, ast.Name) and not ctx.is_var_declared(root.id):
+                return next((role for role, target in roles
+                             if ASTResolver.resolve_to(node, target, ctx.global_vars)), None)
+            return None
+
+        condition = prepare_condition(predicate, kind)
+        if condition is None:
+            return None
+
+        def lower(term):
+            op, *args = term
+            if op == "target_mask":
+                intrinsic, arg = _ti_core.InternalOp.unified_target_matches, args[0]
+            elif op == "capability":
+                intrinsic = _ti_core.InternalOp.unified_has_device_capability
+                arg = _ti_core._device_capability_id(args[0])
+            elif op == "extension":
+                intrinsic = _ti_core.InternalOp.unified_has_extension
+                arg = int(getattr(misc.extension, args[0]))
+            elif op == "not":
+                return ti_ops.logical_not(lower(args[0]))
+            else:
+                result = lower(args[0])
+                combine = ti_ops.bit_and if op == "and" else ti_ops.bit_or
+                for part in args[1:]:
+                    result = combine(result, lower(part))
+                return result
+            return Expr(_ti_core.insert_internal_func_call(intrinsic, make_expr_group([arg])))
+
+        if condition in (("target_mask", 0), ("target_mask", 7)):
+            return bool(condition[1])
+        value = lower(condition)
+        if condition[0] == "target_mask":
+            value._portable_device_mask = condition[1]
+            value._uniform_extent = condition
+        value._portable_prepare_condition = True
+        value._model_uniform = True
+        return value
+
+    @staticmethod
+    def build_branch_test(ctx, test):
+        is_static = ASTTransformer.get_decorator(ctx, test) == "static"
+        if (is_static and ctx.deployment is not None and len(test.args) == 1
+                and isinstance(test.args[0], (ast.BoolOp, ast.UnaryOp, ast.Call))
+                and getattr(getattr(ctx.deployment.kernel, "_package_compilation", None), "portable", False)):
+            predicate = ASTTransformer.portable_device_predicate(ctx, test.args[0])
+            if predicate is not None:
+                test.ptr = predicate
+                return True
+        build_stmt(ctx, test)
+        return is_static
+
+    @staticmethod
+    def build_device_return(ctx, node):
+        """Join two terminal return values before the ordinary return lowering."""
+        if not all(arm and isinstance(arm[-1], ast.Return) and arm[-1].value is not None
+                   for arm in (node.body, node.orelse)):
+            return False
+        # This key cannot shadow a Python variable in the source.
+        name = "$device_return"
+        dbg = _ti_core.DebugInfo(ctx.get_pos_info(node))
+        with ctx.non_static_if_guard(node):
+            impl.begin_frontend_if(ctx.ast_builder, node.test.ptr, dbg)
+            values = []
+            for taken, arm in ((True, node.body), (False, node.orelse)):
+                if taken:
+                    ctx.ast_builder.begin_frontend_if_true()
+                else:
+                    ctx.ast_builder.begin_frontend_if_false()
+                with ctx.deployment.input_condition(node.test.ptr, taken):
+                    target = ast.copy_location(ast.Name(id=name, ctx=ast.Store()), arm[-1])
+                    bind = ast.copy_location(ast.Assign(targets=[target], value=arm[-1].value), arm[-1])
+                    values.append(build_stmts(ctx, [*arm[:-1], bind], capture_scope=True)[name])
+                ctx.ast_builder.pop_scope()
+            result = ASTTransformer.merge_branch_value(ctx, name, *values, dbg)
+        with ctx.variable_scope_guard():
+            ctx.create_variable(name, result)
+            read = ast.copy_location(ast.Name(id=name, ctx=ast.Load()), node)
+            build_stmt(ctx, ast.copy_location(ast.Return(value=read), node))
+        return True
+
+    @staticmethod
     def build_If(ctx, node):
-        build_stmt(ctx, node.test)
-        is_static_if = ASTTransformer.get_decorator(ctx, node.test) == "static"
+        is_static_if = ASTTransformer.build_branch_test(ctx, node.test)
+
+        device_mask = getattr(node.test.ptr, "_portable_device_mask", None)
+        if getattr(node.test.ptr, "_portable_prepare_condition", False) and ASTTransformer.build_device_return(ctx, node):
+            return node
+        if device_mask is not None:
+            from taichi_forge.aot._package_errors import is_error_interface
+            from taichi_forge.lang.misc import loop_config
+
+            if all(isinstance(s, ast.Expr) and isinstance(s.value, ast.Call)
+                   and ASTResolver.resolve_to(s.value.func, loop_config, ctx.global_vars)
+                   for s in (*node.body, *node.orelse)):
+                for mask, statements in ((device_mask, node.body), (7 ^ device_mask, node.orelse)):
+                    if not statements:
+                        continue
+                    previous = ctx.ast_builder.set_device_loop_mask(mask)
+                    try:
+                        build_stmts(ctx, statements)
+                    finally:
+                        ctx.ast_builder.set_device_loop_mask(previous)
+                return node
+
+            for unavailable, body, required in ((node.orelse, node.body, device_mask),
+                                                (node.body, node.orelse, 7 ^ device_mask)):
+                if is_error_interface(ast.Module(body=unavailable, type_ignores=[]), ctx.global_vars):
+                    impl.call_internal("unified_require_device", required, with_runtime_context=False)
+                    build_stmts(ctx, body)
+                    return node
 
         if is_static_if:
             model_test = is_model_value(node.test.ptr)
@@ -2113,7 +2244,11 @@ class ASTTransformer(Builder):
                     build_stmts(ctx, statements)
                 return node
 
-        if is_static_if and is_model_value(node.test.ptr) and ctx.deployment is not None:
+        # Prepare folds a device branch before resolving its helpers and
+        # offloading loops. An empty range would still expose its body to a
+        # target lacking the device operation (e.g. a CPU workgroup barrier).
+        if (is_static_if and is_model_value(node.test.ptr) and ctx.deployment is not None
+                and not getattr(node.test.ptr, "_portable_prepare_condition", False)):
             if ASTTransformer.build_uniform_loop_branch(ctx, node):
                 return node
 
@@ -2146,8 +2281,7 @@ class ASTTransformer(Builder):
 
     @staticmethod
     def build_IfExp(ctx, node):
-        build_stmt(ctx, node.test)
-        is_static_if = ASTTransformer.get_decorator(ctx, node.test) == "static"
+        is_static_if = ASTTransformer.build_branch_test(ctx, node.test)
         # In static(x if target else y), select the arm before capturing
         # resources or model dimensions from a different target.
         if ctx.is_in_static_scope() and isinstance(node.test.ptr, (bool, np.bool_, int, np.integer)):

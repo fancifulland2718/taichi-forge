@@ -16,6 +16,12 @@ namespace taichi::lang {
 
 class ASTBuilder;
 
+struct DeviceLoopOption {
+  int mask;
+  PortableLoopOption kind;
+  Expr value;
+};
+
 struct ForLoopConfig {
   bool is_bit_vectorized{false};
   int num_cpu_threads{0};
@@ -23,6 +29,7 @@ struct ForLoopConfig {
   MemoryAccessOptions mem_access_opt;
   int block_dim{0};
   Expr model_block_dim;
+  std::vector<DeviceLoopOption> device_options;
   bool uniform{false};
   bool one_to_one{false};
 };
@@ -162,6 +169,7 @@ class FrontendAssignStmt : public Stmt {
 class FrontendIfStmt : public Stmt {
  public:
   Expr condition;
+  bool resolved_before_offload{false};
   std::unique_ptr<Block> true_statements, false_statements;
 
   explicit FrontendIfStmt(const Expr &condition, const DebugInfo &dbg_info)
@@ -206,10 +214,12 @@ class FrontendForStmt : public Stmt {
   std::vector<Identifier> loop_var_ids;
   bool is_bit_vectorized;
   int num_cpu_threads;
+  int requested_cpu_threads;
   bool strictly_serialized;
   MemoryAccessOptions mem_access_opt;
   int block_dim;
   Expr model_block_dim;
+  std::vector<DeviceLoopOption> device_options;
   bool one_to_one;
 
   FrontendForStmt(const ExprGroup &loop_vars,
@@ -454,12 +464,17 @@ class AccelerationStructurePtrExpression : public Expression {
  public:
   const std::vector<int> arg_id;
   int arg_depth;
+  const bool portable_capture;
 
   explicit AccelerationStructurePtrExpression(
       const std::vector<int> &arg_id,
       int arg_depth,
-      const DebugInfo &dbg_info = DebugInfo())
-      : Expression(dbg_info), arg_id(arg_id), arg_depth(arg_depth) {
+      const DebugInfo &dbg_info = DebugInfo(),
+      bool portable_capture = false)
+      : Expression(dbg_info),
+        arg_id(arg_id),
+        arg_depth(arg_depth),
+        portable_capture(portable_capture) {
   }
 
   void type_check(const CompileConfig *config) override;
@@ -1119,6 +1134,7 @@ class ASTBuilder {
       config.mem_access_opt.clear();
       config.block_dim = 0;
       config.model_block_dim = Expr();
+      config.device_options.clear();
       config.strictly_serialized = false;
       config.one_to_one = false;
     }
@@ -1129,6 +1145,19 @@ class ASTBuilder {
   bool is_kernel_{false};
   Arch arch_;
   ForLoopDecoratorRecorder for_loop_dec_;
+  int device_loop_mask_{0};
+  bool at_kernel_range_scope() const;
+
+  template <class T>
+  bool record_device_loop_option(PortableLoopOption kind, const T &value) {
+    auto &options = for_loop_dec_.config.device_options;
+    if (!device_loop_mask_ && options.empty())
+      return false;
+    // Later unconditional pragmas override earlier conditional ones in
+    // source order. Ordinary loops retain their existing scalar policy.
+    options.push_back({device_loop_mask_ ? device_loop_mask_ : 7, kind, Expr(value)});
+    return true;
+  }
   int id_counter_{0};
 
  public:
@@ -1167,7 +1196,8 @@ class ASTBuilder {
   void begin_frontend_ray_query_filter(const Expr &cond, const DebugInfo &dbg_info);
   void end_func(const std::string &funcid);
   void begin_frontend_if(const Expr &cond,
-                         const DebugInfo &dbg_info = DebugInfo());
+                         const DebugInfo &dbg_info = DebugInfo(),
+                         bool resolved_before_offload = false);
   void begin_frontend_if_true();
   void begin_frontend_if_false();
   Expr merge_frontend_if_variable(const Expr &true_value,
@@ -1261,14 +1291,25 @@ class ASTBuilder {
   }
 
   void parallelize(int v) {
+    if (record_device_loop_option(PortableLoopOption::parallelize, v))
+      return;
     for_loop_dec_.config.num_cpu_threads = v;
   }
 
+  int set_device_loop_mask(int mask) {
+    TI_ASSERT(mask >= 0 && mask <= 7);
+    return std::exchange(device_loop_mask_, mask);
+  }
+
   void strictly_serialize() {
+    if (record_device_loop_option(PortableLoopOption::serialize, 1))
+      return;
     for_loop_dec_.config.strictly_serialized = true;
   }
 
   void block_dim(int v) {
+    if (record_device_loop_option(PortableLoopOption::block_dim, v))
+      return;
     if (arch_ == Arch::cuda || arch_ == Arch::vulkan || arch_ == Arch::amdgpu) {
       TI_ASSERT((v % 32 == 0) || bit::is_power_of_two(v));
     } else {
@@ -1282,8 +1323,10 @@ class ASTBuilder {
     TI_ERROR_IF(
         arch_ != Arch::cuda && arch_ != Arch::vulkan && !arch_is_cpu(arch_),
         "Model-dependent block size requires a CPU, CUDA or Vulkan kernel");
-    TI_ERROR_IF(!is_kernel_ || loop_state_stack_.back() != None || stack_.size() != 1,
+    TI_ERROR_IF(!at_kernel_range_scope(),
                 "Model-dependent block size requires an outer kernel range");
+    if (record_device_loop_option(PortableLoopOption::block_dim, value))
+      return;
     for_loop_dec_.config.model_block_dim = value;
   }
 

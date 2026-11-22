@@ -186,7 +186,10 @@ def begin_frontend_if(ast_builder, cond, stmt_dbg_info):
             "or\n"
             "    if any(x != y):\n"
         )
-    ast_builder.begin_frontend_if(Expr(cond).ptr, stmt_dbg_info)
+    if getattr(cond, "_portable_prepare_condition", False):
+        ast_builder.begin_frontend_if(Expr(cond).ptr, stmt_dbg_info, True)
+    else:
+        ast_builder.begin_frontend_if(Expr(cond).ptr, stmt_dbg_info)
 
 
 @taichi_scope
@@ -1842,6 +1845,11 @@ def current_cfg():
 
 def default_cfg():
     return _ti_core.default_compile_config()
+
+
+def inside_portable_capture():
+    kernel = get_runtime().current_kernel
+    return getattr(getattr(kernel, "_package_compilation", None), "portable", False)
 
 
 def call_internal(name, *args, with_runtime_context=True):

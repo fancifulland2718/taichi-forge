@@ -4,6 +4,9 @@ import operator
 from dataclasses import dataclass
 
 
+PORTABLE_TARGETS = ("x64", "cuda", "vulkan")
+
+
 def validate_extent(expression):
     remaining = 1024
 
@@ -17,6 +20,8 @@ def validate_extent(expression):
             valid = len(args) == 1 and isinstance(args[0], str) and args[0].isidentifier()
         elif op == "const":
             valid = len(args) == 1 and type(args[0]) is int and 0 <= args[0] <= 2**31 - 1
+        elif op == "target_mask":
+            valid = len(args) == 1 and type(args[0]) is int and 0 < args[0] < 1 << len(PORTABLE_TARGETS)
         elif op == "ceil_pow2":
             valid = len(args) == 1
             if valid:
@@ -42,7 +47,7 @@ def freeze_extent(expression):
 
     def freeze(node):
         op, *args = node
-        return (op, *args) if op in ("dim", "const") else (op, *(freeze(arg) for arg in args))
+        return (op, *args) if op in ("dim", "const", "target_mask") else (op, *(freeze(arg) for arg in args))
 
     try:
         return freeze(expression)
@@ -50,7 +55,7 @@ def freeze_extent(expression):
         freeze = None
 
 
-def evaluate_extent(expression, resolve, *, max_value=2**63 - 1, min_value=0):
+def evaluate_extent(expression, resolve, *, max_value=2**63 - 1, min_value=0, arch=None):
     validate_extent(expression)
 
     def evaluate(node):
@@ -59,6 +64,11 @@ def evaluate_extent(expression, resolve, *, max_value=2**63 - 1, min_value=0):
             result = operator.index(resolve(args[0]))
         elif op == "const":
             result = args[0]
+        elif op == "target_mask":
+            target = "x64" if arch == "cpu" else arch
+            if target not in PORTABLE_TARGETS:
+                raise ValueError("A portable device condition requires the prepare target")
+            result = int(bool(args[0] & (1 << PORTABLE_TARGETS.index(target))))
         elif op == "ceil_pow2":
             minimum = evaluate(args[0])
             if minimum < 0:
@@ -107,15 +117,15 @@ def evaluate_extent(expression, resolve, *, max_value=2**63 - 1, min_value=0):
         evaluate = None
 
 
-def check_model_static_ranges(expressions, resolve):
+def check_model_static_ranges(expressions, resolve, *, arch=None):
     """Preserve static iteration counts within the existing i32 loop ABI."""
     for expression in expressions:
-        evaluate_extent(expression, resolve, min_value=-(2**31), max_value=2**31 - 1)
+        evaluate_extent(expression, resolve, min_value=-(2**31), max_value=2**31 - 1, arch=arch)
 
 
-def local_workspace_shape(expressions, resolve):
+def local_workspace_shape(expressions, resolve, *, arch=None):
     """Validate the i32 scalar-array ABI before allocating per-call storage."""
-    shape = tuple(evaluate_extent(item, resolve, max_value=2**31 - 1) for item in expressions)
+    shape = tuple(evaluate_extent(item, resolve, max_value=2**31 - 1, arch=arch) for item in expressions)
     if len(shape) not in (2, 3) or any(size <= 0 for size in shape[1:]):
         raise ValueError("Model local tensor axes must be positive")
     # An empty parallel range executes no local allocation. The ABI still
@@ -138,7 +148,7 @@ def extent_dependencies(expression):
         op, *args = pending.pop()
         if op == "dim":
             dependencies.add(args[0])
-        elif op != "const":
+        elif op not in ("const", "target_mask"):
             pending.extend(args)
     return dependencies
 

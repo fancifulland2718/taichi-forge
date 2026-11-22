@@ -89,3 +89,8 @@ PER_INTERNAL_OP(subgroupShuffle)
 PER_INTERNAL_OP(subgroupShuffleUp)
 PER_INTERNAL_OP(subgroupShuffleDown)
 PER_INTERNAL_OP(subgroupShuffleXor)
+// A constant of the consuming device. Resolved when reading portable LLVM.
+PER_INTERNAL_OP(unified_target_matches)
+PER_INTERNAL_OP(unified_require_device)
+PER_INTERNAL_OP(unified_has_device_capability)
+PER_INTERNAL_OP(unified_has_extension)

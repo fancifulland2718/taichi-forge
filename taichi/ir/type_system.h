@@ -244,6 +244,10 @@ class Signature {
   // Check a list of argument types against the type expression. If this fails,
   // some TypeSystemError will be raised.
   DataType type_check(const std::vector<DataType> &arguments) const;
+  DataType fixed_return_type() const {
+    return dynamic_cast<const TyMono *>(ret_type_.get()) ? ret_type_->resolve({})
+                                                         : PrimitiveType::unknown;
+  }
 };
 
 enum class StaticTraitID {
@@ -295,6 +299,7 @@ class Operations {
  public:
   // Get an internal operation from its ID.
   static Operation *get(InternalOp opcode);
+  static DataType fixed_return_type(const std::string &name);
 
  private:
   inline static std::map<InternalOp, std::unique_ptr<Operation>> internals_;

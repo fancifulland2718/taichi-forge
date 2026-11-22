@@ -6,6 +6,8 @@
 
 namespace taichi::lang {
 
+enum class PortableLoopOption : int { block_dim, parallelize, serialize };
+
 enum class UnaryOpType : int {
 #define PER_UNARY_OP(x) x,
 #include "taichi/inc/unary_op.inc.h"

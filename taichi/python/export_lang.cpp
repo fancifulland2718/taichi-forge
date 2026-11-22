@@ -1449,7 +1449,8 @@ void export_lang(py::module &m) {
       .def("begin_func", &ASTBuilder::begin_func)
       .def("end_func", &ASTBuilder::end_func)
       .def("stop_grad", &ASTBuilder::stop_gradient)
-      .def("begin_frontend_if", &ASTBuilder::begin_frontend_if)
+      .def("begin_frontend_if", &ASTBuilder::begin_frontend_if, py::arg("condition"),
+           py::arg("debug_info"), py::arg("resolved_before_offload") = false)
       .def("begin_frontend_if_true", &ASTBuilder::begin_frontend_if_true)
       .def("pop_scope", &ASTBuilder::pop_scope)
       .def("begin_frontend_if_false", &ASTBuilder::begin_frontend_if_false)
@@ -1495,10 +1496,12 @@ void export_lang(py::module &m) {
       .def("strictly_serialize", &ASTBuilder::strictly_serialize)
       .def("block_dim", &ASTBuilder::block_dim)
       .def("model_block_dim", &ASTBuilder::model_block_dim)
+      .def("set_device_loop_mask", &ASTBuilder::set_device_loop_mask)
       .def("one_to_one", &ASTBuilder::one_to_one)
       .def("insert_snode_access_flag", &ASTBuilder::insert_snode_access_flag)
       .def("reset_snode_access_flag", &ASTBuilder::reset_snode_access_flag);
 
+  m.def("_device_capability_id", [](const std::string &name) { return uint32_t(str2devcap(name)); });
   py::class_<DeviceCapabilityConfig>(m, "DeviceCapabilityConfig")
       .def("get", [](const DeviceCapabilityConfig &caps,
                      const std::string &name) { return caps.get(str2devcap(name)); });
@@ -8318,7 +8321,9 @@ void export_lang(py::module &m) {
                    const BufferFormat &, int, const DebugInfo &>);
   m.def("make_acceleration_structure_ptr_expr",
         Expr::make<AccelerationStructurePtrExpression,
-                   const std::vector<int> &, int, const DebugInfo &>);
+                   const std::vector<int> &, int, const DebugInfo &, bool>,
+        py::arg("arg_id"), py::arg("arg_depth"), py::arg("dbg_info"),
+        py::arg("portable_capture") = false);
 
   auto &&texture =
       py::enum_<TextureOpType>(m, "TextureOpType", py::arithmetic());

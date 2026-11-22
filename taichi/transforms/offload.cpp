@@ -52,10 +52,13 @@ class ValidateSharedArrayScope : public BasicStmtVisitor {
     if (!is_inside_parallel_range_for(stmt))
       ErrorEmitter(TaichiSyntaxError(), stmt, kSharedArrayScopeError);
     auto *callable = stmt->get_callable();
-    TI_ERROR_IF(!dynamic_cast<Kernel *>(callable),
+    auto *kernel = dynamic_cast<Kernel *>(callable);
+    TI_ERROR_IF(!kernel,
                 "Model-sized SharedArray requires an inlined kernel scope");
     if (!qualify_)
       return;
+    TI_ERROR_IF(kernel->arch != Arch::cuda && kernel->arch != Arch::vulkan,
+                "Model-sized SharedArray requires a CUDA or Vulkan workgroup");
     stmt->layout = {};
     stmt->layout.allocation_id = stmt->allocation_id;
     stmt->layout.element_bytes = data_type_size(stmt->ret_type.ptr_removed());
