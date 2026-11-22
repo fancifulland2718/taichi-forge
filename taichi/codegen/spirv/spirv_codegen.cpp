@@ -3975,36 +3975,30 @@ class TaskCodegen : public IRVisitor {
                       spv::DecorationNoSignedWrap);
     } else {
       const int num_indices = stmt->indices.size();
-      std::vector<std::string> size_var_names;
       const auto &element_shape = stmt->element_shape;
-      const size_t element_shape_index_offset =
-          num_indices - element_shape.size();
-      for (int i = 0; i < num_indices - element_shape.size(); i++) {
-        std::string var_name = fmt::format("{}_size{}_", stmt->raw_name(), i);
-        std::vector<int> indices = arg_id;
-        indices.push_back(TypeFactory::SHAPE_POS_IN_NDARRAY);
-        indices.push_back(i);
-        spirv::Value var_ptr = ir_->make_access_chain(
-            ir_->get_pointer_type(ir_->i32_type(), spv::StorageClassUniform),
-            get_buffer_value(BufferType::Args, PrimitiveType::i32), indices);
-        spirv::Value var = ir_->load_variable(var_ptr, ir_->i32_type());
-        ir_->register_value(var_name, var);
-        size_var_names.push_back(std::move(var_name));
+      const int array_rank = num_indices - static_cast<int>(element_shape.size());
+      // Row-major flattening starts with index 0. Only subsequent extents
+      // multiply a partial index; the leading extent is not an address fact.
+      if (num_indices > 0) {
+        linear_offset = ir_->cast(ir_->i32_type(),
+                                  ir_->query_value(stmt->indices[0]->raw_name()));
       }
-      int size_var_names_idx = 0;
-      for (int i = 0; i < num_indices; i++) {
-        spirv::Value size_var;
-        // Use immediate numbers to flatten index for element shapes.
-        if (i >= element_shape_index_offset &&
-            i < element_shape_index_offset + element_shape.size()) {
-          size_var = ir_->uint_immediate_number(
-              ir_->i32_type(), element_shape[i - element_shape_index_offset]);
+      for (int i = 1; i < num_indices; ++i) {
+        spirv::Value extent;
+        if (i < array_rank) {
+          auto path = arg_id;
+          path.push_back(TypeFactory::SHAPE_POS_IN_NDARRAY);
+          path.push_back(i);
+          auto pointer = ir_->make_access_chain(
+              ir_->get_pointer_type(ir_->i32_type(), spv::StorageClassUniform),
+              get_buffer_value(BufferType::Args, PrimitiveType::i32), path);
+          extent = ir_->load_variable(pointer, ir_->i32_type());
         } else {
-          size_var = ir_->query_value(size_var_names[size_var_names_idx++]);
+          extent = ir_->uint_immediate_number(ir_->i32_type(),
+                                              element_shape[i - array_rank]);
         }
-        spirv::Value indices = ir_->query_value(stmt->indices[i]->raw_name());
-        linear_offset = ir_->mul(linear_offset, size_var);
-        linear_offset = ir_->add(linear_offset, indices);
+        linear_offset = ir_->add(ir_->mul(linear_offset, extent),
+                                 ir_->query_value(stmt->indices[i]->raw_name()));
       }
       if (stmt->byte_stride != 0) {
         linear_offset = ir_->mul(
