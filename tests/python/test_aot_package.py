@@ -7625,6 +7625,28 @@ def test_package_binding_guard_observes_optional_parent_and_live_host_values(bor
         assert not guard.matches(owner)
 
 
+def test_package_binding_guard_checks_identity_before_value_tokens():
+    from types import SimpleNamespace
+    from taichi_forge_runtime.aot._package_calls import OwnerGuard
+
+    class Resource:
+        def __eq__(self, other):
+            raise AssertionError("Resource binding must compare handles by identity")
+
+    package = SimpleNamespace(_manifest={"owners": {}})
+    owner = SimpleNamespace(handle=Resource(), scale=float("1.25"), bias=0.0)
+    contract = dict(captures=[dict(name=name, kind="value") for name in vars(owner)])
+    guard = OwnerGuard.for_graph(package, owner, [contract])
+    assert guard.matches(owner)
+    owner.scale = float("1.25")
+    assert guard.matches(owner)
+    owner.bias = -0.0
+    assert not guard.matches(owner)
+    owner.bias = 0.0
+    owner.handle = Resource()
+    assert not guard.matches(owner)
+
+
 def test_package_binding_guard_observes_namespace_and_descriptor_changes():
     from types import SimpleNamespace
     from taichi_forge._lib import core

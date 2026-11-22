@@ -313,6 +313,7 @@ class OwnerGuard:
         from ._package_native import NativeObject
         self.identity_safe = tuple(type(x) not in (tuple, list, dict) and not isinstance(x, (HostTensor, NativeObject))
                                    for x in self.values)
+        self._all_identity_safe = all(self.identity_safe)
         self._namespace_versions = None
         if stamp is not None and (stamp == versions(owner) or self._children):
             # Versioned dictionaries cover plain top-level attributes, including
@@ -336,7 +337,11 @@ class OwnerGuard:
         if hasattr(self, "_present_count"):
             try:
                 current = self._present_reader(owner) if self._present_count else ()
-                values = list(current if self._present_count != 1 else (current,))
+                if self._present_count == 1:
+                    current = (current,)
+                if not self._missing_readers:
+                    return current
+                values = []
                 for name, reader in self._missing_readers:
                     if "." not in name:
                         values.append(getattr(owner, name, _MISSING))
@@ -345,7 +350,7 @@ class OwnerGuard:
                             values.append(reader(owner))
                         except AttributeError:
                             values.append(_MISSING)
-                return tuple(values)
+                return current + tuple(values)
             except AttributeError:
                 # A formerly present path disappeared. Preserve normal guard
                 # invalidation, including optional parents and descriptors.
@@ -388,9 +393,12 @@ class OwnerGuard:
                 if not (safe and value is previous) and _token(value) != token:
                     return False
             return not self._residual or versions(owner) == stamp
-        matched = all((safe and value is previous) or _token(value) == token
-                      for value, previous, token, safe in
-                      zip(self.read(owner), self.values, self.tokens, self.identity_safe))
+        current = self.read(owner)
+        matched = self._all_identity_safe and all(map(operator.is_, current, self.values))
+        if not matched:
+            matched = all((safe and value is previous) or _token(value) == token
+                          for value, previous, token, safe in
+                          zip(current, self.values, self.tokens, self.identity_safe))
         if matched and stamp is not None and stamp[1:] == self._namespace_stamp[1:]:
             # Only the instance changed. Class mutation may install a descriptor
             # and requires the full read until the next binding.
