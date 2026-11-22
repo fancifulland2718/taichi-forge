@@ -532,6 +532,14 @@ def _normalize_field_loops(module, constructor, kind, fail, namespace):
     ast.fix_missing_locations(Declarations().visit(constructor))
 
 
+def normalize_resource_declarations(module, constructor, kind, fail, namespace):
+    from ._package_function_inputs import invalidate_declaration_syntax
+
+    invalidate_declaration_syntax(constructor)
+    _normalize_scope_aliases(constructor, kind)
+    _normalize_field_loops(module, constructor, kind, fail, namespace)
+
+
 def scope_declarations(
     module,
     constructor,
@@ -548,12 +556,21 @@ def scope_declarations(
 ):
     if constructor is None:
         return {}
-    from ._package_function_inputs import invalidate_declaration_syntax
+    if declaration_domains_only or declaration_constants_only:
+        from ._package_targets import common_resource_schema, resource_views
+
+        variants = {}
+        for targets, branch in resource_views(constructor, module, kind, fail, namespace):
+            spec = scope_declarations(
+                module, branch, kind, fail, namespace, earlier, owner_node=owner_node, owner_class=owner_class,
+                initial_conditions=initial_conditions, declaration_domains_only=declaration_domains_only,
+                declaration_constants_only=declaration_constants_only)
+            variants.update(dict.fromkeys(targets, spec))
+        if variants:
+            return common_resource_schema(variants, lambda message: fail(module, constructor, message))
 
     initial_conditions = initial_conditions or {}
-    invalidate_declaration_syntax(constructor)
-    _normalize_scope_aliases(constructor, kind)
-    _normalize_field_loops(module, constructor, kind, fail, namespace)
+    normalize_resource_declarations(module, constructor, kind, fail, namespace)
     scopes, declarations, allowed = {}, {}, set()
     scope_groups, builders = {}, {}
     contexts, context_bindings, context_stores = {}, {}, {}

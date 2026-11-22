@@ -299,7 +299,22 @@ def constructor_calls(
             return
         raise ValueError("Cold factory input domain has an unproven selection or call")
 
-    for statement in constructor.body:
+    def assignments(body, local_aliases, devices):
+        for statement in body:
+            mask = getattr(statement, "_package_target_mask", None)
+            if mask is None:
+                yield statement, local_aliases
+                continue
+            # A device guard selects a construction path at prepare. Collect
+            # finite factory inputs from each reachable arm without leaking
+            # a branch-local assignment into its sibling.
+            for branch, active in ((statement.body, devices & mask), (statement.orelse, devices & ~mask)):
+                if active:
+                    yield from assignments(branch, local_aliases.copy(), active)
+
+    from ._package_targets import PORTABLE_TARGETS
+
+    for statement, aliases in assignments(constructor.body, aliases, (1 << len(PORTABLE_TARGETS)) - 1):
         if not isinstance(statement, (ast.Assign, ast.AnnAssign)) or statement.value is None:
             continue
         targets = statement.targets if isinstance(statement, ast.Assign) else [statement.target]

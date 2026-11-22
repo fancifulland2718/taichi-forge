@@ -1090,7 +1090,7 @@ class Component:
             op, *args = expression
             if op == "dim":
                 return (op, _capture_id((*prefix, args[0])))
-            return expression if op == "const" else (op, *(qualify(arg, prefix) for arg in args))
+            return expression if op in ("const", "target_mask") else (op, *(qualify(arg, prefix) for arg in args))
 
         def add(members, prefix=()):
             if len(prefix) > 32:
@@ -1251,7 +1251,7 @@ class Component:
                 op, *args = expression
                 if op == "dim":
                     return (op, _capture_id((*prefix, args[0])))
-                return tuple(expression) if op == "const" else (op, *(qualify(arg) for arg in args))
+                return tuple(expression) if op in ("const", "target_mask") else (op, *(qualify(arg) for arg in args))
 
             for name, constraint in registry.get("constraints", {}).items():
                 spec = constraint["spec"]
@@ -1400,7 +1400,7 @@ class Component:
                 op, *args = expression
                 if op == "dim":
                     return (op, _capture_id((*source_prefix, args[0])))
-                return expression if op == "const" else (op, *(qualify_array(arg) for arg in args))
+                return expression if op in ("const", "target_mask") else (op, *(qualify_array(arg) for arg in args))
             shape = []
             for extent in declaration["shape"]:
                 if isinstance(extent, Extent):
@@ -1432,7 +1432,7 @@ class Component:
                 op, *args = expression
                 if op == "dim":
                     return (op, _capture_id((*shape_prefix, args[0])))
-                return expression if op == "const" else (op, *(qualify_shape(arg) for arg in args))
+                return expression if op in ("const", "target_mask") else (op, *(qualify_shape(arg) for arg in args))
 
             for extent in declaration["shape"]:
                 if isinstance(extent, Extent):
@@ -1593,7 +1593,7 @@ class Component:
             op, *args = expression
             if op == "dim":
                 return mapping[args[0]]
-            return expression if op == "const" else (op, *(rewrite(arg, mapping) for arg in args))
+            return expression if op in ("const", "target_mask") else (op, *(rewrite(arg, mapping) for arg in args))
 
         for path, anchor, binding, root_id in sorted(borrowed, key=lambda item: item[0]):
             try:
@@ -1793,6 +1793,7 @@ class Component:
             raise TypeError("Too many explicit component arguments")
         call_args = list(_process_args(kernel, (), {**templates, **dict(zip((a.name for a in explicit), args))}))
         features, abi, template_facts = [], [], []
+        portable = getattr(getattr(kernel, "_package_compilation", None), "portable", False)
         resource_templates = {}
         for i, (argument, value) in enumerate(zip(kernel.arguments, call_args)):
             if i in slots:
@@ -1812,15 +1813,17 @@ class Component:
                 features.append(None)
                 abi.append(("value", describe_element_type(argument.annotation).structural_key()))
             elif isinstance(argument.annotation, RWTextureType):
-                if impl.current_cfg().arch.name != "vulkan":
+                if not portable and impl.current_cfg().arch.name != "vulkan":
                     raise TaichiCompilationError("Component storage image inputs require Vulkan")
-                feature = TaichiCallableTemplateMapper.extract_arg(value, argument.annotation, argument.name)
+                feature = ((value.num_dimensions, value.fmt, value.lod) if portable and value is argument.annotation
+                           else TaichiCallableTemplateMapper.extract_arg(value, argument.annotation, argument.name))
                 features.append(feature)
                 abi.append(("rw_texture", feature[0], feature[1].name, feature[2]))
             elif isinstance(argument.annotation, TextureType):
-                if impl.current_cfg().arch.name not in ("cuda", "vulkan"):
+                if not portable and impl.current_cfg().arch.name not in ("cuda", "vulkan"):
                     raise TaichiCompilationError("Component sampled textures require CUDA or Vulkan")
-                feature = TaichiCallableTemplateMapper.extract_arg(value, argument.annotation, argument.name)
+                feature = ((value.num_dimensions,) if portable and value is argument.annotation
+                           else TaichiCallableTemplateMapper.extract_arg(value, argument.annotation, argument.name))
                 features.append(feature)
                 # Sampling ABI depends on rank, not image size, pixels, sampler
                 # identity or the producer's temporary texture allocation.
@@ -1829,7 +1832,7 @@ class Component:
                 features.append(None)
                 abi.append(("value", str(argument.annotation)))
             elif isinstance(argument.annotation, AccelerationStructureType):
-                if impl.current_cfg().arch.name != "vulkan":
+                if not portable and impl.current_cfg().arch.name != "vulkan":
                     raise TaichiCompilationError("Component acceleration structures require Vulkan")
                 # The typed parameter has no geometry-dependent specialization.
                 # Graph injection supplies None without allocating a dummy AS.
@@ -2098,7 +2101,9 @@ class _Capture:
             if expression is None:
                 raise TaichiCompilationError("Model-sized static range requires a declared integer extent expression")
             expression = freeze_extent(expression)
-            for name in extent_dependencies(expression):
+            # First access assigns the hidden ABI slot. An extent can read
+            # several dimensions and its dependency set has no stable order.
+            for name in sorted(extent_dependencies(expression)):
                 path = self.component._paths[name]
                 self.attribute(ctx, path[-1], prefix=path[:-1])
             self.model_static_ranges.add(expression)
@@ -2107,7 +2112,8 @@ class _Capture:
         from taichi_forge._lib import core
         from taichi_forge.lang._local_tensor import extent
 
-        if impl.current_cfg().arch not in (core.cuda, core.vulkan):
+        compilation = getattr(self.kernel, "_package_compilation", None)
+        if impl.current_cfg().arch not in (core.cuda, core.vulkan) and not getattr(compilation, "portable", False):
             raise TaichiCompilationError("Model-sized SharedArray requires a CUDA or Vulkan workgroup")
         if self._current_real_function is not None or self.local_tensor_scope is None:
             raise TaichiCompilationError("Model-sized SharedArray requires an inlined parallel kernel range")
@@ -2164,7 +2170,7 @@ class _Capture:
             raise TaichiCompilationError("Model local tensors require a primitive scalar element type")
         shapes = tuple(freeze_extent(item) for item in (count, *expressions))
         for expression in shapes:
-            for name in extent_dependencies(expression):
+            for name in sorted(extent_dependencies(expression)):
                 if isinstance(self.declarations[name], Dimension):
                     self.dimension_dependency(name)
                     # A Field element gets its extent from the array descriptor,
@@ -2219,9 +2225,12 @@ class _Capture:
         from taichi_forge.lang._local_tensor import is_model_value
 
         arch = impl.current_cfg().arch
+        compilation = getattr(self.kernel, "_package_compilation", None)
         if not core.arch_uses_llvm(arch) and not (
-                arch == core.vulkan and getattr(function, "_backend_inline_function", False)):
-            raise TaichiCompilationError("real_func AOT requires an LLVM backend (CPU or CUDA)")
+                arch == core.vulkan and (getattr(function, "_backend_inline_function", False)
+                                         or (compilation is not None and
+                                             compilation.module._artifact_format == "unified-bc-library"))):
+            raise TaichiCompilationError("real_func AOT requires an LLVM backend or a unified LLVM library")
         args = list(args)
         for index in function.template_slot_locations:
             if is_model_value(args[index]):
@@ -2233,7 +2242,6 @@ class _Capture:
                 args[index] = _UniformTemplate(freeze_extent(expression), args[index].ptr.get_rvalue_type())
         function._ensure_real_function_cache_current_program()
         instance_id, features = function.mapper.lookup(args)
-        compilation = getattr(self.kernel, "_package_compilation", None)
         track_dependencies = compilation is not None and compilation.function_library
         # A receiver can be the root in one entry and a child in another. Its
         # Python identity alone does not establish the captured declaration ABI.
@@ -2339,6 +2347,8 @@ class _Capture:
                 op, *arguments = expression
                 if op == 'const':
                     return arguments[0]
+                if op == 'target_mask':
+                    return impl.call_internal("unified_target_matches", arguments[0], with_runtime_context=False)
                 if op == 'dim':
                     path = self.component._paths[arguments[0]]
                     return self.attribute(ctx, path[-1], prefix=path[:-1])

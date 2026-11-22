@@ -618,6 +618,18 @@ def field_allocation(owner_key, name, schema):
 
     def dimension_value(key):
         value = ast.parse(sources[key], mode="eval").body
+        for field in fields:
+            if (field.get("_device_declarations") and "like_source_path" in field
+                    and key in field["shape"]):
+                # The originating allocation may have a fixed axis on this
+                # device and therefore never publish a named model extent.
+                # The bound Field descriptor already owns the selected shape.
+                source = ast.Name("self", ast.Load())
+                for part in field["like_source_path"]:
+                    source = ast.Attribute(source, part, ast.Load())
+                value = ast.Subscript(ast.Attribute(source, "shape", ast.Load()),
+                                      ast.Constant(field["shape"].index(key)), ast.Load())
+                break
         conditions = [
             item.get("placement", {}).get("conditions", item.get("conditions", {}))
             for item in fields

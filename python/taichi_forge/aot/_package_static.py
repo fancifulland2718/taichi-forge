@@ -26,7 +26,8 @@ def _receiver_path(expression, receiver):
 
 
 class StaticPreparation:
-    def __init__(self, sources, *, method_implementations=None):
+    def __init__(self, sources, *, method_implementations=None, portable=False):
+        self._portable = portable
         self._method_implementations = method_implementations or {}
         self.uses = {}
         self._contexts = {}
@@ -738,10 +739,11 @@ class StaticPreparation:
         from taichi_forge.types.ray_type import AccelerationStructureType
         from taichi_forge.types.texture_type import TextureType, RWTextureType
 
-        # Vulkan prepare rebinds sampled images and acceleration structures.
-        # Other managed resources still use their original callable identity.
+        # Portable capture records the resource ABI; prepare supplies the
+        # device. Its host Program need not support the consumer's images.
+        projects_sampled_resources = self._portable or impl.current_cfg().arch == core.vulkan
         if any(isinstance(arg.annotation, RWTextureType)
-               or isinstance(arg.annotation, (TextureType, AccelerationStructureType)) and impl.current_cfg().arch != core.vulkan
+               or isinstance(arg.annotation, (TextureType, AccelerationStructureType)) and not projects_sampled_resources
                for arg in kernel.arguments):
             return environment, schema, {}
         identity = kernel.func.__module__ + "." + kernel.func.__qualname__

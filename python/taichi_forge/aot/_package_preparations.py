@@ -153,7 +153,7 @@ def _guard_returns(body, module, fail, *, validate=True):
     return body
 
 
-def _normalize(function, original, module, kind, receiver, fail, namespace):
+def _normalize(function, original, module, kind, receiver, fail, namespace, *, portable=False):
     arguments = (*original.args.posonlyargs, *original.args.args, *original.args.kwonlyargs)
     parameter_nodes = {id(part) for part in arguments if part.arg == receiver}
     if any(
@@ -200,8 +200,7 @@ def _normalize(function, original, module, kind, receiver, fail, namespace):
     from ._package_targets import select_target_branches
 
     normalized._package_target_selections = select_target_branches(
-        wrapper, kind, ti.lang.impl.current_cfg().arch.name, module, fail
-    )
+        wrapper, kind, None if portable else ti.lang.impl.current_cfg().arch.name, module, fail)
     facts = discover_contexts(wrapper, namespace, module, fail)
     facts += normalize_factories(wrapper, namespace, module, fail, kind)
     from ._package_allocations import normalize_allocation_helpers
@@ -268,7 +267,7 @@ def declaration_dependencies(sources, imported, fail, candidates):
         return constant_cache[cls]
 
     result = {}
-    for function, (module, _, kind, original) in candidates.items():
+    for function, (module, tree, kind, original) in candidates.items():
         domains = receivers[function]
         parameters = {parameter for parameter, _ in domains}
         if not domains:
@@ -276,7 +275,8 @@ def declaration_dependencies(sources, imported, fail, candidates):
         if len(parameters) != 1:
             fail(module, original, "Preparation owner parameter changes between source calls")
         namespace = source_function_namespace(function, original, imported)
-        _, normalized, _ = _normalize(function, original, module, kind, next(iter(parameters)), fail, namespace)
+        _, normalized, _ = _normalize(function, original, module, kind, next(iter(parameters)), fail, namespace,
+                                      portable=getattr(tree, "_package_portable", False))
         for _, target in domains:
             cls = owners[target]
             if not ordinary_owner_lookup(cls):
@@ -323,7 +323,8 @@ def resolve(sources, imported, owner_schema, fail, host_contexts, candidates):
             fail(module, original, "Preparation owner parameter changes between source calls")
         receiver = next(iter(parameters))
         namespace = source_function_namespace(function, original, imported)
-        owner, normalized, facts = _normalize(function, original, module, kind, receiver, fail, namespace)
+        owner, normalized, facts = _normalize(function, original, module, kind, receiver, fail, namespace,
+                                              portable=getattr(tree, "_package_portable", False))
         identity = owner.name
         local = None
         for _, target in sorted(domains):

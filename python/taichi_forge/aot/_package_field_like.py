@@ -90,6 +90,10 @@ def resolve_field_likes(sources, imported_modules):
             for key in original["dimension_sources"]
         }
         field = copy.deepcopy(original)
+        # field_like owns a new allocation whenever its constructor receives
+        # a source. The source owner's device-only allocation site is not a
+        # guard on this receiver. Only the selected source shape is inherited.
+        source_devices = field.pop("_device_declarations", {})
 
         metadata_policies = []
 
@@ -233,6 +237,23 @@ def resolve_field_likes(sources, imported_modules):
                 axis = getattr(node, "_package_model_extent", None)
                 if axis in remap:
                     node._package_model_extent = remap[axis]
+            own_devices = item.get("_device_declarations", {})
+            if source_devices or own_devices:
+                from ._package_targets import PORTABLE_TARGETS
+
+                shapes = {}
+                for target in PORTABLE_TARGETS:
+                    if target in own_devices and own_devices[target] is None:
+                        shapes[target] = None
+                        continue
+                    source = source_devices.get(target)
+                    axes = source["shape"] if source is not None else original["shape"]
+                    shapes[target] = [remap[axis] if isinstance(axis, str) else axis for axis in axes]
+                if any(shape != field["shape"] for shape in shapes.values()):
+                    field["_device_declarations"] = {
+                        target: None if shape is None else {**field, "shape": shape}
+                        for target, shape in shapes.items()
+                    }
             schema[name] = field
         finally:
             SourceTypes = original = metadata_policies = None
