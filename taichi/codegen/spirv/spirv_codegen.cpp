@@ -381,11 +381,16 @@ SparseTopologyMutationInfo detect_sparse_topology_mutation(
 // Descriptor variants of a function and separate offloads use the same plan.
 struct ShaderBodyPlan : BasicStmtVisitor {
   std::vector<FuncCallStmt *> calls;
-  std::unordered_set<Stmt *> scalar_slots;
+  std::vector<Stmt *> scalar_slots;
 
   explicit ShaderBodyPlan(IRNode *root) {
     invoke_default_visitor = true;
     root->accept(this);
+    for (const auto &[slot, uses] : slot_uses_) {
+      if (uses.stores_in_declaration || uses.starts_with_local_store)
+        scalar_slots.push_back(slot);
+    }
+    decltype(slot_uses_){}.swap(slot_uses_);
   }
   using BasicStmtVisitor::visit;
   void preprocess_container_stmt(Stmt *stmt) override {
@@ -396,22 +401,43 @@ struct ShaderBodyPlan : BasicStmtVisitor {
       calls.push_back(call);
     if (auto *slot = stmt->cast<AllocaStmt>(); slot && !slot->is_shared &&
         slot->ret_type.ptr_removed()->is<PrimitiveType>())
-      scalar_slots.insert(slot);
+      slot_uses_.try_emplace(slot);
     for (int i = 0; i < stmt->num_operands(); ++i) {
       auto *operand = stmt->operand(i);
       if (!operand || !operand->is<AllocaStmt>())
         continue;
-      auto type = operand->ret_type.ptr_removed();
-      if (stmt->is<LocalLoadStmt>() && stmt->ret_type == type)
+      auto found = slot_uses_.find(operand);
+      if (found == slot_uses_.end())
         continue;
+      const auto type = operand->ret_type.ptr_removed();
+      const bool load = stmt->is<LocalLoadStmt>() && stmt->ret_type == type;
       const auto *store = stmt->cast<LocalStoreStmt>();
-      // Nested reads use the dominating value. A branch or loop that writes
-      // the slot requires a merge, and address uses require real storage.
-      if (!store || store->dest != operand || store->val->ret_type != type ||
-          store->parent != operand->parent)
-        scalar_slots.erase(operand);
+      if (!load && !(store && store->dest == operand && store->val->ret_type == type)) {
+        slot_uses_.erase(found);
+        continue;
+      }
+      auto &uses = found->second;
+      if (store && stmt->parent != operand->parent)
+        uses.stores_in_declaration = false;
+      // A slot declared outside a branch or loop can still be local to its
+      // body. An unconditional first store kills the value from any previous
+      // iteration. A read before that store or a use outside needs storage.
+      if (!uses.first_access) {
+        uses.first_access = stmt->parent;
+        uses.starts_with_local_store = store != nullptr;
+      } else if (uses.first_access != stmt->parent) {
+        uses.starts_with_local_store = false;
+      }
     }
   }
+
+ private:
+  struct SlotUses {
+    Block *first_access{nullptr};
+    bool stores_in_declaration{true};
+    bool starts_with_local_store{false};
+  };
+  std::unordered_map<Stmt *, SlotUses> slot_uses_;
 };
 
 using ShaderBodyPlans = std::unordered_map<IRNode *, ShaderBodyPlan>;

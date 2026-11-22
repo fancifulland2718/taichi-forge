@@ -9,6 +9,52 @@ from tests import test_utils
 
 
 @test_utils.test(arch=ti.vulkan, offline_cache=False)
+def test_unified_shader_loop_local_and_carried_values(tmp_path, monkeypatch):
+    import numpy as np
+    from taichi_forge_runtime.aot import load_package
+
+    source = tmp_path / "source"
+    source.mkdir()
+    (source / "loop_slots.py").write_text("""import taichi_forge as ti
+@ti.kernel
+def update(data: ti.types.ndarray(ti.i32, 1), steps: ti.i32):
+    for i in range(data.shape[0]):
+        value = data[i]
+        previous = 3
+        for j in range(steps):
+            term = i + j
+            if (i + j) % 2 == 0:
+                term = value + j
+                previous = term - i
+            value += term + previous
+        data[i] = value
+""", encoding="utf8")
+    monkeypatch.syspath_prepend(str(source))
+    module = importlib.import_module("loop_slots")
+    output = tmp_path / "library"
+    try:
+        ti.aot.export_package(module, output, arch=ti.vulkan, artifact_format="unified-bc-library")
+        with ti.aot.borrow_runtime() as runtime, load_package(runtime, output) as package:
+            data = runtime.ndarray("i32", (9,))
+            for steps in (0, 1, 5):
+                expected = np.arange(-4, 5, dtype=np.int32)
+                data.write(expected.tobytes())
+                for i, value in enumerate(expected):
+                    previous = 3
+                    for j in range(steps):
+                        term = i + j
+                        if (i + j) % 2 == 0:
+                            term = value + j
+                            previous = term - i
+                        value += term + previous
+                    expected[i] = value
+                package.host.update(data, steps)
+                np.testing.assert_array_equal(np.frombuffer(data.read(), np.int32), expected)
+    finally:
+        sys.modules.pop(module.__name__, None)
+
+
+@test_utils.test(arch=ti.vulkan, offline_cache=False)
 def test_unified_preserves_quarter_turn_rounding_for_prepare(tmp_path, monkeypatch):
     import numpy as np
     from taichi_forge_runtime.aot import load_package
