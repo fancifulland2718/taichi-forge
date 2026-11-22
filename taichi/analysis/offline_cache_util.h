@@ -247,5 +247,8 @@ std::string get_hashed_offline_cache_semantic_key(
 void gen_offline_cache_key(IRNode *ast,
                            std::ostream *os,
                            std::vector<int> *source_tree_ids = nullptr);
+// Build-private identity before the device materializer resolves loop policy.
+// A non-leaf or tree-bound definition needs additional binding information.
+bool serialize_portable_leaf(IRNode *ast, std::ostream &out);
 
 }  // namespace taichi::lang

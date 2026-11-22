@@ -5,6 +5,7 @@ target_sources(llvm_codegen
   PRIVATE
     codegen_llvm.cpp
     codegen_llvm_quant.cpp
+    unified_bitcode.cpp
     llvm_codegen_utils.cpp
     struct_llvm.cpp
     compiled_kernel_data.cpp

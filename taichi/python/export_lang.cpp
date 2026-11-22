@@ -2974,7 +2974,10 @@ void export_lang(py::module &m) {
            &Program::debug_reset_sparse_listgen_statistics,
            py::call_guard<py::gil_scoped_release>())
       .def("materialize_runtime", &Program::materialize_runtime)
-      .def("make_aot_module_builder", &Program::make_aot_module_builder)
+      .def("make_aot_module_builder",
+           py::overload_cast<Arch, const std::vector<std::string> &, const std::string &>(
+               &Program::make_aot_module_builder),
+           py::arg("arch"), py::arg("caps"), py::arg("artifact_format") = "")
       .def("get_snode_tree_size", &Program::get_snode_tree_size)
       .def("get_active_snode_tree_ids", &Program::get_active_snode_tree_ids)
       .def("_materialize_compiled_snode_tree",

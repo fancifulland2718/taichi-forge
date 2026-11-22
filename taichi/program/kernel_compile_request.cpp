@@ -67,7 +67,8 @@ KernelCompileRequest::KernelCompileRequest(CompileConfig config,
   // Range dispatch and resource names have separate emitters. The adaptive
   // optimizer uses the unoptimized shader's word count to select passes.
   config_.spirv_omit_value_names =
-      provenance_.purpose == CompilePurpose::aot && config_.arch == Arch::vulkan &&
+      (provenance_.purpose == CompilePurpose::aot || config_.spirv_omit_value_names) &&
+      config_.arch == Arch::vulkan &&
       !config_.debug && !config_.print_kernel_asm && !config_.spirv_adaptive_opt;
 }
 

@@ -804,6 +804,12 @@ class TI_DLL_EXPORT Program {
 
   Function *create_function(const FunctionKey &func_key);
 
+  // Use the target compiler's ordinary IR lowering to qualify strided inputs
+  // before a prepared invocation chooses its executable.
+  std::vector<std::vector<int>> unified_kernel_affine_arguments(
+      const CompileConfig &config, const DeviceCapabilityConfig &caps,
+      const Kernel &kernel);
+
   const CompiledKernelData &compile_kernel(const CompileConfig &compile_config,
                                            const DeviceCapabilityConfig &caps,
                                            const Kernel &kernel_def);
@@ -965,6 +971,10 @@ class TI_DLL_EXPORT Program {
   std::unique_ptr<AotModuleBuilder> make_aot_module_builder(
       Arch arch,
       const std::vector<std::string> &caps);
+  std::unique_ptr<AotModuleBuilder> make_aot_module_builder(
+      Arch arch,
+      const std::vector<std::string> &caps,
+      const std::string &artifact_format);
 
   size_t get_field_in_tree_offset(int tree_id, const SNode *child) {
     return program_impl_->get_field_in_tree_offset(tree_id, child);

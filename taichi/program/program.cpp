@@ -1,6 +1,7 @@
 // Program, context for Taichi program execution
 
 #include "program.h"
+#include "taichi/analysis/gather_snode_tree_dependencies.h"
 
 #include "taichi/ir/statements.h"
 #include "taichi/program/extension.h"
@@ -60,6 +61,7 @@
 #ifdef TI_WITH_LLVM
 #include "taichi/rhi/llvm/device_memory_pool.h"
 #include "taichi/runtime/program_impls/llvm/llvm_program.h"
+#include "taichi/runtime/llvm/unified_aot_module_builder.h"
 #include "taichi/codegen/llvm/struct_llvm.h"
 #endif
 
@@ -3731,6 +3733,36 @@ Function *Program::create_function(const FunctionKey &func_key) {
   TI_ASSERT(function_map_.count(func_key) == 0);
   function_map_[func_key] = functions_.back().get();
   return functions_.back().get();
+}
+
+std::vector<std::vector<int>> Program::unified_kernel_affine_arguments(
+    const CompileConfig &config, const DeviceCapabilityConfig &caps,
+    const Kernel &kernel) {
+  // Explicit shared-staging plans can override LLVM stride qualification
+  // after lowering. The portable format does not emit these plans.
+  TI_ASSERT(!kernel.get_offload_execution_plan());
+  // The portable reader has already resolved helpers and restored the typed
+  // ExternalPtr/shape accesses. When these prove every array argument, no
+  // target scheduling pass is needed just to describe the unbound callable.
+  // A dead compact access or an opaque call may disappear during lowering.
+  // Keep the target proof for those mixed or unresolved cases.
+  auto direct = irpass::analysis::gather_kernel_runtime_dependencies(*kernel.ir);
+  const auto array_count = std::count_if(
+      kernel.nested_parameters.begin(), kernel.nested_parameters.end(),
+      [](const auto &parameter) {
+        return parameter.second.ptype == ParameterType::kNdarray;
+      });
+  if (direct.runtime_affine_arrays.size() == array_count &&
+      std::all_of(direct.runtime_affine_arrays.begin(), direct.runtime_affine_arrays.end(),
+                  [&](const auto &path) {
+                    const auto it = kernel.nested_parameters.find(path);
+                    return it != kernel.nested_parameters.end() &&
+                           it->second.ptype == ParameterType::kNdarray;
+                  }))
+    return std::move(direct.runtime_affine_arrays);
+  auto request = resolve_kernel_compile_request(config, caps, kernel.get_compile_tier_override());
+  auto ir = program_impl_->get_kernel_compilation_manager().lower_kernel_ir(request, kernel, nullptr);
+  return irpass::analysis::gather_kernel_runtime_dependencies(*ir).runtime_affine_arrays;
 }
 
 const CompiledKernelData &Program::compile_kernel(
@@ -21655,6 +21687,21 @@ DeviceCapabilityConfig translate_devcaps(const std::vector<std::string> &caps) {
     cfg.set(DeviceCapability::spirv_version, 0x10300);
   }
   return cfg;
+}
+
+std::unique_ptr<AotModuleBuilder> Program::make_aot_module_builder(
+    Arch arch, const std::vector<std::string> &caps, const std::string &format) {
+  if (format == "unified-bc-library") {
+#ifdef TI_WITH_LLVM
+    TI_ERROR_IF(compile_config().arch != arch, "Unified LLVM frontend target differs from the active Program");
+    return LLVM::make_unified_aot_module_builder(compile_config(), translate_devcaps(caps));
+#else
+    TI_ERROR("Unified bitcode libraries require an LLVM-enabled producer");
+#endif
+  }
+  auto builder = make_aot_module_builder(arch, caps);
+  if (builder && !format.empty()) builder->set_artifact_format(format);
+  return builder;
 }
 
 std::unique_ptr<AotModuleBuilder> Program::make_aot_module_builder(

@@ -89,6 +89,8 @@ class ASTSerializer : public IRVisitor, public ExpressionVisitor {
     emit(expr->arg_id);
     emit(expr->is_ptr);
     emit(expr->create_load);
+    if (portable_leaf_)
+      emit(expr->arg_depth);
   }
 
   void visit(TexturePtrExpression *expr) override {
@@ -264,6 +266,8 @@ class ASTSerializer : public IRVisitor, public ExpressionVisitor {
   void visit(ExternalTensorBasePtrExpression *expr) override {
     emit(ExprOpCode::ExternalTensorBasePtrExpression);
     emit(expr->ptr);
+    if (portable_leaf_)
+      emit(expr->is_grad);
   }
 
   void visit(FrontendFuncCallStmt *expr) override {
@@ -384,6 +388,8 @@ class ASTSerializer : public IRVisitor, public ExpressionVisitor {
       ++branch_count;
     }
     emit(branch_count);
+    if (portable_leaf_ && branch_count == 1)
+      emit(bool(stmt->true_statements));
     if (stmt->true_statements) {
       emit(stmt->true_statements.get());
     }
@@ -444,7 +450,7 @@ class ASTSerializer : public IRVisitor, public ExpressionVisitor {
     }
     emit(stmt->loop_var_ids);
     emit(stmt->is_bit_vectorized);
-    emit(stmt->num_cpu_threads);
+    emit(portable_leaf_ ? stmt->requested_cpu_threads : stmt->num_cpu_threads);
     emit(stmt->strictly_serialized);
     emit(stmt->mem_access_opt);
     emit(stmt->block_dim);
@@ -490,7 +496,19 @@ class ASTSerializer : public IRVisitor, public ExpressionVisitor {
     }
   }
 
+  static bool portable_leaf(IRNode *ast, std::ostream &out) {
+    ASTSerializer serializer(&out, true);
+    serializer.portable_leaf_ = true;
+    ast->accept(&serializer);
+    if (!serializer.real_funcs_in_id_order_.empty() ||
+        !serializer.source_tree_ids_.empty() || !serializer.snode_tree_roots_.empty())
+      return false;
+    serializer.emit_dependencies();
+    return true;
+  }
+
  private:
+  bool portable_leaf_{false};
   void emit_dependencies() {
     // Match the IDs emitted at call sites. Pointer order varies between
     // processes and can also alias kernels with different call orders.
@@ -671,7 +689,10 @@ class ASTSerializer : public IRVisitor, public ExpressionVisitor {
       emit(expr.const_value);
       emit(expr.atomic);
       auto *e = expr.expr.get();
-      emit(e->get_flattened_stmt());
+      // Frontend clones share expressions. The last FlattenContext's
+      // statement may already be destroyed and is never a source operand.
+      // Preserve the representation of an expression before first lowering.
+      emit(StmtOpCode::NIL);
       emit(e->attributes);
       emit(e->ret_type);
       expr.expr->accept(this);
@@ -762,6 +783,10 @@ void gen_offline_cache_key(IRNode *ast,
                            std::ostream *os,
                            std::vector<int> *source_tree_ids) {
   ASTSerializer::run(ast, os, source_tree_ids);
+}
+
+bool serialize_portable_leaf(IRNode *ast, std::ostream &out) {
+  return ASTSerializer::portable_leaf(ast, out);
 }
 
 std::vector<int> irpass::analysis::gather_frontend_snode_tree_dependencies(
