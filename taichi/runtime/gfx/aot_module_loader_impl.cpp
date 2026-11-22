@@ -26,7 +26,6 @@
 
 namespace taichi::lang {
 namespace gfx {
-namespace {
 #ifdef TI_WITH_VULKAN
 size_t specialize_task_arguments(
     GfxRuntime::RegisterParams &params,
@@ -96,6 +95,7 @@ size_t specialize_task_arguments(
 }
 #endif
 
+namespace {
 class SNodeInstanceImpl final : public AotSNodeInstance {
  public:
   SNodeInstanceImpl(std::shared_ptr<aot::Module> code, GfxRuntime *runtime)
@@ -1177,7 +1177,8 @@ void allocate_aot_root_buffers(aot::Module *module) {
 }
 
 void set_aot_prepare_compile_threads(aot::Module &module, int threads) {
-  dynamic_cast<AotModuleImpl &>(module).set_prepare_compile_threads(threads);
+  if (auto *spirv_module = dynamic_cast<AotModuleImpl *>(&module))
+    spirv_module->set_prepare_compile_threads(threads);
 }
 
 std::unique_ptr<AotSNodeInstance> make_aot_snode_instance(

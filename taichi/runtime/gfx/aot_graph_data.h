@@ -13,6 +13,9 @@ struct AotKernelRegistration {
   // Only split, owned Vulkan artifacts need assembly. Alias lookups and
   // construction of a LaunchContext can use the callable ABI immediately.
   std::function<void()> load_code;
+  // Portable LLVM has a callable ABI before any target tasks exist. Its
+  // materializer supplies the complete target registration on demand.
+  std::unique_ptr<GfxRuntime::RegisterParams> compiled_params;
 
   void materialize_code() {
     if (load_code)
@@ -24,7 +27,7 @@ struct AotKernelRegistration {
     std::call_once(once, [&] {
       try {
         materialize_code();
-        handle = runtime.register_taichi_kernel(params);
+        handle = runtime.register_taichi_kernel(compiled_params ? *compiled_params : params);
       } catch (...) {
         failure = std::current_exception();
       }
@@ -116,8 +119,11 @@ class KernelImpl : public aot::Kernel {
   }
 
   const GfxRuntime::RegisterParams &params() {
-    if (registration_)
+    if (registration_) {
       registration_->materialize_code();
+      if (registration_->compiled_params)
+        return *registration_->compiled_params;
+    }
     return params_;
   }
 

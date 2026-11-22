@@ -1,4 +1,8 @@
 #include "taichi_gfx_impl.h"
+#ifdef TI_WITH_LLVM
+#include "unified_aot_module.h"
+#include "taichi/runtime/llvm/kernel_launcher.h"
+#endif
 #include "taichi/runtime/gfx/aot_module_loader_impl.h"
 #include "taichi/codegen/spirv/snode_struct_compiler.h"
 
@@ -34,6 +38,13 @@ GfxRuntime::allocate_dense_snode_storage(std::size_t size) {
 Error GfxRuntime::create_aot_module(
     std::shared_ptr<const taichi::io::VirtualDir> dir,
     TiAotModule &out) {
+#if defined(TI_WITH_LLVM) && defined(TI_WITH_VULKAN)
+  if (arch == taichi::Arch::vulkan && capi::is_unified_library(*dir)) {
+    auto module = capi::load_unified_library(*this, std::move(dir), nullptr, &get_gfx_runtime());
+    out = (TiAotModule)new AotModule(*this, std::move(module));
+    return Error();
+  }
+#endif
   taichi::lang::gfx::AotModuleParams params{};
   params.source = std::move(dir);
   params.runtime = &get_gfx_runtime();

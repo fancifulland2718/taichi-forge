@@ -207,10 +207,12 @@ void validate_kernel_array(Runtime &runtime,
   }
   validate_array_storage(runtime, array, nullptr, true,
                          prepared_external_access);
-  if (runtime.get_memory(array.memory, prepared_external_access).dense_layout &&
-      std::find(kernel.runtime_affine_arrays.begin(), kernel.runtime_affine_arrays.end(),
-                std::vector<int>{int(index)}) == kernel.runtime_affine_arrays.end())
-    throw MemoryBindingError("Kernel lacks compiler-proven runtime stride support; rebuild with an affine declaration");
+  if (runtime.get_memory(array.memory, prepared_external_access).dense_layout) {
+    auto *deferred = dynamic_cast<capi::DeferredArrayLayouts *>(&kernel);
+    const auto &arrays = deferred ? deferred->resolve_array_layouts() : kernel.runtime_affine_arrays;
+    if (std::find(arrays.begin(), arrays.end(), std::vector<int>{int(index)}) == arrays.end())
+      throw MemoryBindingError("Kernel lacks compiler-proven runtime stride support; rebuild with an affine declaration");
+  }
   const auto &param = parameter->second;
   const auto *abi =
       kernel.args_type->get_element_type({int(index)})->as<StructType>();

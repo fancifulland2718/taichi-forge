@@ -167,6 +167,10 @@ struct AotRuntimeClient::State {
         fault_domain(program.runtime_fault_domain()) {
     if (&this->runtime->get() != program.get_compute_device())
       throw std::logic_error("AOT borrower did not share its Program device");
+#ifdef TI_WITH_LLVM
+    this->runtime->unified_compiler =
+        std::shared_ptr<Program>(&program, [](Program *) {});
+#endif
     this->runtime->borrow_runtime_fault_domain(
         program.runtime_fault_domain(),
         arch == Arch::cuda ? program.cuda_execution_domains() : nullptr,

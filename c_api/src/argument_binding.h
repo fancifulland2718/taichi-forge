@@ -15,6 +15,15 @@ class NativeKernelResourceBinding;
 }  // namespace taichi::lang
 
 namespace capi {
+// A portable callable can describe its ABI before lowering device code.
+// A strided view needs the target compiler's proof when it is first bound.
+class DeferredArrayLayouts {
+ public:
+  virtual const std::vector<std::vector<int>> &resolve_array_layouts() = 0;
+ protected:
+  ~DeferredArrayLayouts() = default;
+};
+
 struct NdArrayStorageLayout {
   uint64_t bytes;
   uint64_t element_bytes;

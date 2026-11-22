@@ -113,11 +113,12 @@ LlvmAotModule::LlvmAotModule(
     const std::string &module_path,
     LlvmRuntimeExecutor *executor,
     std::unique_ptr<LLVM::KernelLauncher> kernel_launcher,
-    uint64 *allocation_result_buffer)
+    uint64 *allocation_result_buffer,
+    std::shared_ptr<const io::VirtualDir> source)
     : executor_(executor),
       allocation_result_buffer_(allocation_result_buffer),
       kernel_launcher_(std::move(kernel_launcher)),
-      directory_(io::VirtualDir::open(module_path)) {
+      directory_(source ? std::move(source) : io::VirtualDir::open(module_path)) {
   TI_ASSERT(executor_ != nullptr);
 
   size_t metadata_size = 0;
@@ -1268,7 +1269,8 @@ std::unique_ptr<aot::Module> make_aot_module(AotModuleParams mod_params) {
   return std::make_unique<LlvmAotModule>(mod_params.module_path,
                                          mod_params.executor_,
                                          std::move(mod_params.kernel_launcher),
-                                         mod_params.allocation_result_buffer);
+                                         mod_params.allocation_result_buffer,
+                                         std::move(mod_params.source));
 }
 
 }  // namespace LLVM

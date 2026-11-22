@@ -12,9 +12,19 @@
 #include "taichi/aot/module_builder.h"
 #include "taichi/aot/module_loader.h"
 #include "taichi/common/virtual_dir.h"
+#ifdef TI_WITH_VULKAN
+#include "taichi/rhi/vulkan/shader_specialization.h"
+#endif
 
 namespace taichi::lang {
 namespace gfx {
+
+#ifdef TI_WITH_VULKAN
+size_t specialize_task_arguments(
+    GfxRuntime::RegisterParams &params,
+    const std::vector<vulkan::ShaderArgumentConstant> &values,
+    size_t max_workers);
+#endif
 
 struct TI_DLL_EXPORT AotModuleParams {
   std::string module_path{};

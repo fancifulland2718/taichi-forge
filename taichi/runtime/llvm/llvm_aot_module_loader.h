@@ -27,7 +27,8 @@ class LlvmAotModule final : public aot::Module {
   explicit LlvmAotModule(const std::string &module_path,
                          LlvmRuntimeExecutor *executor,
                          std::unique_ptr<LLVM::KernelLauncher> kernel_launcher,
-                         uint64 *allocation_result_buffer = nullptr);
+                         uint64 *allocation_result_buffer = nullptr,
+                         std::shared_ptr<const io::VirtualDir> source = nullptr);
   ~LlvmAotModule() override;
 
   Arch arch() const override {
@@ -149,6 +150,7 @@ struct TI_DLL_EXPORT AotModuleParams {
   LlvmRuntimeExecutor *executor_{nullptr};
   std::unique_ptr<LLVM::KernelLauncher> kernel_launcher{nullptr};
   uint64 *allocation_result_buffer{nullptr};
+  std::shared_ptr<const io::VirtualDir> source;
 };
 
 TI_DLL_EXPORT std::unique_ptr<aot::Module> make_aot_module(

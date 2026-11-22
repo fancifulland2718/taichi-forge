@@ -2,6 +2,7 @@
 
 #include "taichi_core_impl.h"
 #include "taichi_llvm_impl.h"
+#include "unified_aot_module.h"
 
 #include "taichi/taichi_cpu.h"
 #include "taichi/taichi_cuda.h"
@@ -135,34 +136,34 @@ TiMemory LlvmRuntime::allocate_memory(
 TiAotModule LlvmRuntime::load_aot_module(const char *module_path) {
   const auto &config = executor_->get_config();
   std::unique_ptr<taichi::lang::aot::Module> aot_module{nullptr};
+  taichi::lang::LLVM::AotModuleParams aot_params;
+  aot_params.source = taichi::io::VirtualDir::open(module_path);
+  aot_params.module_path = module_path;
+  aot_params.executor_ = executor_;
+  aot_params.allocation_result_buffer = result_buffer;
 
   if (taichi::arch_is_cpu(config.arch)) {
     taichi::lang::cpu::KernelLauncher::Config cfg;
     cfg.executor = executor_;
-    taichi::lang::LLVM::AotModuleParams aot_params;
-    aot_params.executor_ = executor_;
-    aot_params.allocation_result_buffer = result_buffer;
     aot_params.kernel_launcher =
         std::make_unique<taichi::lang::cpu::KernelLauncher>(std::move(cfg));
-    aot_params.module_path = module_path;
-    aot_module = taichi::lang::LLVM::make_aot_module(std::move(aot_params));
   } else {
 #ifdef TI_WITH_CUDA
     TI_ASSERT(config.arch == taichi::Arch::cuda);
     taichi::lang::cuda::KernelLauncher::Config cfg;
     cfg.executor = executor_;
-    taichi::lang::LLVM::AotModuleParams aot_params;
-    aot_params.executor_ = executor_;
-    aot_params.allocation_result_buffer = result_buffer;
     aot_params.kernel_launcher =
         std::make_unique<taichi::lang::cuda::KernelLauncher>(std::move(cfg));
-    aot_params.module_path = module_path;
-    aot_module = taichi::lang::LLVM::make_aot_module(std::move(aot_params));
 #else
     TI_NOT_IMPLEMENTED;
 #endif
   }
 
+  if (aot_params.source && is_unified_library(*aot_params.source))
+    aot_module = load_unified_library(*this, std::move(aot_params.source),
+                                      std::move(aot_params.kernel_launcher), nullptr);
+  else
+    aot_module = taichi::lang::LLVM::make_aot_module(std::move(aot_params));
   // The module validates and reserves every tree identity at load time.
   // Kernel dependencies and explicit root views initialize storage on demand.
   return (TiAotModule)(new AotModule(*this, std::move(aot_module)));

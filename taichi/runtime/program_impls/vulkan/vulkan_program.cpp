@@ -210,7 +210,8 @@ StreamSemaphore VulkanProgramImpl::enqueue_graphics_op_lambda(
 }
 
 void VulkanProgramImpl::invalidate_graphics_command_replay() {
-  runtime_->invalidate_graphics_command_replay();
+  if (runtime_)
+    runtime_->invalidate_graphics_command_replay();
 }
 
 std::unordered_map<std::string, std::uint64_t>

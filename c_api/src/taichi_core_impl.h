@@ -43,6 +43,7 @@
 #include "taichi/program/storage_view.h"
 
 namespace taichi::lang {
+class Program;
 class RuntimeFaultDomain;
 class RuntimeCompletion;
 class ExternalSynchronizationDomain;
@@ -253,6 +254,13 @@ class Runtime {
   const taichi::Arch arch;
 
   virtual ~Runtime();
+
+#ifdef TI_WITH_LLVM
+  // Borrowers use the same Program as the calling script. Standalone runtimes
+  // create a compiler only on the first unified numerical lookup.
+  std::shared_ptr<taichi::lang::Program> unified_compiler;
+  taichi::lang::Program &get_unified_compiler();
+#endif
 
   virtual taichi::lang::Device &get() = 0;
 
