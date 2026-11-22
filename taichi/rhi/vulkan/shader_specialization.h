@@ -28,4 +28,10 @@ TI_DLL_EXPORT std::vector<uint32_t> specialize_spirv_arguments(
     const std::vector<uint32_t> &code, uint32_t argument_binding,
     const std::vector<ShaderArgumentConstant> &values, size_t *folded = nullptr);
 
+// Unified code has already specialized user control flow in the portable IR.
+// A single generated task only needs its immutable addressing words bound.
+std::vector<uint32_t> bind_spirv_layout_words(
+    const std::vector<uint32_t> &code, uint32_t argument_binding,
+    const std::vector<ShaderArgumentConstant> &values, size_t *folded);
+
 }  // namespace taichi::lang::vulkan

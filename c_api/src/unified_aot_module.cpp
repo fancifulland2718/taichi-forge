@@ -467,7 +467,10 @@ class UnifiedModule final : public aot::Module {
       std::vector<vulkan::ShaderArgumentConstant> values;
       for (const auto &[offset, word] : layout)
         values.push_back({offset, 32, word});
-      gfx::specialize_task_arguments(params, values, std::max(1, cfg.num_compile_threads));
+      const auto folded = gfx::specialize_task_arguments(params, values, std::max(1, cfg.num_compile_threads),
+                                                         /*layout_words_only=*/true);
+      TI_DEBUG("Unified Vulkan specialization {} folded {} ABI loads for {} layout words",
+               name, folded, values.size());
     }
     auto registration = std::make_shared<gfx::AotKernelRegistration>();
     registrations_.push_back(registration);

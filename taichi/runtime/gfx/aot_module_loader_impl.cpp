@@ -30,7 +30,8 @@ namespace gfx {
 size_t specialize_task_arguments(
     GfxRuntime::RegisterParams &params,
     const std::vector<vulkan::ShaderArgumentConstant> &values,
-    size_t max_workers) {
+    size_t max_workers,
+    bool layout_words_only) {
   if (values.empty())
     return 0;
   const auto &tasks = params.kernel_attribs.tasks_attribs;
@@ -40,7 +41,9 @@ size_t specialize_task_arguments(
     for (const auto &bind : tasks[i].buffer_binds) {
       if (bind.buffer.type == TaskAttributes::BufferType::Args && bind.binding >= 0) {
         size_t count = 0;
-        codes[i] = vulkan::specialize_spirv_arguments(codes[i], bind.binding, values, &count);
+        const auto bind_arguments = layout_words_only ? vulkan::bind_spirv_layout_words
+                                                     : vulkan::specialize_spirv_arguments;
+        codes[i] = bind_arguments(codes[i], bind.binding, values, &count);
         folded += count;
       }
     }

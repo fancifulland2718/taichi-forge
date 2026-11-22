@@ -125,9 +125,11 @@ std::vector<uint32_t> specialize_spirv_shader(
   return output;
 }
 
-std::vector<uint32_t> specialize_spirv_arguments(
+namespace {
+std::vector<uint32_t> bind_spirv_arguments(
     const std::vector<uint32_t> &code, uint32_t argument_binding,
-    const std::vector<ShaderArgumentConstant> &values, size_t *folded) {
+    const std::vector<ShaderArgumentConstant> &values, size_t *folded,
+    bool layout_words_only) {
   if (folded)
     *folded = 0;
   if (values.empty())
@@ -275,6 +277,15 @@ std::vector<uint32_t> specialize_spirv_arguments(
     context->ReplaceAllUsesWith(load->result_id(), definition->result_id());
     context->KillInst(load);
   }
+  auto has_outlined_functions = [&] {
+    auto function = context->module()->begin();
+    return function != context->module()->end() && ++function != context->module()->end();
+  };
+  if (layout_words_only && !has_outlined_functions()) {
+    std::vector<uint32_t> output;
+    context->module()->ToBinary(&output, true);
+    return output;
+  }
   // Kernel metadata owns the descriptor ABI and prepared resource views reuse
   // it. Fold unreachable computations while retaining their binding declarations;
   // removing a variable here would disagree with that immutable task contract.
@@ -295,8 +306,7 @@ std::vector<uint32_t> specialize_spirv_arguments(
     throw std::invalid_argument("Cannot specialize SPIR-V arguments: " + diagnostic);
   // Prune with the bound ABI first. Only the surviving outlined calls can
   // expose new caller-local values when the prepared pipeline is materialized.
-  auto function = context->module()->begin();
-  if (function != context->module()->end() && ++function != context->module()->end()) {
+  if (has_outlined_functions()) {
     passes.AddPass<spvtools::opt::MergeReturnPass>();
     passes.AddPass<spvtools::opt::InlineExhaustivePass>();
     passes.AddPass<spvtools::opt::EliminateDeadFunctionsPass>();
@@ -307,6 +317,19 @@ std::vector<uint32_t> specialize_spirv_arguments(
   std::vector<uint32_t> output;
   context->module()->ToBinary(&output, true);
   return output;
+}
+}  // namespace
+
+std::vector<uint32_t> specialize_spirv_arguments(
+    const std::vector<uint32_t> &code, uint32_t argument_binding,
+    const std::vector<ShaderArgumentConstant> &values, size_t *folded) {
+  return bind_spirv_arguments(code, argument_binding, values, folded, false);
+}
+
+std::vector<uint32_t> bind_spirv_layout_words(
+    const std::vector<uint32_t> &code, uint32_t argument_binding,
+    const std::vector<ShaderArgumentConstant> &values, size_t *folded) {
+  return bind_spirv_arguments(code, argument_binding, values, folded, true);
 }
 
 }  // namespace taichi::lang::vulkan

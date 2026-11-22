@@ -23,7 +23,8 @@ namespace gfx {
 size_t specialize_task_arguments(
     GfxRuntime::RegisterParams &params,
     const std::vector<vulkan::ShaderArgumentConstant> &values,
-    size_t max_workers);
+    size_t max_workers,
+    bool layout_words_only = false);
 #endif
 
 struct TI_DLL_EXPORT AotModuleParams {
