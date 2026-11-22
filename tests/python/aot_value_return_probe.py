@@ -146,6 +146,9 @@ def main(mode, arch, artifact):
 
         runtime = aot.Runtime(
             arch,
+            # The producer includes device assertions. Independent deployment
+            # runtimes explicitly opt in to polling them at completion.
+            debug=arch != "vulkan",
             device_index=(
                 int(os.environ.get("TI_TEST_VULKAN_DEVICE_INDEX", 0))
                 if arch == "vulkan"
