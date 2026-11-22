@@ -168,8 +168,16 @@ class TI_DLL_EXPORT Kernel : public Callable {
  public:
 
   bool ir_is_ast() const {
-    return ir_is_ast_;
+    return source_ == Source::ast;
   }
+
+  bool has_persistent_cache_source() const {
+    return source_ != Source::local_ir;
+  }
+
+  // Before compilation, supply a durable identity for reconstructed IR whose
+  // complete source and code-shaping bindings are known across processes.
+  void set_persistent_ir_identity(std::string identity);
 
   Function *create_inline_function(const std::string &name);
 
@@ -317,8 +325,9 @@ class TI_DLL_EXPORT Kernel : public Callable {
             const std::string &name = "",
             AutodiffMode autodiff_mode = AutodiffMode::kNone);
 
-  // True if |ir| is a frontend AST. False if it's already offloaded to CHI IR.
-  bool ir_is_ast_{false};
+  // Local CHI can have a process-specific name or depend on live storage.
+  enum class Source { local_ir, ast, content_addressed_ir };
+  Source source_{Source::local_ir};
   mutable std::mutex kernel_key_mutex_;
   mutable std::string kernel_key_;
   mutable std::string kernel_key_context_;

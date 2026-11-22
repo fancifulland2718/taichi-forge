@@ -1407,7 +1407,9 @@ class BoundCall:
         CPU/CUDA bitcode and Vulkan 1.3 specialization fold immutable ndarray layouts
         and optional integer scalar argument indices during backend compilation.
         Contents and storage addresses remain instance-bound. Ordinary preparation
-        does not recompile code. The specialized code cache is module-local.
+        does not recompile code. Prepared bindings belong to the loaded module.
+        With offline caching enabled, Vulkan consumers of unified bitcode can reuse
+        compiled shaders across processes before applying instance layout words.
         """
         runtime = self._entry._module._runtime
         with runtime._lock:

@@ -209,9 +209,8 @@ class KernelCompilationManager final {
   std::unique_ptr<CompiledKernelData> load_ckd(const std::string &kernel_key,
                                                Arch arch);
 
-  static CacheData::CacheMode get_cache_mode(
-      const CompileConfig &compile_config,
-      const Kernel &kernel_def);
+  static CacheData::CacheMode get_cache_mode(bool offline_cache,
+                                             const Kernel &kernel_def);
 
   std::shared_ptr<KernelExecutionHandle> ensure_execution_handle_locked(
       KernelCacheData &kernel);

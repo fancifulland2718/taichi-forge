@@ -444,6 +444,12 @@ compiles the resulting code with that device's backend. **Perform** submits
 that executable with live input. All three consumers open the same package.
 An entry that uses an external provider still requires that provider on the device.
 
+With `offline_cache=True`, Vulkan prepare can reuse compiled SPIR-V across processes for
+unified kernels without bound SNode trees. The key covers the root and helper closure,
+signature, substituted integer facts, compiler version, effective configuration and
+device capabilities. Each binding still applies its descriptor layout and creates or
+reuses a driver pipeline. These shaders occupy the consumer's local compiler cache.
+
 In a unified library, one declared model dimension can supply both
 `ti.loop_config(block_dim=self.width)` and `ti.simt.block.SharedArray((self.width,), dtype)`.
 Produce records the width expression, local lane index and synchronization operations once.
@@ -1467,9 +1473,8 @@ contents are never read back or fixed. Special launches, binding families, SNode
 instances and managed kernel resources are outside this Graph specialization
 scope. Independent CUDA domain admission can still materialize generic code early.
 Compatible code is shared within the loaded module with existing instance and
-in-flight ownership. A module-local hit avoids compilation, but a
-new process only benefits from existing CUDA backend/driver caches and still runs
-LLVM optimization; there is no complete persistent specialization cache yet.
+in-flight ownership. For CUDA bitcode, a new process still runs LLVM optimization
+and can reuse existing backend and driver caches.
 Measure initial preparation, cached preparation, steady execution and local code
 storage before enabling it; hot kernel timing alone omits this tradeoff.
 Specialized code caching and native invocation reuse have separate responsibilities:

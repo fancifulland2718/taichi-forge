@@ -9,6 +9,7 @@
 #include "llvm/ADT/PostOrderIterator.h"
 #include "llvm/IR/Dominators.h"
 #include "llvm/Bitcode/BitcodeReader.h"
+#include "llvm/Config/llvm-config.h"
 #include "llvm/IR/Constants.h"
 #include "llvm/IR/Instructions.h"
 #include "llvm/IR/Module.h"
@@ -1372,6 +1373,15 @@ std::unique_ptr<Kernel> read_unified_kernel(
   {
     TI_COMPILE_PROFILER("cpp.unified.prepare.reconstruct_ir");
     KernelReader reader(*kernel, *entry, constant_int_args, storage, needs_bound_device);
+  }
+  // The shared compiler cache adds effective config, device capabilities and
+  // ABI to this body identity. Layout words are bound to a private copy of
+  // the resulting shader. SNode IDs alone are not persistent layout keys.
+  if (arch == Arch::vulkan && storage.empty()) {
+    kernel->set_persistent_ir_identity(fmt::format(
+        "forge-unified-vulkan-v1/{}/{}/{}/{}/{}", get_version_string(),
+        get_commit_hash(), get_forge_native_abi_revision(), LLVM_VERSION_STRING,
+        kernel->get_name()));
   }
   return kernel;
 }

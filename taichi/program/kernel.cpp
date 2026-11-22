@@ -85,7 +85,6 @@ Kernel::Kernel(Program &program,
   this->ir = std::move(ir);
   this->program = &program;
   is_accessor = false;
-  ir_is_ast_ = false;  // CHI IR
 
   TI_ASSERT(this->ir->is<Block>());
   this->ir->as<Block>()->set_parent_callable(this);
@@ -204,7 +203,7 @@ std::string Kernel::get_or_create_kernel_key_for_cache(
               "Cannot compile a retired kernel definition with a different "
               "request or destroyed SNodeTree dependency; rebuild the "
               "kernel/Graph.");
-  auto key = ir_is_ast()
+  auto key = has_persistent_cache_source()
                  ? get_hashed_offline_cache_key(config, caps,
                                                 const_cast<Kernel *>(this))
                  : "N" + context + "_" + get_name();
@@ -231,6 +230,13 @@ void Kernel::invalidate_kernel_key_for_cache() const {
 
 bool Kernel::has_cached_offline_cache_body() const {
   return offline_cache_body_.has_value();
+}
+
+void Kernel::set_persistent_ir_identity(std::string identity) {
+  TI_ASSERT(source_ == Source::local_ir && !kernel_key_valid_ &&
+            !identity.empty());
+  offline_cache_body_ = std::move(identity);
+  source_ = Source::content_addressed_ir;
 }
 
 const std::string &Kernel::get_cached_offline_cache_body() const {
@@ -787,7 +793,7 @@ std::vector<int> Kernel::source_snode_tree_dependencies() const {
   if (!source_snode_tree_dependencies_) {
     source_snode_tree_dependencies_ =
         !ir ? std::vector<int>{}
-        : ir_is_ast_
+        : ir_is_ast()
             ? irpass::analysis::gather_frontend_snode_tree_dependencies(*ir)
             : irpass::analysis::gather_source_snode_tree_dependencies(*ir);
   }
@@ -868,7 +874,7 @@ void Kernel::init(Program &program,
   TI_ASSERT(ir->is<Block>());
   ir->as<Block>()->set_parent_callable(this);
 
-  ir_is_ast_ = true;
+  source_ = Source::ast;
   arch = program.compile_config().arch;
 
   if (autodiff_mode == AutodiffMode::kNone) {

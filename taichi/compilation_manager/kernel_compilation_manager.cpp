@@ -176,7 +176,7 @@ KernelCompilationManager::load_or_compile_execution_handle(
     const Kernel &kernel_def) {
   const auto &compile_config = request.config();
   const auto &caps = request.device_caps();
-  auto cache_mode = get_cache_mode(compile_config, kernel_def);
+  auto cache_mode = get_cache_mode(compile_config.offline_cache, kernel_def);
   const auto kernel_key = make_kernel_key(compile_config, caps, kernel_def);
 
   // P5.a — serialize all cache-map mutation with cache_mutex_. Heavy
@@ -291,9 +291,7 @@ const CompiledKernelData *KernelCompilationManager::find_cached_kernel(
   if (kernel_key.empty()) {
     return nullptr;
   }
-  const auto cache_mode =
-      offline_cache && kernel_def.ir_is_ast() ? CacheData::MemAndDiskCache
-                                             : CacheData::MemCache;
+  const auto cache_mode = get_cache_mode(offline_cache, kernel_def);
   std::lock_guard<std::mutex> lock(cache_mutex_);
   if (cache_mode == CacheData::MemAndDiskCache) {
     ensure_metadata_loaded_locked(arch);
@@ -312,9 +310,7 @@ KernelCompilationManager::find_cached_execution_handle(
   if (kernel_key.empty()) {
     return nullptr;
   }
-  const auto cache_mode =
-      offline_cache && kernel_def.ir_is_ast() ? CacheData::MemAndDiskCache
-                                             : CacheData::MemCache;
+  const auto cache_mode = get_cache_mode(offline_cache, kernel_def);
   std::lock_guard<std::mutex> lock(cache_mutex_);
   if (cache_mode == CacheData::MemAndDiskCache) {
     ensure_metadata_loaded_locked(arch);
@@ -814,7 +810,7 @@ std::string KernelCompilationManager::make_kernel_semantic_key(
     const CompileConfig &compile_config,
     const DeviceCapabilityConfig &caps,
     const Kernel &kernel_def) const {
-  if (!kernel_def.ir_is_ast()) {
+  if (!kernel_def.has_persistent_cache_source()) {
     const auto context_key = get_hashed_offline_cache_semantic_key_context(
         compile_config, caps, (Kernel *)&kernel_def);
     return "N" + context_key + "_" + kernel_def.get_name();
@@ -1057,9 +1053,9 @@ std::size_t persist_kernel(const std::string &filename,
 }  // namespace
 
 CacheData::CacheMode KernelCompilationManager::get_cache_mode(
-    const CompileConfig &compile_config,
+    bool offline_cache,
     const Kernel &kernel_def) {
-  return compile_config.offline_cache && kernel_def.ir_is_ast()
+  return offline_cache && kernel_def.has_persistent_cache_source()
              ? CacheData::MemAndDiskCache
              : CacheData::MemCache;
 }

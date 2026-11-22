@@ -1,11 +1,67 @@
 import hashlib
 import importlib
 import json
+import subprocess
 import sys
+import textwrap
 import zipfile
 
 import taichi_forge as ti
 from tests import test_utils
+
+
+@test_utils.test(arch=ti.vulkan, offline_cache=False)
+def test_unified_vulkan_reuses_specialization_in_new_process(tmp_path, monkeypatch):
+    from taichi_forge_runtime.aot._unified_library import select_manifest
+
+    source = tmp_path / "cached_portable.py"
+    source.write_text("""import taichi_forge as ti
+@ti.kernel
+def fill(data: ti.types.ndarray(ti.i32, 1), bias: ti.i32):
+    for i in range(data.shape[0]):
+        data[i] = i + bias + data.shape[0]
+""", encoding="utf8")
+    monkeypatch.syspath_prepend(str(tmp_path))
+    module = importlib.import_module(source.stem)
+    output = tmp_path / "library"
+    try:
+        document = ti.aot.export_package(module, output, arch=ti.vulkan, artifact_format="unified-bc-library")
+    finally:
+        sys.modules.pop(source.stem, None)
+    symbol, = select_manifest(document, "vulkan")["entries"]
+    consumer = textwrap.dedent("""
+        from array import array
+        import json, sys
+        import taichi_forge as ti
+        from taichi_forge_runtime.aot import load_package
+
+        directory, symbol, cache, size, bias, enabled = sys.argv[1:]
+        size, bias = int(size), int(bias)
+        ti.init(arch=ti.vulkan, enable_fallback=False, offline_cache=enabled == "1",
+                offline_cache_file_path=cache)
+        with ti.aot.borrow_runtime() as runtime, load_package(runtime, directory) as package:
+            data = runtime.ndarray("i32", (size,))
+            bound = package._module.kernel(symbol).bind(data, bias)
+            frontend = ti.lang.impl.get_runtime()
+            frontend.set_kernel_executable_lifecycle_telemetry_enabled(True)
+            frontend.debug_kernel_executable_lifecycle_stats(True)
+            with bound.prepare(specialize=True) as prepared:
+                prepared.submit().wait()
+            stats = frontend.debug_kernel_executable_lifecycle_stats()
+            assert array("i", data.read()).tolist() == [i + bias + size for i in range(size)]
+            print("REUSE=" + json.dumps([stats["compiler_invocations"], stats["disk_loads"]]))
+    """)
+    # A new allocation and ordinary scalar can reuse the shader. A shape
+    # explicitly read by the kernel must select a different specialization.
+    for size, bias, enabled, expected in ((4, 2, 1, [1, 0]), (4, -7, 1, [0, 1]),
+                                          (9, 3, 1, [1, 0]), (4, 8, 0, [1, 0])):
+        result = subprocess.run(
+            [sys.executable, "-c", consumer, str(output), symbol, str(tmp_path / "cache"),
+             str(size), str(bias), str(enabled)], capture_output=True, text=True, timeout=90,
+        )
+        assert result.returncode == 0, result.stdout + result.stderr
+        record, = (line[6:] for line in result.stdout.splitlines() if line.startswith("REUSE="))
+        assert json.loads(record) == expected
 
 
 @test_utils.test(arch=ti.vulkan, offline_cache=False)
