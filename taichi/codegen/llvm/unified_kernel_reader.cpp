@@ -28,6 +28,7 @@
 #include "taichi/program/extension.h"
 #include "taichi/program/program.h"
 #include "taichi/runtime/llvm/aot_artifact_integrity.h"
+#include "taichi/system/profiler.h"
 
 namespace taichi::lang::LLVM {
 namespace {
@@ -211,6 +212,7 @@ bool fold_device_query(llvm::Function &fn, llvm::StringRef name, Evaluate evalua
 void import_helpers(llvm::Module &module, llvm::Function &entry,
                     const UnifiedUnitLoader &loader, Arch arch,
                     const DeviceCapabilityConfig &caps) {
+  TI_COMPILE_PROFILER("cpp.unified.prepare.import_helpers");
   std::unordered_set<std::string> active;
   llvm::Linker linker(module);
   std::function<void(llvm::Function &)> visit = [&](llvm::Function &fn) {
@@ -1263,6 +1265,7 @@ std::unique_ptr<Kernel> read_unified_kernel(
     const DeviceCapabilityConfig &device_caps,
     const UnifiedUnitLoader &load_helper, const std::vector<std::vector<SNode *>> &storage,
     const std::vector<int> &absent_inputs, bool *needs_bound_device) {
+  TI_COMPILE_PROFILER("cpp.unified.prepare.read_kernel");
   llvm::LLVMContext context;
   auto module = llvm::parseBitcodeFile(llvm::MemoryBufferRef(bitcode, name), context);
   if (!module)
@@ -1353,7 +1356,10 @@ std::unique_ptr<Kernel> read_unified_kernel(
   }
   if (program.compile_config().print_ir)
     entry->print(llvm::errs());
-  KernelReader reader(*kernel, *entry, constant_int_args, storage, needs_bound_device);
+  {
+    TI_COMPILE_PROFILER("cpp.unified.prepare.reconstruct_ir");
+    KernelReader reader(*kernel, *entry, constant_int_args, storage, needs_bound_device);
+  }
   return kernel;
 }
 }  // namespace taichi::lang::LLVM

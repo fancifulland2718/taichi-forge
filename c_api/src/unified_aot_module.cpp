@@ -13,6 +13,7 @@
 #include "taichi/runtime/llvm/aot_artifact_integrity.h"
 #include "taichi/runtime/llvm/aot_graph_data.h"
 #include "taichi/runtime/llvm/array_layout_abi.h"
+#include "taichi/system/profiler.h"
 #ifdef TI_WITH_VULKAN
 #include "taichi/codegen/spirv/compiled_kernel_data.h"
 #include "taichi/runtime/gfx/aot_graph_data.h"
@@ -348,6 +349,7 @@ class UnifiedModule final : public aot::Module {
 
   std::unique_ptr<aot::Kernel> compile(const std::string &name, const Facts &facts,
                                        const LayoutWords &layout = {}) {
+    TI_COMPILE_PROFILER("cpp.unified.prepare.compile");
     auto &program = runtime_.get_unified_compiler();
     auto signature = read(directory_, "signatures/" + directory_.signatures.at(name) + ".json");
     auto options = liong::json::parse(signature);
@@ -419,6 +421,7 @@ class UnifiedModule final : public aot::Module {
 #ifdef TI_WITH_VULKAN
     auto params = gfx_params(*execution, name);
     if (!layout.empty()) {
+      TI_COMPILE_PROFILER("cpp.unified.prepare.specialize_shader_layout");
       std::vector<vulkan::ShaderArgumentConstant> values;
       for (const auto &[offset, word] : layout)
         values.push_back({offset, 32, word});

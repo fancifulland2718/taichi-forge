@@ -23,6 +23,7 @@
 #include "taichi/runtime/native_acceleration_structure.h"
 #include "taichi/runtime/native_kernel_result.h"
 #include "taichi/program/runtime_fault.h"
+#include "taichi/system/profiler.h"
 #ifdef TI_WITH_LLVM
 #include "taichi/runtime/cpu/kernel_launcher.h"
 #include "taichi/runtime/llvm/aot_graph_data.h"
@@ -1358,14 +1359,18 @@ static TiPreparedExecution prepare_kernel_impl(TiRuntime runtime,
                                           uint32_t constant_count,
                                           const uint32_t *constant_args) {
   TI_CAPI_TRY_CATCH_BEGIN();
+  TI_COMPILE_PROFILER("cpp.prepare.kernel");
   TI_CAPI_ARGUMENT_NULL_RV(runtime);
   auto &rt = *reinterpret_cast<Runtime *>(runtime);
   std::lock_guard<std::recursive_mutex> lock(rt.submission_mutex());
-  auto arguments = capi::bind_kernel_arguments(rt, kernel, arg_count, args,
-                                               binding_count, bindings);
+  auto arguments = [&] {
+    TI_COMPILE_PROFILER("cpp.prepare.bind_arguments");
+    return capi::bind_kernel_arguments(rt, kernel, arg_count, args, binding_count, bindings);
+  }();
   if (!arguments)
     return TI_NULL_HANDLE;
   if (specialize) {
+    TI_COMPILE_PROFILER("cpp.prepare.specialize_kernel");
     TI_ERROR_IF(constant_count && !constant_args, "Specialization constants are null");
     std::vector<uint32_t> indices;
     if (constant_count)
@@ -1389,7 +1394,10 @@ static TiPreparedExecution prepare_kernel_impl(TiRuntime runtime,
       prepared->kernel_arguments->kernel,
       prepared->kernel_arguments->context.get()};
   dispatch.resources = prepared->kernel_arguments->kernel_resources;
-  prepared->prepare_operations(rt, {std::move(dispatch)});
+  {
+    TI_COMPILE_PROFILER("cpp.prepare.record_operations");
+    prepared->prepare_operations(rt, {std::move(dispatch)});
+  }
   return rt.prepared_registry().publish(std::move(prepared));
   TI_CAPI_TRY_CATCH_END();
   return TI_NULL_HANDLE;

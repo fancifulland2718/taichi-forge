@@ -1,4 +1,5 @@
 #include "taichi/rhi/vulkan/shader_specialization.h"
+#include "taichi/system/profiler.h"
 
 #include <stdexcept>
 #include <map>
@@ -29,6 +30,7 @@ namespace taichi::lang::vulkan {
 std::vector<uint32_t> specialize_spirv_shader(
     const std::vector<uint32_t> &code,
     const std::unordered_map<uint32_t, std::string> &values) {
+  TI_COMPILE_PROFILER("cpp.vulkan.freeze_shader_specialization");
   constexpr auto environment = SPV_ENV_VULKAN_1_3;
   std::string diagnostic;
   const auto consumer = [&](spv_message_level_t level, const char *,
