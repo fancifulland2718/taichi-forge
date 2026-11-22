@@ -209,9 +209,7 @@ class _ModuleBinding:
             hardware=_HostAPI(ray=RayAPI(package), graphics=GraphicsAPI(package),
                               sampling=SimpleNamespace(SamplerConfig=SamplerConfig)),
             Texture=functools.partial(Texture, package),
-            Format=SimpleNamespace(**{arg["fmt"]: arg["fmt"]
-                for entry in entry_headers(package._manifest).values() for arg in entry["arguments"]
-                if arg["kind"] == "rw_texture"}),
+            Format=SimpleNamespace(**package._rw_texture_formats),
             TaichiRuntimeError=AotError,
             graph=SimpleNamespace(
                 Arg=Arg,
@@ -2155,6 +2153,9 @@ class LoadedPackage:
                              and type(argument["lod"]) is int and argument["lod"] >= 0)
                 if not valid:
                     raise ValueError("Invalid Vulkan resource input contract")
+        self._rw_texture_formats = {
+            arg["fmt"]: arg["fmt"] for arg in hardware_arguments if arg["kind"] == "rw_texture"
+        }
         texture_arguments = [argument for entry in headers.values()
                              for argument in entry["arguments"] if argument.get("kind") == "texture"]
         if texture_arguments:
