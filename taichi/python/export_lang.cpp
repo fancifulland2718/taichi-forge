@@ -25,6 +25,8 @@
 
 #if TI_WITH_LLVM
 #include "taichi/runtime/llvm/llvm_aot_module_builder.h"
+#include "taichi/runtime/llvm/unified_aot_module_builder.h"
+#include "taichi/codegen/llvm/unified_kernel_reader.h"
 #include "llvm/Config/llvm-config.h"
 #endif
 
@@ -5987,6 +5989,7 @@ void export_lang(py::module &m) {
 #if TI_WITH_LLVM
         if (auto *llvm = dynamic_cast<LlvmAotModuleBuilder *>(&builder))
           return llvm->cpu_build_object_key(name, kernel);
+        return LLVM::unified_build_object(builder, name);
 #endif
         return std::string{};
       })
@@ -5998,10 +6001,27 @@ void export_lang(py::module &m) {
 #if TI_WITH_LLVM
         if (auto *llvm = dynamic_cast<LlvmAotModuleBuilder *>(&builder))
           return llvm->restore_cpu_build_object(name, key);
+        return LLVM::restore_unified_build_object(builder, name, key);
 #endif
         return false;
       })
 #if TI_WITH_LLVM
+      .def("_set_unified_build_directory", &LLVM::set_unified_build_directory)
+      .def("_add_unified_kernel",
+           [](AotModuleBuilder &builder, Program &program, const std::string &name,
+              const py::bytes &unit, const std::string &signature,
+              const std::map<std::vector<int>, int> &constant_int_args,
+              const LLVM::UnifiedUnitLoader &load_helper,
+              const std::vector<std::vector<SNode *>> &storage) {
+             std::string bytes = unit;
+             py::gil_scoped_release release;
+             auto kernel = LLVM::read_unified_kernel(program, name, bytes, signature,
+                                                       constant_int_args, program.get_device_caps(), load_helper, storage);
+             builder.add(name, kernel.get());
+             builder.seal_kernel_export(name);
+           }, py::arg("program"), py::arg("name"), py::arg("unit"), py::arg("signature"),
+           py::arg("constant_int_args"), py::arg("load_helper") = py::none(),
+           py::arg("storage") = std::vector<std::vector<SNode *>>{})
       .def("_set_ir_cleanup_for_testing",
            [](AotModuleBuilder &builder, bool enabled) {
              auto *llvm_builder =

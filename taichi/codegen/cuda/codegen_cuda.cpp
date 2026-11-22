@@ -447,6 +447,10 @@ class TaskCodeGenCUDA : public TaskCodeGenLLVM {
   }
 
   void visit(InternalFuncStmt *stmt) override {
+    if (stmt->func_name == "localInvocationId") {
+      llvm_val[stmt] = call("thread_idx");
+      return;
+    }
     constexpr std::string_view kTextureExtractPrefix{"composite_extract_"};
     if (stmt->func_name.rfind(kTextureExtractPrefix, 0) == 0 &&
         stmt->func_name.size() == kTextureExtractPrefix.size() + 1 &&

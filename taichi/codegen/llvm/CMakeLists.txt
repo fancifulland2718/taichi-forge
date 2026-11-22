@@ -6,6 +6,8 @@ target_sources(llvm_codegen
     codegen_llvm.cpp
     codegen_llvm_quant.cpp
     unified_bitcode.cpp
+    unified_kernel_reader.cpp
+    unified_cpu_workgroup.cpp
     llvm_codegen_utils.cpp
     struct_llvm.cpp
     compiled_kernel_data.cpp
