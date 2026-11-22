@@ -402,6 +402,11 @@ class Buffer:
     with zipfile.ZipFile(output / "code.tcm") as archive:
         index = json.loads(archive.read("unified_llvm.json"))
         assert len(index["entries"]) == 6
+        content = archive.read(index["members"]["__content__"]).decode().splitlines()
+        assert content == sorted(content)
+        absent = json.loads(archive.read(index["members"]["unified_absent_inputs.json"]))
+        assert list(absent) == sorted(absent)
+        assert all(list(entries) == sorted(entries) for entries in absent.values())
     for target in targets:
         ti.init(arch=target, enable_fallback=False)
         with ti.aot.borrow_runtime() as runtime, load_package(runtime, output) as package:

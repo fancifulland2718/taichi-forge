@@ -904,8 +904,13 @@ class Module:
                 (directory / (quote(name, safe="-_.") + ".json")).write_text(
                     json.dumps(contract, sort_keys=True, separators=(",", ":")), encoding="utf8"
                 )
-        with open(f"{filepath}/__content__", "w") as f:
-            f.write("\n".join(self._content))
+        if self._artifact_format == "unified-bc-library":
+            # Capture restoration may visit entries in a different order.
+            # This member inventories names; execution order lives in the plans.
+            (output_dir / "__content__").write_bytes("\n".join(sorted(self._content)).encode("utf8"))
+        else:
+            with open(f"{filepath}/__content__", "w") as f:
+                f.write("\n".join(self._content))
         with open(f"{filepath}/__version__", "w") as f:
             f.write(".".join(str(x) for x in taichi_forge.__version__))
 

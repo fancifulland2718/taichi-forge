@@ -14,8 +14,8 @@ import warnings
 import zipfile
 
 
-def _bytes(value):
-    return json.dumps(value, separators=(",", ":"), ensure_ascii=True).encode()
+def _bytes(value, *, sort_keys=False):
+    return json.dumps(value, separators=(",", ":"), ensure_ascii=True, sort_keys=sort_keys).encode()
 
 
 class _Projection:
@@ -32,7 +32,7 @@ class _Projection:
                 for target in spec.get("absent_devices", ()):
                     absent_inputs.setdefault(target, {}).setdefault(symbol, []).append(index)
         if absent_inputs:
-            (self.directory / "module" / "unified_absent_inputs.json").write_bytes(_bytes(absent_inputs))
+            (self.directory / "module" / "unified_absent_inputs.json").write_bytes(_bytes(absent_inputs, sort_keys=True))
         for relative, data in payloads.items():
             path = self.directory / relative
             path.parent.mkdir(parents=True, exist_ok=True)
