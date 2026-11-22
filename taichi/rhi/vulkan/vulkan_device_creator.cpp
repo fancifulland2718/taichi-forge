@@ -5,6 +5,7 @@
 #include <iostream>
 #include <stdexcept>
 #include <string>
+#include <tuple>
 #include <unordered_set>
 #include <vector>
 
@@ -203,32 +204,29 @@ VulkanQueueFamilyIndices find_queue_families(VkPhysicalDevice device,
   return indices;
 }
 
-size_t get_device_score(VkPhysicalDevice device, VkSurfaceKHR surface) {
-  auto indices = find_queue_families(device, surface);
-  VkPhysicalDeviceFeatures features{};
-  vkGetPhysicalDeviceFeatures(device, &features);
+bool supports_required_queues(VkPhysicalDevice device, VkSurfaceKHR surface) {
+  const auto indices = find_queue_families(device, surface);
+  return indices.is_complete() &&
+         (surface == VK_NULL_HANDLE || indices.is_complete_for_ui());
+}
+
+auto device_preference(VkPhysicalDevice device) {
   VkPhysicalDeviceProperties properties{};
   vkGetPhysicalDeviceProperties(device, &properties);
-
-  size_t score = 0;
-
-  if (surface != VK_NULL_HANDLE) {
-    // this means we need ui
-    score = size_t(indices.is_complete_for_ui()) * 1000;
-  } else {
-    score = size_t(indices.is_complete()) * 1000;
+  VkPhysicalDeviceMemoryProperties memory{};
+  vkGetPhysicalDeviceMemoryProperties(device, &memory);
+  VkDeviceSize largest_local_heap = 0;
+  for (uint32_t i = 0; i < memory.memoryHeapCount; ++i) {
+    if (memory.memoryHeaps[i].flags & VK_MEMORY_HEAP_DEVICE_LOCAL_BIT) {
+      largest_local_heap =
+          std::max(largest_local_heap, memory.memoryHeaps[i].size);
+    }
   }
-
-  score += features.wideLines * 100;
-  score +=
-      size_t(properties.deviceType == VK_PHYSICAL_DEVICE_TYPE_INTEGRATED_GPU) *
-      500;
-  score +=
-      size_t(properties.deviceType == VK_PHYSICAL_DEVICE_TYPE_DISCRETE_GPU) *
-      1000;
-  score += VK_API_VERSION_MINOR(properties.apiVersion) * 100;
-
-  return score;
+  return std::make_tuple(
+      properties.deviceType == VK_PHYSICAL_DEVICE_TYPE_DISCRETE_GPU,
+      properties.deviceType == VK_PHYSICAL_DEVICE_TYPE_INTEGRATED_GPU,
+      properties.deviceType != VK_PHYSICAL_DEVICE_TYPE_CPU, largest_local_heap,
+      properties.apiVersion);
 }
 
 }  // namespace
@@ -554,6 +552,11 @@ void VulkanDeviceCreator::create_instance(uint32_t vk_api_version,
   }
 
   instance_api_version_ = app_info.apiVersion;
+  if (instance_api_version_ < VK_API_VERSION_1_1 &&
+      !extensions.count(VK_KHR_EXTERNAL_MEMORY_CAPABILITIES_EXTENSION_NAME)) {
+    // Vulkan 1.0 exposes VkPhysicalDeviceIDProperties through this extension.
+    params_.preferred_device_uuid.reset();
+  }
   ti_device_->vk_caps().vk_api_version = instance_api_version_;
   ti_device_->vk_caps().physical_device_features2 =
       detail::supports_physical_device_features2(
@@ -573,12 +576,13 @@ void VulkanDeviceCreator::query_physical_device_features2(
 }
 
 void VulkanDeviceCreator::query_physical_device_properties2(
-    VkPhysicalDeviceProperties2 *properties) const {
+    VkPhysicalDeviceProperties2 *properties,
+    VkPhysicalDevice device) const {
   RHI_ASSERT(ti_device_->vk_caps().physical_device_features2);
   if (detail::uses_core_physical_device_features2(instance_api_version_)) {
-    vkGetPhysicalDeviceProperties2(physical_device_, properties);
+    vkGetPhysicalDeviceProperties2(device, properties);
   } else {
-    vkGetPhysicalDeviceProperties2KHR(physical_device_, properties);
+    vkGetPhysicalDeviceProperties2KHR(device, properties);
   }
 }
 
@@ -615,15 +619,13 @@ void VulkanDeviceCreator::pick_physical_device(
     RHI_LOG_DEBUG(msg_buf);
   }
 
-  auto device_id = VulkanLoader::instance().visible_device_id;
+  const auto &device_id = VulkanLoader::instance().visible_device_id;
   if (device_index) {
     if (*device_index >= devices.size() ||
-        !get_device_score(devices[*device_index], test_surface))
+        !supports_required_queues(devices[*device_index], test_surface))
       throw std::invalid_argument("Requested Vulkan device is unavailable");
-    device_id = std::to_string(*device_index);
-  }
-  bool has_visible_device{false};
-  if (!device_id.empty()) {
+    physical_device_ = devices[*device_index];
+  } else if (!device_id.empty()) {
     int id = std::stoi(device_id);
     if (id < 0 || id >= device_count) {
       char msg_buf[128];
@@ -631,20 +633,35 @@ void VulkanDeviceCreator::pick_physical_device(
                "TI_VISIBLE_DEVICE=%d is not valid, found %d devices available",
                id, device_count);
       RHI_LOG_ERROR(msg_buf);
-    } else if (get_device_score(devices[id], test_surface)) {
+    } else if (supports_required_queues(devices[id], test_surface)) {
       physical_device_ = devices[id];
-      has_visible_device = true;
     }
   }
 
-  if (!has_visible_device) {
-    // could not find a user defined visible device, use the first one suitable
-    size_t max_score = 0;
+  if (physical_device_ == VK_NULL_HANDLE) {
+    std::optional<decltype(device_preference(VK_NULL_HANDLE))> best;
     for (const auto &device : devices) {
-      size_t score = get_device_score(device, test_surface);
-      if (score > max_score) {
+      if (!supports_required_queues(device, test_surface)) {
+        continue;
+      }
+      if (params_.preferred_device_uuid &&
+          ti_device_->vk_caps().physical_device_features2) {
+        VkPhysicalDeviceIDProperties id{
+            VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_ID_PROPERTIES};
+        VkPhysicalDeviceProperties2 properties{
+            VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PROPERTIES_2};
+        properties.pNext = &id;
+        query_physical_device_properties2(&properties, device);
+        if (std::memcmp(id.deviceUUID, params_.preferred_device_uuid->data(),
+                        VK_UUID_SIZE) == 0) {
+          physical_device_ = device;
+          break;
+        }
+      }
+      const auto score = device_preference(device);
+      if (!best || score > *best) {
         physical_device_ = device;
-        max_score = score;
+        best = score;
       }
     }
   }

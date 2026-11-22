@@ -4307,9 +4307,12 @@ arbitrary recipe coverage. Complete ordered Vulkan compute binding-frame recipes
 also export their selected nodes into one immutable AOT command sequence per
 binding. Explicit segmented/graphics recipes use the separate v20 contract;
 unqualified executor subclasses and storage recipes still need their own
-qualification. Independent AOT uses the explicit
-`Runtime("vulkan", device_index=...)` enumeration index (default 0), which can
-differ from JIT's automatically chosen GPU. Compare performance on the same device.
+qualification. Independent AOT and JIT use the same automatic Vulkan adapter
+selection. Eligible discrete GPUs take priority over integrated GPUs.
+`Runtime("vulkan", device_index=i)` pins a Vulkan enumeration index, including
+zero. An explicit index takes precedence over `TI_VISIBLE_DEVICE`. A CUDA
+program opening a separate Vulkan window prefers the CUDA adapter's UUID
+when the display adapter is selected automatically.
 The optional SDK component is `TaichiSDKProvider_vkfft`.
 
 `VulkanParallelSortPlan.record()` also exports through `Module.add_execution_plan`.

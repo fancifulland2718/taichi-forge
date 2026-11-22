@@ -3,6 +3,9 @@
 #include "taichi/ui/ggui/swap_chain.h"
 #include "taichi/program/program.h"
 #include "taichi/ui/ggui/vertex.h"
+#ifdef TI_WITH_CUDA
+#include "taichi/rhi/cuda/cuda_context.h"
+#endif
 
 #include <algorithm>
 #include <string_view>
@@ -98,6 +101,16 @@ void AppContext::init_with_vulkan(Program *prog,
   // modules for example).
   if (config.ti_arch != Arch::vulkan || prog == nullptr) {
     taichi::lang::vulkan::VulkanDeviceCreator::Params evd_params{};
+#ifdef TI_WITH_CUDA
+    if (prog && config.ti_arch == Arch::cuda) {
+      const auto cuda = CUDAContext::configuration();
+      if (cuda.initialized &&
+          std::any_of(cuda.device_uuid.begin(), cuda.device_uuid.end(),
+                      [](uint8_t byte) { return byte != 0; })) {
+        evd_params.preferred_device_uuid = cuda.device_uuid;
+      }
+    }
+#endif
     evd_params.additional_instance_extensions =
         get_required_instance_extensions();
     evd_params.additional_device_extensions = get_required_device_extensions();

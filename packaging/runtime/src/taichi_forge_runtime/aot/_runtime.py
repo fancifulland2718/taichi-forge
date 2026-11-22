@@ -146,7 +146,7 @@ class Runtime:
     Native driver or bundled LLVM loading may still compile code on first use.
     """
 
-    def __init__(self, arch="cpu", *, device_index=0, library_path=None, runtime_path=None, debug=False):
+    def __init__(self, arch="cpu", *, device_index=None, library_path=None, runtime_path=None, debug=False):
         if type(debug) is not bool:
             raise TypeError("debug must be a boolean")
         self._lock = threading.RLock()
@@ -172,9 +172,12 @@ class Runtime:
             native_arch = {"x64": 4, "arm64": 5, "cuda": 3, "vulkan": 1}[arch]
         except (KeyError, TypeError):
             raise ValueError(f"Unsupported AOT consumer backend: {arch!r}") from None
-        index = operator.index(device_index)
-        if not 0 <= index <= 0xFFFFFFFF:
-            raise ValueError("device_index must fit uint32")
+        if device_index is None:
+            index = 0xFFFFFFFF if arch == "vulkan" else 0
+        else:
+            index = operator.index(device_index)
+            if not 0 <= index <= 0xFFFFFFFF:
+                raise ValueError("device_index must fit uint32")
         self.arch = arch
         self._api = abi.Api(library_path)
         if arch != "vulkan" or runtime_path is not None:

@@ -1243,7 +1243,10 @@ class Runtime {
         runtime_(detail::move_handle(b.runtime_)),
         should_destroy_(detail::exchange(b.should_destroy_, false)) {
   }
-  explicit Runtime(TiArch arch, uint32_t device_index = 0)
+  explicit Runtime(TiArch arch)
+      : Runtime(arch, arch == TI_ARCH_VULKAN ? UINT32_MAX : 0) {
+  }
+  explicit Runtime(TiArch arch, uint32_t device_index)
       : arch_(arch),
         runtime_(ti_create_runtime(arch, device_index)),
         should_destroy_(true) {

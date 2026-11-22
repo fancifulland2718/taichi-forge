@@ -2,12 +2,23 @@ import os
 from pathlib import Path
 import subprocess
 import sys
+from unittest.mock import Mock
 from zipfile import ZipFile
 
 import pytest
 import taichi_forge as ti
 from taichi_forge._lib import utils as runtime_utils
 from tests import test_utils
+
+
+@pytest.mark.parametrize("options, native_index", [({}, 0xFFFFFFFF), ({"device_index": 0}, 0), ({"device_index": 1}, 1)])
+def test_vulkan_runtime_distinguishes_automatic_and_explicit_adapter(monkeypatch, options, native_index):
+    from taichi_forge_runtime.aot import _runtime
+
+    api = Mock()
+    monkeypatch.setattr(_runtime.abi, "Api", lambda _: api)
+    with _runtime.Runtime("vulkan", **options):
+        api.call.assert_called_once_with(api.ti_create_runtime, 1, native_index)
 
 
 @test_utils.test(arch=[ti.cpu, ti.cuda], debug=True, offline_cache=False)

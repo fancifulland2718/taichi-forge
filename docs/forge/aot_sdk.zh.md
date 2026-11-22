@@ -3248,8 +3248,10 @@ inline 扩展的 adapter；不提供额外 vendor `library_path`。准备可能�
 kernel/FFT、归一化逆变换、显式谱能量伴随、尾分块、双绑定、独立/借用消费及退休；不是自动
 FFT AD 或任意 recipe 支持声明。完整有序 Vulkan compute binding-frame 方案也可将已选节点
 导出为每绑定一组不可变 AOT 命令；显式分段/graphics 配方使用独立的 v20 合同，未资格
-executor 子类及 storage recipe 仍需单独处理。独立 AOT 使用 `Runtime("vulkan", device_index=...)` 的显式
-枚举序号（默认 0），可能与 JIT 自动选择的 GPU 不同；性能比较须指定同一设备。
+executor 子类及 storage recipe 仍需单独处理。独立 AOT 的 `Runtime("vulkan")`
+与 JIT 共用 Vulkan 选卡逻辑，默认优先选择具备所需队列的独立显卡。
+`TI_VISIBLE_DEVICE` 可指定 Vulkan 枚举序号，单个 Runtime 的显式 `device_index` 优先级更高。
+CUDA 程序创建独立 Vulkan 窗口时，自动选卡优先匹配 CUDA 计算卡的设备 UUID。
 独立 SDK 可选组件为 `TaichiSDKProvider_vkfft`。
 
 `VulkanParallelSortPlan.record()` 也可通过 `Module.add_execution_plan` 导出。

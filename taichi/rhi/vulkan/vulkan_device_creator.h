@@ -12,6 +12,7 @@
 #include <taichi/rhi/device.h>
 #include <taichi/program/kernel_profiler.h>
 
+#include <array>
 #include <memory>
 #include <optional>
 #include <vector>
@@ -61,7 +62,7 @@ struct VulkanQueueFamilyIndices {
     return compute_family.has_value();
   }
 
-  bool is_complete_for_ui() {
+  bool is_complete_for_ui() const {
     return graphics_family.has_value() && present_family.has_value();
   }
 };
@@ -88,6 +89,9 @@ class TI_DLL_EXPORT VulkanDeviceCreator {
     // Per-owner selection must not overwrite the process default used by GGUI
     // and other runtimes. An explicit index never falls back to another GPU.
     std::optional<uint32_t> device_index;
+    // Prefer the compute owner's adapter when creating a separate display
+    // device.
+    std::optional<std::array<uint8_t, VK_UUID_SIZE>> preferred_device_uuid;
   };
 
   explicit VulkanDeviceCreator(const Params &params);
@@ -110,7 +114,12 @@ class TI_DLL_EXPORT VulkanDeviceCreator {
   void query_physical_device_features2(
       VkPhysicalDeviceFeatures2 *features) const;
   void query_physical_device_properties2(
-      VkPhysicalDeviceProperties2 *properties) const;
+      VkPhysicalDeviceProperties2 *properties,
+      VkPhysicalDevice device) const;
+  void query_physical_device_properties2(
+      VkPhysicalDeviceProperties2 *properties) const {
+    query_physical_device_properties2(properties, physical_device_);
+  }
 
   VkInstance instance_{VK_NULL_HANDLE};
   VkDebugUtilsMessengerEXT debug_messenger_{VK_NULL_HANDLE};

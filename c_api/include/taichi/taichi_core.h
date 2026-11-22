@@ -49,8 +49,8 @@
 // any problem with runtime instance coexistence.
 //
 // ```cpp
-// // Create a Taichi Runtime on Vulkan device at index 0.
-// TiRuntime runtime = ti_create_runtime(TI_ARCH_VULKAN, 0);
+// // Let Forge select a Vulkan adapter.
+// TiRuntime runtime = ti_create_runtime(TI_ARCH_VULKAN, UINT32_MAX);
 // ```
 //
 // When your program runs to the end, ensure that:
@@ -1140,8 +1140,8 @@ TI_DLL_EXPORT void TI_API_CALL ti_set_last_error(
 TI_DLL_EXPORT TiRuntime TI_API_CALL ti_create_runtime(
     // Arch of Taichi Runtime.
     TiArch arch,
-    // The index of device in `function.create_runtime.arch` to create Taichi
-    // Runtime on.
+    // The device index within the requested arch. Vulkan also accepts
+    // `UINT32_MAX` to apply the runtime's automatic adapter selection.
     uint32_t device_index);
 
 // Function `ti_destroy_runtime` (1.4.0)
