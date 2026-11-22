@@ -6,6 +6,7 @@
 #include "taichi/ir/statements.h"
 #include "taichi/program/extension.h"
 #include "taichi/program/kernel_compile_request.h"
+#include "taichi/program/program_lifetime.h"
 #include "taichi/aot/argpack_layout.h"
 #include "taichi/runtime/runtime_client.h"
 #include "taichi/codegen/cpu/codegen_cpu.h"
@@ -108,17 +109,6 @@
 #include <vector>
 
 namespace taichi::lang {
-
-class ProgramLifetimeToken {
- public:
-  explicit ProgramLifetimeToken(Program *program) : program_(program) {
-  }
-
- private:
-  friend class Program;
-  std::mutex mutex_;
-  Program *program_{nullptr};
-};
 
 Program *&runtime_completion_detail::active_runtime_submission_program()
     noexcept {
@@ -8522,13 +8512,9 @@ void Program::delete_ndarray_if_alive(
   if (!program || !ndarray) {
     return;
   }
-  auto token = lifetime.lock();
-  if (!token) {
-    return;
-  }
   try {
-    std::lock_guard<std::mutex> lock(token->mutex_);
-    if (token->program_ == program) {
+    ProgramLifetimeToken::Use use(lifetime, program);
+    if (use) {
       program->delete_ndarray(ndarray);
     }
   } catch (...) {
@@ -8542,15 +8528,8 @@ storage::StorageOwnerRef Program::register_external_dense_storage_if_alive(
     std::uint64_t allocation_bytes,
     ExternalDenseStorageRelease release,
     std::shared_ptr<ExternalSynchronizationDomain> synchronization_domain) {
-  if (!program) {
-    return {};
-  }
-  auto token = lifetime.lock();
-  if (!token) {
-    return {};
-  }
-  std::lock_guard<std::mutex> lock(token->mutex_);
-  if (token->program_ != program) {
+  ProgramLifetimeToken::Use use(lifetime, program);
+  if (!use) {
     return {};
   }
   return program->register_external_dense_storage(
@@ -8573,20 +8552,20 @@ bool Program::close_external_dense_storage_if_alive(
     Program *program,
     const std::weak_ptr<ProgramLifetimeToken> &lifetime,
     const storage::StorageOwnerRef &owner) {
-  // A client callback can already hold this lifetime token through the outer
-  // close helper. Reject destructive reentry before its nonrecursive mutex.
+  // A client drain may call back into its owner while retirement is pending.
   if (active_runtime_storage_retirement_program)
     throw std::logic_error("Reentrant runtime storage destruction");
   if (!program || !owner.valid()) {
     return false;
   }
-  auto token = lifetime.lock();
-  if (!token) {
+  ProgramLifetimeToken::Use use(lifetime, program);
+  if (!use) {
     return false;
   }
-  std::lock_guard<std::mutex> lock(token->mutex_);
-  if (token->program_ != program ||
-      !program->validate_external_dense_storage_owner(owner)) {
+  // Validate and retire atomically against another close of the same owner.
+  std::lock_guard<std::recursive_mutex> lock(
+      program->runtime_resource_submission_mutex_);
+  if (!program->validate_external_dense_storage_owner(owner)) {
     return false;
   }
   program->retire_external_dense_storage(owner);
@@ -21655,8 +21634,7 @@ std::pair<const StructType *, size_t> Program::get_struct_type_with_data_layout(
 
 Program::~Program() {
   if (lifetime_token_) {
-    std::lock_guard<std::mutex> lock(lifetime_token_->mutex_);
-    lifetime_token_->program_ = nullptr;
+    lifetime_token_->invalidate();
   }
   lifetime_token_.reset();
   finalize();

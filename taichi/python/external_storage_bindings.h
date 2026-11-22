@@ -12,6 +12,7 @@
 
 #include "taichi/ir/type_utils.h"
 #include "taichi/program/program.h"
+#include "taichi/program/program_lifetime.h"
 #include "taichi/program/storage_view.h"
 #include "taichi/python/dlpack_compat.h"
 #include "taichi/python/export.h"
@@ -165,7 +166,8 @@ class PythonExternalDenseStorage final {
       std::string provider,
       std::int32_t device_type,
       std::int32_t device_id,
-      std::uint64_t allocation_bytes)
+      std::uint64_t allocation_bytes,
+      std::weak_ptr<DLPackOwner> dlpack_producer = {})
       : program_(program),
         program_lifetime_(
             program != nullptr ? program->weak_resource_lifetime_token()
@@ -175,7 +177,8 @@ class PythonExternalDenseStorage final {
         provider_(std::move(provider)),
         device_type_(device_type),
         device_id_(device_id),
-        allocation_bytes_(allocation_bytes) {
+        allocation_bytes_(allocation_bytes),
+        dlpack_producer_(std::move(dlpack_producer)) {
   }
 
   PythonExternalDenseStorage(const PythonExternalDenseStorage &) = delete;
@@ -215,6 +218,10 @@ class PythonExternalDenseStorage final {
     if (closed_) {
       return;
     }
+    // A DLPack deleter can run arbitrary producer code. Keep only the
+    // producer across immediate retirement, so the device allocation still
+    // retires under its Program gate and the deleter runs after it unlocks.
+    auto producer = dlpack_producer_.lock();
     lang::Program::close_external_dense_storage_if_alive(
         program_, program_lifetime_, owner_);
     closed_ = true;
@@ -236,6 +243,7 @@ class PythonExternalDenseStorage final {
   std::int32_t device_type_{0};
   std::int32_t device_id_{0};
   std::uint64_t allocation_bytes_{0};
+  std::weak_ptr<DLPackOwner> dlpack_producer_;
   std::atomic<bool> closed_{false};
 };
 
@@ -329,7 +337,8 @@ PythonExternalDenseStorage::describe_typed_view(
     const std::vector<std::int64_t> &element_shape,
     std::int64_t relative_byte_offset) const {
   using namespace lang::storage;
-  if (closed_ || program_lifetime_.expired() || !description_ || !program_ ||
+  lang::ProgramLifetimeToken::Use use(program_lifetime_, program_);
+  if (closed_ || !description_ || !use ||
       !program_->validate_external_dense_storage_owner(owner_))
     throw py::buffer_error("external allocation is closed or retired");
   const auto &root = *description_.descriptor;
@@ -387,8 +396,6 @@ std::shared_ptr<PythonExternalDenseStorage> import_vulkan_external_buffer(
     lang::Program &program, const py::bytes &descriptor_bytes,
     const py::capsule &ready_capsule) {
   using namespace lang;
-  if (program.compile_config().arch != Arch::vulkan)
-    throw py::buffer_error("external Vulkan import requires arch=ti.vulkan");
   const std::string bytes = descriptor_bytes;
   if (bytes.size() != sizeof(TiVulkanExternalBufferImportInfo))
     throw py::value_error("invalid Vulkan external descriptor byte size");
@@ -406,7 +413,11 @@ std::shared_ptr<PythonExternalDenseStorage> import_vulkan_external_buffer(
       PyCapsule_GetPointer(ready_capsule.ptr(), capsule_name));
   if (!gate)
     throw py::error_already_set();
+  py::gil_scoped_release release_gil;
   auto submission = program.acquire_runtime_resource_submission_guard();
+  program.ensure_runtime_submission_allowed("Vulkan external storage import");
+  if (program.compile_config().arch != Arch::vulkan)
+    throw py::buffer_error("external Vulkan import requires arch=ti.vulkan");
   auto *device =
       dynamic_cast<vulkan::VulkanDevice *>(program.get_compute_device());
   if (!device)
@@ -679,10 +690,6 @@ import_vulkan_cuda_allocation(lang::Program &program,
                               bool dedicated,
                               bool allow_unsynchronized) {
 #if defined(TI_WITH_CUDA)
-  if (program.compile_config().arch != Arch::cuda) {
-    throw py::buffer_error(
-        "external Vulkan-CUDA allocation requires arch=ti.cuda");
-  }
   if (allocation_bytes == 0 ||
       allocation_bytes > static_cast<std::uint64_t>(
                              (std::numeric_limits<std::size_t>::max)())) {
@@ -715,6 +722,13 @@ import_vulkan_cuda_allocation(lang::Program &program,
         {native_handle_type, ready_for_vulkan_handle.cast<std::uintptr_t>()}};
   }
 
+  py::gil_scoped_release release_gil;
+  auto submission = program.acquire_runtime_resource_submission_guard();
+  program.ensure_runtime_submission_allowed("Vulkan-CUDA external storage import");
+  if (program.compile_config().arch != Arch::cuda) {
+    throw py::buffer_error(
+        "external Vulkan-CUDA allocation requires arch=ti.cuda");
+  }
   auto *cuda_device =
       dynamic_cast<lang::cuda::CudaDevice *>(program.get_compute_device());
   if (cuda_device == nullptr) {
@@ -769,6 +783,11 @@ std::shared_ptr<PythonExternalDenseStorage> import_dlpack_capsule(
   }
 
   auto managed = DLPackOwner::consume(std::move(capsule));
+  // Consume the Python capsule first. Import and register the allocation
+  // under one Program transaction without waiting with the GIL.
+  py::gil_scoped_release release_gil;
+  auto submission = program.acquire_runtime_resource_submission_guard();
+  program.ensure_runtime_submission_allowed("DLPack external storage import");
   if (managed->copied()) {
     throw py::buffer_error(
         "DLPack producer returned a copy for a zero-copy import");
@@ -903,7 +922,7 @@ std::shared_ptr<PythonExternalDenseStorage> import_dlpack_capsule(
     allocation = device->import_memory(tensor.data, reachable_end);
   }
   auto lifetime = std::make_shared<DLPackImportLifetime>(
-      device, allocation, std::move(managed));
+      device, allocation, managed);
   auto release = [lifetime]() mutable {
     lifetime->release();
   };
@@ -942,7 +961,7 @@ std::shared_ptr<PythonExternalDenseStorage> import_dlpack_capsule(
   }
   return std::make_shared<PythonExternalDenseStorage>(
       &program, owner, std::move(description), "dlpack",
-      tensor.device.device_type, tensor.device.device_id, reachable_end);
+      tensor.device.device_type, tensor.device.device_id, reachable_end, managed);
 }
 
 void export_external_storage_bindings(py::module &m) {
@@ -971,7 +990,7 @@ void export_external_storage_bindings(py::module &m) {
            py::call_guard<py::gil_scoped_release>())
       .def("_describe_typed_view", &PythonExternalDenseStorage::describe_typed_view,
            py::arg("scalar_type"), py::arg("shape"), py::arg("element_shape"),
-           py::arg("offset_bytes"));
+           py::arg("offset_bytes"), py::call_guard<py::gil_scoped_release>());
 
 #ifdef TI_WITH_VULKAN
   m.def("_import_vulkan_external_buffer", &import_vulkan_external_buffer,
@@ -1002,7 +1021,8 @@ void export_external_storage_bindings(py::module &m) {
       .def("_view", &PythonVulkanCudaExternalAllocation::view,
            py::arg("scalar_type"), py::arg("shape"),
            py::arg("element_shape") = std::vector<std::int64_t>{},
-           py::arg("offset_bytes") = 0, py::arg("access") = "readwrite")
+           py::arg("offset_bytes") = 0, py::arg("access") = "readwrite",
+           py::call_guard<py::gil_scoped_release>())
       .def("close", &PythonVulkanCudaExternalAllocation::close,
            py::call_guard<py::gil_scoped_release>());
 

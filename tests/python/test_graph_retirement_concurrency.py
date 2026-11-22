@@ -5,6 +5,8 @@ from pathlib import Path
 import subprocess
 import sys
 import threading
+import time
+import weakref
 
 import numpy as np
 import pytest
@@ -138,33 +140,137 @@ def _retire_external_during_submission(mode):
     ti.init(arch=ti.cpu, offline_cache=False)
     program = impl.get_runtime().prog
     holder = [ti.interop.from_dlpack(np.arange(16, dtype=np.int32))]
+    sibling = ti.interop.from_dlpack(np.arange(16, dtype=np.int32))
     before = program._debug_external_dense_storage_stats()["released_total"]
     started = threading.Event()
+    errors = []
 
-    def retire():
-        started.set()
-        if mode == "close":
-            holder[0].close()
-        else:
-            holder.clear()
+    @ti.kernel
+    def increment(data: ti.types.ndarray(dtype=ti.i32, ndim=1)):
+        for i in data:
+            data[i] += 1
+
+    builder = ti.graph.GraphBuilder()
+    builder.dispatch(increment, ti.graph.Arg(ti.graph.ArgKind.NDARRAY, "x", ti.i32, ndim=1))
+    graph = builder.compile()
+    data = ti.ndarray(ti.i32, 16)
+    data.fill(0)
+    graph.run({"x": data})
+    ti.sync()
+
+    def operate():
+        try:
+            started.set()
+            if mode in ("close", "same_owner", "finalize"):
+                holder[0].close()
+            elif mode == "destroy":
+                holder.clear()
+            elif mode == "view":
+                # CPU and Vulkan roots expose the same native validator.
+                holder[0]._source._describe_typed_view(ti.i32, (4,), (), 0)
+            elif mode == "register":
+                holder.append(ti.interop.from_dlpack(np.arange(8, dtype=np.int32)))
+        except BaseException as error:
+            errors.append(error)
 
     transaction = program._begin_runtime_submission_transaction()
-    worker = threading.Thread(target=retire)
+    worker = threading.Thread(target=operate)
     worker.start()
     assert started.wait(5)
     worker.join(0.1)
     assert worker.is_alive()
-    transaction._abort()
+    if mode == "finalize":
+        # The close has pinned this Program while it waits for the batch.
+        # Admission shuts before finalize waits for the same submission gate.
+        finalizer = threading.Thread(target=program.finalize)
+        finalizer.start()
+        deadline = time.monotonic() + 5
+        while program._runtime_fault_snapshot()["state"] == "healthy" and time.monotonic() < deadline:
+            time.sleep(0.001)
+        assert program._runtime_fault_snapshot()["state"] == "finalizing"
+        transaction._abort()
+        worker.join(5)
+        finalizer.join(5)
+        assert not worker.is_alive() and not finalizer.is_alive() and not errors, errors
+        assert program._debug_external_dense_storage_stats()["released_total"] == before + 2
+        ti.reset()
+        ti.init(arch=ti.cpu, offline_cache=False)
+        replacement = ti.interop.from_dlpack(np.arange(8, dtype=np.int32))
+        sibling.close()  # Late close of the old generation after replacement.
+        assert impl.get_runtime().prog._debug_external_dense_storage_stats()["live"] == 1
+        replacement.close()
+        ti.reset()
+        return
+    sibling.close()
+    if mode == "same_owner":
+        holder[0].close()
+    graph.run({"x": data})
+    transaction._finish().wait()
     worker.join(5)
     assert not worker.is_alive()
-    assert program._debug_external_dense_storage_stats()["released_total"] == before + 1
+    assert not errors, errors
+    np.testing.assert_array_equal(data.to_numpy(), np.full(16, 2, dtype=np.int32))
+    for view in holder:
+        view.close()
+    expected_releases = 3 if mode == "register" else 2
+    assert program._debug_external_dense_storage_stats()["released_total"] == before + expected_releases
+    graph.close()
     ti.reset()
 
 
-@pytest.mark.parametrize("mode", ["close", "destroy"])
+@pytest.mark.parametrize("mode", ["close", "destroy", "same_owner", "view", "register", "finalize"])
 @test_utils.test(arch=ti.cpu, offline_cache=False)
 def test_external_storage_retirement_during_native_batch(mode):
     _check_in_child(_retire_external_during_submission, mode)
+
+
+def _release_external_producer(mode):
+    ti.init(arch=ti.cpu, offline_cache=False)
+    program = impl.get_runtime().prog
+    source = np.arange(8, dtype=np.int32)
+    view = ti.interop.from_dlpack(source)
+    sibling = ti.interop.from_dlpack(np.arange(8, dtype=np.int32))
+    entered = threading.Event()
+    finish = threading.Event()
+    errors = []
+
+    def release():
+        try:
+            assert view.closed
+            # Explicit same-owner close and retiring a sibling are safe once
+            # the device lease and the client drain have both finished.
+            view.close()
+            sibling.close()
+            entered.set()
+            assert finish.wait(5)
+        except BaseException as error:
+            errors.append(error)
+            entered.set()
+
+    weakref.finalize(source, release)
+    del source
+    worker = threading.Thread(target=view.close)
+    worker.start()
+    assert entered.wait(5)
+    try:
+        if mode == "finalize":
+            program.finalize()
+        else:
+            current = ti.interop.from_dlpack(np.arange(8, dtype=np.int32))
+            current.close()
+    finally:
+        finish.set()
+    worker.join(5)
+    assert not worker.is_alive() and not errors, errors
+    assert sibling.closed
+    assert program._debug_external_dense_storage_stats()["released_total"] == (2 if mode == "finalize" else 3)
+    ti.reset()
+
+
+@pytest.mark.parametrize("mode", ["register", "finalize"])
+@test_utils.test(arch=ti.cpu, offline_cache=False)
+def test_external_producer_release_can_reenter(mode):
+    _check_in_child(_release_external_producer, mode)
 
 
 @pytest.mark.parametrize(
