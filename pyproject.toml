@@ -77,6 +77,8 @@ wheel.exclude = [
   # separate native distribution concern and is large enough to dominate PyPI
   # storage when multiplied by the Python/platform wheel matrix.
   "taichi_forge/_lib/c_api/**",
+  # Native provider adapters are owned by the paired runtime wheel.
+  "taichi_forge/_lib/hardware_providers/**",
   "**/c_api/**",
   "**/__pycache__/**",
   "**/*.pyc",

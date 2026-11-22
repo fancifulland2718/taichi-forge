@@ -1009,6 +1009,18 @@ def test_shim_wheel_validator_rejects_duplicate_runtime(tmp_path):
         validate_shim_wheel.validate_shim_wheel(wheel, "windows")
 
 
+def test_shim_wheel_validator_rejects_runtime_provider(tmp_path):
+    wheel = tmp_path / "taichi_forge-0.7.0-cp310-cp310-win_amd64.whl"
+    _write_shim_wheel(wheel, platform="windows", version="0.7.0")
+    with ZipFile(wheel, "a") as archive:
+        archive.writestr(
+            "taichi_forge/_lib/hardware_providers/taichi_forge_optix_provider_abi1_optix118.dll",
+            b"adapter",
+        )
+    with pytest.raises(RuntimeError, match="duplicates runtime artifacts"):
+        validate_shim_wheel.validate_shim_wheel(wheel, "windows")
+
+
 def test_shim_wheel_validator_checks_selected_runtime_version(tmp_path):
     wheel = tmp_path / "taichi_forge-0.4.3-cp310-cp310-win_amd64.whl"
     _write_shim_wheel(

@@ -293,6 +293,7 @@ def validate_shim_wheel(
             leaf = Path(name).name.lower()
             if (
                 name.startswith("taichi_forge_runtime/")
+                or name.startswith("taichi_forge/_lib/hardware_providers/")
                 or "taichi_runtime" in leaf
                 or "cudart" in leaf
                 or "slim_libdevice" in leaf
