@@ -59,7 +59,7 @@ class _CaptureScope:
         self.fields = fields
 
     def field_inputs(self, code):
-        # Direct owner reads (including getattr) go through _Capture.attribute.
+        # Owner reads (including nested typed owners) go through _Capture.attribute.
         # A newly declared field can also shadow a previously resolved method.
         names = (code.used.keys() | code.methods.keys() | set(code.resource_templates.values())) & self.fields.keys()
         inputs = {}
@@ -350,10 +350,10 @@ class PackageBuildCache:
         return entry
 
     def capture_scope(self, kernel, schema, environment):
-        # Always traverse the current configuration domain. Direct owner fields
+        # Always traverse the current configuration domain. Typed owner fields
         # have a recorded read set, while records, dimensions and choices can
         # affect discovery even before the numerical body is entered.
-        from ._component import DenseField, _ModelTensorField
+        from ._component import DenseField, _ModelTensorField, _capture_id
         from ._package_capture_cache import _body, _callable
 
         fn = kernel.func
@@ -367,10 +367,21 @@ class PackageBuildCache:
                 self._compiler_inputs()
             fields, domain = {}, {}
             paths = dict(environment._source_scope_paths)
+            # An owner exposes named attributes. Whole-record operations on a
+            # StructField can observe its member set, so retain its full schema.
+            owner_kinds = {"owner", "owner_input"}
+            owner_paths = {
+                environment._paths[name] for name, item in schema.items()
+                if name in environment._paths and item["kind"] in owner_kinds
+                and all(view is None or view["kind"] in owner_kinds
+                        for view in item.get("_device_declarations", {}).values())
+            }
             for name, item in schema.items():
                 binding = environment.declarations.get(name)
-                if (item["kind"] == "dense_field" and environment._paths.get(name) == (name,)
+                path = environment._paths.get(name)
+                if (item["kind"] == "dense_field" and path and _capture_id(path) == name
                         and isinstance(binding, DenseField) and not isinstance(binding, _ModelTensorField)
+                        and all(path[:depth] in owner_paths for depth in range(1, len(path)))
                         and all(view is None or view.get("kind") == "dense_field"
                                 for view in item.get("_device_declarations", {}).values())):
                     fields[name] = (item, paths.pop(name, None))

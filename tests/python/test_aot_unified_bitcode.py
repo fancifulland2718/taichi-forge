@@ -159,7 +159,7 @@ def vector(x: ti.types.vector(2, ti.i32)) -> ti.i32:
 
 
 @test_utils.test(arch=ti.cpu, offline_cache=False)
-def test_unified_incremental_capture_tracks_direct_fields_per_entry(tmp_path, monkeypatch):
+def test_unified_incremental_capture_tracks_owner_fields_per_entry(tmp_path, monkeypatch):
     from taichi_forge_runtime.aot import load_package
 
     source = tmp_path / "direct_fields.py"
@@ -188,10 +188,23 @@ class Model:
     @ti.func""")
     colocated = original.replace("    @ti.func", "        scope.temp = scope.field(ti.f32, shape=1)\n    @ti.func")
     edited = colocated.replace("scope.field(ti.i32", "scope.field(ti.i16")
-    for label, text, hits, expected in (("seed", original, 0, 65535), ("added", added, 2, 65535),
-                                       ("colocated", colocated, 1, 65535),
-                                       ("edited", edited, 1, -1), ("cold", edited, 0, -1)):
-        source.write_text(text, encoding="utf8")
+    reader = """
+@ti.data_oriented
+class Reader:
+    def __init__(self, model: Model):
+        scope = ti.experimental.ResourceScope(self)
+        scope.owner_reference('model', model)
+    @ti.kernel
+    def nested_write(self, x: ti.i32) -> ti.i32:
+        return self.model.write_cell(x)
+    @ti.kernel
+    def double(self, x: ti.i32) -> ti.i32:
+        return x * 2
+"""
+    for label, text, hits, expected in (("seed", original, 0, 65535), ("added", added, 4, 65535),
+                                       ("colocated", colocated, 2, 65535),
+                                       ("edited", edited, 2, -1), ("cold", edited, 0, -1)):
+        source.write_text(text + reader, encoding="utf8")
         module = importlib.import_module(source.stem)
         output = tmp_path / label
         cache = tmp_path / ("fresh-cache" if label == "cold" else "cache")
@@ -206,6 +219,9 @@ class Model:
             model = package.host.Model()
             assert model.write(65535) == expected
             assert model.scalar(3) == 4
+            view = package.host.Reader(model)
+            assert view.nested_write(65535) == expected
+            assert view.double(3) == 6
     with zipfile.ZipFile(tmp_path / "edited/code.tcm") as warm, zipfile.ZipFile(tmp_path / "cold/code.tcm") as cold:
         assert set(warm.namelist()) == set(cold.namelist())
         assert all(warm.read(name) == cold.read(name) for name in warm.namelist())
