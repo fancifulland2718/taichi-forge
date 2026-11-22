@@ -7,36 +7,61 @@
 `@ti.func`、`@ti.real_func`、`@ti.pyfunc`、`@ti.dataclass` 和 `@ti.data_oriented`，无需增加导出装饰器、逐 Kernel 注册或组件根。
 这个接口目前是小范围原型，不是完整引擎的一键发行接口，格式和支持范围尚未稳定。
 
-在同一个 `ti.aot.export_package` 调用中选择交付方式。
+## 从一个数值模块到实际调用
 
-| 部署方式 | 导出参数 | 消费方式 |
-| --- | --- | --- |
-| 指定一个后端 | `arch="cuda"`（也可选 `"x64"`、`"vulkan"`），使用该后端的默认产物格式 | 在指定后端加载。Produce 为该后端选择已支持的静态设备分支。 |
-| x64、CUDA、Vulkan 共用一个包 | `artifact_format="unified-bc-library"`，省略 `arch` | 三端加载同一目录。Prepare 按实际后端特化已支持的设备分支。 |
-
-在 `unified-bc-library` 模式下指定单个 `arch`，可限制允许加载该通用库的后端。示例与设备要求见[生产与消费](#生产与消费)。
-
-x64 和 CUDA bitcode 库、CPU bitcode（`artifact_format="bc"`）与 Vulkan 默认格式
-（省略 `artifact_format`）可以显式开启生产端热启动：
+生产机需要支持按定义导出的 Forge 前端和配套 Runtime。将下面的普通 Kernel 保存为 `src/small_engine.py`。
 
 ```python
-ti.aot.export_package(app, "build/sdk-next", artifact_format="bc-library",
-                      build_cache="build/aot-cache")
+import taichi_forge as ti
+
+
+@ti.kernel
+def twice(x: ti.i32) -> ti.i32:
+    return 2 * x
 ```
 
-缓存目录只保存小型索引，引用最后一次成功发布的包；下一次构建前请保留该输出。
-源码闭包、可记录的 Python 绑定、编译器/Runtime 文件、目标和编译选项均未变化时，
-在资源见证构造及数值捕获之前直接复制完整包。复制时一并校验文件，不解压 TCM，
-不重复定稿；输出使用独立文件，不与旧包建立硬链接，发布仍采用原子目录换名。
-索引或引用产物缺失、损坏时按可选缓存未命中处理；失败构建不覆盖上一成功索引。
-本地开发索引按文件身份、大小和时间戳复用编译器文件摘要；每次复制仍校验产物实际字节。
+**Produce（构建时导出）。** 在生产进程中将 `src` 加入 Python 模块搜索路径，从项目目录运行以下代码。每次构建都使用 `src` 以外的新输出目录。通用格式默认允许 x64、CUDA 和 Vulkan 消费。
 
-本阶段复用的是输入不变的完整构建。源码修改仍进入正常编译流程及原有离线缓存，
-**尚未实现按入口跳过未变部分的前端捕获，也不合并独立编译的资源合同**。
-无法记录身份的可变对象、外部模块同样走正常导出；当前身份范围覆盖源码定义绑定、
-Forge 类型及简单不可变的标准库声明。依赖未声明外部状态、运行时修改 Forge 或
-标准库实现的构建不应启用此缓存。索引不保存前端对象、资源见证、模型数据或消费期
-特化结果。该选项默认关闭，不给普通 JIT 调用或包消费增加检查。
+```python
+import small_engine
+import taichi_forge as ti
+
+ti.aot.export_package(
+    small_engine, "dist/small-engine", artifact_format="unified-bc-library",
+    build_cache="build/producer-cache",
+)
+```
+
+要导出**单后端包**，将通用格式参数换成 `arch="cuda", artifact_format="bc-library"`、`arch="x64"` 或 `arch="vulkan"`。在**通用包**模式下指定 `arch` 可以限制允许消费的设备。包中保存可移植数值代码和相容的共享 helper，prepare 根据实际设备生成可执行代码。使用设备专有操作的入口仍需要相应能力和 provider。
+
+交付时保留整个输出目录。`code.tcm` 保存数值代码和执行合同，`host/` 保存构造与调度用的可读 Python，`package.json` 记录导入名、入口映射和产物身份。导出器写出的其他资产也随包分发。部署环境单独安装兼容的 Forge Runtime。开发时保留上一次成功输出，沿用同一 `build_cache` 并换一个输出目录。局部改动后，满足复用条件的入口可以跳过已有捕获或编译工作。生产缓存留在构建机即可。
+
+**Prepare（消费时准备）和 perform（执行）。** 在项目目录启动新进程，使导出的包可用。调用脚本也要用 Forge JIT 时，在导入数值模块之前选择混合模式。
+
+```python
+import taichi_forge as ti
+
+ti.init(arch=ti.cpu, execution_mode="hybrid", aot_package_paths=["dist/small-engine"])
+from small_engine import twice
+
+assert twice(7) == 14
+ti.reset()
+```
+
+独立 Python 应用只需安装 Runtime，使用同一份包，按原模块名导入。
+
+```python
+from taichi_forge_runtime import ExecutionSession
+
+with ExecutionSession(mode="aot", arch="x64", package_paths=["dist/small-engine"]):
+    from small_engine import twice
+
+    assert twice(9) == 18
+```
+
+这两种调用都会为符合条件的入口自动准备。Prepare 绑定实例资源，按已知维度和布局特化，生成设备可执行代码。Perform 使用当次实参和数组内容提交计算。评估用户成本时，分别测量含 prepare 的首次使用和暖态调用至设备完成的时间。Produce 导出时间单列为构建成本。
+
+多源码根、目标设备能力及增量导出的细节见[生产与消费](#生产与消费)。
 
 包外 Host 脚本组合数值对象时，可以先按对象选择录图器：
 

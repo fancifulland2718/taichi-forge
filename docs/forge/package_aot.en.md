@@ -10,44 +10,61 @@ No export decorator, per-kernel registration or component root is required.
 This is a limited prototype, not a complete engine distribution interface.
 Its format and supported scope are experimental.
 
-Choose the package with the same `ti.aot.export_package` call.
+## Export and call a numerical module
 
-| Deployment | Producer arguments | Consumer |
-| --- | --- | --- |
-| One backend | `arch="cuda"` (or `"x64"`, `"vulkan"`), using that backend's default artifact format | Load on the selected backend. Produce resolves supported static device branches for it. |
-| One package for x64, CUDA and Vulkan | `artifact_format="unified-bc-library"`, omit `arch` | Load the same directory on each backend. Prepare specializes supported device branches for the actual backend. |
-
-A single `arch` with `unified-bc-library` limits which backend may consume the portable library. See [Producing and consuming a package](#producing-and-consuming-a-package) for examples and device requirements.
-
-An optional producer warm start is available for x64 and CUDA bitcode libraries, CPU
-bitcode (`artifact_format="bc"`), and Vulkan's default format (omit `artifact_format`):
+Use a Forge frontend and matching runtime build that include definition-package export. Save this ordinary kernel as `src/small_engine.py`.
 
 ```python
-ti.aot.export_package(app, "build/sdk-next", artifact_format="bc-library",
-                      build_cache="build/aot-cache")
+import taichi_forge as ti
+
+
+@ti.kernel
+def twice(x: ti.i32) -> ti.i32:
+    return 2 * x
 ```
 
-The cache directory holds a small index referencing the last successfully
-published package. Keep that output until the next build. When the source closure,
-recordable Python bindings, compiler/runtime files, target and compilation options
-are unchanged, export copies the complete package before constructing resource
-witnesses or capturing numerical code. Files are checked while copying; TCM is
-neither unpacked nor finalized again. Outputs are independent files, not hardlinks.
-Publication remains atomic. A missing/corrupted index or result is an optional
-cache miss; a failed export does not replace the last successful index.
-Compiler file digests are memoized by file identity, size and timestamps in this
-trusted local development index; exported payload bytes are checked on each copy.
+**Produce.** Make `src` importable in the producer process and run the following from the project directory. Choose a new output directory outside `src` for each build. The default unified target set is x64, CUDA and Vulkan.
 
-This first stage reuses a complete unchanged build. Source edits still enter the
-normal compiler and its existing offline cache; it does **not** yet skip frontend
-capture per changed/unchanged entry or merge independently compiled resource
-contracts. Opaque mutable globals and external modules without a tracked identity
-also use ordinary export. Source-defined bindings, Forge types and simple immutable
-standard-library declarations are the initial supported identity scope. Do not use
-this cache for declarations with undeclared external state or runtime monkeypatches
-of Forge/standard-library implementations. There is no snapshot of frontend objects,
-resource witnesses, model data or consumer specializations. The option is off by
-default and adds no checks to ordinary JIT calls or loaded package execution.
+```python
+import small_engine
+import taichi_forge as ti
+
+ti.aot.export_package(
+    small_engine, "dist/small-engine", artifact_format="unified-bc-library",
+    build_cache="build/producer-cache",
+)
+```
+
+For a **device-specific** build, use `arch="cuda", artifact_format="bc-library"`, `arch="x64"`, or `arch="vulkan"` in place of the unified format. In the **unified** format, passing `arch` restricts the allowed consumers. The archive carries portable numerical code and compatible shared helpers. Prepare lowers that code for the selected device. Device-specific operations still require the corresponding capabilities and providers.
+
+Distribute the whole output directory. `code.tcm` holds numerical code and execution contracts, `host/` holds readable Python for construction and scheduling, and `package.json` maps imports to entries and records payload identity. Include any assets emitted by the exporter. Install the compatible Forge runtime separately. For incremental development, keep the previous output and reuse `build_cache` with a new destination. Eligible entries can reuse captured or compiled work after a local edit. The producer cache stays on the build machine.
+
+**Prepare and perform.** Start a fresh process in the project directory with the exported package available. Select hybrid mode before importing the library if the calling script also uses Forge JIT.
+
+```python
+import taichi_forge as ti
+
+ti.init(arch=ti.cpu, execution_mode="hybrid", aot_package_paths=["dist/small-engine"])
+from small_engine import twice
+
+assert twice(7) == 14
+ti.reset()
+```
+
+For a standalone Python application with the Runtime installed, use the same package and public import.
+
+```python
+from taichi_forge_runtime import ExecutionSession
+
+with ExecutionSession(mode="aot", arch="x64", package_paths=["dist/small-engine"]):
+    from small_engine import twice
+
+    assert twice(9) == 18
+```
+
+These calls prepare eligible entries automatically. Prepare binds instance resources, specializes supported dimensions and layouts, and materializes executable code. Perform submits the work with current argument values and array contents. Measure first use, including prepare, separately from warm calls to completion. Producer export time belongs to the build.
+
+See [Producing and consuming a package](#producing-and-consuming-a-package) for multiple source roots, target capabilities and incremental build details.
 
 Host scripts composing numerical objects can select their recorder before recording:
 
@@ -702,9 +719,9 @@ declared dimensions, prepare-static captures and integer scalar captures marked
 unmarked values, array contents and instance addresses remain dynamic. Native preparation is
 retained per instance. Host arrays still transfer through their original path.
 Device-range tasks and unsupported formats retain generic AOT; specialization
-errors are not swallowed. Cross-process specialization caching remains deferred;
-record first and second calls
-separately. Allocation lifetime currently ends at `LoadedPackage.close()`;
+errors propagate to the caller. Record first and second calls separately for these
+device-specific formats. Unified LLVM libraries on Vulkan also support the
+cross-process shader reuse described above. Allocation lifetime currently ends at `LoadedPackage.close()`;
 independent object retirement is not implemented.
 
 Callers may retain the Forge frontend and use their own JIT kernels to prepare
