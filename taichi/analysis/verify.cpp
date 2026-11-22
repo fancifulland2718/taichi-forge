@@ -1,4 +1,3 @@
-#include <vector>
 #include <unordered_set>
 
 #include "taichi/ir/ir.h"
@@ -14,8 +13,7 @@ class IRVerifier : public BasicStmtVisitor {
  private:
   Block *current_block_;
   Stmt *current_container_stmt_;
-  // each scope corresponds to an unordered_set
-  std::vector<std::unordered_set<Stmt *>> visible_stmts_;
+  std::unordered_set<Stmt *> visible_stmts_;
 
   bool is_func_return_element_ptr(Stmt *stmt) const {
     auto *elem = stmt->cast<GetElementStmt>();
@@ -40,8 +38,6 @@ class IRVerifier : public BasicStmtVisitor {
       : current_block_(nullptr), current_container_stmt_(nullptr) {
     allow_undefined_visitor = true;
     invoke_default_visitor = true;
-    if (!root->is<Block>())
-      visible_stmts_.emplace_back();
     if (root->is<Stmt>() && root->as<Stmt>()->is_container_statement()) {
       current_container_stmt_ = root->as<Stmt>();
     }
@@ -51,17 +47,11 @@ class IRVerifier : public BasicStmtVisitor {
     TI_ASSERT_INFO(stmt->parent == current_block_,
                    "stmt({})->parent({}) != current_block({})", stmt->id,
                    fmt::ptr(stmt->parent), fmt::ptr(current_block_));
-    for (auto &op : stmt->get_operands()) {
+    for (int i = 0; i < stmt->num_operands(); ++i) {
+      auto *op = stmt->operand(i);
       if (op == nullptr)
         continue;
-      bool found = false;
-      for (int depth = (int)visible_stmts_.size() - 1; depth >= 0; depth--) {
-        if (visible_stmts_[depth].find(op) != visible_stmts_[depth].end()) {
-          found = true;
-          break;
-        }
-      }
-      TI_ASSERT_INFO(found,
+      TI_ASSERT_INFO(visible_stmts_.count(op),
                      "IR broken: stmt {} {} cannot have operand {} {}."
                      " If you are using autodiff, please check out"
                      " https://docs.taichi-lang.org/docs/"
@@ -71,7 +61,7 @@ class IRVerifier : public BasicStmtVisitor {
                      " Thanks in advance!",
                      stmt->type(), stmt->id, op->type(), op->id);
     }
-    visible_stmts_.back().insert(stmt);
+    visible_stmts_.insert(stmt);
   }
 
   void preprocess_container_stmt(Stmt *stmt) override {
@@ -91,8 +81,6 @@ class IRVerifier : public BasicStmtVisitor {
     auto backup_block = current_block_;
     current_block_ = block;
     auto backup_container_stmt = current_container_stmt_;
-    if (!block->parent_stmt() || !block->parent_stmt()->is<OffloadedStmt>())
-      visible_stmts_.emplace_back();
     for (auto &stmt : block->statements) {
       if (stmt->is_container_statement())
         current_container_stmt_ = stmt.get();
@@ -101,8 +89,12 @@ class IRVerifier : public BasicStmtVisitor {
         current_container_stmt_ = backup_container_stmt;
     }
     current_block_ = backup_block;
-    if (!block->parent_stmt() || !block->parent_stmt()->is<OffloadedStmt>())
-      visible_stmts_.pop_back();
+    // Nested blocks leave lexical scope here. Direct blocks of one offload
+    // share its scope so definitions from a prologue stay visible in the body.
+    if (block->parent_stmt() && !block->parent_stmt()->is<OffloadedStmt>()) {
+      for (const auto &stmt : block->statements)
+        visible_stmts_.erase(stmt.get());
+    }
   }
 
   void visit(OffloadedStmt *stmt) override {
@@ -121,12 +113,11 @@ class IRVerifier : public BasicStmtVisitor {
     }
     // A task is compiled into its own function/shader. Its prologues, body
     // and epilogues share a scope, but cannot use another task's SSA values.
-    auto enclosing_scopes = std::move(visible_stmts_);
+    auto enclosing_scope = std::move(visible_stmts_);
     visible_stmts_.clear();
-    visible_stmts_.emplace_back();
-    visible_stmts_.back().insert(stmt);  // LoopIndexStmt refers to its task.
+    visible_stmts_.insert(stmt);  // LoopIndexStmt refers to its task.
     stmt->all_blocks_accept(this);
-    visible_stmts_ = std::move(enclosing_scopes);
+    visible_stmts_ = std::move(enclosing_scope);
   }
 
   void visit(LocalLoadStmt *stmt) override {
