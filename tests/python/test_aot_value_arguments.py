@@ -148,7 +148,7 @@ def test_cpu_prepare_specializes_only_fixed_range_chunks(tmp_path, cleanup):
 
 @test_utils.test(arch=[ti.cpu, ti.cuda, ti.vulkan], offline_cache=False)
 @pytest.mark.parametrize("fold_dimensions", [False, True])
-def test_prepared_bitcode_specialization_keeps_shapes_and_instances_independent(tmp_path, fold_dimensions):
+def test_prepared_bitcode_specialization_keeps_shapes_and_instances_independent(tmp_path, fold_dimensions, monkeypatch):
     from taichi_forge_runtime.aot import Scalar
 
     decorator = ti.func if ti.cfg.arch == ti.vulkan else ti.real_func
@@ -196,6 +196,36 @@ def test_prepared_bitcode_specialization_keeps_shapes_and_instances_independent(
             bound.prepare(specialize=True, constant_args=(2,))
         with pytest.raises(ValueError, match="requires specialize"):
             bound.prepare(constant_args=(1,))
+        # Replaying an admitted binding does not traverse its allocations.
+        memory = records[-1][0]._memory
+        checks = []
+        check = memory._check
+
+        def observe():
+            checks.append(None)
+            check()
+
+        monkeypatch.setattr(memory, "_check", observe)
+        bound.run()
+        bound.run()
+        assert not checks
+        runtime.ndarray("i32", (1,)).close()
+        bound.run()
+        bound.run()
+        assert len(checks) == 1
+
+        class RetireDuringBind:
+            def __index__(self):
+                memory.close()
+                return 1
+
+        stale = entry.bind(records[-1][0], Scalar("i32", RetireDuringBind()), 1.0)
+        with pytest.raises(RuntimeError, match="closed"):
+            stale.run()
+        with pytest.raises(RuntimeError, match="closed"):
+            bound.run()
+        with pytest.raises(RuntimeError, match="closed"):
+            bound.prepare()
 
 
 @test_utils.test(arch=ti.cuda, offline_cache=False)

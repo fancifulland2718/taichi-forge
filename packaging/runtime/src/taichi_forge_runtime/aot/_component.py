@@ -956,6 +956,7 @@ class ComponentInstance:
             selected[key] = bytes(self._resources[key].nbytes)
         if selected:
             self._state_generation += 1
+            self._component._module._runtime._binding_epoch += 1
         for name, value in selected.items():
             self._resources[name].write(value)
             self._initialized.add(name)
@@ -1124,6 +1125,7 @@ class ComponentInstance:
                 bindings = self._bindings(plan, values, dimensions, arguments)
                 plan = self._workspace_plan(plan, bindings)
                 self._transfer_active = True
+                runtime._binding_epoch += 1
             try:
                 with ExitStack() as owners:
                     with runtime._lock:
@@ -1184,6 +1186,7 @@ class ComponentInstance:
                 if self._transfer_active:
                     raise RuntimeError("Component Field transfer is in progress")
                 self._retiring_bindings = True
+                runtime._binding_epoch += 1
                 if invalidate_borrows:
                     self._state_generation += 1
                 calls = tuple(self._prepared)
@@ -1200,6 +1203,7 @@ class ComponentInstance:
             if getattr(self, "_retired", True):
                 return
             self._closed = True
+            runtime._binding_epoch += 1
             calls = tuple(self._prepared)
         # PreparedCall.close() releases the runtime submission lock while
         # retiring its accepted domain work. Do not enclose it in that lock.

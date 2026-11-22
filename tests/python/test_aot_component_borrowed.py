@@ -60,7 +60,7 @@ class _InputReader:
 
 
 @test_utils.test(arch=[ti.cpu, ti.cuda], offline_cache=False)
-def test_external_field_input_keeps_independent_roots_and_source_lifetime(tmp_path):
+def test_external_field_input_keeps_independent_roots_and_source_lifetime(tmp_path, monkeypatch):
     source = _InputSource(1, 2)
     reader = _InputReader(source)
     environment = Component.from_owner(reader)
@@ -106,7 +106,11 @@ def test_external_field_input_keeps_independent_roots_and_source_lifetime(tmp_pa
             with pytest.raises(ValueError, match="source owner"):
                 frame.initialize(zero=["state"])
             with frame.prepare() as draw:
-                draw.run()
+                with monkeypatch.context() as stable:
+                    def unexpected_owner_check():
+                        raise AssertionError("steady replay rechecked a retained Field source")
+                    stable.setattr(state, "_check", unexpected_owner_check)
+                    draw.run()
                 np.testing.assert_array_equal(np.frombuffer(frame.resource("output").read(), np.float32), np.arange(13) * 2)
                 with pytest.raises(RuntimeError, match="cold boundary"):
                     state.initialize(zero=["payload"])

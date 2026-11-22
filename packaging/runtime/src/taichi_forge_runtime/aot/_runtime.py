@@ -160,6 +160,9 @@ class Runtime:
         # Cyclic GC can finalize a runtime and its pending argument owners in
         # either order; every native child must still retire before the device.
         self._resources = set()
+        # Fixed calls observe resource retirement and changes to borrowed
+        # component state under the submission lock.
+        self._binding_epoch = 0
         self._pending = set()
         self._domain_owners = {}
         self._provider_paths = {}
@@ -199,6 +202,7 @@ class Runtime:
         result._acceleration_structure_importer = acceleration_structure_importer
         result._handle = None
         result._resources, result._pending = set(), set()
+        result._binding_epoch = 0
         result._domain_owners = {}
         result._provider_paths = {}
         try:
@@ -790,6 +794,8 @@ class Runtime:
         else:
             self._api.call(self._api.ti_free_memory, self._handle, handle)
         self._resources.remove((kind, handle))
+        if kind != "prepared":
+            self._binding_epoch += 1
 
     def __enter__(self):
         self._check()
@@ -1295,9 +1301,13 @@ class BoundCall:
     retain modules and allocations until the runtime finishes submitted work.
     """
 
-    def __init__(self, entry, arguments, bindings, owners, value_buffers=()):
+    def __init__(self, entry, arguments, bindings, owners, value_buffers=(), *, _validated_epoch=None):
         self._entry, self._arguments, self._bindings = entry, arguments, bindings
-        self._owners = tuple(dict.fromkeys(owners))
+        self._owners = tuple(dict.fromkeys((entry._module, *owners)))
+        # Kernel.bind and Graph.bind validate under the submission lock. Keep
+        # the epoch from *before* encoding: a Python argument can retire an
+        # earlier resource while its descriptor is being assembled.
+        self._binding_epoch = _validated_epoch
         # Native prepare copies these bytes into its context. Ordinary bound
         # launches keep the immutable payload alive independently of user values.
         self._value_buffers = tuple(value_buffers)
@@ -1311,13 +1321,20 @@ class BoundCall:
         """Submit this value snapshot with cached specialized code, without a Graph."""
         return self._run(constant_args=constant_args)
 
+    def _check_binding(self, runtime):
+        runtime._check()
+        if self._binding_epoch != runtime._binding_epoch:
+            for owner in self._owners:
+                if not isinstance(owner, _BoundValue):
+                    owner._check()
+            if self._binding_epoch is not None:
+                self._binding_epoch = runtime._binding_epoch
+
     def _run(self, *, constant_args=None):
         module = self._entry._module
         runtime = module._runtime
         with runtime._lock:
-            module._check()
-            for owner in self._owners:
-                owner._check()
+            self._check_binding(runtime)
             # Even a failing launch may have submitted earlier native work.
             runtime._pending.update(self._owners)
             if constant_args is not None:
@@ -1379,8 +1396,7 @@ class BoundCall:
         """
         runtime = self._entry._module._runtime
         with runtime._lock:
-            for owner in self._owners:
-                owner._check()
+            self._check_binding(runtime)
             graph = isinstance(self._entry, Graph)
             function = runtime._api.ti_prepare_compute_graph_ext if graph else runtime._api.ti_prepare_kernel_ext
             extra = ()
@@ -1435,6 +1451,7 @@ class PreparedCall(_Resource):
         self._close_lock = threading.RLock()
         self._domain_owner_key = None
         self._binding_owners = ()
+        self._binding_epoch = runtime._binding_epoch
         # Imports created exclusively by a JIT adapter for this instance.
         # User-owned AOT modules/arrays must never be included here.
         self._instance_imports = ()
@@ -1451,8 +1468,10 @@ class PreparedCall(_Resource):
         super()._check()
         if self._closing:
             raise RuntimeError("Prepared execution is retiring")
-        for owner in self._binding_owners:
-            owner._check()
+        if self._binding_owners and self._binding_epoch != self._runtime._binding_epoch:
+            for owner in self._binding_owners:
+                owner._check()
+            self._binding_epoch = self._runtime._binding_epoch
 
     def _retain_binding_owner(self, owner):
         """Pin an instance and revoke new submissions when it starts closing.
@@ -1861,10 +1880,11 @@ class Kernel:
     def bind(self, *arguments, gradients=None):
         runtime = self._module._runtime
         with runtime._lock:
+            epoch = runtime._binding_epoch
             self._module._check()
             if len(arguments) != self._argument_layout.count:
                 raise ValueError("Argument count does not match the exported kernel ABI")
-            owners = [self._module]
+            owners = []
             buffers = []
             native = (abi.Argument * len(arguments))(*[
                 self._argument_layout.encode(index, value, buffers)
@@ -1880,7 +1900,8 @@ class Kernel:
                 if not 0 <= index < len(arguments) or not isinstance(arguments[index], NdArray):
                     raise ValueError("Gradient indices must refer to ndarray arguments")
                 bindings.append(_gradient_binding(runtime, index, arguments[index], gradient, owners))
-            return BoundCall(self, native, (abi.Binding * len(bindings))(*bindings), owners, buffers)
+            return BoundCall(self, native, (abi.Binding * len(bindings))(*bindings), owners, buffers,
+                             _validated_epoch=epoch)
 
     def run(self, *arguments, gradients=None):
         """Run and return Python scalars, tuples or named dictionaries.
@@ -1913,8 +1934,9 @@ class Graph(Kernel):
     def bind(self, arguments, *, gradients=None):
         runtime = self._module._runtime
         with runtime._lock:
+            epoch = runtime._binding_epoch
             self._module._check()
-            owners = [self._module]
+            owners = []
             native = (abi.NamedArgument * len(arguments))(
                 *[
                     abi.NamedArgument(_name(name), _argument(runtime, value, owners))
@@ -1929,7 +1951,8 @@ class Graph(Kernel):
                 if name not in arguments or not isinstance(arguments[name], NdArray):
                     raise ValueError("Gradient names must refer to ndarray arguments")
                 bindings.append(_gradient_binding(runtime, name, arguments[name], gradient, owners, named=True))
-            return BoundCall(self, native, (abi.NamedBinding * len(bindings))(*bindings), owners)
+            return BoundCall(self, native, (abi.NamedBinding * len(bindings))(*bindings), owners,
+                             _validated_epoch=epoch)
 
     def run(self, arguments, *, gradients=None):
         self.bind(arguments, gradients=gradients).run()
