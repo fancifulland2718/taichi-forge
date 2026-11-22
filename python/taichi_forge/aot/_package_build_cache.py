@@ -232,12 +232,15 @@ class PackageBuildCache:
         arch = impl.current_cfg().arch
         supported = (
             (arch in (core.x64, core.cuda) and artifact_format == "bc-library")
+            or (arch in (core.x64, core.cuda, core.vulkan) and artifact_format == "unified-bc-library")
             or (arch in (core.x64, core.arm64) and artifact_format == "bc")
             or (arch == core.vulkan and artifact_format is None)
         )
         if not supported:
-            raise ValueError("build_cache requires x64/CUDA bc-library, CPU bc, or Vulkan default export")
-        self.objects_enabled = arch in (core.x64, core.arm64, core.vulkan) and impl.current_cfg().offline_cache
+            raise ValueError("build_cache requires x64/CUDA bc-library, CPU bc, Vulkan default export or unified-bc-library")
+        self.objects_enabled = impl.current_cfg().offline_cache and (
+            arch in (core.x64, core.arm64, core.vulkan) or artifact_format == "unified-bc-library"
+        )
         self.build_settings = dict(
             config=core._build_cache_config_key(impl.current_cfg(), impl.get_runtime().prog.get_device_caps(), True),
             option_sources=core._get_compile_option_sources(impl.current_cfg()),
@@ -502,11 +505,7 @@ class PackageBuildCache:
         self.directory.mkdir(parents=True, exist_ok=True)
         # One pointer, published only after a complete package. No duplicate
         # artifact store or mutable frontend object survives the transaction.
-        record = dict(version=1, key=self.identity.key if self.identity else None, output=str(output),
-                      inputs=dict(self.identity.inputs) if self.identity else {}, toolchain_files=self.toolchain_files,
-                      objects=self.objects,
-                      captures=self.captures, method_inputs=self.method_inputs, module_syntax=self.syntax_records,
-                      manifest_sha256=file_digest(output / "package.json"))
+        record = dict(self.declaration_record(), output=str(output), manifest_sha256=file_digest(output / "package.json"))
         fd, temporary = tempfile.mkstemp(prefix=".latest-", suffix=".json", dir=self.directory)
         try:
             with os.fdopen(fd, "w", encoding="utf8") as stream:
@@ -515,3 +514,10 @@ class PackageBuildCache:
             os.replace(temporary, self.directory / "latest.json")
         finally:
             Path(temporary).unlink(missing_ok=True)
+
+    def declaration_record(self):
+        """Independent capture inputs. A unified projection has no standalone package."""
+        return dict(version=1, key=self.identity.key if self.identity else None,
+                    inputs=dict(self.identity.inputs) if self.identity else {}, toolchain_files=self.toolchain_files,
+                    objects=self.objects, captures=self.captures, method_inputs=self.method_inputs,
+                    module_syntax=self.syntax_records)
