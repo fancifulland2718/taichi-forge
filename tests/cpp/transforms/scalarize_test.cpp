@@ -117,7 +117,7 @@ TEST(Scalarize, ScalarizeGlobalStore) {
   std::vector<Stmt *> indices = {};
   Stmt *dest_stmt = block->push_back<ExternalPtrStmt>(
       argload_stmt, indices);  // fake ExternalPtrStmt
-
+  dest_stmt->as<ExternalPtrStmt>()->runtime_affine = false;
   dest_stmt->ret_type = type_factory.get_pointer_type(tensor_type);
 
   std::vector<Stmt *> matrix_init_vals = {const_1_stmt, const_1_stmt,
@@ -151,6 +151,11 @@ TEST(Scalarize, ScalarizeGlobalStore) {
   EXPECT_EQ(block->statements[12]->is<ConstStmt>(), true);
   EXPECT_EQ(block->statements[13]->is<ExternalPtrStmt>(), true);
   EXPECT_EQ(block->statements[14]->is<GlobalStoreStmt>(), true);
+  for (auto &stmt : block->statements) {
+    if (auto *ptr = stmt->cast<ExternalPtrStmt>()) {
+      EXPECT_FALSE(ptr->runtime_affine);
+    }
+  }
 }
 
 TEST(Scalarize, ScalarizeGlobalLoad) {
@@ -213,6 +218,11 @@ TEST(Scalarize, ScalarizeGlobalLoad) {
   EXPECT_EQ(block->statements[10]->is<ConstStmt>(), true);
   EXPECT_EQ(block->statements[11]->is<ExternalPtrStmt>(), true);
   EXPECT_EQ(block->statements[12]->is<GlobalLoadStmt>(), true);
+  for (auto &stmt : block->statements) {
+    if (auto *ptr = stmt->cast<ExternalPtrStmt>()) {
+      EXPECT_TRUE(ptr->runtime_affine);
+    }
+  }
 }
 
 TEST(Scalarize, ScalarizeLocalStore) {

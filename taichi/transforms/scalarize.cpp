@@ -1285,6 +1285,10 @@ class FuseMatrixPtr : public BasicStmtVisitor {
     if (stmt->origin->is<ExternalPtrStmt>()) {
       auto origin = stmt->origin->as<ExternalPtrStmt>();
       TI_ASSERT(stmt->origin->ret_type.ptr_removed()->is<TensorType>());
+      // Fixed-stride record members use scalar pointers with component byte
+      // offsets. Appending a lane index would multiply it by the record stride.
+      if (origin->byte_offset != 0 || origin->byte_stride != 0)
+        return;
 
       std::vector<Stmt *> indices = origin->indices;
       indices.push_back(stmt->offset);
@@ -1299,6 +1303,7 @@ class FuseMatrixPtr : public BasicStmtVisitor {
       auto fused = std::make_unique<ExternalPtrStmt>(
           origin->base_ptr, indices, origin->ndim, element_shape,
           origin->is_grad);
+      fused->runtime_affine = origin->runtime_affine;
       fused->ret_type = stmt->ret_type;
       // Note: Update base_ptr's ret_type so that it matches the ExternalPtrStmt
       // with flattened indices. Main goal is to keep all the hacks in a single
