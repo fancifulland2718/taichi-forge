@@ -159,6 +159,59 @@ def vector(x: ti.types.vector(2, ti.i32)) -> ti.i32:
 
 
 @test_utils.test(arch=ti.cpu, offline_cache=False)
+def test_unified_incremental_capture_tracks_direct_fields_per_entry(tmp_path, monkeypatch):
+    from taichi_forge_runtime.aot import load_package
+
+    source = tmp_path / "direct_fields.py"
+    monkeypatch.syspath_prepend(str(tmp_path))
+    original = """import taichi_forge as ti
+@ti.data_oriented
+class Model:
+    def __init__(self):
+        scope = ti.experimental.ResourceScope(self)
+        scope.cells = scope.field(ti.i32, shape=1, initialization='zero')
+    @ti.func
+    def write_cell(self, x):
+        self.cells[0] = x
+        return ti.cast(self.cells[0], ti.i32)
+    @ti.kernel
+    def write(self, x: ti.i32) -> ti.i32:
+        return self.write_cell(x)
+    @ti.kernel
+    def scalar(self, x: ti.i32) -> ti.i32:
+        return x + 1
+"""
+    added = original.replace("    @ti.func", """        builder = ti.FieldsBuilder()
+        scratch = ti.experimental.ResourceScope(self, builder=builder)
+        scratch.temp = scratch.field(ti.f32, shape=1)
+        builder.finalize()
+    @ti.func""")
+    colocated = original.replace("    @ti.func", "        scope.temp = scope.field(ti.f32, shape=1)\n    @ti.func")
+    edited = colocated.replace("scope.field(ti.i32", "scope.field(ti.i16")
+    for label, text, hits, expected in (("seed", original, 0, 65535), ("added", added, 2, 65535),
+                                       ("colocated", colocated, 1, 65535),
+                                       ("edited", edited, 1, -1), ("cold", edited, 0, -1)):
+        source.write_text(text, encoding="utf8")
+        module = importlib.import_module(source.stem)
+        output = tmp_path / label
+        cache = tmp_path / ("fresh-cache" if label == "cold" else "cache")
+        try:
+            ti.aot.export_package(module, output, arch=[ti.cpu], artifact_format="unified-bc-library",
+                                  build_cache=cache)
+        finally:
+            sys.modules.pop(source.stem)
+        stats = json.loads((cache / "unified/latest.json").read_bytes())["produce"]
+        assert stats["unified_capture_restores"] == hits
+        with ti.aot.borrow_runtime() as runtime, load_package(runtime, output) as package:
+            model = package.host.Model()
+            assert model.write(65535) == expected
+            assert model.scalar(3) == 4
+    with zipfile.ZipFile(tmp_path / "edited/code.tcm") as warm, zipfile.ZipFile(tmp_path / "cold/code.tcm") as cold:
+        assert set(warm.namelist()) == set(cold.namelist())
+        assert all(warm.read(name) == cold.read(name) for name in warm.namelist())
+
+
+@test_utils.test(arch=ti.cpu, offline_cache=False)
 def test_unified_incremental_capture_survives_moving_host_declarations(tmp_path, monkeypatch):
     from taichi_forge_runtime.aot import load_package
 

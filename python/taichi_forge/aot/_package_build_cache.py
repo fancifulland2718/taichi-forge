@@ -44,6 +44,31 @@ def _capture_declaration(item):
     return result
 
 
+def _declaration_json(value):
+    def syntax(node):
+        if isinstance(node, ast.AST):
+            return ast.dump(node)
+        raise TypeError("Untracked producer declaration")
+
+    return json.dumps(value, sort_keys=True, default=syntax)
+
+
+class _CaptureScope:
+    def __init__(self, key, fields):
+        self.key = key
+        self.fields = fields
+
+    def field_inputs(self, code):
+        # Direct owner reads (including getattr) go through _Capture.attribute.
+        # A newly declared field can also shadow a previously resolved method.
+        names = (code.used.keys() | code.methods.keys() | set(code.resource_templates.values())) & self.fields.keys()
+        inputs = {}
+        for name in names:
+            item, source = self.fields[name]
+            inputs[name] = (_capture_declaration(item), source)
+        return value_digest(_declaration_json(inputs))
+
+
 def _scalar_kernel_inputs(kernel, modules):
     """Dependency identity for free, lexically closed scalar numerical code.
 
@@ -325,8 +350,10 @@ class PackageBuildCache:
         return entry
 
     def capture_scope(self, kernel, schema, environment):
-        # A schema change may introduce a new branch, resource or receiver.
-        # Traverse the current declaration domain even on a warm build.
+        # Always traverse the current configuration domain. Direct owner fields
+        # have a recorded read set, while records, dimensions and choices can
+        # affect discovery even before the numerical body is entered.
+        from ._component import DenseField, _ModelTensorField
         from ._package_capture_cache import _body, _callable
 
         fn = kernel.func
@@ -338,15 +365,20 @@ class PackageBuildCache:
                 return None
             if self.object_context is None:
                 self._compiler_inputs()
-            def syntax(node):
-                if isinstance(node, ast.AST):
-                    return ast.dump(node)
-                raise TypeError("Untracked producer declaration")
-
-            declaration = json.dumps({name: _capture_declaration(item) for name, item in schema.items()},
-                                     sort_keys=True, default=syntax)
-            return value_digest((self.object_context, fn.__module__, fn.__qualname__, kernel.opt_level,
-                                 declaration, environment._symbolic_dimensions, dict(environment._source_scope_paths)))
+            fields, domain = {}, {}
+            paths = dict(environment._source_scope_paths)
+            for name, item in schema.items():
+                binding = environment.declarations.get(name)
+                if (item["kind"] == "dense_field" and environment._paths.get(name) == (name,)
+                        and isinstance(binding, DenseField) and not isinstance(binding, _ModelTensorField)
+                        and all(view is None or view.get("kind") == "dense_field"
+                                for view in item.get("_device_declarations", {}).values())):
+                    fields[name] = (item, paths.pop(name, None))
+                else:
+                    domain[name] = _capture_declaration(item)
+            key = value_digest((self.object_context, fn.__module__, fn.__qualname__, kernel.opt_level,
+                                _declaration_json(domain), environment._symbolic_dimensions, paths))
+            return _CaptureScope(key, fields)
         except (TypeError, ValueError, AttributeError, _UntrackedInput):
             return None
 
@@ -364,6 +396,10 @@ class PackageBuildCache:
         facts = vars(code).pop("_cache_facts", None)
         if facts is None:
             return
+        try:
+            facts["field_inputs"] = scope.field_inputs(code)
+        except (TypeError, ValueError):
+            return  # An untracked declaration can still be compiled normally.
         native = module._aot_builder._build_object_key(symbol, code.kernel.compiled_kernels[code.key])
         if not native:
             return
@@ -371,7 +407,8 @@ class PackageBuildCache:
         # Per-object compression leaves unrelated owners opaque during lookup
         # and preserves the original declaration traversal order on recovery.
         packed = base64.b64encode(zlib.compress(payload.encode("utf8"), 1)).decode("ascii")
-        self.captures.setdefault(scope, {})[symbol] = dict(object=packed, digest=value_digest((scope, symbol, packed)))
+        self.captures.setdefault(scope.key, {})[symbol] = dict(
+            object=packed, digest=value_digest((scope.key, symbol, packed)))
 
     def restore_capture(self, compilation, component, owner, kernel, signature, resources, layouts):
         from taichi_forge.lang.exception import TaichiCompilationError
@@ -379,7 +416,7 @@ class PackageBuildCache:
 
         scope = compilation.capture_scope
         history = self.previous.get("captures")
-        records = history.get(scope) if isinstance(history, dict) else None
+        records = history.get(scope.key) if isinstance(history, dict) else None
         if not isinstance(records, dict):
             return None
         module = compilation.module
@@ -388,11 +425,13 @@ class PackageBuildCache:
                 continue
             try:
                 packed = record["object"]
-                if record["digest"] != value_digest((scope, symbol, packed)):
+                if record["digest"] != value_digest((scope.key, symbol, packed)):
                     continue
                 native, entry, facts = json.loads(zlib.decompress(base64.b64decode(packed, validate=True)))
                 key = kernel.func, "component_" + str(len(kernel._component_candidates)), kernel.autodiff_mode
                 code = thaw(facts, kernel, key, entry)
+                if facts["field_inputs"] != scope.field_inputs(code):
+                    continue
                 if not matches(code, facts, self.capture_syntax, component, owner, signature, resources, layouts):
                     continue
                 code.validate_bindings(component, owner)
@@ -407,7 +446,7 @@ class PackageBuildCache:
             module._content.extend(("kernel:" + symbol, "component_entry:" + symbol))
             compilation.exported[identity] = symbol
             compilation.resource_effects[identity] = module._aot_builder._kernel_resource_effects(symbol)
-            self.captures.setdefault(scope, {})[symbol] = record
+            self.captures.setdefault(scope.key, {})[symbol] = record
             return code
         return None
 
