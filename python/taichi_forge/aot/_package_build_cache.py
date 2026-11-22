@@ -355,7 +355,8 @@ class PackageBuildCache:
         from ._package_capture_cache import freeze
 
         try:
-            return freeze(code, self.capture_syntax, component, owner)
+            return freeze(code, self.capture_syntax, component, owner,
+                          portable=self.build_settings["artifact_format"] == "unified-bc-library")
         except (KeyError, AttributeError, OSError, ValueError, TypeError, TaichiCompilationError):
             return None
 

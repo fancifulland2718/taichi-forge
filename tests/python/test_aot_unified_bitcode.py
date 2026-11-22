@@ -488,11 +488,17 @@ class Exchange:
     monkeypatch.syspath_prepend(str(src))
     root = importlib.import_module(path.stem)
     output = tmp_path / "library"
+    cache = tmp_path / "build-cache"
     try:
+        ti.aot.export_package(root, tmp_path / "cold", arch=targets, source_root=src,
+                              artifact_format="unified-bc-library", build_cache=cache)
         ti.aot.export_package(root, output, arch=targets, source_root=src,
-                              artifact_format="unified-bc-library")
+                              artifact_format="unified-bc-library", build_cache=cache)
     finally:
         sys.modules.pop(path.stem, None)
+    stats = json.loads((cache / "unified/latest.json").read_bytes())["produce"]
+    assert stats["unified_capture_restores"] == 1
+    assert (output / "code.tcm").read_bytes() == (tmp_path / "cold/code.tcm").read_bytes()
     with zipfile.ZipFile(output / "code.tcm") as archive:
         assert len(json.loads(archive.read("unified_llvm.json"))["entries"]) == 1
     for arch in targets:

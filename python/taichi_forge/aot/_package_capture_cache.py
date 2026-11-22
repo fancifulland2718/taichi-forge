@@ -238,10 +238,13 @@ _MAPS = ("used", "capture_paths", "capture_source_paths", "static", "objects", "
 _LEXICAL_MAPS = ("functions", "constants", "struct_types")
 
 
-def freeze(code, memo, component, owner):
-    if (code.fixed_groups or code.workspaces or code.lexical or code.model_static_ranges
-            or code.contract.get("model_blocks")):
+def freeze(code, memo, component, owner, *, portable):
+    if code.fixed_groups or code.workspaces or code.lexical or code.model_static_ranges:
         raise Unavailable("task-local or lexical binding")
+    # Portable loop widths are expressions over the captured arguments. The
+    # LLVM unit and entry contract retain them until the consumer binds them.
+    if not portable and code.contract.get("model_blocks"):
+        raise Unavailable("target-specific model block")
     maps = {name: list(getattr(code, name).items()) for name in _MAPS}
     for name in _LEXICAL_MAPS:
         maps[name] = [(fn.__module__, fn.__qualname__, key, val)
