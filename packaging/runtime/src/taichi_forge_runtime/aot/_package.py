@@ -1738,10 +1738,10 @@ class entry:
             if construction is not None and construction[0] is package:
                 construction[3].callback(_discard_construction_calls, package, cache_owner, cache)
         previous = cache.get(self)
-        if previous is not None:
-            if previous.matches(owner, values):
+        if previous is not None and previous.guard.matches(owner):
+            if previous.matches_values(values):
                 return previous.run(reuse=True)
-            updated = previous.bind_values(owner, values)
+            updated = previous.bind_values(values)
             if updated is not None:
                 previous.close()
                 cache[self] = updated

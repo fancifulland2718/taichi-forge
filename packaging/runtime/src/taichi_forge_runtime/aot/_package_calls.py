@@ -429,9 +429,9 @@ class CachedCall:
         value = argument.value.value
         return C.string_at(value.data, value.size)
 
-    def matches(self, owner, values):
-        if not self.guard.matches(owner):
-            return False
+    def matches_values(self, values):
+        if not values:
+            return not self.tokens
         buffers = []
         return tuple(
             self._encoded_token(self.value_layout.encode(index, value, buffers))
@@ -439,9 +439,9 @@ class CachedCall:
             for index, value in enumerate(values)
         ) == self.tokens
 
-    def bind_values(self, owner, values):
-        """Refresh explicit values when every resource and owner fact is unchanged."""
-        if not self.specialized_launch or not self.guard.matches(owner):
+    def bind_values(self, values):
+        """Refresh explicit values after the caller checked the owner binding."""
+        if not self.specialized_launch:
             return None
         from ._runtime import Scalar
 

@@ -19859,6 +19859,7 @@ def test_package_while_private_arrays_are_prepared_per_invocation(tmp_path, monk
 @test_utils.test(arch=[ti.cpu, ti.cuda], offline_cache=False)
 def test_package_reuses_tensor_captures_and_implicit_graph_bindings(tmp_path, monkeypatch):
     import struct
+    from unittest.mock import patch
     from taichi_forge_runtime.aot import _runtime, _plan
 
     package = _source_package(tmp_path, monkeypatch, """
@@ -19904,6 +19905,13 @@ class Model:
         assert counts == initial
         np.testing.assert_array_equal(a.output.to_numpy(), np.full(7, 20))
         np.testing.assert_array_equal(b.output.to_numpy(), np.full(13, 25))
+        # Updating only an explicit value must observe the owner once. Reading
+        # it again during the refresh could also evaluate a descriptor twice.
+        (cached,) = a._forge_package_calls.values()
+        with patch.object(cached.guard, "matches", wraps=cached.guard.matches) as observe:
+            a.step(-3.0)  # Cancel the two components of bias; preserve output.
+            observe.assert_called_once_with(a)
+        np.testing.assert_array_equal(a.output.to_numpy(), np.full(7, 20))
         a.bias[0] = 5.0  # Same object, different CPU value bytes.
         a.step(1.0)
         a.step(1.0)
