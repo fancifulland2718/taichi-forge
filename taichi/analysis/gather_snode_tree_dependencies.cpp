@@ -5,6 +5,7 @@
 #include <unordered_map>
 #include <unordered_set>
 
+#include "taichi/analysis/ndarray_descriptor_origin.h"
 #include "taichi/ir/frontend_ir.h"
 #include "taichi/ir/statements.h"
 #include "taichi/ir/visitors.h"
@@ -292,66 +293,18 @@ class SNodeTreeDependencyCollector : public BasicStmtVisitor {
     for (const auto &[id, parameter] : call->func->nested_parameters) {
       if (parameter.ptype != ParameterType::kNdarray)
         continue;
-      const int ndim = parameter.total_dim - parameter.element_shape.size();
       const auto leaf = [&](std::vector<int> suffix) -> Stmt * {
         auto path = id;
         path.insert(path.end(), suffix.begin(), suffix.end());
         const auto found = leaves.find(path);
         return found == leaves.end() ? nullptr : found->second;
       };
-      auto *data = leaf({TypeFactory::DATA_PTR_POS_IN_NDARRAY});
-      auto *pointer = data ? data->cast<ExternalTensorBasePtrStmt>() : nullptr;
-      if (!pointer || pointer->is_grad) {
+      ExternalTensorBasePtrStmt *pointer = nullptr, *gradient = nullptr;
+      if (!forwarded_ndarray(parameter, leaf, pointer, gradient)) {
         arrays_.known = false;
         return;
       }
       const auto &origin = pointer->arg_id;
-      auto descriptor_type = parameter.get_dtype();
-      // Callable stores a scalar data pointer after ndarray scalarization, but
-      // the caller's descriptor ArgLoad keeps the original tensor element type.
-      // Both are the same ABI; preserve the exact rank/element/gradient layout.
-      const Type *tensor_descriptor_type = descriptor_type;
-      if (!parameter.element_shape.empty()) {
-        auto *element_type = descriptor_type->as<StructType>()
-                                 ->get_element_type({TypeFactory::DATA_PTR_POS_IN_NDARRAY})
-                                 ->as<PointerType>()->get_pointee_type();
-        auto &factory = TypeFactory::get_instance();
-        tensor_descriptor_type = factory.get_ndarray_struct_type(
-            factory.get_tensor_type(parameter.element_shape, element_type), ndim,
-            parameter.needs_grad);
-      }
-      bool valid = true;
-      for (int axis = 0; axis < TypeFactory::ndarray_shape_member_count(ndim); ++axis) {
-        auto *value = leaf({TypeFactory::SHAPE_POS_IN_NDARRAY, axis});
-        if (ndim == 0) {
-          auto *padding = value ? value->cast<ConstStmt>() : nullptr;
-          valid &= padding && padding->val.val_int() == 0;
-        } else {
-          auto *shape = value ? value->cast<ExternalTensorShapeAlongAxisStmt>() : nullptr;
-          valid &= shape && shape->arg_id == origin && shape->axis == axis;
-        }
-      }
-      for (int field = TypeFactory::ndarray_shape_member_count(ndim);
-           field <= TypeFactory::affine_mode_pos_in_ndarray(ndim); ++field) {
-        auto *value = leaf({TypeFactory::SHAPE_POS_IN_NDARRAY, field});
-        auto *member = value ? value->cast<GetElementStmt>() : nullptr;
-        auto *source = member ? member->src->cast<ArgLoadStmt>() : nullptr;
-        valid &= member && !member->is_ptr && source && source->is_ptr &&
-                 !source->create_load && source->arg_id == origin &&
-                 (source->ret_type.ptr_removed() == descriptor_type ||
-                  (const Type *)source->ret_type.ptr_removed() == tensor_descriptor_type) &&
-                 member->index == std::vector<int>{TypeFactory::SHAPE_POS_IN_NDARRAY, field};
-      }
-      ExternalTensorBasePtrStmt *gradient = nullptr;
-      if (parameter.needs_grad) {
-        auto *value = leaf({TypeFactory::GRAD_PTR_POS_IN_NDARRAY});
-        gradient = value ? value->cast<ExternalTensorBasePtrStmt>() : nullptr;
-        valid &= gradient && gradient->is_grad && gradient->arg_id == origin;
-      }
-      if (!valid) {
-        arrays_.known = false;
-        return;
-      }
       origins.emplace(id, origin);
       ++arrays_.descriptor_uses[pointer][call];
       if (gradient)

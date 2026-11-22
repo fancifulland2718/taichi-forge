@@ -21,6 +21,10 @@ class AotMetadataRowReader;
 
 namespace spirv {
 
+inline const char *kernel_argument_data_layout(const DeviceCapabilityConfig &caps) {
+  return caps.get(DeviceCapability::spirv_has_physical_storage_buffer) ? "1b" : "1-";
+}
+
 // Shared six-u32 diagnostic record kind. BufferType::HashOverflow keeps its
 // historical enum value/name for offline-cache stability, but the buffer now
 // reports all fixed-capacity sparse allocator failures.

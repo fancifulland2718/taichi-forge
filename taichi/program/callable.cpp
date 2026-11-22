@@ -234,6 +234,10 @@ void Callable::finish_argument_initialization() {
 }
 
 void Callable::finalize_params() {
+  finalize_params_with_layout(program->get_kernel_argument_data_layout());
+}
+
+void Callable::finalize_params_with_layout(const std::string &layout) {
   TI_ASSERT(temp_argpack_stack_.size() == 0 &&
             temp_indices_stack_.size() == 0 &&
             temp_argpack_name_stack_.size() == 0);
@@ -249,7 +253,6 @@ void Callable::finalize_params() {
   }
   auto *type =
       TypeFactory::get_instance().get_struct_type(members)->as<StructType>();
-  std::string layout = program->get_kernel_argument_data_layout();
   std::tie(args_type, args_size) =
       program->get_struct_type_with_data_layout(type, layout);
 }

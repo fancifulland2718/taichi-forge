@@ -88,6 +88,12 @@ class KernelCompilationManager final {
 
   explicit KernelCompilationManager(Config init_params);
 
+  std::unique_ptr<IRNode> lower_kernel_ir(const KernelCompileRequest &request,
+                                          const Kernel &kernel,
+                                          GraphKernelMetadata *metadata) const {
+    return config_.kernel_compiler->compile(request, kernel, metadata);
+  }
+
   // Load from memory || Load from disk || (Compile && Cache in memory)
   const CompiledKernelData &load_or_compile(const KernelCompileRequest &request,
                                             const Kernel &kernel_def);

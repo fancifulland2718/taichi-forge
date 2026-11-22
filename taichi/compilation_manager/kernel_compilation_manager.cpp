@@ -789,7 +789,7 @@ std::unique_ptr<CompiledKernelData> KernelCompilationManager::compile_kernel(
   GraphKernelMetadata graph_metadata;
   auto ir = [&]() {
     TI_COMPILE_PROFILER("cpp.compile.ir_pipeline");
-    return compiler.compile(request, kernel_def, &graph_metadata);
+    return lower_kernel_ir(request, kernel_def, &graph_metadata);
   }();
   auto ckd = [&]() {
     TI_COMPILE_PROFILER("cpp.compile.backend_codegen");

@@ -2,6 +2,7 @@
 #include "taichi/ir/statements.h"
 #include "taichi/ir/transforms.h"
 #include "taichi/ir/visitors.h"
+#include "taichi/transforms/lower_matrix_ptr.h"
 #include "taichi/system/profiler.h"
 #include <numeric>
 #include <functional>
@@ -594,6 +595,10 @@ class RemoveMatrixOfPtr : public BasicStmtVisitor {
 
 namespace irpass {
 
+void scalarize_matrix_ptr_accesses(IRNode *root) {
+  ScalarizeMatrixPtr pass(root);
+}
+
 void lower_matrix_ptr(IRNode *root, bool force_scalarize) {
   TI_AUTO_PROF;
 
@@ -604,7 +609,7 @@ void lower_matrix_ptr(IRNode *root, bool force_scalarize) {
         root, gather_valid_aos_global_ptr_pass.invalid_aos_global_ptr_stmts_);
   }
 
-  ScalarizeMatrixPtr scalarize_matrix_ptr_pass(root);
+  scalarize_matrix_ptr_accesses(root);
   LowerMatrixPtr::run(root);
   RemoveMatrixOfPtr::run(root);
 }

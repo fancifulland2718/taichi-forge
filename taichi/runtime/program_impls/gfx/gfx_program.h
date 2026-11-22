@@ -131,9 +131,7 @@ class GfxProgramImpl : public ProgramImpl {
   };
 
   std::string get_kernel_argument_data_layout() override {
-    auto has_buffer_ptr = runtime_->get_ti_device()->get_caps().get(
-        DeviceCapability::spirv_has_physical_storage_buffer);
-    return "1" + std::string(has_buffer_ptr ? "b" : "-");
+    return spirv::kernel_argument_data_layout(runtime_->get_ti_device()->get_caps());
   };
 
   DeviceCapabilityConfig get_device_caps() override;

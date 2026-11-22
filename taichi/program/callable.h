@@ -197,6 +197,7 @@ class TI_DLL_EXPORT Callable : public CallableBase {
   void finalize_rets();
 
   void finalize_params();
+  void finalize_params_with_layout(const std::string &layout);
 
   void finish_argument_initialization();
 
