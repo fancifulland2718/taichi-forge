@@ -19,6 +19,7 @@
 #include "taichi/rhi/vulkan/vulkan_device.h"
 #include "taichi/runtime/gfx/aot_graph_data.h"
 #include "taichi/runtime/gfx/aot_module_loader_impl.h"
+#include "taichi/runtime/gfx/descriptor_binding.h"
 #endif
 
 using taichi::lang::Program;
@@ -228,6 +229,16 @@ class UnifiedModule final : public aot::Module {
       std::memcpy(&word, static_cast<const char *>(context.get_context().arg_buffer) + offset, sizeof(word));
       layout.emplace(offset, word);
     }
+#ifdef TI_WITH_VULKAN
+    if (const auto it = descriptor_reads_.find(kernel.name); it != descriptor_reads_.end()) {
+      const auto limits = runtime_.get().get_storage_buffer_binding_limits();
+      for (const auto &member : it->second) {
+        const auto bias = gfx::descriptor_array_byte_bias(
+            limits, context.find_resolved_dense_storage_buffer(member));
+        layout.emplace(kernel.args_type->get_element_offset(member), bias);
+      }
+    }
+#endif
     Facts facts;
     auto bind = [&](const std::vector<int> &path) {
       if (!reads.count(path))
@@ -389,6 +400,18 @@ class UnifiedModule final : public aot::Module {
       // read by this body or an imported helper can change the selected code.
       auto &reads = specialization_reads_[name];
       auto &layout_reads = layout_reads_[name];
+      const bool descriptor_offsets = arch() == Arch::vulkan &&
+          !caps.get(DeviceCapability::spirv_has_physical_storage_buffer);
+      auto note_descriptor = [&](const std::vector<int> &path, bool gradient) {
+        if (!descriptor_offsets)
+          return;
+        // The launch context resolves this displacement inside the aligned
+        // binding. The allocation address itself is never a code fact.
+        auto member = path;
+        member.push_back(gradient ? TypeFactory::GRAD_PTR_POS_IN_NDARRAY :
+                                    TypeFactory::DATA_PTR_POS_IN_NDARRAY);
+        descriptor_reads_[name].insert(std::move(member));
+      };
       irpass::analysis::gather_statements(kernel->ir.get(), [&](Stmt *stmt) {
         if (auto *arg = stmt->cast<ArgLoadStmt>()) {
           if (!arg->is_ptr && arg->ret_type == PrimitiveType::i32)
@@ -402,6 +425,8 @@ class UnifiedModule final : public aot::Module {
           // Array addressing introduces descriptor loads in target codegen,
           // after the portable IR's explicit argument loads were specialized.
           auto *base = ptr->base_ptr->cast<ArgLoadStmt>();
+          if (base)
+            note_descriptor(base->arg_id, ptr->is_grad);
           if (base && ptr->ndim > 0) {
             auto path = base->arg_id;
             path.push_back(TypeFactory::SHAPE_POS_IN_NDARRAY);
@@ -419,10 +444,12 @@ class UnifiedModule final : public aot::Module {
               }
             }
           }
+        } else if (auto *base = stmt->cast<ExternalTensorBasePtrStmt>()) {
+          note_descriptor(base->arg_id, base->is_grad);
         }
         return false;
       });
-      if (needs_bound_device || !reads.empty() || !layout_reads.empty())
+      if (needs_bound_device || !reads.empty() || !layout_reads.empty() || descriptor_reads_.count(name))
         return deferred(name, *kernel, cfg);
     }
     auto execution = program.compile_kernel_execution_handle(cfg, caps, *kernel);
@@ -457,6 +484,7 @@ class UnifiedModule final : public aot::Module {
   std::atomic<bool> used_{false};
   std::map<std::string, std::set<std::vector<int>>> specialization_reads_;
   std::map<std::string, std::set<std::vector<int>>> layout_reads_;
+  std::map<std::string, std::set<std::vector<int>>> descriptor_reads_;
   std::map<std::tuple<std::string, Facts, LayoutWords>, std::unique_ptr<aot::Kernel>> specialized_;
 #ifdef TI_WITH_VULKAN
   std::vector<std::shared_ptr<gfx::AotKernelRegistration>> registrations_;

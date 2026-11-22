@@ -884,6 +884,23 @@ def scheduled(data: ti.types.ndarray(dtype=ti.i32, ndim=1)):
                 generic.submit().wait()
             np.testing.assert_array_equal(np.frombuffer(values.read(), np.int32),
                                           np.ones(4, np.int32))
+            if target == ti.vulkan:
+                # Equal-shaped slices of one allocation can have different
+                # displacements inside an aligned Vulkan descriptor binding.
+                from contextlib import ExitStack, closing
+
+                backing = ti.ndarray(ti.i32, 8)
+                backing.fill(0)
+                with ExitStack() as stack:
+                    prepared = []
+                    for start in (1, 3):
+                        sliced = ti.experimental.ndarray_view(backing, slices=slice(start, start + 3))
+                        array = stack.enter_context(closing(runtime.import_dense_view(sliced)))
+                        call = module.kernel(symbol).bind(array).prepare(specialize=True)
+                        prepared.append(stack.enter_context(call))
+                    for call in (prepared[0], prepared[1], prepared[0]):
+                        call.submit().wait()
+                np.testing.assert_array_equal(backing.to_numpy(), [0, 2, 2, 3, 1, 1, 0, 0])
             if target in (ti.cpu, ti.cuda):
                 # The same callable can later receive one member of an
                 # interleaved field. Writes must skip the adjacent member.
