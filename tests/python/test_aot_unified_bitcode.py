@@ -528,6 +528,14 @@ class Exchange:
                         jit_data = before.copy()
                         root.Exchange(width).run(jit_data)
                         np.testing.assert_array_equal(jit_data, expected)
+            if arch == ti.vulkan:
+                from taichi_forge.tools.vulkan_diagnostics import vulkan_runtime_diagnostics
+
+                device = vulkan_runtime_diagnostics()["device"]
+                limit = min(device["max_workgroup_invocations"], device["max_workgroup_size_x"])
+                for invalid_width in (3, 1 << limit.bit_length()):
+                    with pytest.raises(RuntimeError, match="(workgroup size|device limit)"):
+                        pkg.host.Exchange(invalid_width).run(data)
 
 
 def test_unified_cpu_uses_consumer_default_workgroup_width(tmp_path, monkeypatch):

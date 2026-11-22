@@ -1094,6 +1094,19 @@ class KernelReader {
         }
       }
     }
+    // On Vulkan a width resolved from a prepare fact can go directly into
+    // LocalSize. Keep an unbound width in the model-workgroup ABI.
+    if (kernel_.arch == Arch::vulkan && model_block_dim_) {
+      if (auto *fixed = model_block_dim_->cast<ConstStmt>()) {
+        const int lanes = fixed->val.val_int32();
+        TI_ERROR_IF(lanes <= 0 || (lanes % 32 && !bit::is_power_of_two(lanes)),
+                    "Invalid model workgroup size");
+        if (lanes <= taichi_max_gpu_block_dim) {
+          width = lanes;
+          model_block_dim_ = nullptr;
+        }
+      }
+    }
     int threads = kernel_.arch == Arch::cuda ? 1 :
                   requested ? requested : int(std::max(1u, std::thread::hardware_concurrency()));
     auto *loop = block.push_back<RangeForStmt>(

@@ -16,6 +16,7 @@
 #include "taichi/system/profiler.h"
 #ifdef TI_WITH_VULKAN
 #include "taichi/codegen/spirv/compiled_kernel_data.h"
+#include "taichi/rhi/vulkan/vulkan_device.h"
 #include "taichi/runtime/gfx/aot_graph_data.h"
 #include "taichi/runtime/gfx/aot_module_loader_impl.h"
 #endif
@@ -297,6 +298,20 @@ class UnifiedModule final : public aot::Module {
     gfx::GfxRuntime::RegisterParams params;
     params.kernel_attribs = data.metadata.kernel_attribs;
     params.kernel_attribs.name = name;
+    // A bound width baked into LocalSize no longer passes through
+    // bound_pipeline(). Admit its launch and shared storage on this device.
+    const auto &limits = static_cast<vulkan::VulkanDevice &>(runtime_.get())
+                             .get_vk_physical_device_props().limits;
+    for (const auto &task : params.kernel_attribs.tasks_attribs) {
+      if (task.has_model_workgroup())
+        continue;
+      const uint32_t width = task.advisory_num_threads_per_group;
+      TI_ERROR_IF(width > limits.maxComputeWorkGroupSize[0] ||
+                      width > limits.maxComputeWorkGroupInvocations,
+                  "Workgroup size {} exceeds the Vulkan device limit", width);
+      TI_ERROR_IF(uint64_t(task.static_shared_array_bytes) > limits.maxComputeSharedMemorySize,
+                  "Static workgroup storage exceeds the Vulkan device limit");
+    }
     params.task_spirv_source_codes = data.src.spirv_src;
     params.num_snode_trees = data.metadata.num_snode_trees;
     params.snode_tree_ids = data.metadata.used_snode_tree_ids;
