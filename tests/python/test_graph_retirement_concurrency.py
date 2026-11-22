@@ -134,6 +134,39 @@ def _retire_during_submission(mode):
     holder.clear()  # Late cache destruction after runtime retirement remains safe.
 
 
+def _retire_external_during_submission(mode):
+    ti.init(arch=ti.cpu, offline_cache=False)
+    program = impl.get_runtime().prog
+    holder = [ti.interop.from_dlpack(np.arange(16, dtype=np.int32))]
+    before = program._debug_external_dense_storage_stats()["released_total"]
+    started = threading.Event()
+
+    def retire():
+        started.set()
+        if mode == "close":
+            holder[0].close()
+        else:
+            holder.clear()
+
+    transaction = program._begin_runtime_submission_transaction()
+    worker = threading.Thread(target=retire)
+    worker.start()
+    assert started.wait(5)
+    worker.join(0.1)
+    assert worker.is_alive()
+    transaction._abort()
+    worker.join(5)
+    assert not worker.is_alive()
+    assert program._debug_external_dense_storage_stats()["released_total"] == before + 1
+    ti.reset()
+
+
+@pytest.mark.parametrize("mode", ["close", "destroy"])
+@test_utils.test(arch=ti.cpu, offline_cache=False)
+def test_external_storage_retirement_during_native_batch(mode):
+    _check_in_child(_retire_external_during_submission, mode)
+
+
 @pytest.mark.parametrize(
     "mode",
     [
@@ -144,6 +177,10 @@ def _retire_during_submission(mode):
 )
 @test_utils.test(arch=ti.vulkan, offline_cache=False)
 def test_graph_retirement_during_native_batch(mode):
+    _check_in_child(_retire_during_submission, mode)
+
+
+def _check_in_child(operation, mode):
     # Load exactly the parent's native extension, including source/native local
     # development checks. A deadlock kills only this bounded child process.
     code = (
@@ -152,8 +189,8 @@ def test_graph_retirement_during_native_batch(mode):
         "package = types.ModuleType('taichi_forge._lib.core')\n"
         f"package.__path__ = [{json.dumps(str(Path(core.__file__).parent))}]\n"
         "sys.modules[package.__name__] = package\n"
-        "from tests.python.test_graph_retirement_concurrency import _retire_during_submission\n"
-        f"_retire_during_submission({mode!r})\n"
+        f"from tests.python.test_graph_retirement_concurrency import {operation.__name__}\n"
+        f"{operation.__name__}({mode!r})\n"
     )
     result = subprocess.run([sys.executable, "-B", "-c", code], capture_output=True, text=True, timeout=25)
     assert result.returncode == 0, result.stdout + result.stderr

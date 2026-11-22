@@ -1,6 +1,7 @@
 #pragma once
 
 #include <array>
+#include <atomic>
 #include <cstring>
 #include <limits>
 #include <memory>
@@ -235,7 +236,7 @@ class PythonExternalDenseStorage final {
   std::int32_t device_type_{0};
   std::int32_t device_id_{0};
   std::uint64_t allocation_bytes_{0};
-  bool closed_{false};
+  std::atomic<bool> closed_{false};
 };
 
 lang::DataType dlpack_data_type(
@@ -642,7 +643,7 @@ class PythonVulkanCudaExternalAllocation final {
   std::array<std::uint8_t, 16> device_uuid_{};
   std::int32_t device_id_{0};
   bool synchronized_{false};
-  bool closed_{false};
+  std::atomic<bool> closed_{false};
 };
 
 lang::ExternalOpaqueHandleType parse_external_handle_type(
@@ -948,9 +949,11 @@ void export_external_storage_bindings(py::module &m) {
   using namespace lang;
   using namespace lang::storage;
 
+  // Retirement can wait for a Graph transaction whose owner needs the GIL
+  // to finish it. This also applies to last-reference drops during Python GC.
   py::class_<PythonExternalDenseStorage,
              std::shared_ptr<PythonExternalDenseStorage>>(
-      m, "_ExternalDenseStorage")
+      m, "_ExternalDenseStorage", py::release_gil_before_calling_cpp_dtor())
       .def_property_readonly(
           "description", &PythonExternalDenseStorage::description,
           py::return_value_policy::reference_internal)
@@ -964,7 +967,8 @@ void export_external_storage_bindings(py::module &m) {
                              &PythonExternalDenseStorage::allocation_bytes)
       .def_property_readonly("closed",
                              &PythonExternalDenseStorage::closed)
-      .def("close", &PythonExternalDenseStorage::close)
+      .def("close", &PythonExternalDenseStorage::close,
+           py::call_guard<py::gil_scoped_release>())
       .def("_describe_typed_view", &PythonExternalDenseStorage::describe_typed_view,
            py::arg("scalar_type"), py::arg("shape"), py::arg("element_shape"),
            py::arg("offset_bytes"));
@@ -977,7 +981,8 @@ void export_external_storage_bindings(py::module &m) {
 
   py::class_<PythonVulkanCudaExternalAllocation,
              std::shared_ptr<PythonVulkanCudaExternalAllocation>>(
-      m, "_VulkanCudaExternalAllocation")
+      m, "_VulkanCudaExternalAllocation",
+      py::release_gil_before_calling_cpp_dtor())
       .def_property_readonly(
           "allocation_bytes",
           &PythonVulkanCudaExternalAllocation::allocation_bytes)
@@ -998,7 +1003,8 @@ void export_external_storage_bindings(py::module &m) {
            py::arg("scalar_type"), py::arg("shape"),
            py::arg("element_shape") = std::vector<std::int64_t>{},
            py::arg("offset_bytes") = 0, py::arg("access") = "readwrite")
-      .def("close", &PythonVulkanCudaExternalAllocation::close);
+      .def("close", &PythonVulkanCudaExternalAllocation::close,
+           py::call_guard<py::gil_scoped_release>());
 
   m.def("_import_dlpack_capsule", &import_dlpack_capsule, py::arg("program"),
         py::arg("capsule"),
