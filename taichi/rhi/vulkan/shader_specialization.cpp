@@ -268,20 +268,35 @@ std::vector<uint32_t> bind_spirv_arguments(
     return code;
   if (folded)
     *folded = loads.size();
+  auto has_outlined_functions = [&] {
+    auto function = context->module()->begin();
+    return function != context->module()->end() && ++function != context->module()->end();
+  };
+  const bool finish_after_binding = layout_words_only && !has_outlined_functions();
   auto *manager = context->get_constant_mgr();
   for (const auto &[load, value] : loads) {
     auto *type = defs->GetDef(load->type_id());
     const auto *constant = manager->GetIntConst(
         value.value, value.bits, type->GetSingleWordInOperand(1) != 0);
     auto *definition = manager->GetDefiningInstruction(constant, load->type_id());
+    auto pointer = load->GetSingleWordInOperand(0);
     context->ReplaceAllUsesWith(load->result_id(), definition->result_id());
     context->KillInst(load);
+    // Only these argument access chains lost a use. Stop at the first shared
+    // address (including an explicitly qualified load), or at the UBO itself.
+    if (finish_after_binding) {
+      const auto is_metadata = [](Instruction *use) {
+        return use->opcode() == spv::Op::OpName ||
+               use->opcode() == spv::Op::OpDecorate;
+      };
+      while (pointer != argument && defs->WhileEachUser(pointer, is_metadata)) {
+        auto *address = defs->GetDef(pointer);
+        pointer = address->GetSingleWordInOperand(0);
+        context->KillInst(address);
+      }
+    }
   }
-  auto has_outlined_functions = [&] {
-    auto function = context->module()->begin();
-    return function != context->module()->end() && ++function != context->module()->end();
-  };
-  if (layout_words_only && !has_outlined_functions()) {
+  if (finish_after_binding) {
     std::vector<uint32_t> output;
     context->module()->ToBinary(&output, true);
     return output;

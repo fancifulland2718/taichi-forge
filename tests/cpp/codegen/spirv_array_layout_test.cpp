@@ -64,6 +64,18 @@ OpReturn
 OpFunctionEnd
 )", &input));
   ASSERT_TRUE(tools.Validate(input));
+  // Layout-only binding keeps the branch and the workgroup/output addresses.
+  // The folded count must no longer leave an unused UBO address behind.
+  size_t layout_folds = 0;
+  const auto bound = vulkan::bind_spirv_layout_words(input, 0, {{0, 32, 2}}, &layout_folds);
+  ASSERT_EQ(layout_folds, 1u);
+  ASSERT_TRUE(tools.Validate(bound));
+  size_t addresses = 0;
+  for (size_t pos = 5; pos < bound.size(); pos += bound[pos] >> 16) {
+    if ((bound[pos] & 0xffffu) == spv::OpAccessChain)
+      ++addresses;
+  }
+  EXPECT_EQ(addresses, 2u);
   for (uint32_t count : {0u, 2u}) {
     size_t folded = 0;
     const auto shader = vulkan::specialize_spirv_arguments(
