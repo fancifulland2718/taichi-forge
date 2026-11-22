@@ -6739,13 +6739,21 @@ def test_package_owner_input_keeps_struct_member_allocation_scope(tmp_path, monk
     original.step(3.0)
     expected = original.storage.values.x.to_numpy()
     manifest = ti.aot.export_package(package, tmp_path / "sdk")
-    assert len(manifest["entries"]) == 4 and len(manifest["field_groups"]) == 1
+    assert {entry["definition"] for entry in manifest["entries"].values()} == {
+        "definition_fixture.model.Storage.clear",
+        "definition_fixture.model.Reader.step",
+        "definition_fixture.unimported.available_without_a_test",
+    }
+    assert len(manifest["field_groups"]) == 1
     with Runtime(manifest["target"]) as runtime, load_package(runtime, tmp_path / "sdk") as code:
         a = code.host.Model(7, True)
         a.step(3.0)
         assert a.reader.reader.alias is a.storage.values.x
         assert a.reader.reader.alias._group_owner is a.storage.values.v._group_owner
         np.testing.assert_array_equal(a.storage.values.x.to_numpy(), expected)
+        b = code.host.Model(7, False)
+        b.step(3.0)
+        np.testing.assert_array_equal(b.storage.values.x.to_numpy(), 3 * np.arange(7) + 2)
 
 
 @pytest.mark.parametrize("annotation", ["Storage", '"Storage"', "'\"Storage\"'"])
