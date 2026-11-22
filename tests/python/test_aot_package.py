@@ -25,6 +25,36 @@ def _shader_bytes(archive, name):
     return data
 
 
+def test_free_kernel_validation_uses_entry_headers():
+    from types import SimpleNamespace
+    from taichi_forge_runtime.aot._package_closures import _FunctionEntry
+    from taichi_forge_runtime.aot._package_manifest import decode_manifest
+
+    header = dict(symbol="code", arguments=[{"name": "gain"}], template_resources={"target": ["values"]}, admission=0)
+    case = dict(symbol="code", values={}, resources={"target": ["values"]})
+    spec = dict(receiver="self", parameters=["self", "target", "gain"], templates=["self", "target"],
+                owners={"Model": [case]})
+    manifest = decode_manifest({
+        "version": 99,
+        "entry_contract_records": dict(version=98, fragments=['{"inputs":{}}'], recipes=[[0]]),
+        "entries": {"code": header},
+        "owners": {"Model": {"values": {"kind": "dense_field"}}},
+        "function_entries": {"update": spec},
+    })
+    package = SimpleNamespace(_manifest=manifest)
+    _FunctionEntry(package, "update")
+    assert not manifest["entries"]._cache
+    header["template_resources"] = {"target": ["other"]}
+    with pytest.raises(ValueError, match="Template resource paths differ"):
+        _FunctionEntry(package, "update")
+    header["template_resources"] = {"target": ["values"]}
+    header["arguments"] = [{"name": "wrong"}]
+    with pytest.raises(ValueError, match="receiver binding differs"):
+        _FunctionEntry(package, "update")
+    assert not manifest["entries"]._cache
+    assert manifest["entries"]["code"]["admission"] == {"inputs": {}}
+
+
 def test_definition_package_shared_entry_contracts():
     from taichi_forge_runtime.aot._package_manifest import decode_manifest, encode_manifest, materialize_manifest
 

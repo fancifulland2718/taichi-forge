@@ -166,6 +166,7 @@ class _FunctionEntry:
         self.receiver = receiver
         self.templates = tuple(templates)
         self.static_parameters = tuple(name for name in templates if name != receiver)
+        numerical_parameters = [name for name in parameters if name not in templates]
         self.signature = inspect.Signature(
             [inspect.Parameter(name, inspect.Parameter.POSITIONAL_OR_KEYWORD) for name in parameters]
         )
@@ -253,23 +254,20 @@ class _FunctionEntry:
                     raise ValueError("Free Kernel has duplicate template input cases")
                 seen.add(key)
                 bound = entry(package, case["symbol"])
-                if [item["name"] for item in bound.contract["arguments"]] != [
-                    n for n in parameters if n not in templates
-                ]:
+                if list(bound.signature.parameters) != numerical_parameters:
                     raise ValueError("Free Kernel receiver binding differs from its numerical ABI")
                 if resources or inputs:
-                    contracts = (
-                        [bound.contract]
+                    symbols = (
+                        [case["symbol"]]
                         if bound.family is None
-                        else [
-                            _entry_contract(package._manifest, variant["symbol"]) for variant in bound.family["variants"]
-                        ]
+                        else [variant["symbol"] for variant in bound.family["variants"]]
                     )
                     template_paths = {**resources, **{name: ["_arg_" + name] for name in (*inputs, *fields)}}
-                    for contract in contracts:
+                    for symbol in symbols:
+                        header = _entry_contract(package._manifest, symbol, header_only=True)
                         if any(
                             template_paths.get(name) != path
-                            for name, path in contract.get("template_resources", {}).items()
+                            for name, path in header.get("template_resources", {}).items()
                         ):
                             raise ValueError("Template resource paths differ from the compiled resource ABI")
                     if inputs:
