@@ -325,8 +325,10 @@ class Module:
             )
 
         if artifact_format is not None:
-            if artifact_format not in ("bc", "bc-library", "ptx", "cubin"):
-                raise ValueError("AOT artifact_format must be bc, bc-library, ptx or cubin")
+            if artifact_format not in ("bc", "bc-library", "unified-bc-library", "ptx", "cubin"):
+                raise ValueError("AOT artifact_format must be bc, bc-library, unified-bc-library, ptx or cubin")
+            if artifact_format == "unified-bc-library" and arch not in (taichi_forge.x64, taichi_forge.cuda, taichi_forge.vulkan):
+                raise TaichiRuntimeError("Unified LLVM frontend capture supports x64, CUDA and Vulkan")
             if artifact_format == "bc-library" and arch not in (taichi_forge.x64, taichi_forge.cuda):
                 raise TaichiRuntimeError("AOT bitcode libraries require x64 or CUDA")
             if artifact_format in ("ptx", "cubin") and arch != taichi_forge.cuda:
@@ -357,6 +359,7 @@ class Module:
                 setattr(options, key, value)
 
         self._arch = arch
+        self._artifact_format = artifact_format
         self._kernels = []
         self._exported_kernels = {}
         self._component_entries = {}
@@ -374,9 +377,12 @@ class Module:
         rtm = impl.get_runtime()
         self._runtime = rtm
         rtm._finalize_root_fb_for_aot()
-        self._aot_builder = rtm.prog.make_aot_module_builder(arch, caps)
-        if artifact_format is not None:
-            self._aot_builder.set_artifact_format(artifact_format)
+        if artifact_format == "unified-bc-library":
+            self._aot_builder = rtm.prog.make_aot_module_builder(arch, caps, artifact_format)
+        else:
+            self._aot_builder = rtm.prog.make_aot_module_builder(arch, caps)
+            if artifact_format is not None:
+                self._aot_builder.set_artifact_format(artifact_format)
         if options is not None:
             self._aot_builder.set_compile_options(options)
         self._content = []
@@ -942,9 +948,11 @@ class Module:
         # Fast deflate reduces frozen topology/state and code without replay
         # work. Native VirtualDir readers already decompress requested entries.
         with TemporaryDirectory(prefix="tcm_") as temp_dir:
+            pack_vulkan_tasks = (_pack_shader_members and self._arch == _ti_core.vulkan
+                                 and self._artifact_format != "unified-bc-library")
             self.save(temp_dir, shared_component_contracts=shared_component_contracts,
                       shared_execution_plans=shared_execution_plans,
-                      _share_kernel_rows=_pack_shader_members and self._arch == _ti_core.vulkan)
+                      _share_kernel_rows=pack_vulkan_tasks)
             with ZipFile(tcm_path, "w", compression=ZIP_DEFLATED, compresslevel=1) as z:
                 packed_entries = set()
                 has_entry_blocks = False
@@ -965,7 +973,7 @@ class Module:
                     if relative in omitted or relative.as_posix() in packed_entries:
                         continue
                     os.utime(path, (fixed_time, fixed_time))
-                    if _pack_shader_members and self._arch == _ti_core.vulkan and (
+                    if pack_vulkan_tasks and (
                         relative.suffix in (".spv", ".spvroot")
                         or (relative.parent == Path("data") and relative.suffix == ".bin")
                     ):
