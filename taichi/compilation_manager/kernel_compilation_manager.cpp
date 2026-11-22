@@ -173,7 +173,8 @@ const CompiledKernelData &KernelCompilationManager::load_or_compile(
 std::shared_ptr<KernelExecutionHandle>
 KernelCompilationManager::load_or_compile_execution_handle(
     const KernelCompileRequest &request,
-    const Kernel &kernel_def) {
+    const Kernel &kernel_def,
+    const std::function<std::unique_ptr<Kernel>()> &restore_source) {
   const auto &compile_config = request.config();
   const auto &caps = request.device_caps();
   auto cache_mode = get_cache_mode(compile_config.offline_cache, kernel_def);
@@ -232,7 +233,14 @@ KernelCompilationManager::load_or_compile_execution_handle(
     if (!compiled) {
       record_if_enabled(executable_lifecycle_telemetry_.enabled,
                         executable_lifecycle_telemetry_.compiler_invocations);
-      compiled = compile_kernel(request, kernel_def);
+      if (restore_source) {
+        // Only the worker that owns the miss imports the numerical closure.
+        auto source = restore_source();
+        TI_ASSERT(source && make_kernel_key(compile_config, caps, *source) == kernel_key);
+        compiled = compile_kernel(request, *source);
+      } else {
+        compiled = compile_kernel(request, kernel_def);
+      }
     }
     // Logical identity is needed only when this thread installs a cache miss.
     // Keep its serialization and SHA-256 work off the memory-cache hit path,

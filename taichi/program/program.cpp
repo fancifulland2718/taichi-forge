@@ -3789,6 +3789,15 @@ Program::compile_kernel_execution_handle(
     const CompileConfig &compile_config,
     const DeviceCapabilityConfig &caps,
     const Kernel &kernel_def) {
+  return compile_kernel_execution_handle(compile_config, caps, kernel_def, {});
+}
+
+std::shared_ptr<KernelExecutionHandle>
+Program::compile_kernel_execution_handle(
+    const CompileConfig &compile_config,
+    const DeviceCapabilityConfig &caps,
+    const Kernel &kernel_def,
+    const std::function<std::unique_ptr<Kernel>()> &restore_source) {
   auto start_t = Time::get_time();
   TI_AUTO_PROF;
   auto &mgr = program_impl_->get_kernel_compilation_manager();
@@ -3808,7 +3817,7 @@ Program::compile_kernel_execution_handle(
     return handle;
   }
   auto handle = mgr.load_or_compile_execution_handle(
-      request, kernel_def);
+      request, kernel_def, restore_source);
   kernel_def.set_snode_tree_dependencies(handle->compiled().snode_tree_ids());
   total_compilation_time_ += Time::get_time() - start_t;
   return handle;

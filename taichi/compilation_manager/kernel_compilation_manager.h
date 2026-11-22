@@ -1,6 +1,7 @@
 ﻿#pragma once
 
 #include <ctime>
+#include <functional>
 #include <atomic>
 #include <string>
 #include <memory>
@@ -100,7 +101,8 @@ class KernelCompilationManager final {
 
   std::shared_ptr<KernelExecutionHandle> load_or_compile_execution_handle(
       const KernelCompileRequest &request,
-      const Kernel &kernel_def);
+      const Kernel &kernel_def,
+      const std::function<std::unique_ptr<Kernel>()> &restore_source = {});
 
   // Return an already materialized in-memory kernel for a known specialization
   // key. This intentionally does not load from disk or compile; callers that

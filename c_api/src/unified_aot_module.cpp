@@ -392,9 +392,23 @@ class UnifiedModule final : public aot::Module {
     const auto &caps = runtime_.get().get_caps();
     bool needs_bound_device = false;
     const bool unbound = facts.empty() && layout.empty();
-    auto kernel = LLVM::read_unified_kernel(program, name, directory_.unit(directory_.entries.at(name)),
-        signature, facts, caps, [this](const std::string &hash) { return directory_.unit(hash); }, {},
-        directory_.absent_inputs(name), unbound ? &needs_bound_device : nullptr);
+    const auto &digest = directory_.entries.at(name);
+    const auto &absent = directory_.absent_inputs(name);
+    auto read_source = [&] {
+      return LLVM::read_unified_kernel(program, name, directory_.unit(digest),
+          signature, facts, caps, [this](const std::string &hash) { return directory_.unit(hash); }, {},
+          absent, unbound ? &needs_bound_device : nullptr);
+    };
+    // A bound call has already read and verified the generic root and its
+    // reachable helpers in this module. The snapshot is immutable. Keep the
+    // specialized availability proof on the eager path for absent resources.
+    std::function<std::unique_ptr<Kernel>()> restore_source;
+    if (!unbound && arch() == Arch::vulkan && cfg.offline_cache &&
+        directory_.is_immutable() && absent.empty() && !cfg.print_ir)
+      restore_source = read_source;
+    auto kernel = restore_source ? LLVM::declare_unified_kernel(
+                                      program, name, digest, signature, facts, caps, {})
+                                 : read_source();
     if (unbound) {
       // Shape descriptors are bound for every ndarray. Only a value actually
       // read by this body or an imported helper can change the selected code.
@@ -452,7 +466,7 @@ class UnifiedModule final : public aot::Module {
       if (needs_bound_device || !reads.empty() || !layout_reads.empty() || descriptor_reads_.count(name))
         return deferred(name, *kernel, cfg);
     }
-    auto execution = program.compile_kernel_execution_handle(cfg, caps, *kernel);
+    auto execution = program.compile_kernel_execution_handle(cfg, caps, *kernel, restore_source);
     if (launcher_) {
       auto &data = dynamic_cast<const LLVM::CompiledKernelData &>(execution->compiled());
       const auto &abi = data.get_internal_data();

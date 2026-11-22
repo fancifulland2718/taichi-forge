@@ -819,6 +819,12 @@ class TI_DLL_EXPORT Program {
       const DeviceCapabilityConfig &caps,
       const Kernel &kernel_def);
 
+  std::shared_ptr<KernelExecutionHandle> compile_kernel_execution_handle(
+      const CompileConfig &compile_config,
+      const DeviceCapabilityConfig &caps,
+      const Kernel &declaration,
+      const std::function<std::unique_ptr<Kernel>()> &restore_source);
+
   const CompiledKernelData *find_cached_kernel(
       const CompileConfig &compile_config,
       const std::string &kernel_key,

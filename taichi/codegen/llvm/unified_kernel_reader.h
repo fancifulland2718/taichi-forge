@@ -16,6 +16,15 @@ struct DeviceCapabilityConfig;
 namespace LLVM {
 using UnifiedUnitLoader = std::function<std::string(const std::string &)>;
 
+// Describe the source and ABI for a cache lookup after the module has verified
+// the root and its helper closure. A miss must compile the numerical definition.
+TI_DLL_EXPORT std::unique_ptr<Kernel> declare_unified_kernel(
+    Program &program, const std::string &name, const std::string &root_digest,
+    const std::string &signature,
+    const std::map<std::vector<int>, int> &constant_int_args,
+    const DeviceCapabilityConfig &device_caps,
+    const std::vector<std::vector<SNode *>> &storage);
+
 // Rebuild a pre-offload kernel from the selected numerical LLVM unit. The
 // target Program supplies its own task scheduler, ABI layout and compiler.
 TI_DLL_EXPORT std::unique_ptr<Kernel> read_unified_kernel(

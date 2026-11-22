@@ -12,6 +12,7 @@ from tests import test_utils
 
 @test_utils.test(arch=ti.vulkan, offline_cache=False)
 def test_unified_vulkan_reuses_specialization_in_new_process(tmp_path, monkeypatch):
+    import pytest
     from taichi_forge_runtime.aot._unified_library import select_manifest
 
     source = tmp_path / "cached_portable.py"
@@ -31,8 +32,10 @@ def fill(data: ti.types.ndarray(ti.i32, 1), bias: ti.i32):
     symbol, = select_manifest(document, "vulkan")["entries"]
     consumer = textwrap.dedent("""
         from array import array
+        from pathlib import Path
         import json, sys
         import taichi_forge as ti
+        from taichi_forge._lib import core
         from taichi_forge_runtime.aot import load_package
 
         directory, symbol, cache, size, bias, enabled = sys.argv[1:]
@@ -45,23 +48,53 @@ def fill(data: ti.types.ndarray(ti.i32, 1), bias: ti.i32):
             frontend = ti.lang.impl.get_runtime()
             frontend.set_kernel_executable_lifecycle_telemetry_enabled(True)
             frontend.debug_kernel_executable_lifecycle_stats(True)
+            core.set_compile_profile_runtime_enabled(True)
             with bound.prepare(specialize=True) as prepared:
                 prepared.submit().wait()
+            core.set_compile_profile_runtime_enabled(False)
+            trace = Path(cache).parent / "prepare-trace.json"
+            assert core.export_compile_profile_trace(str(trace))
+            restores = sum(e["name"] == "cpp.unified.prepare.read_kernel"
+                           for e in json.loads(trace.read_bytes()))
             stats = frontend.debug_kernel_executable_lifecycle_stats()
             assert array("i", data.read()).tolist() == [i + bias + size for i in range(size)]
+            assert restores == stats["compiler_invocations"], (restores, stats)
             print("REUSE=" + json.dumps([stats["compiler_invocations"], stats["disk_loads"]]))
     """)
-    # A new allocation and ordinary scalar can reuse the shader. A shape
-    # explicitly read by the kernel must select a different specialization.
-    for size, bias, enabled, expected in ((4, 2, 1, [1, 0]), (4, -7, 1, [0, 1]),
-                                          (9, 3, 1, [1, 0]), (4, 8, 0, [1, 0])):
+    cache = tmp_path / "cache"
+
+    def consume(size, bias, enabled, expected):
         result = subprocess.run(
-            [sys.executable, "-c", consumer, str(output), symbol, str(tmp_path / "cache"),
+            [sys.executable, "-c", consumer, str(output), symbol, str(cache),
              str(size), str(bias), str(enabled)], capture_output=True, text=True, timeout=90,
         )
         assert result.returncode == 0, result.stdout + result.stderr
         record, = (line[6:] for line in result.stdout.splitlines() if line.startswith("REUSE="))
         assert json.loads(record) == expected
+
+    # A new allocation and ordinary scalar can reuse the shader. Recover a
+    # truncated local cache object by compiling the intact TCM again.
+    consume(4, 2, 1, [1, 0])
+    consume(4, -7, 1, [0, 1])
+    artifact, = cache.rglob("*.tic")
+    artifact.write_bytes(b"incomplete")
+    consume(4, 6, 1, [1, 0])
+    consume(4, 3, 1, [0, 1])
+    consume(9, 3, 1, [1, 0])
+    consume(4, 8, 0, [1, 0])
+
+    # A cached device shader cannot supply a required unit missing from a newly loaded archive.
+    damaged = tmp_path / "missing-root.tcm"
+    with zipfile.ZipFile(output / "code.tcm") as archive, zipfile.ZipFile(damaged, "w") as copy:
+        root = json.loads(archive.read("unified_llvm.json"))["entries"][symbol]
+        for member in archive.infolist():
+            if member.filename != f"code_units/{root}.bc":
+                copy.writestr(member, archive.read(member))
+    ti.reset()
+    ti.init(arch=ti.vulkan, enable_fallback=False, offline_cache=True, offline_cache_file_path=str(cache))
+    with ti.aot.borrow_runtime() as runtime, runtime.load_module(damaged) as loaded:
+        with pytest.raises(RuntimeError, match="Missing unified LLVM library member"):
+            loaded.kernel(symbol)
 
 
 @test_utils.test(arch=ti.vulkan, offline_cache=False)

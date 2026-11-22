@@ -1273,26 +1273,15 @@ class KernelReader {
 };
 }  // namespace
 
-std::unique_ptr<Kernel> read_unified_kernel(
-    Program &program, const std::string &name, const std::string &bitcode,
+std::unique_ptr<Kernel> declare_unified_kernel(
+    Program &program, const std::string &name, const std::string &root_digest,
     const std::string &signature, const std::map<std::vector<int>, int> &constant_int_args,
     const DeviceCapabilityConfig &device_caps,
-    const UnifiedUnitLoader &load_helper, const std::vector<std::vector<SNode *>> &storage,
-    const std::vector<int> &absent_inputs, bool *needs_bound_device) {
-  TI_COMPILE_PROFILER("cpp.unified.prepare.read_kernel");
-  llvm::LLVMContext context;
-  auto module = llvm::parseBitcodeFile(llvm::MemoryBufferRef(bitcode, name), context);
-  if (!module)
-    TI_ERROR("Invalid unified LLVM unit: {}", llvm::toString(module.takeError()));
-  auto *entry = (*module)->getFunction("entry");
-  TI_ERROR_IF(!entry || entry->isDeclaration() || entry->arg_size() != 1 ||
-              !entry->getReturnType()->isVoidTy() || llvm::verifyModule(**module),
-              "Invalid unified LLVM kernel {}", name);
-  // The Program keys pre-lowered CHI by its name and target configuration.
+    const std::vector<std::vector<SNode *>> &storage) {
   // Include the immutable closure (callee digests are encoded in the root),
   // ABI and the facts substituted by this prepare. Public aliases are bound
   // separately by the caller.
-  std::string identity = aot_artifact_sha256(bitcode) + aot_artifact_sha256(signature);
+  std::string identity = root_digest + aot_artifact_sha256(signature);
   for (const auto &[path, replacement] : constant_int_args)
     identity += fmt::format("|arg[{}]={}", fmt::join(path, ","), replacement);
   for (const auto &tree : storage) {
@@ -1328,6 +1317,36 @@ std::unique_ptr<Kernel> read_unified_kernel(
   else
     kernel->finalize_params();
   kernel->finalize_rets();
+  // The shared compiler cache adds effective config, device capabilities and
+  // ABI to this body identity. Layout words are bound to a private copy of
+  // the resulting shader. SNode IDs alone are not persistent layout keys.
+  if (arch == Arch::vulkan && storage.empty()) {
+    kernel->set_persistent_ir_identity(fmt::format(
+        "forge-unified-vulkan-v1/{}/{}/{}/{}/{}", get_version_string(),
+        get_commit_hash(), get_forge_native_abi_revision(), LLVM_VERSION_STRING,
+        kernel->get_name()));
+  }
+  return kernel;
+}
+
+std::unique_ptr<Kernel> read_unified_kernel(
+    Program &program, const std::string &name, const std::string &bitcode,
+    const std::string &signature, const std::map<std::vector<int>, int> &constant_int_args,
+    const DeviceCapabilityConfig &device_caps,
+    const UnifiedUnitLoader &load_helper, const std::vector<std::vector<SNode *>> &storage,
+    const std::vector<int> &absent_inputs, bool *needs_bound_device) {
+  TI_COMPILE_PROFILER("cpp.unified.prepare.read_kernel");
+  llvm::LLVMContext context;
+  auto module = llvm::parseBitcodeFile(llvm::MemoryBufferRef(bitcode, name), context);
+  if (!module)
+    TI_ERROR("Invalid unified LLVM unit: {}", llvm::toString(module.takeError()));
+  auto *entry = (*module)->getFunction("entry");
+  TI_ERROR_IF(!entry || entry->isDeclaration() || entry->arg_size() != 1 ||
+              !entry->getReturnType()->isVoidTy() || llvm::verifyModule(**module),
+              "Invalid unified LLVM kernel {}", name);
+  auto kernel = declare_unified_kernel(program, name, aot_artifact_sha256(bitcode),
+                                       signature, constant_int_args, device_caps, storage);
+  const auto arch = kernel->arch;
   substitute_bound_arguments(*entry, *kernel, constant_int_args);
   if (!constant_int_args.empty())
     fold_empty_ranges(*entry);
@@ -1373,15 +1392,6 @@ std::unique_ptr<Kernel> read_unified_kernel(
   {
     TI_COMPILE_PROFILER("cpp.unified.prepare.reconstruct_ir");
     KernelReader reader(*kernel, *entry, constant_int_args, storage, needs_bound_device);
-  }
-  // The shared compiler cache adds effective config, device capabilities and
-  // ABI to this body identity. Layout words are bound to a private copy of
-  // the resulting shader. SNode IDs alone are not persistent layout keys.
-  if (arch == Arch::vulkan && storage.empty()) {
-    kernel->set_persistent_ir_identity(fmt::format(
-        "forge-unified-vulkan-v1/{}/{}/{}/{}/{}", get_version_string(),
-        get_commit_hash(), get_forge_native_abi_revision(), LLVM_VERSION_STRING,
-        kernel->get_name()));
   }
   return kernel;
 }
