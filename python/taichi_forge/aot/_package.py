@@ -1904,7 +1904,12 @@ def export_package(package, output, *, arch=None, caps=None, source_root=None, a
 
     ``check_package`` runs this same declaration phase without compilation.
     Multiple roots share one compiler and source closure, not separate exports.
-    Selects ``arch`` on a cold Runtime or validates the active backend.
+    For a target-specific package, select one ``arch`` or use the active backend.
+    An explicit target initializes a cold Runtime or must match the active backend.
+    With ``artifact_format="unified-bc-library"``, produce one portable LLVM
+    library. Omitting ``arch`` allows x64, CUDA and Vulkan consumers. One arch
+    or a list restricts the allowed consumers. Prepare resolves supported device
+    predicates and compiles the executable on the consuming backend.
     A completed package is retained at the reported staging path if publication fails.
     CPU/CUDA bitcode and Vulkan SPIR-V retain eligible typed helper calls for
     consumer specialization and backend inlining. x64 packages default to

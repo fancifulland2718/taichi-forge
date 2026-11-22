@@ -10,6 +10,15 @@ No export decorator, per-kernel registration or component root is required.
 This is a limited prototype, not a complete engine distribution interface.
 Its format and supported scope are experimental.
 
+Choose the package with the same `ti.aot.export_package` call.
+
+| Deployment | Producer arguments | Consumer |
+| --- | --- | --- |
+| One backend | `arch="cuda"` (or `"x64"`, `"vulkan"`), using that backend's default artifact format | Load on the selected backend. Produce resolves supported static device branches for it. |
+| One package for x64, CUDA and Vulkan | `artifact_format="unified-bc-library"`, omit `arch` | Load the same directory on each backend. Prepare specializes supported device branches for the actual backend. |
+
+A single `arch` with `unified-bc-library` limits which backend may consume the portable library. See [Producing and consuming a package](#producing-and-consuming-a-package) for examples and device requirements.
+
 An optional producer warm start is available for x64 and CUDA bitcode libraries, CPU
 bitcode (`artifact_format="bc"`), and Vulkan's default format (omit `artifact_format`):
 
@@ -474,6 +483,8 @@ contexts before analyzing their bodies, including repeated Graph calls. Every
 preparation call site still receives its coverage check, and different owner or
 resource sources remain distinct. Deduplication is local to one discovery pass;
 it does not reuse facts across declaration updates or add consumer-side checks.
+
+### Producing for one backend
 
 Export an imported source package, selecting the backend explicitly:
 

@@ -7,6 +7,15 @@
 `@ti.func`、`@ti.real_func`、`@ti.pyfunc`、`@ti.dataclass` 和 `@ti.data_oriented`，无需增加导出装饰器、逐 Kernel 注册或组件根。
 这个接口目前是小范围原型，不是完整引擎的一键发行接口，格式和支持范围尚未稳定。
 
+在同一个 `ti.aot.export_package` 调用中选择交付方式。
+
+| 部署方式 | 导出参数 | 消费方式 |
+| --- | --- | --- |
+| 指定一个后端 | `arch="cuda"`（也可选 `"x64"`、`"vulkan"`），使用该后端的默认产物格式 | 在指定后端加载。Produce 为该后端选择已支持的静态设备分支。 |
+| x64、CUDA、Vulkan 共用一个包 | `artifact_format="unified-bc-library"`，省略 `arch` | 三端加载同一目录。Prepare 按实际后端特化已支持的设备分支。 |
+
+在 `unified-bc-library` 模式下指定单个 `arch`，可限制允许加载该通用库的后端。示例与设备要求见[生产与消费](#生产与消费)。
+
 x64 和 CUDA bitcode 库、CPU bitcode（`artifact_format="bc"`）与 Vulkan 默认格式
 （省略 `artifact_format`）可以显式开启生产端热启动：
 
@@ -307,6 +316,8 @@ x64 目前支持组内分支和阶段之间的标量活值。多 lane 的执行�
 声明发现按函数及完整输入来源上下文去重，再分析函数体；重复 Graph 调用不重复扫描
 同一上下文。每个准备调用点仍单独核对来源覆盖，不同 owner/资源来源继续分别分析。
 去重仅限当前声明发现轮次，不跨资源声明更新复用，也不增加消费端检查。
+
+### 为指定后端生产包
 
 生产端对导入的源码包调用一次导出接口，并显式选择后端：
 
