@@ -10,6 +10,29 @@ from taichi_forge.aot._component import _Capture
 from taichi_forge_runtime.aot import Runtime, load_package
 
 
+@pytest.mark.parametrize("prepared_first", [False, True])
+def test_shared_scalar_binding_selects_its_own_prepare_policy(prepared_first):
+    from taichi_forge_runtime.aot._package import _entry_contract
+    from taichi_forge_runtime.aot._package_calls import specialization_constant_args
+
+    live = dict(name="contact", kind="value", dtype="i32")
+    fixed = dict(live, prepare_static=[["bool", False], ["bool", True]])
+    base, alias = (fixed, live) if prepared_first else (live, fixed)
+    manifest = dict(version=104, entries={"save": dict(symbol="save", captures=[base], arguments=[])},
+                    entry_bindings={"other": dict(code="save", admission=None, captures=[alias])})
+    for symbol, prepared in (("other", not prepared_first), ("save", prepared_first)):
+        contract = _entry_contract(manifest, symbol)
+        assert contract["symbol"] == "save"
+        assert specialization_constant_args(contract, {}) == ((0,) if prepared else ())
+    manifest["version"] = 103
+    with pytest.raises(ValueError, match="package version 104"):
+        _entry_contract(manifest, "other")
+    manifest["version"] = 104
+    manifest["entry_bindings"]["other"]["captures"] = [dict(live, prepare_static=[["int", 2**31]])]
+    with pytest.raises(ValueError, match="Invalid logical prepare choices"):
+        _entry_contract(manifest, "other")
+
+
 def _copy_source(first="scope.field(ti.f32", second="scope.field(ti.f32"):
     return TYPED_FIELD_INPUT_SOURCE.replace(
         "scope.scalar = scope.field(ti.f32", "scope.scalar = " + first

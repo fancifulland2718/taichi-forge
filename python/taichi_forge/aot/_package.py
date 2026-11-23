@@ -52,6 +52,11 @@ class PackageExportError(ValueError):
     """A definition cannot yet be represented by the package exporter."""
 
 
+def _prepared_choices(schema, name):
+    resource = schema.get(name, {})
+    return resource["choices"] if resource.get("prepare_static") else None
+
+
 def _fail(module, node, message):
     raise PackageExportError(f"{module}:{getattr(node, 'lineno', 1)}: {message}")
 
@@ -2985,7 +2990,10 @@ def _export_package(output, declarations, source_root, caps, artifact_format, co
                     else None
                 )
                 identity = (code.kernel, code.key)
-                if identity not in shared_entries or getattr(code, "_package_rebound_dense_slots", False):
+                shared = shared_entries.get(identity)
+                if (shared is None or getattr(code, "_package_rebound_dense_slots", False)
+                        or any(c.get("prepare_static") != _prepared_choices(compilation_schema, c["name"])
+                               for c in shared["captures"])):
                     capture = [
                         {
                             "name": capture_name,
@@ -3044,12 +3052,14 @@ def _export_package(output, declarations, source_root, caps, artifact_format, co
                         entry_manifest["definitions"].append(definition_name)
                     projected_captures = entry_manifest["captures"] != capture
                     if projected_captures:
-                        layout_keys = {"layout_owner_path", "layout_member"}
+                        binding_keys = {"layout_owner_path", "layout_member", "prepare_static"}
                         original_captures = entry_manifest["captures"]
                         if len(capture) != len(original_captures):
                             raise PackageExportError(f"{definition_name}: shared numerical capture count changed")
                         for original, current in zip(original_captures, capture):
-                            changed = sorted(key for key in (original.keys() | current.keys()) - layout_keys
+                            if original.get("prepare_static") != current.get("prepare_static"):
+                                manifest["version"] = max(104, manifest["version"])
+                            changed = sorted(key for key in (original.keys() | current.keys()) - binding_keys
                                              if original.get(key) != current.get(key) or
                                              (key in original) != (key in current))
                             if changed:

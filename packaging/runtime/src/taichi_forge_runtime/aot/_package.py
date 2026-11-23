@@ -1637,14 +1637,14 @@ def _entry_contract(manifest, symbol, *, header_only=False):
             raise ValueError("Logical capture bindings require definition package version 84")
         captures = binding["captures"]
         original = contract.get("captures", ())
-        layout_keys = {"layout_owner_path", "layout_member"}
+        binding_keys = {"layout_owner_path", "layout_member", "prepare_static"}
         if not isinstance(captures, list) or len(captures) != len(original):
             raise ValueError("Logical capture binding differs from its numerical parameter contract")
         for current, source in zip(captures, original):
             if (
                 not isinstance(current, dict)
-                or {key: value for key, value in current.items() if key not in layout_keys}
-                != {key: value for key, value in source.items() if key not in layout_keys}
+                or {key: value for key, value in current.items() if key not in binding_keys}
+                != {key: value for key, value in source.items() if key not in binding_keys}
                 or ("layout_owner_path" in current) != ("layout_member" in current)
                 or "layout_member" in current and (
                     current.get("kind") != "dense_field"
@@ -1654,6 +1654,18 @@ def _entry_contract(manifest, symbol, *, header_only=False):
                 )
             ):
                 raise ValueError("Logical capture binding differs from its numerical parameter contract")
+            if current.get("prepare_static", ()) != source.get("prepare_static", ()):
+                if (manifest["version"] < 104 or current.get("kind") != "value"
+                        or current.get("dtype") != "i32" or current.get("element_shape")):
+                    raise ValueError("Logical prepare choices require a scalar i32 binding and package version 104")
+                for spec in (source, current):
+                    if "prepare_static" in spec:
+                        choices = spec["prepare_static"]
+                        if not isinstance(choices, list) or not choices:
+                            raise ValueError("Invalid logical prepare choices")
+                        values = map(read_static_key, choices)
+                        if not all(type(v) in (bool, int) and -(2**31) <= v < 2**31 for v in values):
+                            raise ValueError("Invalid logical prepare choices")
         contract["captures"] = captures
     contract.pop("admission", None)
     if binding["admission"] is not None:
@@ -2153,6 +2165,7 @@ class LoadedPackage:
                 101,
                 102,
                 103,
+                104,
             )
             or manifest.get("kind") != "forge_definition_package_prototype"
         ):
@@ -2354,7 +2367,7 @@ class LoadedPackage:
         )
         if any(
             name not in self._specialization_entries and any("prepare_static" in c for c in entry.get("captures", ()))
-            for name, entry in headers.items()
+            for name, entry in itertools.chain(headers.items(), ((b["code"], b) for b in bindings.values()))
         ):
             raise ValueError("Prepared static inputs require a specialization-capable numerical entry")
         self._module = runtime.load_module(self.directory / "code.tcm")
