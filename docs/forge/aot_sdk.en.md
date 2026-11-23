@@ -6,11 +6,11 @@ Use the standalone SDK to load exported numerical modules from the Python runtim
 
 ## Component pairing and versions
 
-Use a Forge frontend, Python bridge and native runtime with compatible ABIs. Distribute the module, execution plans and provider dependencies required by the target device. An independent runtime owns its resources. A runtime obtained with `borrow_runtime()` shares the lifetime of its Program. [Release notes](release_notes.en.md) · [API reference](forge_api_reference.en.md)
+Use a Forge frontend, Python bridge and native runtime with compatible ABIs. Distribute the module, execution plans and provider dependencies required by the target device. An independent runtime owns its resources. A runtime obtained with `borrow_runtime()` shares the lifetime of its Program. [0.7.1 compatibility](release_notes.en.md#071) · [Execution plan format](../../taichi/aot/execution_plan.h) · [API reference](forge_api_reference.en.md)
 
 ## SDK build and installation
 
-The 0.7.0 development build can install a separate C/C++ SDK. The producer uses
+The source build can install a separate C/C++ SDK. The producer uses
 Forge Python to export modules; the consumer links `TaichiForge::c_api` and does
 not import Python. CPU/CUDA still use the supplied LLVM runtime and compiler.
 This is a full SDK, not a compiler-free runtime.

@@ -6,11 +6,11 @@
 
 ## 组件配套与版本
 
-使用 ABI 相容的 Forge 前端、Python 扩展和原生 Runtime。分发与目标设备相符的模块、执行计划和 provider 依赖。独立 Runtime 拥有自己的资源；通过 `borrow_runtime()` 借用的 Runtime 与原 Program 共用生命周期。[发行说明](release_notes.zh.md) · [API 参考](forge_api_reference.zh.md)
+使用 ABI 相容的 Forge 前端、Python 扩展和原生 Runtime。分发与目标设备相符的模块、执行计划和 provider 依赖。独立 Runtime 拥有自己的资源；通过 `borrow_runtime()` 借用的 Runtime 与原 Program 共用生命周期。[0.7.1 版本配套](release_notes.zh.md#071) · [执行计划格式](../../taichi/aot/execution_plan.h) · [API 参考](forge_api_reference.zh.md)
 
 ## SDK 构建与安装
 
-0.7.0 开发版可以单独安装 C/C++ SDK。生产端通过 Forge Python 导出模块；
+从源码构建时可以单独安装 C/C++ SDK。生产端通过 Forge Python 导出模块；
 消费端链接 `TaichiForge::c_api`，无需导入 Python。CPU/CUDA 仍使用随 SDK
 提供的 LLVM runtime 与编译器。这是一份完整 SDK，不是无编译器 runtime。
 

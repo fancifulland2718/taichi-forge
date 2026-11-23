@@ -42,6 +42,8 @@ Use the documentation at your release tag for version-specific API details.
 - `ti.solve` and `Matrix.inverse()` support additional fixed square dimensions through partial-pivot elimination. Tested sizes include dimension 32 on CPU and CUDA, and dimension 32 in f32 on Vulkan. Compile cost at larger dimensions depends on the device. [Local matrix solves](local_matrix_solve.en.md)
 - Default Vulkan device selection prefers an eligible discrete adapter. Supported hardware rendering paths can call external providers such as OptiX through the runtime. Driver, adapter and resource requirements depend on the device and operation. [External hardware providers](external_hardware_providers.en.md)
 
+The frontend/runtime private ABI is **226**. The runtime reads up to persistent execution-plan version **29**. This build writes compiled-cache schema **104** and GFX metadata **24**.
+
 **Upgrading from 0.7.0.** Use Forge frontend and runtime version 0.7.1. Entries sharing the same numerical code can specialize different scalar bindings. Ordinary scalar inputs stay live. Re-export packages from source to use the new format or resource capabilities. Ship the complete export directory, including `code.tcm`, `package.json`, `host/`, and required assets. The next section describes the published 0.7.0 release. [Deployment profiles](aot_deployment_profiles.en.md)
 
 <a id="070"></a>

@@ -41,6 +41,8 @@
 - `ti.solve` 和 `Matrix.inverse()` 增加了固定尺寸方阵的带选主元消元路径。已测尺寸包括 CPU/CUDA 的 32 阶和 Vulkan 的 32 阶 f32。更大尺寸的编译代价应按设备评估。[局部矩阵求解](local_matrix_solve.zh.md)
 - Vulkan 默认设备选择优先考虑满足能力要求的独立显卡。硬件渲染应用可以在支持的配置下通过 Runtime 调用 OptiX 等外部 provider。这些入口的驱动、适配器和资源要求随所选设备和操作而定。[外部硬件 provider](external_hardware_providers.zh.md)
 
+前端与 Runtime 的私有 ABI **226**。Runtime 支持的最高持久执行计划为 **29**。此版本写入的编译缓存 schema 为 **104**，GFX metadata 为 **24**。
+
 **从 0.7.0 迁移。** 使用 0.7.1 版 Forge 前端和 Runtime。共享数值代码的入口可以分别特化各自允许固定的标量，普通标量在每次调用时读取。请从源码重新导出需要新格式或新资源能力的包。部署时分发完整导出目录，包括 `code.tcm`、`package.json`、`host/` 和所需资产。已发布 0.7.0 的行为见下节。[部署方式](aot_deployment_profiles.zh.md)
 
 <a id="070"></a>
