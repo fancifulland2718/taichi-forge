@@ -11,6 +11,7 @@
 #include "taichi/ir/statements.h"
 #include "taichi/program/program.h"
 #include "taichi/util/lang_util.h"
+#include "taichi/rhi/cuda/cuda_context.h"
 #include "taichi/rhi/cuda/cuda_driver.h"
 #include "taichi/rhi/cuda/cuda_capability.h"
 #include "taichi/runtime/program_impls/llvm/llvm_program.h"
@@ -1202,13 +1203,14 @@ class TaskCodeGenCUDA : public TaskCodeGenLLVM {
         }
       }
       if (stmt->task_type == Type::listgen) {
+        const auto device = CUDAContext::get_instance().get_device();
         int query_max_block_per_sm;
         CUDADriver::get_instance().device_get_attribute(
             &query_max_block_per_sm,
-            CU_DEVICE_ATTRIBUTE_MAX_BLOCKS_PER_MULTIPROCESSOR, nullptr);
+            CU_DEVICE_ATTRIBUTE_MAX_BLOCKS_PER_MULTIPROCESSOR, device);
         int num_SMs;
         CUDADriver::get_instance().device_get_attribute(
-            &num_SMs, CU_DEVICE_ATTRIBUTE_MULTIPROCESSOR_COUNT, nullptr);
+            &num_SMs, CU_DEVICE_ATTRIBUTE_MULTIPROCESSOR_COUNT, device);
         const int saturating = num_SMs * query_max_block_per_sm;
         int chosen = saturating;
         current_task->sparse_list_parent_grid_bound = llvm_listgen_grid_bound(

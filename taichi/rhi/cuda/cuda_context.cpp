@@ -129,9 +129,8 @@ CUDAContext::CUDAContext()
           "Vulkan CiG requires NVIDIA CUDA device identity");
     ordinal = -1;
     for (int candidate = 0; candidate < dev_count_; ++candidate) {
-      void *candidate_device = nullptr;
-      driver_.device_get(&candidate_device,
-                         reinterpret_cast<void *>(candidate));
+      CUdevice candidate_device{};
+      driver_.device_get(&candidate_device, candidate);
       CUuuid uuid{};
       driver_.device_get_uuid(&uuid, candidate_device);
       if (std::memcmp(uuid.bytes, configuration.device_uuid.data(), 16) == 0) {
@@ -143,7 +142,7 @@ CUDAContext::CUDAContext()
       throw std::invalid_argument(
           "Vulkan CiG UUID has no matching CUDA device");
   }
-  driver_.device_get(&device_, reinterpret_cast<void *>(ordinal));
+  driver_.device_get(&device_, ordinal);
   CUuuid selected_uuid{};
   if (!driver_.is_musa() && driver_.device_get_uuid.available())
     driver_.device_get_uuid(&selected_uuid, device_);

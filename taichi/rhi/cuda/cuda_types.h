@@ -44,6 +44,7 @@ using CUtexObject = uint64_t;
 using CUstream = void *;
 using CUgraph = void *;
 using CUgraphExec = void *;
+using CUdevice = int;
 using CUdeviceptr = void *;
 using CUmipmappedArray = void *;
 using CUarray = void *;

@@ -19,7 +19,7 @@ class CUDADriver;
 
 class CUDAContext {
  private:
-  void *device_{nullptr};
+  CUdevice device_{};
   void *context_{nullptr};
   int dev_count_;
   // Keep the hardware capability separate from the target accepted by the
@@ -96,7 +96,7 @@ class CUDAContext {
     return context_;
   }
 
-  void *get_device() const {
+  CUdevice get_device() const {
     return device_;
   }
 

@@ -130,14 +130,15 @@ LlvmRuntimeExecutor::LlvmRuntimeExecutor(CompileConfig &config,
 #if defined(TI_WITH_CUDA)
   else if (config.arch == Arch::cuda) {
     auto context_guard = CUDAContext::get_instance().get_guard();
+    const auto device = CUDAContext::get_instance().get_device();
     int num_SMs{1};
     CUDADriver::get_instance().device_get_attribute(
-        &num_SMs, CU_DEVICE_ATTRIBUTE_MULTIPROCESSOR_COUNT, nullptr);
+        &num_SMs, CU_DEVICE_ATTRIBUTE_MULTIPROCESSOR_COUNT, device);
     config.gpu_compute_unit_count = std::max(num_SMs, 0);
     config.gpu_subgroup_size = 32;
     int query_max_block_dim{1024};
     CUDADriver::get_instance().device_get_attribute(
-        &query_max_block_dim, CU_DEVICE_ATTRIBUTE_MAX_BLOCK_DIM_X, nullptr);
+        &query_max_block_dim, CU_DEVICE_ATTRIBUTE_MAX_BLOCK_DIM_X, device);
     int version{0};
     CUDADriver::get_instance().driver_get_version(&version);
     int query_max_block_per_sm{16};
@@ -145,7 +146,7 @@ LlvmRuntimeExecutor::LlvmRuntimeExecutor(CompileConfig &config,
       // query this attribute only when CUDA version is above 11.0
       CUDADriver::get_instance().device_get_attribute(
           &query_max_block_per_sm,
-          CU_DEVICE_ATTRIBUTE_MAX_BLOCKS_PER_MULTIPROCESSOR, nullptr);
+          CU_DEVICE_ATTRIBUTE_MAX_BLOCKS_PER_MULTIPROCESSOR, device);
     }
 
     if (config.max_block_dim == 0) {

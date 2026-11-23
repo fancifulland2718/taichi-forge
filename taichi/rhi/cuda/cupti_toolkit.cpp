@@ -28,7 +28,7 @@ enum class CuptiMetricsDefault : uint {
 };
 
 bool check_cupti_availability() {
-  void *device;
+  CUdevice device{};
   int cc_major;
   CUDADriver::get_instance().device_get(&device, 0);
   CUDADriver::get_instance().device_get_attribute(
@@ -1102,9 +1102,7 @@ bool CuptiToolkit::update_record(
 CuptiToolkit::CuptiToolkit() {
   TI_NOT_IMPLEMENTED;
 }
-CuptiToolkit::~CuptiToolkit() {
-  TI_NOT_IMPLEMENTED;
-}
+CuptiToolkit::~CuptiToolkit() = default;
 void CuptiToolkit::set_status(bool enable) {
   TI_NOT_IMPLEMENTED;
 }

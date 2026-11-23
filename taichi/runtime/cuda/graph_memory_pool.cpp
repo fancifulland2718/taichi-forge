@@ -122,9 +122,7 @@ void GraphMemoryPool::initialize(CudaDevice &device,
     TaichiCudaMemPoolProps properties{};
     properties.allocation_type = 1;  // CU_MEM_ALLOCATION_TYPE_PINNED
     properties.location_type = 1;    // CU_MEM_LOCATION_TYPE_DEVICE
-    properties.location_id =
-        static_cast<std::int32_t>(reinterpret_cast<std::intptr_t>(
-            CUDAContext::get_instance().get_device()));
+    properties.location_id = CUDAContext::get_instance().get_device();
     auto &driver = CUDADriver::get_instance();
     driver.mem_pool_create(&state->pool->handle, &properties);
     driver.mem_pool_set_attribute(state->pool->handle,

@@ -5,11 +5,11 @@ PER_CUDA_FUNCTION(init, cuInit, int);
 
 // Device management
 PER_CUDA_FUNCTION(device_get_count, cuDeviceGetCount, int *);
-PER_CUDA_FUNCTION(device_get, cuDeviceGet, void *, void *);
-PER_CUDA_FUNCTION(device_get_uuid, cuDeviceGetUuid, CUuuid *, void *);
-PER_CUDA_FUNCTION(device_get_name, cuDeviceGetName, char *, int, void *);
-PER_CUDA_FUNCTION(device_get_attribute, cuDeviceGetAttribute, int *, uint32, void *);
-PER_CUDA_FUNCTION(device_get_default_mem_pool, cuDeviceGetDefaultMemPool, void **, void *);
+PER_CUDA_FUNCTION(device_get, cuDeviceGet, CUdevice *, int);
+PER_CUDA_FUNCTION(device_get_uuid, cuDeviceGetUuid, CUuuid *, CUdevice);
+PER_CUDA_FUNCTION(device_get_name, cuDeviceGetName, char *, int, CUdevice);
+PER_CUDA_FUNCTION(device_get_attribute, cuDeviceGetAttribute, int *, uint32, CUdevice);
+PER_CUDA_FUNCTION(device_get_default_mem_pool, cuDeviceGetDefaultMemPool, void **, CUdevice);
 
 
 // Context management
