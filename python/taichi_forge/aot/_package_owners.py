@@ -70,6 +70,8 @@ def resolve_owners(sources, imported, owner_schema, fail):
             if owner is cls:
                 entry["requires_owner"] = True
 
+    shared_allocation_methods = {}
+
     def inherited_allocation_order(cls, base, methods, overrides):
         """Follow self-only allocation hooks invoked by the effective constructor."""
         local = {method.name: method for method in methods}
@@ -112,6 +114,7 @@ def resolve_owners(sources, imported, owner_schema, fail):
                             or id(call) not in sites):
                         fail(origin, call, "Inherited allocation requires an ordinary self-only construction call")
                     source, source_owner, source_kind, body = inherited[name]
+                    shared_allocation_methods.setdefault((source, source_owner.name), {})[body.name] = body
                     child = copy.copy(body)
                     child._package_construction_conditions = dict(sites[id(call)])
                     construction_early_guards(child, child._package_construction_conditions)
@@ -257,16 +260,18 @@ def resolve_owners(sources, imported, owner_schema, fail):
                     item["value"] = class_constant(cls, key)
                 except (AttributeError, ValueError) as error:
                     fail(name, constructor, f"Definition constant {key!r}: {error}")
-        field_owners, implicit_groups = {}, set()
-        for item in result.values():
-            if item["kind"] != "dense_field":
-                continue
-            group = item.get("group", "fields")
-            owners = field_owners.setdefault(group, set())
-            owners.add((item["declaration_module"], item["declaration_owner"]))
-            if not (item.get("group_builder") or item.get("storage_nodes")):
-                implicit_groups.add(group)
-        if any(len(field_owners[group]) > 1 for group in implicit_groups):
+        # An inherited allocation helper runs in the calling constructor's
+        # managed frame. Only super().__init__ opens a separate frame.
+        group_frames, implicit_groups = {}, set()
+        for frame, declarations in enumerate((inherited, own)):
+            for item in declarations.values():
+                if item["kind"] != "dense_field":
+                    continue
+                group = item.get("group", "fields")
+                group_frames.setdefault(group, set()).add(frame)
+                if not (item.get("group_builder") or item.get("storage_nodes")):
+                    implicit_groups.add(group)
+        if any(len(group_frames[group]) > 1 for group in implicit_groups):
             fail(name, constructor, "Fields allocated by multiple constructors require separate native group contracts")
         # Projection needs the original allocation sites even for a plain
         # resource mixin. This is metadata, not an additional application decorator.
@@ -374,14 +379,6 @@ def resolve_owners(sources, imported, owner_schema, fail):
                     receivers.add(name + "." + node.name)
                     if base_node.name in classes[base][3]:
                         receivers.add(origin + "." + base_node.name)
-            group_origins = {}
-            for item in schema.values():
-                if item["kind"] != "dense_field":
-                    continue
-                group = item.get("group", "fields")
-                origin = (item["declaration_module"], item["declaration_owner"])
-                if group_origins.setdefault(group, origin) != origin:
-                    fail(name, node, "Inherited resource groups have ambiguous allocation identities")
             effective = []
             seen = set()
             for base in cls.__mro__:
@@ -409,9 +406,33 @@ def resolve_owners(sources, imported, owner_schema, fail):
                                 "requires_owner": False,
                             }
                         )
-            pending.append((schemas, node.name, schema, entries, effective))
-    for schemas, name, schema, entries, effective in pending:
-        schemas[name] = copy.deepcopy(schema)
+            pending.append((schemas, name, node, schema, entries, effective))
+
+    def group_shared_hooks(schema, module, node):
+        origins = {}
+        for item in schema.values():
+            if item["kind"] != "dense_field":
+                continue
+            origin = (item["declaration_module"], item["declaration_owner"])
+            group = item.get("group", "fields")
+            if not (item.get("group_builder") or item.get("storage_nodes")):
+                # A borrowed method also runs without its declaring class's
+                # constructor. Its tree must depend only on dimensions in
+                # this method, for every projection that calls it.
+                line = item["allocation"][0]
+                for method in shared_allocation_methods.get(origin, {}).values():
+                    if method.lineno <= line <= method.end_lineno:
+                        group = item["group"] = group + "@" + ".".join((*origin, method.name))
+                        break
+            if origins.setdefault(group, origin) != origin:
+                fail(module, node, "Inherited resource groups have ambiguous allocation identities")
+
+    for tree in trees.values():
+        for owner, schema in getattr(tree, "_package_construction_schemas", {}).items():
+            group_shared_hooks(schema, owner, tree)
+    for schemas, source, node, schema, entries, effective in pending:
+        group_shared_hooks(schema, source, node)
+        schemas[node.name] = copy.deepcopy(schema)
         entries.extend(effective)
     for cls in templates:
         name, node, *_ = classes[cls]

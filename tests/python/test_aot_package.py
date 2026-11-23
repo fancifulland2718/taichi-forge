@@ -33121,11 +33121,12 @@ def test_package_derived_constructor_calls_inherited_allocation_without_base_con
 import taichi_forge as ti
 @ti.data_oriented
 class Base:
-    def __init__(self, n):
+    def __init__(self, n, m):
         self.n = n
+        self.m = m
         self._allocate_grid()
         own = ti.experimental.ResourceScope(self)
-        own.base_status = own.field(ti.i32, shape=())
+        own.base_status = own.field(ti.i32, shape=own.dim("m"))
 
     def _allocate_grid(self):
         group = ti.experimental.ResourceScope(self)
@@ -33142,9 +33143,15 @@ class Model(Base):
     def __init__(self, n):
         self.n = n
         self._allocate_grid()
+        scope = ti.experimental.ResourceScope(self)
+        scope.status = scope.field(ti.i32, shape=())
+    @ti.kernel
+    def read_status(self) -> ti.i32:
+        return self.status[None]
 """
+    derived = "import taichi_forge as ti\n" + derived
     if case == "repeated":
-        derived += "        self._allocate_grid()\n"
+        derived = derived.replace("        self._allocate_grid()", "        self._allocate_grid()\n        self._allocate_grid()")
     elif case == "shadowed":
         derived = derived.replace("        self._allocate_grid()", "        self._allocate_grid = lambda: None\n        self._allocate_grid()")
     elif case == "opaque_condition":
@@ -33161,6 +33168,8 @@ class Model(Base):
         for n in (2, 5):
             owner = constructor(n)
             assert not hasattr(owner, "base_status")
+            owner.status[None] = n
+            assert owner.read_status() == n
             owner.grid.fill(1)
             owner.advance(3)
             np.testing.assert_array_equal(owner.grid.to_numpy(), 1 + 3 * np.arange(1, n + 1))
