@@ -8621,9 +8621,10 @@ def test_package_typed_inputs_reject_unproven_host_selection(tmp_path, monkeypat
     assert not (tmp_path / "sdk").exists()
 
 
-@pytest.mark.parametrize("record_projection", [False, True])
+@pytest.mark.parametrize("record_projection, shadow", [(False, ""), (True, ""), (True, "assignment"),
+                                                       (True, "nested"), (True, "after")])
 @test_utils.test(arch=ti.cpu, offline_cache=False)
-def test_package_host_sequence_element_binds_template_owner(tmp_path, monkeypatch, record_projection):
+def test_package_host_sequence_element_binds_template_owner(tmp_path, monkeypatch, record_projection, shadow):
     source = """
 import taichi_forge as ti
 @ti.data_oriented
@@ -8633,18 +8634,28 @@ class Item:
         scope.weight = scope.field(ti.i32, shape=())
         self.weight[None] = v
 @ti.data_oriented
+class Scaled:
+    def __init__(self, v):
+        scope = ti.experimental.ResourceScope(self)
+        scope.weight = scope.field(ti.i32, shape=())
+        self.weight[None] = 2 * v
+@ti.data_oriented
 class Model:
     def __init__(self, values):
         scope = ti.experimental.ResourceScope(self)
         scope.total = scope.field(ti.i32, shape=(), initialization='zero')
         self.items = tuple(Item(v) for v in values)
         scope.owner_sequence('items', self.items)
+        self.scaled = tuple(Scaled(v) for v in values)
+        scope.owner_sequence('scaled', self.scaled)
     @ti.kernel
     def add(self, item: ti.template()):
         self.total[None] += item.weight[None]
     def step(self):
         for item in self.items[1:]:
             self.add_one(item)
+        for item in self.scaled[:1]:
+            self.add(item)
     def add_one(self, item: Item):
         self.add(item)
 """
@@ -8657,13 +8668,24 @@ class Model:
             "    def bind(self, value):\n        return Binding(Item(value))",
         ).replace("self.items = tuple(Item(v) for v in values)",
                   "records = tuple(self.bind(v) for v in values)\n        self.items = tuple(r.item for r in records)")
+    if shadow:
+        body = {
+            "assignment": "            item = object()\n            self.add(item)",
+            "nested": "            for item in self.items[1:]:\n                pass\n            self.add(item)",
+            "after": "            pass\n        self.add(item)",
+        }[shadow]
+        source = source.replace("            self.add(item)", body)
     package = _source_package(tmp_path, monkeypatch, source)
+    if shadow:
+        with pytest.raises(ValueError, match="unproven template input|template input requires"):
+            ti.aot.check_package(package)
+        return
     manifest = ti.aot.export_package(package, tmp_path / "sdk")
     with Runtime(manifest["target"]) as runtime, load_package(runtime, tmp_path / "sdk") as code:
         for values in ((), (3,), (1, 4, 6)):
             model = code.host.Model(values)
             model.step()
-            assert model.total[None] == sum(values[1:])
+            assert model.total[None] == sum(values[1:]) + 2 * sum(values[:1])
 
 
 @test_utils.test(arch=ti.cpu, offline_cache=False)

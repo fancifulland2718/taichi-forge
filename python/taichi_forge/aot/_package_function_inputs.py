@@ -439,8 +439,9 @@ class _FunctionSyntax:
                     source = source.value
                 if isinstance(source, ast.Attribute):
                     first, last = part.body[0], part.body[-1]
-                    self.owner_iterations[part.target.id] = (
-                        source, (first.lineno, first.col_offset), (last.end_lineno, last.end_col_offset))
+                    self.owner_iterations.setdefault(part.target.id, []).append(
+                        (source, (first.lineno, first.col_offset), (last.end_lineno, last.end_col_offset))
+                    )
             if isinstance(part, ast.Name):
                 counts = self.reads if isinstance(part.ctx, ast.Load) else self.stores
                 counts[part.id] = counts.get(part.id, 0) + 1
@@ -466,6 +467,12 @@ class _FunctionSyntax:
                     exposed.append(part.func.value)
                 self.calls.append((part, tuple((item, self.names(item)) for item in exposed)))
 
+        # Python leaves the last loop binding in scope. Only disjoint loop
+        # bodies prove a new element independently on every iteration.
+        self.owner_iterations = {
+            name: iterations for name, iterations in self.owner_iterations.items()
+            if all(previous[2] <= following[1] for previous, following in zip(iterations, iterations[1:]))
+        }
         self.dependencies = {
             name: self.names(expression) for name, expression in self.aliases.items()
             if not isinstance(expression, (ast.Dict, ast.DictComp, ast.Tuple, ast.List))
@@ -1305,10 +1312,13 @@ def discover(sources, imported, *, preparation_receivers=None, preparation_guard
                         name = expression.id
                         if name in bindings:
                             return bindings[name]
-                        iteration = lexical.owner_iterations.get(name)
-                        if iteration is not None and stores.get(name) == 1 and name not in visiting:
-                            source, first, last = iteration
-                            if first <= (expression.lineno, expression.col_offset) < last:
+                        iterations = lexical.owner_iterations.get(name)
+                        if (iterations and stores.get(name) == len(iterations)
+                                and name not in lexical.imports and name not in visiting):
+                            position = (expression.lineno, expression.col_offset)
+                            for source, first, last in iterations:
+                                if not first <= position < last:
+                                    continue
                                 sequence_owner = value(source.value, (*visiting, name), bindings)
                                 if isinstance(sequence_owner, _Owner):
                                     sequence = owners[sequence_owner.identity].get(source.attr, {})
