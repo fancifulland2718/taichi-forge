@@ -1060,6 +1060,13 @@ def _host_projection(
             for flag, item in binding_schemas.get(node.name, {}).items():
                 if item.get("prepared_presence"):
                     node.body.append(ast.Assign([ast.Name(flag, ast.Store())], ast.Constant(False)))
+                if "layout_guard" in item:
+                    guard = item["layout_guard"]
+                    path = binding_schemas[node.name][guard].get("path", (guard,))
+                    node.body.append(ast.parse(
+                        f"@property\ndef {flag}(self):\n    return self." + ".".join(path)
+                    ).body[0])
+                    self.minimum_version = max(self.minimum_version, 100)
             if managed:
                 node.decorator_list = [
                     ast.Attribute(ast.Name(_PREFIX + "runtime", ast.Load()), "managed_class", ast.Load())

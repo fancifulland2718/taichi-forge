@@ -23329,6 +23329,35 @@ class Model:
 
 
 @test_utils.test(arch=ti.cpu, offline_cache=False)
+def test_package_derived_dimension_uses_only_selected_layout(tmp_path, monkeypatch):
+    source = """
+import taichi_forge as ti
+@ti.data_oriented
+class Model:
+    def __init__(self, n, denominator, direct):
+        self.n, self.denominator, self.direct = n, denominator, direct
+        self.capacity = n if direct else n // denominator
+        scope = ti.experimental.ResourceScope(self)
+        scope.static('direct', choices=(False, True))
+        length, divisor = scope.dim('n'), scope.dim('denominator')
+        chosen = length if self.direct else length // divisor
+        capacity = scope.derived_dim('capacity', chosen)
+        scope.out = scope.field(ti.i32, shape=capacity)
+    @ti.kernel
+    def write(self):
+        for i in range(self.capacity):
+            self.out[i] = i + 1
+"""
+    package = _source_package(tmp_path, monkeypatch, source)
+    manifest = ti.aot.export_package(package, tmp_path / 'sdk')
+    with Runtime(manifest['target']) as runtime, load_package(runtime, tmp_path / 'sdk') as code:
+        for direct, divisor, count in ((True, 0, 8), (False, 2, 4)):
+            model = code.host.Model(8, divisor, direct)
+            model.write()
+            np.testing.assert_array_equal(model.out.to_numpy(), np.arange(count) + 1)
+
+
+@test_utils.test(arch=ti.cpu, offline_cache=False)
 def test_package_shape_tuple_composition_keeps_model_extents(tmp_path, monkeypatch):
     source = """
 import taichi_forge as ti

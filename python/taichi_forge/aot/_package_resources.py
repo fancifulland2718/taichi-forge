@@ -1034,6 +1034,23 @@ def scope_declarations(
             local_name = node.args[0].value
             name = member(scope, local_name)
             value = dimension(node.args[1], bindings)
+            if value is None:
+                choice = node.args[1]
+                visited = set()
+                while isinstance(choice, ast.Name) and choice.id in shape_aliases and choice.id not in visited:
+                    visited.add(choice.id)
+                    choice = shape_aliases[choice.id]
+                if isinstance(choice, ast.IfExp):
+                    guard, invert = layout_guard(scope, choice)
+                    branches = [dimension(branch, bindings) for branch in (choice.body, choice.orelse)]
+                    if all(isinstance(branch, Extent) for branch in branches):
+                        for branch in branches:
+                            namespace_check(scope, branch, choice)
+                        if invert:
+                            branches.reverse()
+                        flag = "_forge_package_layout_flag_" + guard
+                        add(flag, dict(kind="dimension", dtype="i32", layout_guard=guard), choice)
+                        value = Extent(("if_layout", ("dim", flag), *(branch.expression for branch in branches)))
             if not isinstance(value, Extent) or not extent_dependencies(value.expression):
                 fail(module, node, "Derived dimension requires the existing declared dimension algebra")
             expression = value.expression
@@ -1427,6 +1444,28 @@ def scope_declarations(
         optional_records.update(id(call) for call in calls)
         return name
 
+    def layout_guard(scope, choice):
+        test, invert = choice.test, False
+        if isinstance(test, ast.UnaryOp) and isinstance(test.op, ast.Not):
+            test, invert = test.operand, True
+        identity = None
+        if isinstance(test, ast.Attribute) and isinstance(test.value, ast.Name):
+            binding = scope_binding(test.value)
+            if binding in scopes:
+                identity = member(binding, test.attr)
+                allowed.add(id(test.value))
+            elif test.value.id == "self":
+                identity = test.attr
+        declaration = declarations.get(identity, (earlier or {}).get(identity, {}))
+        if not (
+            declaration.get("kind") == "static"
+            and {tuple(value) for value in declaration["choices"]} == {("bool", False), ("bool", True)}
+            and not declaration.get("kernel_only")
+            and all(current_conditions.get(key) is value for key, value in declaration.get("conditions", {}).items())
+        ):
+            fail(module, choice, "Field shape selection requires a declared boolean static on this branch")
+        return identity, invert
+
     def declared_shape(scope, shape_node):
         """Resolve one existing static layout choice before materialization."""
         shape = dimension(shape_node)
@@ -1437,26 +1476,7 @@ def scope_declarations(
             visited_shapes.add(choice.id)
             choice = shape_aliases[choice.id]
         if shape is None and isinstance(choice, ast.IfExp):
-            test, invert = choice.test, False
-            if isinstance(test, ast.UnaryOp) and isinstance(test.op, ast.Not):
-                test, invert = test.operand, True
-            identity = None
-            if isinstance(test, ast.Attribute) and isinstance(test.value, ast.Name):
-                binding = scope_binding(test.value)
-                if binding in scopes:
-                    identity = member(binding, test.attr)
-                    allowed.add(id(test.value))
-                elif test.value.id == "self":
-                    identity = test.attr
-            declaration = declarations.get(identity, (earlier or {}).get(identity, {}))
-            if not (
-                declaration.get("kind") == "static"
-                and {tuple(value) for value in declaration["choices"]} == {("bool", False), ("bool", True)}
-                and not declaration.get("kernel_only")
-                and all(current_conditions.get(key) is value
-                        for key, value in declaration.get("conditions", {}).items())
-            ):
-                fail(module, choice, "Field shape selection requires a declared boolean static on this branch")
+            identity, invert = layout_guard(scope, choice)
             branches = [dimension(branch) for branch in (choice.body, choice.orelse)]
             branches = [(branch,) if isinstance(branch, Extent) else branch for branch in branches]
             if any(not isinstance(branch, tuple) for branch in branches):

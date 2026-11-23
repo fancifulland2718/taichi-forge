@@ -2069,6 +2069,7 @@ class LoadedPackage:
                 96,
                 97,
                 98,
+                100,
             )
             or manifest.get("kind") != "forge_definition_package_prototype"
         ):

@@ -316,6 +316,13 @@ def construct_fields(
         def witness(name, visiting=()):
             if name in visiting:
                 raise ValueError(f"Cyclic derived dimension {name!r}")
+            if "layout_guard" in schema[name]:
+                guard = schema[name]["layout_guard"]
+                # No model was constructed. The declared default is sufficient
+                # to size this private witness; consumption reads the real flag.
+                value = int(schema[guard]["choices"][0][1])
+                write_member(owner, name, value, schema)
+                return value
             if "owner_dimension" in schema[name]:
                 value = read_member(owner, name, schema)
                 if type(value) is not int or not 0 <= value <= 2**31 - 1:
