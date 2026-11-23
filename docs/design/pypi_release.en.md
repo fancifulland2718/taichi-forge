@@ -2,7 +2,7 @@
 
 [中文](pypi_release.md) · [Build wheels](../forge/build_wheels.en.md)
 
-This guide uses **0.7.0** as an example without claiming it is published.
+This guide uses **0.7.1** as an example without claiming it is published.
 Keep the already-bound PyPI publishers: [publish_runtime_pypi.yml](../../.github/workflows/publish_runtime_pypi.yml)
 for runtime and [publish_pypi.yml](../../.github/workflows/publish_pypi.yml) for the main package.
 The new [release.yml](../../.github/workflows/release.yml) **only handles GitHub Release**,
@@ -15,8 +15,8 @@ verify the index files first, then publish identical wheel bytes and public asse
 | Location | Files and purpose |
 | --- | --- |
 | PyPI and GitHub | 2 runtime platform wheels, 10 CPython 3.10–3.14 shim wheels; Windows x86_64 and manylinux_2_35 x86_64 |
-| GitHub | `taichi-forge-0.7.0-source.tar.gz`: pinned sources, recursive submodules, licenses, build scripts, public tests/API examples, `SOURCE_COMMIT`, `SOURCE_MANIFEST.json` |
-| GitHub | `taichi-forge-0.7.0-docs.zip`: public documentation, English/Chinese READMEs, license |
+| GitHub | `taichi-forge-0.7.1-source.tar.gz`: pinned sources, recursive submodules, licenses, build scripts, public tests/API examples, `SOURCE_COMMIT`, `SOURCE_MANIFEST.json` |
+| GitHub | `taichi-forge-0.7.1-docs.zip`: public documentation, English/Chinese READMEs, license |
 | GitHub | `RELEASE_NOTES.md`: Chinese and English together, also the release body |
 | GitHub | `release-manifest.json`: version, commit, originating run, file sizes/SHA256, submodule sources, actual public LLVM URLs and hashes |
 | GitHub | `SHA256SUMS`: every other asset, including the manifest |
@@ -118,8 +118,8 @@ attachment includes the full changelog.
    be available from production PyPI:
 
 ```bash
-git tag -a forge-v0.7.0 -m "Taichi Forge 0.7.0"
-git push origin forge-v0.7.0
+git tag -a forge-v0.7.1 -m "Taichi Forge 0.7.1"
+git push origin forge-v0.7.1
 ```
 
 Alternatively dispatch the original main-package workflow on the existing tag, with
@@ -188,7 +188,7 @@ Release always consumes published artifacts and never compiles them.
 - Missing submodule: `git submodule update --init --recursive` at the pinned commit;
   never omit required sources or archive unresolved LFS pointers.
 
-Install using `python -m pip install taichi-forge==0.7.0`, then `python -m pip check`;
+Install using `python -m pip install taichi-forge==0.7.1`, then `python -m pip check`;
 verify with `import taichi_forge as ti; print(ti.__version__)`.
 
 ## Standards

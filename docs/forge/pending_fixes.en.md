@@ -4,25 +4,25 @@
 
 This page tracks **fixes in source that are not yet included in a release**.
 The current public version is **0.7.0**. Reinstalling that version does not include
-the fixes below. The release column will be updated when the next version is assigned.
+the fixes below. The release column identifies the candidate that includes each fix.
 
 ## Fixed, awaiting release
 
 | ID | Affected version | Symptom and fix | Fixed in release |
 | --- | --- | --- | --- |
-| F070-1 | 0.7.0 | A method decorated with `@ti.kernel(opt_level=...)` inside a `@ti.data_oriented` class may require a type annotation for `self` at import. Fixed class-method detection for parameterized decorators, preserving bare `@ti.kernel` and template owner bindings. | Next release, TBD |
-| F070-2 | 0.7.0 | Graph configuration discovery misses Sequential and WHILE condition/body kernels; repeated `A → B → A` calls may make `recipe_catalog()` reject noncontiguous coverage. Fixed per-dispatch configuration and recursive lowering of frozen structured regions, preserving order, bindings, stop conditions and the baseline. | Next release, TBD |
-| F070-3 | 0.7.0 | CPU `fast` forces LLVM O0, retaining repeated address and aggregate work in simulation loops. Use O1 through the shared module-option policy, with a separate cache-schema invalidation. Cold compilation may increase and individual workloads may regress. | Next release, TBD |
-| F070-4 | 0.7.0 | With advanced IR optimization disabled, nested reverse loops can turn redundant local control state into expensive AD stack traffic. Clean local dataflow before differentiation, respecting `cfg_optimization` and `fast_math`; invalidate earlier artifacts. | Next release, TBD |
-| F070-5 | 0.7.0 | Whole-value assignment to a scalar-shaped matrix field can retain one writer kernel per component. Reuse bulk transfer for standalone homogeneous f32/f64 Matrix values on CPU/CUDA outside AD recording, preserving host rounding and fallback semantics. Vulkan retains scalar assignment because bulk transfer increased measured host memory. | Next release, TBD |
-| F070-6 | 0.7.0 | Repeated conditional field reads in Vulkan nested reverse kernels can produce redundant gradient atomic updates. Run one bounded advanced simplification batch before differentiation, keeping AD memory guards, configuration switches and later lowering unchanged; invalidate earlier cache artifacts. | Next release, TBD |
-| F070-7 | 0.7.0 | SPIR-V random initialization reads and updates a shared counter without atomic synchronization. Claim each counter value with one device-scope atomic increment and invalidate old shader caches. This fixes the shared-state race; seed configuration is a separate issue. | Next release, TBD |
-| F070-8 | 0.7.0 | Vulkan ignores `random_seed`. Initialize the shared RNG counter from runtime configuration, including independent fixed Graph workspaces; cached shaders remain seed-independent. | Next release, TBD |
-| F070-9 | 0.7.0 | SPIR-V f32/f16 and LLVM f16 random draws can round to 1.0, violating `[0, 1)`. Generate only the destination's significant bits before scaling; invalidate old compiled artifacts. | Next release, TBD |
-| F070-10 | 0.7.0 | Cross-task temporaries can overlap the SPIR-V RNG counter, so even a kernel without random draws can corrupt the random stream. Reserve the historical RNG word in temporary allocation, preserving contiguous tensors and scalar alignment; invalidate old compiled artifacts. | Next release, TBD |
-| F070-11 | 0.7.0 | CPU/CUDA whole-value assignment to a packed scalar matrix still compiles a transfer helper after F070-5. Use the existing native packed host copy first, retaining the earlier fallback and host rounding. | Next release, TBD |
-| F070-12 | 0.7.0 | The first host read or write creates both accessor kernel definitions, retaining an unused counterpart for fields accessed in only one direction. Create each accessor on demand and retire whichever definitions exist with the SNode tree. | Next release, TBD |
-| F070-13 | 0.7.0 | Compiled kernels are only persisted at reset/normal exit, losing cache work on forced termination. Publish each `.tic` atomically and recover unindexed artifacts, retaining corrupt-file fallback and cache-disabled behavior. | Next release, TBD |
+| F070-1 | 0.7.0 | A method decorated with `@ti.kernel(opt_level=...)` inside a `@ti.data_oriented` class may require a type annotation for `self` at import. Fixed class-method detection for parameterized decorators, preserving bare `@ti.kernel` and template owner bindings. | 0.7.1 |
+| F070-2 | 0.7.0 | Graph configuration discovery misses Sequential and WHILE condition/body kernels; repeated `A → B → A` calls may make `recipe_catalog()` reject noncontiguous coverage. Fixed per-dispatch configuration and recursive lowering of frozen structured regions, preserving order, bindings, stop conditions and the baseline. | 0.7.1 |
+| F070-3 | 0.7.0 | CPU `fast` forces LLVM O0, retaining repeated address and aggregate work in simulation loops. Use O1 through the shared module-option policy, with a separate cache-schema invalidation. Cold compilation may increase and individual workloads may regress. | 0.7.1 |
+| F070-4 | 0.7.0 | With advanced IR optimization disabled, nested reverse loops can turn redundant local control state into expensive AD stack traffic. Clean local dataflow before differentiation, respecting `cfg_optimization` and `fast_math`; invalidate earlier artifacts. | 0.7.1 |
+| F070-5 | 0.7.0 | Whole-value assignment to a scalar-shaped matrix field can retain one writer kernel per component. Reuse bulk transfer for standalone homogeneous f32/f64 Matrix values on CPU/CUDA outside AD recording, preserving host rounding and fallback semantics. Vulkan retains scalar assignment because bulk transfer increased measured host memory. | 0.7.1 |
+| F070-6 | 0.7.0 | Repeated conditional field reads in Vulkan nested reverse kernels can produce redundant gradient atomic updates. Run one bounded advanced simplification batch before differentiation, keeping AD memory guards, configuration switches and later lowering unchanged; invalidate earlier cache artifacts. | 0.7.1 |
+| F070-7 | 0.7.0 | SPIR-V random initialization reads and updates a shared counter without atomic synchronization. Claim each counter value with one device-scope atomic increment and invalidate old shader caches. This fixes the shared-state race; seed configuration is a separate issue. | 0.7.1 |
+| F070-8 | 0.7.0 | Vulkan ignores `random_seed`. Initialize the shared RNG counter from runtime configuration, including independent fixed Graph workspaces; cached shaders remain seed-independent. | 0.7.1 |
+| F070-9 | 0.7.0 | SPIR-V f32/f16 and LLVM f16 random draws can round to 1.0, violating `[0, 1)`. Generate only the destination's significant bits before scaling; invalidate old compiled artifacts. | 0.7.1 |
+| F070-10 | 0.7.0 | Cross-task temporaries can overlap the SPIR-V RNG counter, so even a kernel without random draws can corrupt the random stream. Reserve the historical RNG word in temporary allocation, preserving contiguous tensors and scalar alignment; invalidate old compiled artifacts. | 0.7.1 |
+| F070-11 | 0.7.0 | CPU/CUDA whole-value assignment to a packed scalar matrix still compiles a transfer helper after F070-5. Use the existing native packed host copy first, retaining the earlier fallback and host rounding. | 0.7.1 |
+| F070-12 | 0.7.0 | The first host read or write creates both accessor kernel definitions, retaining an unused counterpart for fields accessed in only one direction. Create each accessor on demand and retire whichever definitions exist with the SNode tree. | 0.7.1 |
+| F070-13 | 0.7.0 | Compiled kernels are only persisted at reset/normal exit, losing cache work on forced termination. Publish each `.tic` atomically and recover unindexed artifacts, retaining corrupt-file fallback and cache-disabled behavior. | 0.7.1 |
 
 F070-15: current-source GGUI title FPS counts every `show()` call, including those
 that submit no frame. Count only window frame submissions without changing
@@ -96,7 +96,7 @@ This is an enhancement, not a bug in upstream scope rules.
 
 | ID | Scope and validation | Available in release |
 | --- | --- | --- |
-| FG-AOT-01 | Add explicit `GraphBuilder.dispatch_loaded` for void loaded AOT kernels on the current borrowed Program. Preserve entry/module identity, native ABI validation, conservative effects and completion ownership without recovering Python numerical definitions. Windows CPU/CUDA/Vulkan: nine focused checks plus fourteen existing borrowing, native-storage and BindingSet checks. Root sequence with primitive scalars and compact JIT ndarrays only; this is an enhancement over 0.7.0, not a newly discovered failure of Runtime ExecutionPlan. | Next release, TBD |
+| FG-AOT-01 | Add explicit `GraphBuilder.dispatch_loaded` for void loaded AOT kernels on the current borrowed Program. Preserve entry/module identity, native ABI validation, conservative effects and completion ownership without recovering Python numerical definitions. Windows CPU/CUDA/Vulkan: nine focused checks plus fourteen existing borrowing, native-storage and BindingSet checks. Root sequence with primitive scalars and compact JIT ndarrays only; this is an enhancement over 0.7.0, not a newly discovered failure of Runtime ExecutionPlan. | 0.7.1 |
 
 Committed with this entry as `Add explicit loaded AOT kernel dispatch to frontend Graph`.
 See the [AOT SDK](aot_sdk.en.md) for lifecycle, binding and scope details.

@@ -11,7 +11,7 @@ execution, reusable Graphs, native algorithms and optional hardware providers.
 [![Python](https://img.shields.io/pypi/pyversions/taichi-forge.svg)](https://pypi.org/project/taichi-forge/)
 [![License](https://img.shields.io/badge/license-Apache%202.0-blue.svg)](LICENSE)
 
-## 0.7.0 release information / 0.7.0 发行信息
+## 0.7.1 release information / 0.7.1 发行信息
 
 The 0.7 series includes compilation improvements, broader AOT deployment and shared
 JIT/AOT contracts. See the [English release notes](https://github.com/fancifulland2718/taichi-forge/blob/master/docs/forge/release_notes.en.md)
@@ -71,7 +71,7 @@ Taichi 1.7.4 is the public programming-model reference; Forge has an independent
 release track. Supported source-compatible APIs do not imply identical private
 implementation, binary ABI, backend coverage or performance.
 
-This documentation covers **Taichi Forge 0.7.0 (in development)**. See the
+This documentation covers **Taichi Forge 0.7.1**. See the
 [release notes](docs/forge/release_notes.en.md) for changes and upgrade guidance.
 The install command above selects the latest published package; it does not
 select this development checkout. For a released version, use the documentation

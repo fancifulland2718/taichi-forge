@@ -7,7 +7,7 @@ performance settings and upgrade guidance.
 
 ## Versions and installation
 
-These pages are based on **Taichi Forge 0.7.0**. See the
+These pages are based on **Taichi Forge 0.7.1**. See the
 [release notes](release_notes.en.md) for changes and upgrade guidance.
 Source fixes not yet included in a package are listed in [Fixes awaiting release](pending_fixes.en.md).
 The install command below selects the latest published package. For a specific

@@ -2,7 +2,7 @@
 
 [English](pypi_release.en.md) · [构建 wheel](../forge/build_wheels.zh.md)
 
-本文以 **0.7.0** 为例，不表示版本已经上线。沿用已经绑定的两个 PyPI 发布入口：
+本文以 **0.7.1** 为例，不表示版本已经上线。沿用已经绑定的两个 PyPI 发布入口：
 [publish_runtime_pypi.yml](../../.github/workflows/publish_runtime_pypi.yml) 发布 runtime，
 [publish_pypi.yml](../../.github/workflows/publish_pypi.yml) 发布主包。
 新增 [release.yml](../../.github/workflows/release.yml) **只负责 GitHub Release**，在主包
@@ -14,8 +14,8 @@
 | 位置 | 文件及用途 |
 | --- | --- |
 | PyPI 与 GitHub | 2 个 runtime 平台 wheel，10 个 CPython 3.10–3.14 shim wheel；Windows x86_64 与 manylinux_2_35 x86_64 |
-| GitHub | `taichi-forge-0.7.0-source.tar.gz`：固定源码、递归子模块、许可证、构建脚本、公开测试/API 示例、`SOURCE_COMMIT`、`SOURCE_MANIFEST.json` |
-| GitHub | `taichi-forge-0.7.0-docs.zip`：公开文档、中英文 README、许可证 |
+| GitHub | `taichi-forge-0.7.1-source.tar.gz`：固定源码、递归子模块、许可证、构建脚本、公开测试/API 示例、`SOURCE_COMMIT`、`SOURCE_MANIFEST.json` |
+| GitHub | `taichi-forge-0.7.1-docs.zip`：公开文档、中英文 README、许可证 |
 | GitHub | `RELEASE_NOTES.md`：同一文件先中文后英文，也作为 Release 正文 |
 | GitHub | `release-manifest.json`：版本、commit、来源运行、附件大小/SHA256、子模块来源、实际 LLVM 下载 URL 与 SHA256 |
 | GitHub | `SHA256SUMS`：全部其他附件（含 manifest）的校验和 |
@@ -104,8 +104,8 @@ GitHub Release 和对应包发布后，再把相关条目移入“已发布修�
 4. 推送匹配的版本 tag，自动触发主包正式发布。runtime 必须已经可从生产 PyPI 获取：
 
 ```bash
-git tag -a forge-v0.7.0 -m "Taichi Forge 0.7.0"
-git push origin forge-v0.7.0
+git tag -a forge-v0.7.1 -m "Taichi Forge 0.7.1"
+git push origin forge-v0.7.1
 ```
 
 也可在已有 tag 上手动运行原主包 workflow，设置 `publish=true`、`target=pypi` 和可选
@@ -157,7 +157,7 @@ git push origin forge-v0.7.0
 - OIDC invalid-publisher：核对上述两个原 YAML 的项目绑定及 environment，不改绑到新流程。
 - 缺子模块：在固定 commit 运行 `git submodule update --init --recursive`，不省略源码或打包 LFS pointer。
 
-用户安装仍为 `python -m pip install taichi-forge==0.7.0`，随后 `python -m pip check`，
+用户安装仍为 `python -m pip install taichi-forge==0.7.1`，随后 `python -m pip check`，
 通过 `import taichi_forge as ti; print(ti.__version__)` 核对版本。
 
 ## 规范依据

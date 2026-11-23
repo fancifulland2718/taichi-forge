@@ -9,7 +9,7 @@ Use the documentation at your release tag for version-specific API details.
 
 | Version | Main additions |
 | --- | --- |
-| [Unreleased](#unreleased) | Portable definition-based AOT libraries, consumer specialization, incremental builds and JIT fixes |
+| [0.7.1](#071) | Portable definition-based AOT libraries, consumer specialization, incremental builds and JIT fixes |
 | [0.7.0](#070) | Compilation improvements, AOT coverage and backend/autodiff fixes |
 | [0.6.3](#063) | Complete Graph recipes, hardware rendering, reusable operations and basic ROCm/HIP |
 | [0.6.2](#062) | Execution plans, dynamic work, Graph storage and solver improvements |
@@ -25,9 +25,9 @@ Use the documentation at your release tag for version-specific API details.
 | [0.2.4](#024) | Compile/cache and memory diagnostics |
 | [0.1.0](#010)–[0.1.3](#013) | Forge package/import identity and toolchain |
 
-<a id="unreleased"></a>
+<a id="071"></a>
 
-## Unreleased
+## 0.7.1
 
 ### Ship a numerical library from Python definitions
 
@@ -42,7 +42,7 @@ Use the documentation at your release tag for version-specific API details.
 - `ti.solve` and `Matrix.inverse()` support additional fixed square dimensions through partial-pivot elimination. Tested sizes include dimension 32 on CPU and CUDA, and dimension 32 in f32 on Vulkan. Compile cost at larger dimensions depends on the device. [Local matrix solves](local_matrix_solve.en.md)
 - Default Vulkan device selection prefers an eligible discrete adapter. Supported hardware rendering paths can call external providers such as OptiX through the runtime. Driver, adapter and resource requirements depend on the device and operation. [External hardware providers](external_hardware_providers.en.md)
 
-**Upgrading from 0.7.0.** Use a matching Forge frontend and runtime. Re-export packages from source to use the new format or resource capabilities. Ship the complete export directory, including `code.tcm`, `package.json`, `host/`, and required assets. The next section describes the published 0.7.0 release. [Deployment profiles](aot_deployment_profiles.en.md)
+**Upgrading from 0.7.0.** Use Forge frontend and runtime version 0.7.1. Entries sharing the same numerical code can specialize different scalar bindings. Ordinary scalar inputs stay live. Re-export packages from source to use the new format or resource capabilities. Ship the complete export directory, including `code.tcm`, `package.json`, `host/`, and required assets. The next section describes the published 0.7.0 release. [Deployment profiles](aot_deployment_profiles.en.md)
 
 <a id="070"></a>
 
