@@ -8620,6 +8620,41 @@ def test_package_typed_inputs_reject_unproven_host_selection(tmp_path, monkeypat
     assert not (tmp_path / "sdk").exists()
 
 
+@test_utils.test(arch=ti.cpu, offline_cache=False)
+def test_package_host_sequence_element_binds_template_owner(tmp_path, monkeypatch):
+    source = """
+import taichi_forge as ti
+@ti.data_oriented
+class Item:
+    def __init__(self, v):
+        scope = ti.experimental.ResourceScope(self)
+        scope.weight = scope.field(ti.i32, shape=())
+        self.weight[None] = v
+@ti.data_oriented
+class Model:
+    def __init__(self, values):
+        scope = ti.experimental.ResourceScope(self)
+        scope.total = scope.field(ti.i32, shape=(), initialization='zero')
+        self.items = tuple(Item(v) for v in values)
+        scope.owner_sequence('items', self.items)
+    @ti.kernel
+    def add(self, item: ti.template()):
+        self.total[None] += item.weight[None]
+    def step(self):
+        for item in self.items[1:]:
+            self.add_one(item)
+    def add_one(self, item: Item):
+        self.add(item)
+"""
+    package = _source_package(tmp_path, monkeypatch, source)
+    manifest = ti.aot.export_package(package, tmp_path / "sdk")
+    with Runtime(manifest["target"]) as runtime, load_package(runtime, tmp_path / "sdk") as code:
+        for values in ((), (3,), (1, 4, 6)):
+            model = code.host.Model(values)
+            model.step()
+            assert model.total[None] == sum(values[1:])
+
+
 @pytest.mark.parametrize("reverse", [False, True])
 @test_utils.test(arch=[ti.cpu, ti.cuda], offline_cache=False)
 def test_package_host_owner_sequences_reuse_independent_typed_entries(tmp_path, monkeypatch, reverse):

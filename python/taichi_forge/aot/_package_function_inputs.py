@@ -431,7 +431,16 @@ class _FunctionSyntax:
 
         self.stores, self.imports, self.aliases, self.reads = {}, {}, {}, {}
         self.calls, self.writes = [], set()
+        self.owner_iterations = {}
         for part in nodes:
+            if isinstance(part, ast.For) and isinstance(part.target, ast.Name):
+                source = part.iter
+                if isinstance(source, ast.Subscript) and isinstance(source.slice, ast.Slice):
+                    source = source.value
+                if isinstance(source, ast.Attribute):
+                    first, last = part.body[0], part.body[-1]
+                    self.owner_iterations[part.target.id] = (
+                        source, (first.lineno, first.col_offset), (last.end_lineno, last.end_col_offset))
             if isinstance(part, ast.Name):
                 counts = self.reads if isinstance(part.ctx, ast.Load) else self.stores
                 counts[part.id] = counts.get(part.id, 0) + 1
@@ -1296,6 +1305,20 @@ def discover(sources, imported, *, preparation_receivers=None, preparation_guard
                         name = expression.id
                         if name in bindings:
                             return bindings[name]
+                        iteration = lexical.owner_iterations.get(name)
+                        if iteration is not None and stores.get(name) == 1 and name not in visiting:
+                            source, first, last = iteration
+                            if first <= (expression.lineno, expression.col_offset) < last:
+                                sequence_owner = value(source.value, (*visiting, name), bindings)
+                                if isinstance(sequence_owner, _Owner):
+                                    sequence = owners[sequence_owner.identity].get(source.attr, {})
+                                    if sequence.get("kind") == "host_owner_sequence":
+                                        kinds = tuple(dict.fromkeys(
+                                            item["owner_type"] for item in sequence.get("constructors", ())))
+                                        if kinds and all(kind in owners for kind in kinds):
+                                            origin = (function.__qualname__, source.lineno, name)
+                                            alternatives = tuple(_Owner(kind) for kind in kinds)
+                                            return alternatives[0] if len(kinds) == 1 else _Choice(origin, alternatives)
                         if name in arguments and name not in stores:
                             item = arguments[name]
                             return (
