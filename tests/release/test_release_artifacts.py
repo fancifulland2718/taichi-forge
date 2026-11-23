@@ -37,11 +37,16 @@ def commit(root):
 def source(tmp_path):
     root = tmp_path / "source"
     initialize(root)
-    for relative in ("version.txt", "pyproject.toml", "packaging/runtime/pyproject.toml", "taichi/common/version.h", "packaging/constraints/release-build.txt", "packaging/constraints/cudss-build.txt"):
+    for relative in ("packaging/constraints/release-build.txt", "packaging/constraints/cudss-build.txt"):
         dest = root / relative
         dest.parent.mkdir(parents=True, exist_ok=True)
         dest.write_bytes((ROOT / relative).read_bytes())
+    cmake_version = '[tool.scikit-build.cmake.define]\nTI_VERSION_MAJOR = "0"\nTI_VERSION_MINOR = "7"\nTI_VERSION_PATCH = "0"\n'
     for relative, content in {
+        "version.txt": "v0.7.0\n",
+        "pyproject.toml": cmake_version,
+        "packaging/runtime/pyproject.toml": cmake_version,
+        "taichi/common/version.h": "#define TI_VERSION_MAJOR 0\n#define TI_VERSION_MINOR 7\n#define TI_VERSION_PATCH 0\n",
         "README.md": "Public build instructions", "LICENSE": "Apache-2.0",
         "docs/guide.md": "Build guide", "internal/secret.md": "excluded",
         "opt_doc/plan.md": "excluded", ".gitignore": "local.bin\n",
