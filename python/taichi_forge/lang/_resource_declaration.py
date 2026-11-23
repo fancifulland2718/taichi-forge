@@ -487,7 +487,9 @@ class ResourceScope:
         With explicit dtype and shape, external=True instead binds a typed
         package input/output port without requiring the caller's allocation
         declaration. Shape uses this scope's dimensions; it does not describe
-        the caller's complete storage group.
+        the caller's complete storage group. With source_scope=True, the same
+        typed port retains a declared source Field's original group in a live
+        Component and uses its typed descriptor for independent package inputs.
         """
         from taichi_forge.lang.field import Field
         from taichi_forge.lang.struct import StructField
@@ -497,8 +499,8 @@ class ResourceScope:
             from taichi_forge.types._argument_descriptor import describe_element_type
 
             if (
-                external is not True
-                or source_scope is not False
+                type(external) is not bool or type(source_scope) is not bool
+                or external == source_scope
                 or dimensions is not None
                 or dtype is None
                 or shape is None
@@ -506,7 +508,7 @@ class ResourceScope:
                 or not name.isidentifier()
                 or type(optional) is not bool
             ):
-                raise TypeError("Typed external borrow requires a name, dtype, shape and external=True")
+                raise TypeError("Typed borrow requires a name, dtype, shape and external=True or source_scope=True")
             element = describe_element_type(dtype)
             shape = shape if isinstance(shape, tuple) else (shape,)
             expressions = tuple(
@@ -530,6 +532,8 @@ class ResourceScope:
                 matches = field.dtype == element.scalar_type and lanes == tuple(element.shape)
             if not matches or field is not None and tuple(field.shape) != expected:
                 raise ValueError("Typed external resource dtype or shape differs from its declaration")
+            if source_scope and getattr(field, "_logical_resource_declaration", None) is not None:
+                return self.borrow(name, field, source_scope=True)
             if self._read_only:
                 if getattr(self._owner, name) is not field:
                     raise ValueError("A borrowed record must retain its existing member")

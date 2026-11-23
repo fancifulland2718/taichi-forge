@@ -174,6 +174,10 @@ def _normalize_field_loops(module, constructor, kind, fail, namespace):
             name for name, members in context_bindings if id(node) in members
         }
 
+    from ._package_storage_choices import normalize_storage_choices
+
+    normalize_storage_choices(constructor, scope_names_at, lambda node, msg: fail(module, node, msg))
+
     shadowed = namespace.get("setattr", setattr) is not setattr or any(
         isinstance(n, ast.Name)
         and n.id == "setattr"
@@ -257,8 +261,12 @@ def _normalize_field_loops(module, constructor, kind, fail, namespace):
 
         def visit_For(self, node):
             from ._package_aliases import expand_alias_loop
+            from ._package_resource_rows import expand_field_rows
 
             scope_names = scope_names_at(node)
+            rows = expand_field_rows(node, scope_names, constructor, namespace, lambda n, msg: fail(module, n, msg))
+            if rows is not None:
+                return rows
             aliases = expand_alias_loop(
                 node, scope_names, constructor, namespace, lambda n, message: fail(module, n, message)
             )
@@ -2056,12 +2064,19 @@ def scope_declarations(
                     or type(call.args[0].value) is not str
                     or not call.args[0].value.isidentifier()
                     or len(keywords) != len(call.keywords)
-                    or set(keywords) - {"external", "dtype", "shape", "optional"}
-                    or not {"external", "dtype", "shape"} <= keywords.keys()
-                    or not isinstance(keywords["external"], ast.Constant)
-                    or keywords["external"].value is not True
+                    or set(keywords) - {"external", "source_scope", "dtype", "shape", "optional"}
+                    or not {"dtype", "shape"} <= keywords.keys()
+                    or len({"external", "source_scope"} & keywords.keys()) != 1
+                    or not isinstance(mode, ast.Constant)
+                    or mode.value is not True
                 ):
-                    fail(module, call, "Typed external borrow requires a name, dtype, shape and external=True")
+                    fail(module, call, "Typed borrow requires a name, dtype, shape and external=True or source_scope=True")
+                if "source_scope" in keywords:
+                    # A typed source link keeps its original allocation in a live Component.
+                    # Definition packages admit the same zero-copy member through its typed port.
+                    for keyword in call.keywords:
+                        if keyword.arg == "source_scope":
+                            keyword.arg = "external"
                 optional = keywords.get("optional", ast.Constant(False))
                 if not isinstance(optional, ast.Constant) or type(optional.value) is not bool:
                     fail(module, optional, "Typed external optional flag must be a literal boolean")
@@ -2651,7 +2666,7 @@ def scope_declarations(
                 ),
                 statement,
             )
-            if conditions:
+            if conditions and not getattr(target, "_package_storage_choice", False):
                 conditional_fields.add(target.attr)
         elif isinstance(statement, ast.Expr) and method in (
             "dim",
