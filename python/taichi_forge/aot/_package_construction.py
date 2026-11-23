@@ -314,6 +314,13 @@ def discover_construction_methods(tree, namespace, module, fail, kind):
                 break
             needed = expanded
 
+        def owner_guard(test):
+            negated = isinstance(test, ast.UnaryOp) and isinstance(test.op, ast.Not)
+            value = test.operand if negated else test
+            if isinstance(value, ast.Attribute) and isinstance(value.value, ast.Name) and value.value.id == "self":
+                return value.attr, not negated
+            return None, None
+
         def call_sites(function, conditions):
             sites = {}
 
@@ -327,16 +334,10 @@ def discover_construction_methods(tree, namespace, module, fail, kind):
                     expression(value.orelse, guarded(value.test, guards, False))
 
             def guarded(test, guards, expected):
-                if isinstance(test, ast.UnaryOp) and isinstance(test.op, ast.Not):
-                    test, expected = test.operand, not expected
-                if not (
-                    isinstance(test, ast.Attribute)
-                    and isinstance(test.value, ast.Name)
-                    and test.value.id == "self"
-                    and test.attr not in guards
-                ):
+                name, positive = owner_guard(test)
+                if name is None or name in guards:
                     return None
-                return {**guards, test.attr: expected}
+                return {**guards, name: positive == expected}
 
             def body(statements, guards):
                 if guards is None:
@@ -388,18 +389,38 @@ def discover_construction_methods(tree, namespace, module, fail, kind):
                     fail(module, call, "Construction methods currently require only the owner receiver")
                 if method.name in selected:
                     fail(module, call, "Construction resource methods must have one call site")
+                # A leading "if not self.enabled: return" guards every
+                # allocation and nested construction call that follows it.
+                # Keep the Host method intact and let the normal owner-schema
+                # pass verify that the guard denotes a declared layout choice.
+                method_conditions = dict(sites[id(call)])
+                early_returns = set()
+                start = 1 if ast.get_docstring(method, clean=False) is not None else 0
+                for statement in method.body[start:]:
+                    if not (isinstance(statement, ast.If) and not statement.orelse
+                            and len(statement.body) == 1 and isinstance(statement.body[0], ast.Return)):
+                        break
+                    returned = statement.body[0]
+                    if returned.value is not None and not (
+                            isinstance(returned.value, ast.Constant) and returned.value.value is None):
+                        break
+                    name, positive = owner_guard(statement.test)
+                    if name is None or method_conditions.setdefault(name, not positive) == positive:
+                        break
+                    early_returns.add(returned)
                 if any(
                     isinstance(n, (ast.Yield, ast.YieldFrom, ast.AsyncFunctionDef))
                     or isinstance(n, ast.Return)
                     and n is not method.body[-1]
+                    and n not in early_returns
                     for n in syntax_of(method)[0]
                 ):
                     fail(module, method, "Construction resource methods permit only a terminal Host return")
                 selected.add(method.name)
                 method._package_construction_method = True
                 method._package_construction_order = len(selected)
-                method._package_construction_conditions = sites[id(call)]
-                visit(method, sites[id(call)])
+                method._package_construction_conditions = method_conditions
+                visit(method, method_conditions)
                 facts.append(
                     dict(
                         kind="construction_method",

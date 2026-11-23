@@ -24505,7 +24505,7 @@ def test_package_rejects_ambiguous_construction_methods(tmp_path, monkeypatch, c
     assert not (tmp_path / "sdk").exists()
 
 
-@pytest.mark.parametrize("statement_form", [False, True])
+@pytest.mark.parametrize("statement_form", ["expression", "if", "early_return"])
 @test_utils.test(arch=[ti.cpu, ti.cuda], offline_cache=False)
 def test_package_conditional_construction_preserves_host_return(tmp_path, monkeypatch, statement_form):
     source = """
@@ -24532,10 +24532,14 @@ class Model:
             for i in self.data:
                 self.data[i] += delta * (i + 1)
 """
-    if statement_form:
+    if statement_form == "if":
         source = source.replace(
             "        self.plan = self._allocate() if self.enabled else None",
             "        self.plan = None\n        if self.enabled:\n            self.plan = self._allocate()",
+        )
+    elif statement_form == "early_return":
+        source = source.replace("self._allocate() if self.enabled else None", "self._allocate()").replace(
+            "def _allocate(self):", "def _allocate(self):\n        if not self.enabled:\n            return"
         )
     package = _source_package(tmp_path, monkeypatch, source)
     original = package.Model(7)
