@@ -9,6 +9,7 @@ Use the documentation at your release tag for version-specific API details.
 
 | Version | Main additions |
 | --- | --- |
+| [Unreleased](#unreleased) | Portable definition-based AOT libraries, consumer specialization, incremental builds and JIT fixes |
 | [0.7.0](#070) | Compilation improvements, AOT coverage and backend/autodiff fixes |
 | [0.6.3](#063) | Complete Graph recipes, hardware rendering, reusable operations and basic ROCm/HIP |
 | [0.6.2](#062) | Execution plans, dynamic work, Graph storage and solver improvements |
@@ -26,7 +27,22 @@ Use the documentation at your release tag for version-specific API details.
 
 <a id="unreleased"></a>
 
-Source fixes not yet included in a package are listed in [Fixes awaiting release](pending_fixes.en.md).
+## Unreleased
+
+### Ship a numerical library from Python definitions
+
+- **Produce.** `ti.aot.export_package` exports numerical entry points, shared functions, and readable Python for construction and scheduling from one or more modules. Target one backend or select `artifact_format="unified-bc-library"` to produce one portable LLVM library for x64, CUDA, and Vulkan. Device-specific operations still require the corresponding hardware and providers. [Package export](package_aot.en.md)
+- **Prepare.** The runtime uses the selected device, model dimensions, resource layouts, and workgroup capabilities to compile portable code and shared helpers into device executables. Eligible entries defer inlining to this stage. Each instance owns its mutable state. Array contents and ordinary arguments can change between calls. Vulkan consumers can reuse compatible compiled kernels across processes. First-use costs depend on the entry and device. [Production and consumption](package_aot.en.md)
+- **Perform.** Applications can select `ti.init(execution_mode="hybrid")` to keep script JIT and call packaged computations through normal Python imports. An application with only the compatible Forge runtime can use `ExecutionSession(mode="aot")`. Stable bindings and native Graphs can be reused. Supported pointer-block and bitmasked sparse layouts are rebuilt per model instance, with each instance tracking its own active nodes. [Calling examples](package_aot.en.md)
+- **Incremental builds.** Keep the previous successful output, reuse the producer's `build_cache`, and export to a new directory. Unaffected definitions can reuse capture and compilation results. Distribute the export directory and its declared dependencies. The build cache stays on the producer. [Using the cache](package_aot.en.md)
+
+### Other user-visible changes
+
+- The CPU fast tier uses LLVM O1. Individual offline kernel cache entries can reach disk before process exit. Graph configuration reaches nested sequential and WHILE regions. Vulkan fixes cover RNG seed handling and concurrent RNG state updates. Selected reverse-mode paths on CPU, CUDA and Vulkan reduce redundant state and gradient operations. [Fixes and backend coverage](pending_fixes.en.md)
+- `ti.solve` and `Matrix.inverse()` support additional fixed square dimensions through partial-pivot elimination. Tested sizes include dimension 32 on CPU and CUDA, and dimension 32 in f32 on Vulkan. Compile cost at larger dimensions depends on the device. [Local matrix solves](local_matrix_solve.en.md)
+- Default Vulkan device selection prefers an eligible discrete adapter. Supported hardware rendering paths can call external providers such as OptiX through the runtime. Driver, adapter and resource requirements depend on the device and operation. [External hardware providers](external_hardware_providers.en.md)
+
+**Upgrading from 0.7.0.** Use a matching Forge frontend and runtime. Re-export packages from source to use the new format or resource capabilities. Ship the complete export directory, including `code.tcm`, `package.json`, `host/`, and required assets. The next section describes the published 0.7.0 release. [Deployment profiles](aot_deployment_profiles.en.md)
 
 <a id="070"></a>
 

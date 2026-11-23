@@ -8,6 +8,7 @@
 
 | 版本 | 主要内容 |
 | --- | --- |
+| [待发布](#unreleased) | 按定义导出的通用 AOT 库、消费端特化、增量构建及 JIT 修复 |
 | [0.7.0](#070) | 编译改进、AOT 覆盖与后端/自动微分修复 |
 | [0.6.3](#063) | 完整 Graph recipe、硬件渲染、可复用操作与基础 ROCm/HIP |
 | [0.6.2](#062) | 执行计划、动态工作、Graph 存储与求解器改进 |
@@ -25,7 +26,22 @@
 
 <a id="unreleased"></a>
 
-源码已修复但尚未随包发布的问题见[待发布修复](pending_fixes.zh.md)。
+## 待发布
+
+### 从 Python 定义交付可独立运行的数值库
+
+- **Produce（构建）。** `ti.aot.export_package` 可从一个或多个 Python 模块的定义导出数值入口、共享函数、可读的 Host 构造与调度代码。可以指定单一后端，也可以用 `artifact_format="unified-bc-library"` 生成一份面向 x64、CUDA 和 Vulkan 的可移植 LLVM 库。使用设备专有操作的入口仍需要相应硬件和 provider。[按包导出](package_aot.zh.md)
+- **Prepare（消费时特化）。** Runtime 根据实际设备、模型尺寸、资源布局和可用的工作组能力，把通用代码和共享 helper 生成设备可执行代码。相容入口可以延迟内联。各实例拥有各自的可变状态，数组内容和普通运行参数可以逐次改变。Vulkan 消费者可跨进程复用相容的已编译 kernel。首次准备时间取决于入口和设备。[生产与消费](package_aot.zh.md)
+- **Perform（执行）。** 应用可以用 `ti.init(execution_mode="hybrid")` 保留脚本 JIT，通过正常 Python 导入调用包内计算。只安装兼容 Runtime 的应用可用 `ExecutionSession(mode="aot")` 独立运行。稳定的资源绑定和原生 Graph 可以复用。受支持的指针块和 bitmasked 稀疏布局按模型实例重建，实际活动节点由该实例维护。[调用示例](package_aot.zh.md)
+- **增量构建。** 保留上一次成功输出，复用生产端 `build_cache`，向新目录导出。未受改动影响的定义可以复用捕获和编译结果。应用只需分发导出目录及所声明的依赖，构建缓存留在生产端。[缓存用法](package_aot.zh.md)
+
+### 其他用户可见变化
+
+- CPU 的 fast 编译档使用 LLVM O1。普通 kernel 的离线缓存可在进程退出前逐项写盘。Graph 配置可以覆盖嵌套顺序段和 WHILE 区域。Vulkan 修正随机种子、随机状态竞争，部分 CPU/CUDA/Vulkan 反向求导路径减少冗余状态和梯度操作。[待发布修复及适用范围](pending_fixes.zh.md)
+- `ti.solve` 和 `Matrix.inverse()` 增加了固定尺寸方阵的带选主元消元路径。已测尺寸包括 CPU/CUDA 的 32 阶和 Vulkan 的 32 阶 f32。更大尺寸的编译代价应按设备评估。[局部矩阵求解](local_matrix_solve.zh.md)
+- Vulkan 默认设备选择优先考虑满足能力要求的独立显卡。硬件渲染应用可以在支持的配置下通过 Runtime 调用 OptiX 等外部 provider。这些入口的驱动、适配器和资源要求随所选设备和操作而定。[外部硬件 provider](external_hardware_providers.zh.md)
+
+**从 0.7.0 迁移。** 使用配套的 Forge 前端和 Runtime，从源码重新导出需要新格式或新资源能力的包。部署时分发完整导出目录，包括 `code.tcm`、`package.json`、`host/` 和所需资产。已发布 0.7.0 的行为见下节。[部署方式](aot_deployment_profiles.zh.md)
 
 <a id="070"></a>
 
