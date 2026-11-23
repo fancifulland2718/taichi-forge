@@ -137,6 +137,8 @@ def _allocation_schema(index, source_paths, *, declarations=()):
                 require(condition)
         if item.get('input_presence_attribute'):
             require(item['input_presence_attribute'])
+        if item.get("layout_guard"):
+            require(item["layout_guard"])
         for part in ("shape", "shape_expressions", "expression", "dimension_expressions", "dimensions", "constraints"):
             expression_dependencies(item.get(part, ()))
         for part in ("source_path", "like_source_path", "reference_path", "owner_dimension"):

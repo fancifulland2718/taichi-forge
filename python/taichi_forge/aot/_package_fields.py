@@ -313,14 +313,15 @@ def construct_fields(
             # Other algebra keeps the existing witness and validation rules.
             # This is not a search over model values or a constraint solver.
 
+        from ._package_layout_witnesses import positive_layout_flags
+        layout_witnesses = positive_layout_flags(schema)
+
         def witness(name, visiting=()):
             if name in visiting:
                 raise ValueError(f"Cyclic derived dimension {name!r}")
             if "layout_guard" in schema[name]:
                 guard = schema[name]["layout_guard"]
-                # No model was constructed. The declared default is sufficient
-                # to size this private witness; consumption reads the real flag.
-                value = int(schema[guard]["choices"][0][1])
+                value = int(layout_witnesses.get(name, schema[guard]["choices"][0][1]))
                 write_member(owner, name, value, schema)
                 return value
             if "owner_dimension" in schema[name]:

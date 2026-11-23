@@ -192,3 +192,44 @@ class Model:
         assert int(a.value.to_numpy()) == int(b.value.to_numpy()) == 2
         with pytest.raises(ValueError, match="types"):
             code.host.Model([object()])
+
+@test_utils.test(arch=ti.cpu, offline_cache=False)
+def test_nested_optional_zero_span_has_a_positive_capture_layout(tmp_path, monkeypatch):
+    source = """
+import taichi_forge as ti
+@ti.data_oriented
+class Child:
+    def __init__(self, n, enabled):
+        self.enabled = enabled
+        self.n = n
+        self.span = n if enabled else 0
+        s = ti.experimental.ResourceScope(self)
+        s.static("enabled", choices=(False, True))
+        span = s.dim("n") if self.enabled else s.dim("n") * 0
+        active = s.derived_dim("span", span)
+        s.counter = s.field(ti.i32, shape=())
+        if self.enabled:
+            s.values = s.field(ti.i32, shape=active)
+@ti.data_oriented
+class Model:
+    def __init__(self, child: Child):
+        s = ti.experimental.ResourceScope(self)
+        s.owner_reference("child", child)
+        s.result = s.field(ti.i32, shape=())
+    @ti.kernel
+    def run(self):
+        self.result[None] = -1
+        if ti.static(self.child.enabled):
+            for i in self.child.values:
+                self.child.values[i] = i + 1
+            self.result[None] = self.child.values[self.child.span - 1]
+"""
+    package = _source_package(tmp_path, monkeypatch, source, initializer="from .model import Child, Model\n")
+    sdk = tmp_path / "zero-span"
+    ti.aot.export_package(package, sdk, arch=ti.cpu, artifact_format="unified-bc-library")
+    ti.reset()
+    with Runtime("x64") as runtime, load_package(runtime, sdk) as code:
+        for n, enabled in ((3, False), (3, True), (17, True)):
+            obj = code.host.Model(code.host.Child(n, enabled))
+            obj.run()
+            assert int(obj.result.to_numpy()) == (n if enabled else -1)
