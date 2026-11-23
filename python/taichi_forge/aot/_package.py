@@ -2298,6 +2298,8 @@ def _export_package(output, declarations, source_root, caps, artifact_format, co
                 manifest["version"] = max(39, manifest["version"])
             if any(item.get("struct_borrow") for item in schema.values()):
                 manifest["version"] = max(41, manifest["version"])
+            if any(item.get("sequence_dimension") for item in schema.values()):
+                manifest["version"] = max(102, manifest["version"])
             if any(item.get("owner_dimension") for item in schema.values()):
                 manifest["version"] = max(42, manifest["version"])
             if any(item["kind"] == "host_owner_sequence" for item in schema.values()):

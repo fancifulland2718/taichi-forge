@@ -214,6 +214,7 @@ class OwnerGuard:
                     visit(child, dimensions)
             return True
 
+        sequence_owners = {}
         captures = []
         for contract in contracts:
             visit(contract.get("admission", {}))
@@ -234,6 +235,8 @@ class OwnerGuard:
                 allocated = path_value(owner, prefix)
                 if allocated is None:
                     continue
+                if getattr(allocated, "_forge_package_sequence_dimensions", None):
+                    sequence_owners[id(allocated)] = allocated
                 schema = package._manifest["owners"].get(owner_type(allocated), {})
                 selections = getattr(allocated, "_forge_package_member_layouts", {}).get(
                     spec.get("layout_member", spec["name"]), {})
@@ -271,8 +274,10 @@ class OwnerGuard:
                 reachable.add(parts)
         versions = getattr(getattr(package, "runtime", None), "_owner_namespace_versions", None)
         self._bind_paths(owner, reachable, versions)
+        self._sequence_owners = tuple(sequence_owners.values())
 
     def _bind_paths(self, owner, paths, versions):
+        self._sequence_owners = ()
         stamp = versions(owner) if versions and type(type(owner)) is type and len(paths) > 1 else None
         self._children = []
         if stamp is not None:
@@ -366,6 +371,11 @@ class OwnerGuard:
         return tuple(values)
 
     def matches(self, owner):
+        if self._sequence_owners:
+            from ._package_values import check_sequence_dimensions
+
+            for bound in self._sequence_owners:
+                check_sequence_dimensions(bound)
         if not self._matches_attributes(owner):
             return False
         for name, guard in self._children:

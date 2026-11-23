@@ -1105,6 +1105,26 @@ def scope_declarations(
                 node,
             )
             return scoped_extent(scope, name)
+        if method == "sequence_dim":
+            if (scope_paths[scope] or len(node.args) != 3 or len(node.keywords) != 1
+                    or node.keywords[0].arg != "reduction"
+                    or not isinstance(node.keywords[0].value, ast.Constant)
+                    or node.keywords[0].value.value not in ("sum", "uniform")
+                    or any(not isinstance(arg, ast.Constant) or type(arg.value) is not str
+                           or not arg.value.isidentifier() for arg in node.args)):
+                fail(module, node, "sequence_dim requires literal names and a sum or uniform reduction")
+            name, sequence, source = (arg.value for arg in node.args)
+            sequence_item = declarations.get(sequence, (earlier or {}).get(sequence, {}))
+            if sequence_item.get("kind") != "host_owner_sequence" or sequence_item.get("conditions"):
+                fail(module, node, "sequence_dim requires a declared unconditional owner sequence")
+            relation = dict(sequence=sequence, member=source, reduction=node.keywords[0].value.value)
+            previous = declarations.get(name, {}).get("sequence_dimension")
+            if previous is not None and previous != relation:
+                fail(module, node, f"Conflicting owner sequence dimension {name!r}")
+            add(name, dict(kind="dimension", dtype="i32", scope_allocation=origin(scope)), node)
+            declarations[name]["sequence_dimension"] = relation
+            allowed.add(id(node.func.value))
+            return scoped_extent(scope, name)
         if method == "owner_dim":
             if (
                 scope_paths[scope]
@@ -2713,6 +2733,7 @@ def scope_declarations(
             "dim",
             "parent_dim",
             "owner_dim",
+            "sequence_dim",
             "derived_dim",
             "power_of_two_dim",
         ):

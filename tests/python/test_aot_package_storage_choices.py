@@ -233,3 +233,70 @@ class Model:
             obj = code.host.Model(code.host.Child(n, enabled))
             obj.run()
             assert int(obj.result.to_numpy()) == (n if enabled else -1)
+
+@test_utils.test(arch=ti.cpu, offline_cache=False)
+def test_owner_sequence_dimensions_follow_bound_members(tmp_path, monkeypatch):
+    source = """
+import taichi_forge as ti
+@ti.data_oriented
+class Leaf:
+    def __init__(self, count, width):
+        self.count = count
+        self.width = width
+        s = ti.experimental.ResourceScope(self)
+        s.dim("count")
+        s.dim("width")
+@ti.data_oriented
+class Model:
+    leaves: tuple[Leaf, ...]
+    def __init__(self, leaves, total, width):
+        self.leaves = tuple(leaves)
+        self.total = total
+        self.width = width
+        s = ti.experimental.ResourceScope(self)
+        s.owner_sequence_reference("leaves", self.leaves)
+        n = s.sequence_dim("total", "leaves", "count", reduction="sum")
+        w = s.sequence_dim("width", "leaves", "width", reduction="uniform")
+        s.data = s.field(ti.i32, shape=(n, w))
+    @ti.kernel
+    def run(self):
+        for i, j in self.data:
+            self.data[i, j] = i + j
+"""
+    package = _source_package(tmp_path, monkeypatch, source, initializer="from .model import Leaf, Model\n")
+    sdk = tmp_path / "aggregate"
+    ti.aot.export_package(package, sdk, arch=ti.cpu, artifact_format="unified-bc-library")
+    a, b = package.Leaf(3, 2), package.Leaf(5, 2)
+    positive = package.Model((a, b), 8, 2)
+    class World:
+        pass
+
+    world = World()
+    resources = ti.experimental.ResourceScope(world)
+    world.sources = (a, b)
+    resources.owner_sequence("sources", world.sources)
+    resources.aggregate = positive
+    component = ti.aot.Component.from_owner(world)
+    component.compile(positive.run, owner=world)
+    positive.run()
+    np.testing.assert_array_equal(positive.data.to_numpy(), np.arange(8)[:, None] + np.arange(2))
+    with pytest.raises(ValueError, match="dimension|constraint"):
+        package.Model((a, b), 9, 2)
+    ti.reset()
+    with Runtime("x64") as runtime, load_package(runtime, sdk) as code:
+        a, b = code.host.Leaf(3, 2), code.host.Leaf(5, 2)
+        for seq, total in (((b,), 5), ((b, a), 8), ((a, b, a), 11)):
+            model = code.host.Model(seq, total, 2)
+            model.run()
+            np.testing.assert_array_equal(model.data.to_numpy(), np.arange(total)[:, None] + np.arange(2))
+        with pytest.raises(ValueError, match="dimension"):
+            code.host.Model((a, b), 9, 2)
+        b.width = 3
+        with pytest.raises(ValueError, match="uniform"):
+            code.host.Model((a, b), 8, 2)
+        with pytest.raises(ValueError, match="uniform"):
+            model.run()
+        b.width = 2
+        model.leaves = tuple(reversed((b, a, a)))
+        with pytest.raises(ValueError, match="membership"):
+            model.run()

@@ -1283,6 +1283,20 @@ class _ResourceScope:
             raise ValueError("Host owner sequence differs from its declared input types")
         return values
 
+    def sequence_dim(self, name, sequence, member, *, reduction):
+        from ._package_values import owner_type, check_sequence_dimensions
+
+        package = self._root._forge_package_owner
+        schema = package._manifest["owners"][owner_type(self._root)]
+        relation = {"sequence": sequence, "member": member, "reduction": reduction}
+        if self._parent is not None or schema.get(name, {}).get("sequence_dimension") != relation:
+            raise ValueError("Sequence dimension differs from its declared source relation")
+        items = getattr(self._root, sequence)
+        bindings = self._root.__dict__.setdefault("_forge_package_sequence_dimensions", {})
+        bindings[name] = (relation, tuple(items))
+        check_sequence_dimensions(self._root)
+        return self.dim(name)
+
     def owner_dim(self, reference, name):
         if self._parent is not None or any(
             type(value) is not str or not value.isidentifier() for value in (reference, name)
@@ -1892,12 +1906,16 @@ class entry:
     def _check_layout(self, owner):
         if owner is None:
             return
-        from ._package_values import capture_is_absent, owner_type
+        from ._package_values import capture_is_absent, check_sequence_dimensions, owner_type
 
+        checked = set()
         for item in self.contract["captures"]:
             if capture_is_absent(owner, item):
                 continue
             allocated_owner = path_value(owner, item.get("layout_owner_path", ()))
+            if getattr(allocated_owner, "_forge_package_sequence_dimensions", None) and id(allocated_owner) not in checked:
+                check_sequence_dimensions(allocated_owner)
+                checked.add(id(allocated_owner))
             schema = self.package._manifest["owners"].get(owner_type(allocated_owner), {})
             for name, value in allocated_owner._forge_package_member_layouts.get(
                 item.get("layout_member", item["name"]), {}
@@ -2106,6 +2124,7 @@ class LoadedPackage:
                 98,
                 100,
                 101,
+                102,
             )
             or manifest.get("kind") != "forge_definition_package_prototype"
         ):
@@ -2207,6 +2226,24 @@ class LoadedPackage:
                 member.get("kind") == "owner_input" and member.get("binding_phase") == "preparation"
                 for owner in manifest["owners"].values() for member in owner.values()):
             raise ValueError("Prepared owner inputs require definition package version 85")
+        for schema in manifest["owners"].values():
+            for item in schema.values():
+                relation = item.get("sequence_dimension")
+                if relation is None:
+                    continue
+                if (manifest["version"] < 102 or item["kind"] != "dimension" or not isinstance(relation, dict)
+                        or set(relation) != {"sequence", "member", "reduction"}
+                        or any(type(relation[key]) is not str or not relation[key].isidentifier()
+                               for key in ("sequence", "member"))
+                        or relation["reduction"] not in ("sum", "uniform")
+                        or schema.get(relation["sequence"], {}).get("kind") != "host_owner_sequence"):
+                    raise ValueError("Invalid owner sequence dimension relation")
+                sources = schema[relation["sequence"]].get("owner_types", ())
+                if not sources or any(
+                    manifest["owners"].get(kind, {}).get(relation["member"], {}).get("kind") != "dimension"
+                    for kind in sources
+                ):
+                    raise ValueError("Invalid owner sequence dimension member")
         if manifest["version"] < 101 and any(
                 "prepared_type_guards" in member for owner in manifest["owners"].values() for member in owner.values()):
             raise ValueError("Prepared owner type choices require definition package version 101")

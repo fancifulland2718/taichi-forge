@@ -41,6 +41,24 @@ def dimension_value(owner, name):
     return path_value(owner, getattr(owner, "_forge_package_dimension_paths", {}).get(name, (name,)))
 
 
+def check_sequence_dimensions(owner):
+    for name, (relation, originals) in owner._forge_package_sequence_dimensions.items():
+        values = getattr(owner, relation["sequence"])
+        if len(values) != len(originals) or any(value is not original for value, original in zip(values, originals)):
+            raise ValueError("Owner sequence membership changed after layout binding")
+        sizes = [operator.index(getattr(value, relation["member"])) for value in values]
+        if any(not 0 <= size <= 2**31 - 1 for size in sizes):
+            raise ValueError("Sequence member dimension is outside the i32 count range")
+        if relation["reduction"] == "uniform":
+            if not sizes or any(size != sizes[0] for size in sizes):
+                raise ValueError("A uniform sequence dimension requires equal counts in a nonempty sequence")
+            dimension = sizes[0]
+        else:
+            dimension = sum(sizes)
+        if not 0 <= dimension <= 2**31 - 1 or dimension != operator.index(getattr(owner, name)):
+            raise ValueError(f"Sequence dimension {name!r} differs from its declared members")
+
+
 def owner_type(owner):
     return getattr(owner, "_forge_package_contract", getattr(type(owner), "_forge_package_type", None))
 

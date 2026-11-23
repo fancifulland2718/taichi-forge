@@ -551,6 +551,15 @@ def resolve_inputs(sources, imported, *, partial=False):
                 raise ValueError(f"Owner reference {owner}.{name} requires a resolved declared owner path")
         for owner, (schema, _) in owners.items():
             for item in schema.values():
+                relation = item.get("sequence_dimension")
+                if relation:
+                    types = schema[relation["sequence"]].get("owner_types", ())
+                    if not types or any(
+                        (source := owners.get(kind, ({}, None))[0].get(relation["member"], {})).get("kind") != "dimension"
+                        or source.get("conditions")
+                        for kind in types
+                    ):
+                        raise ValueError(f"Sequence dimension on {owner} requires an unconditional member dimension")
                 if "owner_dimension" not in item:
                     continue
                 reference, dimension = item["owner_dimension"]

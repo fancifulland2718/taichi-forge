@@ -430,6 +430,38 @@ class ResourceScope:
         self._registry.setdefault("inherited_dimensions", {})[alias] = ("dim", name)
         return Extent(("dim", alias))
 
+    def sequence_dim(self, name, sequence, member, *, reduction):
+        """Derive a count from a declared owner sequence's member dimensions.
+
+        A uniform reduction requires a nonempty sequence with equal counts.
+        A sum of an empty sequence is zero. Component capture uses the normal
+        ownership paths and dimension algebra of the actual bound members.
+        """
+        if (not all(isinstance(key, str) and key.isidentifier() for key in (name, sequence, member))
+                or sequence not in self._registry.get("owner_sequences", {}) or reduction not in ("sum", "uniform")):
+            raise ValueError("A sequence dimension requires a declared owner sequence, member, and reduction")
+        extents = []
+        for index, owner in enumerate(getattr(self._owner, sequence)):
+            reference = f"_forge_{sequence}_item_{index}"
+            if hasattr(self._owner, reference) and getattr(self._owner, reference) is not owner:
+                raise ValueError("An owner sequence dimension conflicts with an existing reference")
+            self.owner_reference(reference, owner)
+            extents.append(self.owner_dim(reference, member))
+        if not extents:
+            if reduction == "uniform":
+                raise ValueError("A uniform sequence dimension requires a nonempty sequence")
+            return self.derived_dim(name, Extent(("const", 0)))
+        extent = extents[0]
+        if reduction == "sum":
+            for term in extents[1:]:
+                extent = extent + term
+        dimension = self.derived_dim(name, extent)
+        if reduction == "uniform":
+            for index, term in enumerate(extents[1:], start=1):
+                self.require_le(f"{name}_min_{index}", dimension, term, when=name)
+                self.require_le(f"{name}_max_{index}", term, dimension, when=name)
+        return dimension
+
     def owner_dim(self, reference, name):
         """Use a declared non-owning owner's dimension in this owner's layout.
 
