@@ -13949,6 +13949,38 @@ def test_package_struct_fields_reject_unproven_layouts(tmp_path, monkeypatch, ch
 
 
 @pytest.mark.parametrize("layout", ["AOS", "SOA"])
+@test_utils.test(arch=ti.cpu, offline_cache=False)
+def test_package_selects_struct_grid_rank_at_construction(tmp_path, monkeypatch, layout):
+    source = """
+import taichi_forge as ti
+Cell = ti.types.struct(mass=ti.i32, velocity=ti.types.vector(2, ti.f32))
+@ti.data_oriented
+class Model:
+    def __init__(self, n: int, dual: bool):
+        self.n, self.dual = n, dual
+        scope = ti.experimental.ResourceScope(self)
+        scope.static('dual', choices=(False, True))
+        size = scope.dim('n')
+        shape = (size, size, 2) if self.dual else (size, size)
+        scope.grid = scope.struct_field(Cell.members, shape=shape, layout=ti.Layout.LAYOUT)
+    @ti.kernel
+    def step(self):
+        for I in ti.grouped(self.grid):
+            self.grid.mass[I] = 10 * I[0] + I[1]
+            self.grid.velocity[I] = ti.Vector([I[0], I[1]])
+""".replace("LAYOUT", layout)
+    package = _source_package(tmp_path, monkeypatch, source)
+    manifest = ti.aot.export_package(package, tmp_path / "sdk")
+    with Runtime(manifest["target"]) as runtime, load_package(runtime, tmp_path / "sdk") as loaded:
+        for dual in (False, True):
+            a, b = package.Model(3, dual), loaded.host.Model(3, dual)
+            a.step()
+            b.step()
+            for member in ("mass", "velocity"):
+                np.testing.assert_array_equal(getattr(b.grid, member).to_numpy(), getattr(a.grid, member).to_numpy())
+
+
+@pytest.mark.parametrize("layout", ["AOS", "SOA"])
 @test_utils.test(arch=[ti.cpu, ti.cuda, ti.vulkan], offline_cache=False)
 def test_package_struct_fields_keep_original_layout_and_member_paths(tmp_path, monkeypatch, layout):
     from tests.python.test_aot_dense_snode_group import _compiled_nodes

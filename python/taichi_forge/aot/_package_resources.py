@@ -2541,8 +2541,8 @@ def scope_declarations(
 
             extents = [project_extent(extent, shape_node) for extent in shape]
             if shape_policy:
-                if method == "struct_field" or order_nodes or placement is not None:
-                    fail(module, call, "Field shape selection requires an independent default AOS allocation")
+                if order_nodes or placement is not None:
+                    fail(module, call, "Field shape selection requires independent dense placement")
                 shape_policy = {
                     **shape_policy,
                     **{

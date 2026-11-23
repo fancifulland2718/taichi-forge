@@ -195,7 +195,7 @@ def _select_shapes(contract, selected):
     nodes = source["nodes"]
     paths, children = _tree(nodes)
     by_path = {path: index for index, path in paths.items()}
-    replaced = set()
+    allocations = {}
     shapes.update({name: policy["if_true" if selected[policy["condition"]] else "if_false"]
                    for name, policy in contract.get("shapes", {}).items() if name in contract["members"]})
     for name, shape in shapes.items():
@@ -203,21 +203,23 @@ def _select_shapes(contract, selected):
             continue
         selector = contract["members"][name]
         leaves = list(selector[1]) if selector[0] == "schema_nodes" else [by_path[tuple(path)] for path in selector]
-        parent = nodes[leaves[0]]["parent"]
-        if (
-            parent <= 0
-            or nodes[parent]["parent"] != 0
-            or nodes[parent]["type"] != 1
-            or leaves != children.get(parent)
-            or parent in replaced
-            or any(children.get(leaf) for leaf in leaves)
-        ):
-            raise ValueError("Field shape selection requires an independent default AOS allocation")
         if not isinstance(shape, (tuple, list)) or any(
             not (type(axis) is str and axis or type(axis) is int and 0 < axis <= 2**31 - 1) for axis in shape
         ):
             raise ValueError("Field shape selection requires declared positive extents")
-        replaced.add(parent)
+        for leaf in leaves:
+            parent = nodes[leaf]["parent"]
+            if parent <= 0 or nodes[parent]["parent"] != 0 or nodes[parent]["type"] != 1 or children.get(leaf):
+                raise ValueError("Field shape selection requires independent dense placement")
+            axes, members = allocations.setdefault(parent, (tuple(shape), set()))
+            if axes != tuple(shape):
+                raise ValueError("Fields sharing dense placement require the same selected shape")
+            members.add(leaf)
+    # AOS members share an allocation, while SOA members can have separate
+    # parents. Resize each complete native allocation exactly once.
+    for parent, (shape, members) in allocations.items():
+        if members != set(children[parent]):
+            raise ValueError("Field shape selection requires independent dense placement")
         nodes[parent] = {
             **nodes[parent],
             "extents": [
