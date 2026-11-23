@@ -1,4 +1,5 @@
 """Release gates run independently of the native Forge runtime."""
+import io
 import json
 from pathlib import Path
 import subprocess
@@ -232,10 +233,47 @@ def test_github_draft_resume_and_finalization_never_replace_assets(bundle, monke
 
 
 def test_complete_index_gate_rejects_missing_files(monkeypatch, tmp_path):
-    monkeypatch.setattr("sys.argv", ["check", "--repository", "pypi", "--wheel-dir", str(tmp_path), "--upload-dir", str(tmp_path / "upload"), "--require-published"])
-    monkeypatch.setattr(index, "prepare_upload", lambda *args: 1)
-    with pytest.raises(SystemExit, match="not yet published"):
+    wheel = tmp_path / "taichi_forge-0.7.1-cp313-cp313-win_amd64.whl"
+    wheel.touch()
+    monkeypatch.setattr("sys.argv", ["check", "--repository", "pypi", "--wheel-dir", str(tmp_path), "--require-published"])
+    monkeypatch.setattr(index, "urlopen", lambda *a, **kw: io.BytesIO(b'{"urls": []}'))
+    monkeypatch.setattr(index.time, "sleep", lambda delay: None)
+    with pytest.raises(ValueError, match="not yet published: taichi_forge-"):
         index.main()
+
+
+def test_index_gate_waits_for_visibility_without_staging(tmp_path, monkeypatch):
+    wheels = []
+    for platform in ("win_amd64", "manylinux_2_35_x86_64"):
+        wheel = tmp_path / f"taichi_forge_runtime-0.7.1-py3-none-{platform}.whl"
+        wheel.write_bytes(platform.encode())
+        wheels.append({"filename": wheel.name, "digests": {"sha256": artifacts.digest(wheel)}})
+    responses = iter([None, wheels[:1], wheels])
+
+    def read_index(request, **kwargs):
+        files = next(responses)
+        if files is None:
+            raise index.HTTPError(request.full_url, 404, "Not Found", {}, None)
+        return io.BytesIO(json.dumps({"urls": files}).encode())
+
+    waits = []
+    monkeypatch.setattr(index, "urlopen", read_index)
+    monkeypatch.setattr(index.time, "sleep", waits.append)
+    index.require_published(tmp_path, "https://pypi.org/pypi")
+    assert len(waits) == 2
+    assert {p.name for p in tmp_path.iterdir()} == {w["filename"] for w in wheels}
+
+
+@pytest.mark.parametrize("yanked, error", [(True, "yanked"), (False, "differs")])
+def test_index_conflicts_fail_immediately(tmp_path, monkeypatch, yanked, error):
+    wheel = tmp_path / "taichi_forge-0.7.1-cp313-cp313-win_amd64.whl"
+    wheel.touch()
+    digest = artifacts.digest(wheel) if yanked else "0" * 64
+    payload = {"urls": [{"filename": wheel.name, "digests": {"sha256": digest}, "yanked": yanked}]}
+    monkeypatch.setattr(index, "urlopen", lambda *a, **kw: io.BytesIO(json.dumps(payload).encode()))
+    monkeypatch.setattr(index.time, "sleep", lambda delay: pytest.fail("Retried a conflicting release"))
+    with pytest.raises(RuntimeError, match=error):
+        index.require_published(tmp_path, "https://pypi.org/pypi")
 
 
 def test_actual_build_record_captures_compiler_and_constraints(source, tmp_path, monkeypatch):
@@ -378,7 +416,6 @@ def test_reused_shim_keeps_compile_identity_across_republication(published_sourc
 
 
 def test_pypi_staging_excludes_all_github_sidecars(tmp_path, monkeypatch):
-    import io
     directory = tmp_path / "assets"
     directory.mkdir()
     wheel = directory / "taichi_forge-0.7.0-cp313-cp313-win_amd64.whl"
@@ -421,7 +458,7 @@ def test_runtime_record_requires_complete_index_and_correct_build(published_sour
     monkeypatch.setenv("GITHUB_SHA", "b" * 40)
     monkeypatch.setenv("GITHUB_RUN_ID", "20")
     monkeypatch.setattr(github, "validate_release_set", lambda *a, **kw: None)
-    monkeypatch.setattr(github, "prepare_upload", lambda *a: 0)
+    monkeypatch.setattr(github, "require_published", lambda *a: None)
     for record in runtime["build_inputs"]:
         artifacts.write_json(directory / f"build-info-{record['platform']}.json", record)
     artifacts.write_json(directory / "runtime-build-info.json", {
@@ -431,8 +468,11 @@ def test_runtime_record_requires_complete_index_and_correct_build(published_sour
     output = tmp_path / "runtime-publication.json"
     github.record_runtime(directory, "0.6.3", "pypi", output)
     assert json.loads(output.read_text()) == runtime
-    monkeypatch.setattr(github, "prepare_upload", lambda *a: 1)
-    with pytest.raises(ValueError, match="not complete"):
+    def unavailable(*args):
+        raise ValueError("wheel(s) are not yet published")
+
+    monkeypatch.setattr(github, "require_published", unavailable)
+    with pytest.raises(ValueError, match="not yet published"):
         github.record_runtime(directory, "0.6.3", "pypi", output)
 
 

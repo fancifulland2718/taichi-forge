@@ -144,6 +144,9 @@ git push origin forge-v0.7.1
 
 ## 失败恢复与附件预演
 
+- 两包已上传而索引暂时只列出部分文件时，发布后校验会短暂重试。如果 runtime 的
+  `Record verified runtime publication` 仍失败，先在原 runtime 运行选择 **Re-run failed jobs**。
+  等该运行生成 `runtime-publication-<版本>-pypi`，再重跑主包失败的 GitHub Release 阶段。
 - 原 PyPI 发布失败：在原运行 **Re-run failed jobs**，沿用原 wheel，不重新编译。
   同名同 SHA256 跳过，只补缺失文件；不同字节或 yanked 报错，不盲目 skip-existing。
 - PyPI 成功、GitHub 阶段失败：先重跑失败 job。也可手动运行 **GitHub Release / GitHub 发行**，

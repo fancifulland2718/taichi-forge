@@ -169,6 +169,10 @@ Release always consumes published artifacts and never compiles them.
 
 ## Recovery and attachment rehearsal
 
+- Post-upload checks retry briefly while the index lists newly uploaded files. If
+  `Record verified runtime publication` still fails, select **Re-run failed jobs**
+  on the original runtime run. Once it produces `runtime-publication-<version>-pypi`,
+  retry the failed GitHub Release stage on the shim run.
 - Original PyPI upload failed: **Re-run failed jobs** in that run, retaining its wheels.
   Matching filename/SHA256 files stay; only missing files upload. Different bytes or
   yanked files fail. No blind skip-existing or recompilation.

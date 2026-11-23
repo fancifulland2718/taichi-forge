@@ -8,6 +8,7 @@ import hashlib
 import json
 from pathlib import Path
 import shutil
+import time
 from urllib.error import HTTPError
 from urllib.parse import quote
 from urllib.request import Request, urlopen
@@ -36,13 +37,10 @@ def version_exists(repository: str, project: str, version: Version) -> bool:
     return version in _released_versions(payload)
 
 
-def prepare_upload(wheel_dir: Path, upload_dir: Path, repository: str) -> int:
-    """Compare every candidate before staging; never replace a published file."""
+def missing_wheels(wheel_dir: Path, repository: str) -> list[Path]:
     wheels = sorted(wheel_dir.glob("*.whl"))
     if not wheels:
         raise RuntimeError(f"No wheel candidates in {wheel_dir}")
-    if upload_dir.exists() and any(upload_dir.iterdir()):
-        raise RuntimeError(f"Upload staging directory must be empty: {upload_dir}")
     releases = {}
     pending = []
     for wheel in wheels:
@@ -53,7 +51,7 @@ def prepare_upload(wheel_dir: Path, upload_dir: Path, repository: str) -> int:
         if key not in releases:
             request = Request(
                 f"{repository.rstrip('/')}/{quote(project)}/{version}/json",
-                headers={"User-Agent": "taichi-forge-release-check"},
+                headers={"User-Agent": "taichi-forge-release-check", "Cache-Control": "no-cache"},
             )
             try:
                 with urlopen(request, timeout=30) as response:  # noqa: S310
@@ -79,10 +77,32 @@ def prepare_upload(wheel_dir: Path, upload_dir: Path, repository: str) -> int:
         if existing.get("yanked", False):
             raise RuntimeError(f"Published wheel is yanked: {wheel.name}")
         print(f"Already published with matching SHA256: {wheel.name}")
+    return pending
+
+
+def require_published(wheel_dir: Path, repository: str) -> None:
+    """Give the index time to list newly uploaded files. Identity errors propagate."""
+    pending = missing_wheels(wheel_dir, repository)
+    for delay in (5, 10, 20, 40, 60, 60, 60, 60):
+        if not pending:
+            return
+        print(f"Waiting {delay}s for the index to list {len(pending)} wheel(s)", flush=True)
+        time.sleep(delay)
+        pending = missing_wheels(wheel_dir, repository)
+    if pending:
+        names = ", ".join(wheel.name for wheel in pending)
+        raise ValueError(f"{len(pending)} candidate wheel(s) are not yet published: {names}")
+
+
+def prepare_upload(wheel_dir: Path, upload_dir: Path, repository: str) -> int:
+    """Compare every candidate before staging; never replace a published file."""
+    if upload_dir.exists() and any(upload_dir.iterdir()):
+        raise RuntimeError(f"Upload staging directory must be empty: {upload_dir}")
+    pending = missing_wheels(wheel_dir, repository)
     upload_dir.mkdir(parents=True, exist_ok=True)
     for wheel in pending:
         shutil.copy2(wheel, upload_dir / wheel.name)
-    print(f"Prepared {len(pending)} missing wheel(s); {len(wheels) - len(pending)} already match")
+    print(f"Prepared {len(pending)} missing wheel(s) for upload")
     return len(pending)
 
 
@@ -96,7 +116,7 @@ def main() -> int:
     parser.add_argument("--version", type=Version)
     parser.add_argument("--wheel-dir", type=Path)
     parser.add_argument("--upload-dir", type=Path)
-    parser.add_argument("--require-published", action="store_true", help="Fail if any candidate wheel is absent from the index")
+    parser.add_argument("--require-published", action="store_true", help="Wait for published wheel hashes on the index")
     parser.add_argument("projects", nargs="*")
     args = parser.parse_args()
 
@@ -104,12 +124,15 @@ def main() -> int:
         "pypi": "https://pypi.org/pypi",
         "testpypi": "https://test.pypi.org/pypi",
     }[args.repository]
+    if args.require_published:
+        if args.wheel_dir is None or args.version or args.projects:
+            parser.error("Use --require-published with --wheel-dir, without --version/projects")
+        require_published(args.wheel_dir, base)
+        return 0
     if args.wheel_dir is not None or args.upload_dir is not None:
         if args.wheel_dir is None or args.upload_dir is None or args.version or args.projects:
             parser.error("Use --wheel-dir and --upload-dir together, without --version/projects")
-        count = prepare_upload(args.wheel_dir, args.upload_dir, base)
-        if args.require_published and count:
-            raise SystemExit(f"{count} candidate wheel(s) are not yet published")
+        prepare_upload(args.wheel_dir, args.upload_dir, base)
         return 0
     if args.version is None or not args.projects:
         parser.error("Availability inspection requires --version and projects")

@@ -73,7 +73,7 @@ jobs:
               --platform "$platform" "taichi-forge-runtime==$RUNTIME_VERSION" -d wheels
           done
           python -m scripts.validate_release_wheel_set --wheel-dir wheels --version "$VERSION" --runtime-version "$RUNTIME_VERSION"
-          python scripts/check_pypi_version_available.py --repository pypi --wheel-dir wheels --upload-dir missing --require-published
+          python scripts/check_pypi_version_available.py --repository pypi --wheel-dir wheels --require-published
       - name: Resolve actual publisher provenance / 核对实际构建来源
         id: source
         env:
@@ -129,7 +129,7 @@ jobs:
           SOURCE_COMMIT: ${{ needs.bundle.outputs.commit }}
         run: |
           set -euo pipefail
-          python scripts/check_pypi_version_available.py --repository pypi --wheel-dir release --upload-dir missing --require-published
+          python scripts/check_pypi_version_available.py --repository pypi --wheel-dir release --require-published
           python -m scripts.release_github stage --directory release --version "$VERSION" --commit "$SOURCE_COMMIT"
           python -m scripts.release_github publish --directory release --version "$VERSION" --commit "$SOURCE_COMMIT"
           echo "### $VERSION — GitHub Release 已发布 / Published" >> "$GITHUB_STEP_SUMMARY"

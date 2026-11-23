@@ -13,7 +13,7 @@ from urllib.parse import quote
 from packaging.version import Version
 
 from scripts.release_artifacts import digest, verify_bundle, write_json
-from scripts.check_pypi_version_available import prepare_upload
+from scripts.check_pypi_version_available import require_published
 from scripts.validate_release_wheel_set import validate_release_set
 
 
@@ -45,10 +45,8 @@ def require_job(repository: str, run_id: str, name: str) -> None:
 
 def record_runtime(directory: Path, version: str, index: str, output: Path) -> None:
     validate_release_set(directory, Version(version), project="runtime")
-    with tempfile.TemporaryDirectory() as temporary:
-        base = "https://pypi.org/pypi" if index == "pypi" else "https://test.pypi.org/pypi"
-        if prepare_upload(directory, Path(temporary) / "missing", base):
-            raise ValueError("Runtime publication is not complete")
+    base = "https://pypi.org/pypi" if index == "pypi" else "https://test.pypi.org/pypi"
+    require_published(directory, base)
     candidate = json.loads((directory / "runtime-build-info.json").read_text(encoding="utf-8"))
     if candidate["version"] != version or candidate["wheels"] != wheel_facts(directory):
         raise ValueError("Runtime publication differs from the validated candidate")
