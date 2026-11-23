@@ -476,6 +476,7 @@ class TaskCodegen : public IRVisitor {
   explicit TaskCodegen(const Params &params)
       : arch_(params.arch),
         caps_(params.caps),
+        compact_aot_(params.omit_value_names),
         task_ir_(params.task_ir),
         compiled_structs_(params.compiled_structs),
         snode_to_root_(params.snode_to_root),
@@ -487,8 +488,7 @@ class TaskCodegen : public IRVisitor {
         bitmasked_clear_data_on_deactivate_(
             params.bitmasked_clear_data_on_deactivate),
         listgen_subgroup_ballot_(params.listgen_subgroup_ballot),
-        listgen_reuse_(params.listgen_reuse),
-        compact_aot_(params.omit_value_names) {
+        listgen_reuse_(params.listgen_reuse) {
     allow_undefined_visitor = true;
     invoke_default_visitor = true;
 

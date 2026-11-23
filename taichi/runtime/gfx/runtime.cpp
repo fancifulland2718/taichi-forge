@@ -1125,11 +1125,11 @@ size_t align_up_to(size_t value, size_t alignment) {
 CompiledTaichiKernel::CompiledTaichiKernel(const Params &ti_params)
     : ti_kernel_attribs_(*ti_params.ti_kernel_attribs),
       device_(ti_params.device),
-      backend_cache_(ti_params.backend_cache),
       sparse_task_resources_(ti_params.sparse_task_resources),
       sparse_tree_uses_(ti_params.sparse_tree_uses),
       sparse_tree_permit_(ti_params.sparse_tree_permit),
-      diagnostic_trees_(ti_params.diagnostic_trees) {
+      diagnostic_trees_(ti_params.diagnostic_trees),
+      backend_cache_(ti_params.backend_cache) {
   if (ti_params.shared_code) {
     auto source = ti_params.shared_code->ti_kernel_attribs_;
     auto target = ti_kernel_attribs_;
