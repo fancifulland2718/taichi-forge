@@ -766,6 +766,8 @@ class OwnerGraph:
                 source = self.definitions[item["owner_type"]][2]
 
         for attribute, item in schema.items():
+            if item.get("storage_nodes"):
+                item["storage_guards"] = {flag: static_values[flag] for flag in item["storage_flags"]}
             if "source_policy" in item:
                 policy = item["source_policy"]
                 # Validate both complete allocation paths after child schemas
@@ -1054,6 +1056,7 @@ def _compose(environment, schema, children):
     from ._component import (
         Array,
         DenseField,
+        FixedSNodeField,
         Dimension,
         Record,
         _ConditionalRecord,
@@ -1093,6 +1096,8 @@ def _compose(environment, schema, children):
                     names[value.capacity] if value.capacity else "",
                     relation,
                 )
+            elif isinstance(value, FixedSNodeField):
+                value = replace(value, group=attribute + "." + value.group)
             elif isinstance(value, DenseField):
                 shape = tuple(names[n] if isinstance(n, str) else n for n in value.shape)
                 group = attribute + "." + value.group
@@ -1188,6 +1193,8 @@ def _compose(environment, schema, children):
                 ]
             if "conditions" in item:
                 transformed["conditions"] = {names[n]: expected for n, expected in item["conditions"].items()}
+            if "storage_guards" in item:
+                transformed["storage_guards"] = {names[n]: v for n, v in item["storage_guards"].items()}
             if "choice_guards" in item:
                 transformed["choice_guards"] = {names[n]: expected for n, expected in item["choice_guards"].items()}
             if "shape_policy" in item:

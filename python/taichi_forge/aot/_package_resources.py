@@ -1943,11 +1943,20 @@ def scope_declarations(
         # preparation passes must still validate every allocation and use.
         return {name: item for name, item in declarations.items() if item["kind"] == "static"}
 
+    from ._package_native_storage import owner_member, read_node
+
+    storage_nodes = {}
     conditional_fields = set()
     for statement, conditions in statements(constructor.body, initial_conditions):
         current_conditions = conditions
         call = statement.value if isinstance(statement, (ast.Expr, ast.Assign, ast.AnnAssign)) else None
         scope, method = operation(call)
+        native_node = read_node(statement, storage_nodes, dimension, lambda value: qualified_kind(value, kind),
+                                lambda node, message: fail(module, node, message))
+        if native_node is not None:
+            if conditions or member_stores[native_node] != 1:
+                fail(module, statement, "Sparse SNode placement requires an unconditional single assignment")
+            continue
         if conditions and method == "constant":
             fail(module, statement, "Definition constants must remain unconditional")
         if method in ("record", "child") and id(call) in record_calls:
@@ -2637,7 +2646,13 @@ def scope_declarations(
                 fail(module, statement, "Resource declaration follows FieldsBuilder finalization")
             placement_node = original_args.get("placement")
             placement = None
-            if placement_node is not None:
+            sparse = storage_nodes.get(owner_member(placement_node))
+            if sparse is not None:
+                if (order is not None or order_policy is not None or layout == "SOA"
+                        or shape_policy or tuple(extent.expression for extent in shape) != sparse["shape"]):
+                    fail(module, call, "Sparse Field shape must retain its native placement dimension relations")
+                group = sparse["group"]
+            elif placement_node is not None:
                 if order is not None or order_policy is not None:
                     fail(module, placement_node, "Explicit placement already determines the Field index order")
                 placement = placements.get(placement_node.id) if isinstance(placement_node, ast.Name) else None
@@ -2709,6 +2724,7 @@ def scope_declarations(
                     ),
                     dimension_sources=sources,
                     dimension_expressions=expressions,
+                    **({"storage_nodes": sparse["chain"]} if sparse else {}),
                     **({"dimension_alias_checks": dict(alias_checks)} if alias_checks else {}),
                     allocation=[statement.lineno, statement.col_offset],
                     scope_allocation=origin(scope),
@@ -2944,6 +2960,13 @@ def scope_declarations(
             for item in members
         ):
             fail(module, constructor, "Declared Dense placement requires a member whenever its branch is active")
+    sparse_guards = {}
+    for item in declarations.values():
+        if item.get("storage_nodes"):
+            sparse_guards.setdefault(item["group"], set()).update(item.get("conditions", ()))
+    for item in declarations.values():
+        if item.get("storage_nodes"):
+            item["storage_flags"] = sorted(sparse_guards[item["group"]])
     for name in conditional_fields:
         group = declarations[name]["group"]
         group_conditions = builders.get(group, {}).get("conditions", initial_conditions)

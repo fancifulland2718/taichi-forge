@@ -210,7 +210,8 @@ def compile_owner_variants(graph, identity, entry, arguments, *, template_args=N
         shape_choices = {name: item for name, item in schema.items() if item.get("shape_policy")}
         dtype_choices = {name: item for name, item in schema.items() if item.get("dtype_policy")}
         source_choices = {name: item for name, item in schema.items() if item.get("source_policy")}
-        fixed = {}
+        storage_flags = {flag: value for item in schema.values() for flag, value in item.get("storage_guards", {}).items()}
+        fixed = dict(storage_flags)
         for item in (*choices.values(), *shape_choices.values(), *dtype_choices.values(), *source_choices.values()):
             for name, value in {
                 **item.get("choice_guards", {}),
@@ -257,6 +258,13 @@ def compile_owner_variants(graph, identity, entry, arguments, *, template_args=N
         )
         dependencies = []
         for code in codes:
+            from ._package_native_storage import selection as storage_selection
+
+            observed_flags = set(storage_selection(schema, environment, code))
+            observed_flags.update(storage_flags.keys() & code.static.keys())
+            for flag in observed_flags:
+                for value in (False, True):
+                    schedule({**selection, tuple(environment._paths[aliases.get(flag, flag)]): value})
             bindings = owner_bindings(environment, schema, code.used)
             dependencies.append((code.used, code.static, bindings))
             # The existing compiler still decides physical code sharing. This
@@ -276,6 +284,10 @@ def compile_owner_variants(graph, identity, entry, arguments, *, template_args=N
         # become exported code or admissible no-op entries. Explore only layout
         # guards actually read before encountering the missing resource.
         dependencies.extend(((), static, {}) for static in rejected)
+        for static in rejected:
+            for flag in storage_flags.keys() & static.keys():
+                for value in (False, True):
+                    schedule({**selection, tuple(environment._paths[aliases.get(flag, flag)]): value})
         for used, static, bindings in dependencies:
             for name, policy in (
                 *((name, item["shape_policy"]) for name, item in shape_choices.items()),

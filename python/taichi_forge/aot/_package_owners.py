@@ -126,6 +126,8 @@ def resolve_owners(sources, imported, owner_schema, fail):
         visit(methods[0], module, {})
         return ordered
 
+    bound_hooks = {}
+
     def constructor_schema(cls, start=0):
         mro = cls.__mro__
         index = next(i for i in range(start, len(mro)) if "__init__" in vars(mro[i]))
@@ -171,6 +173,7 @@ def resolve_owners(sources, imported, owner_schema, fail):
                 replacement = copy.copy(override)
                 replacement._package_construction_conditions = getattr(method, "_package_construction_conditions", {})
                 overrides[method] = (*origin_info[:3], replacement)
+                bound_hooks.setdefault(cls, set()).add((origin, method.name))
         constructor = next((n for n in node.body if isinstance(n, ast.FunctionDef) and n.name == "__init__"), None)
         if constructor is None:
             fail(name, node, "constructor replacement requires an explicit resource contract")
@@ -254,14 +257,16 @@ def resolve_owners(sources, imported, owner_schema, fail):
                     item["value"] = class_constant(cls, key)
                 except (AttributeError, ValueError) as error:
                     fail(name, constructor, f"Definition constant {key!r}: {error}")
-        field_owners = {
-            (item["declaration_module"], item["declaration_owner"])
-            for item in result.values()
-            if item["kind"] == "dense_field"
-        }
-        if len(field_owners) > 1 and any(
-            item["kind"] == "dense_field" and not item.get("group_builder") for item in result.values()
-        ):
+        field_owners, implicit_groups = {}, set()
+        for item in result.values():
+            if item["kind"] != "dense_field":
+                continue
+            group = item.get("group", "fields")
+            owners = field_owners.setdefault(group, set())
+            owners.add((item["declaration_module"], item["declaration_owner"]))
+            if not (item.get("group_builder") or item.get("storage_nodes")):
+                implicit_groups.add(group)
+        if any(len(field_owners[group]) > 1 for group in implicit_groups):
             fail(name, constructor, "Fields allocated by multiple constructors require separate native group contracts")
         # Projection needs the original allocation sites even for a plain
         # resource mixin. This is metadata, not an additional application decorator.
@@ -337,7 +342,8 @@ def resolve_owners(sources, imported, owner_schema, fail):
                     method = next(
                         (m for m in base_node.body if isinstance(m, ast.FunctionDef) and m.name == method_name), None
                     )
-                    if method is not None and getattr(method, "_package_preparation_method", False):
+                    if ((base, method_name) not in bound_hooks.get(cls, ()) and method is not None
+                            and getattr(method, "_package_preparation_method", False)):
                         methods.append((base, origin, base_node, base_kind, method))
             if methods and not ordinary_owner_lookup(cls):
                 fail(name, node, "Preparation inheritance requires ordinary owner lookup")

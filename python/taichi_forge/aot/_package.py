@@ -179,6 +179,7 @@ def _owner_schema(
             if (
                 getattr(function, "_package_preparation_method", False)
                 and declaration["kind"] == "dense_field"
+                and not declaration.get("storage_nodes")
                 and not declaration.get("group_builder", {}).get("context")
             ):
                 _fail(module, function, "Preparation resource allocations require explicit group contexts")
@@ -310,7 +311,12 @@ _SOURCE_RESOURCE_FIELDS = frozenset((
 
 
 def _public_resource(item):
-    return {key: value for key, value in item.items() if key not in _SOURCE_RESOURCE_FIELDS}
+    result = {key: value for key, value in item.items() if key not in _SOURCE_RESOURCE_FIELDS}
+    if item.get("storage_nodes"):
+        result.update(kind="fixed_snode_field", shape_expressions=[
+            item.get("dimension_expressions", {}).get(axis, ("const", axis)) for axis in item["shape"]
+        ])
+    return result
 
 
 def _construction_schema(module, node, constructor, kind, namespace, earlier=None, *, owner_class=None):
@@ -738,6 +744,12 @@ def _host_projection(
         def _allocation(self, node):
             target = node.targets[0] if isinstance(node, ast.Assign) else node.target
             schema = binding_schemas.get(self.owner, {})
+            from ._package_native_storage import projected_assignment
+
+            projected = projected_assignment(node, schema, _PREFIX + "runtime")
+            if projected is not None:
+                self.minimum_version = max(self.minimum_version, 103)
+                return projected
             if (
                 isinstance(target, ast.Attribute)
                 and schema.get(target.attr, {}).get("reference_assignment") == [node.lineno, node.col_offset]
@@ -2393,7 +2405,7 @@ def _export_package(output, declarations, source_root, caps, artifact_format, co
 
                 owner_key = name + "." + class_name
                 for group in sorted(
-                    {item.get("group", "fields") for item in schema.values() if item["kind"] == "dense_field"}
+                    {item.get("group", "fields") for item in schema.values() if item["kind"] == "dense_field" and not item.get("storage_nodes")}
                 ):
                     layout, members, dimensions, _ = _dense_group(environment, owner, group)
                     if any(paths[0] == "schema_nodes" for paths in members.values()):
@@ -2700,6 +2712,7 @@ def _export_package(output, declarations, source_root, caps, artifact_format, co
             try:
                 if "closure_environment" not in definition and any(
                     item.get("owner_alternatives")
+                    or item.get("storage_flags")
                     or item.get("shape_policy")
                     or item.get("dtype_policy")
                     or item.get("source_policy")
@@ -3073,6 +3086,10 @@ def _export_package(output, declarations, source_root, caps, artifact_format, co
                         dependencies=dict(methods=contract["methods"], functions=contract["functions"]),
                         compile_options=compile_options,
                     )
+                    if code.fixed_dependencies:
+                        from ._package_native_storage import entry_storage
+                        entry_manifest["native_storage"] = entry_storage(module, code)
+                        manifest["version"] = max(manifest["version"], 103)
                     from ._resource_effects import package_effects
 
                     entry_manifest["resource_effects"] = package_effects(
@@ -3094,6 +3111,8 @@ def _export_package(output, declarations, source_root, caps, artifact_format, co
                     entry_manifest["admission"] = admission
                 if object_key and getattr(code, "_build_object_key", None):
                     cache.record_object(object_key, code._build_object_key, entry_manifest, module)
+                from ._package_native_storage import selection as storage_selection
+
                 variants.append(
                     dict(
                         selection={
@@ -3105,6 +3124,7 @@ def _export_package(output, declarations, source_root, caps, artifact_format, co
                                 for key in child_bindings
                                 for flag, value in compilation_schema[key].get("choice_guards", {}).items()
                             },
+                            **{key: ("bool", value) for key, value in storage_selection(compilation_schema, environment, code).items()},
                             **{key: value for key, value in code.static.items() if key not in constants},
                             **{
                                 key: ("bool", value)
@@ -3266,6 +3286,9 @@ def _export_package(output, declarations, source_root, caps, artifact_format, co
         sources[source_index] = (name, source_path, relative, None, None, kind, {}, ())
     context_payloads, manifest["host_contexts"] = host_contexts.render()
     payloads.update(context_payloads)
+    from ._package_native_storage import public_groups
+    public_groups(module, manifest)
+
     if not manifest["entries"]:
         raise PackageExportError("Package contains no supported decorated kernels")
     if projection is not None:

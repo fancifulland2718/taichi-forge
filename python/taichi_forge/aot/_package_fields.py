@@ -155,6 +155,7 @@ def construct_fields(
     import taichi_forge as ti
     from ._component import (
         DenseField,
+        FixedSNodeField,
         Dimension,
         Record,
         _ConditionalDenseField,
@@ -422,6 +423,12 @@ def construct_fields(
                     if not 0 < extent <= 2**31 - 1:
                         raise ValueError("Field extents must fit the existing positive i32 dimension contract")
                     concrete.append(extent)
+            if item.get("storage_nodes") and any(
+                item["storage_guards"][flag] != truth for flag, truth in item.get("conditions", {}).items()
+            ):
+                declarations[name] = Record(optional=True)
+                setattr(owner, name, None)
+                continue
             axes = ti.lang.impl.index_nd(len(concrete))
             typed.append((name, item, dtype, concrete, axes))
         # Expected type/rank/extent rejection must not leave an unfinalized
@@ -457,6 +464,7 @@ def construct_fields(
             else:
                 builders[group] = ti.FieldsBuilder()
                 values[group] = {}
+        storage = {}
         for position, (kind, name, item, dtype, concrete, axes) in sorted(events.items()):
             group = item.get("group", "fields")
             if group not in reused:
@@ -487,7 +495,14 @@ def construct_fields(
                 # This is the documented default field(shape=...) placement through
                 # the ordinary builder. Even shape=() uses its empty-axis Dense
                 # node so tensor lanes remain packed rather than split at root.
+                if item.get("storage_nodes") and group not in storage:
+                    from ._package_native_storage import create_nodes
+
+                    storage[group] = create_nodes(builder, item["storage_nodes"],
+                                                  lambda key: read_member(owner, key, schema))
                 parent = (
+                    storage[group][0][item["storage_nodes"][-1]["attribute"]]
+                    if item.get("storage_nodes") else
                     placements[tuple(item["placement"]["declaration"])]
                     if "placement" in item
                     else None if item.get("layout") == "SOA" else ordinary_placement()
@@ -508,6 +523,8 @@ def construct_fields(
             setattr(owner, name, value)
 
             def field_declaration(element, spec):
+                if item.get("storage_nodes"):
+                    return FixedSNodeField(element, tuple(concrete), group)
                 guards = {**item.get("conditions", {}), **item.get("shape_guards", {}), **item.get("dtype_guards", {})}
                 if spec.get("model_tensor"):
                     if guards:
@@ -546,6 +563,12 @@ def construct_fields(
             # Record each successful allocation immediately, including a prefix
             # whose later group or owner construction fails.
             field_trees.append(tree)
+            if group in storage:
+                from ._package_native_storage import register_tree
+
+                item = next(item for item in fields.values() if item.get("group") == group)
+                register_tree(module, builder, item["storage_nodes"], storage[group], witness_scope, group,
+                              item.get("storage_guards", {}), values[group])
             owner._forge_package_field_trees.append(tree)
             if witnesses is not None:
                 witnesses[keys[group]] = values[group], tree
@@ -561,7 +584,7 @@ def construct_fields(
 def field_environment(declarations, schema):
     """Retain the allocation scope of record dimensions, as from_owner does."""
     from dataclasses import replace
-    from ._component import _ModelTensorField, _capture_id
+    from ._component import FixedSNodeField, _ModelTensorField, _capture_id
     from ._package_records import record_environment
 
     environment = record_environment(declarations, schema)
@@ -570,7 +593,11 @@ def field_environment(declarations, schema):
         if item.get("struct_field"):
             for member in item["element"]["members"]:
                 identity = _capture_id((name, member))
+                if identity not in flattened and item.get("storage_nodes"):
+                    continue
                 original = flattened[identity]
+                if isinstance(original, FixedSNodeField):
+                    continue
                 changes = dict(shape=tuple(item["shape"]))
                 if isinstance(original, _ModelTensorField):
                     changes["element_shape"] = tuple(item["element"]["members"][member]["element_shape"])
