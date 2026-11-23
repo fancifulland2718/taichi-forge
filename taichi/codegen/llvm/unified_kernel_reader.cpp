@@ -76,7 +76,10 @@ DataType port_type(llvm::StringRef text) {
 #undef PER_TYPE
   TI_ERROR_IF(element == PrimitiveType::unknown || element == PrimitiveType::gen,
               "Unknown unified scalar type {}", text.str());
-  return shape.empty() ? element : TypeFactory::get_instance().get_tensor_type(shape, element);
+  if (shape.empty()) {
+    return element;
+  }
+  return TypeFactory::get_instance().get_tensor_type(shape, element);
 }
 
 unsigned portable_target_bit(Arch arch) {
