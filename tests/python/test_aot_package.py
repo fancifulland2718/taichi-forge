@@ -32671,7 +32671,7 @@ class Model:
             load_package(runtime, output)
 
 
-@test_utils.test(arch=ti.cuda, offline_cache=False)
+@test_utils.test(arch=[ti.cuda, ti.vulkan], offline_cache=False)
 def test_package_optional_query_helper_preserves_affine_group_dependencies(tmp_path, monkeypatch):
     source = '''
 import taichi_forge as ti
@@ -32685,7 +32685,7 @@ class Leaf:
         scope.values = scope.field(ti.f32, shape=scope.dim('n'), placement=cells)
         scope.padding = scope.vector_field(3, ti.i32, shape=scope.dim('n'), placement=cells)
         self.tree = fields.finalize()
-    @ti.real_func
+    @HELPER
     def sample(self, i: ti.i32) -> ti.f32:
         return self.values[i] * 2.0 + 1.0
 @ti.data_oriented
@@ -32711,6 +32711,9 @@ class Model:
                 value = self.child.sample(i)
             self.out[i] = value
 '''
+    vulkan = ti.lang.impl.current_cfg().arch == ti.vulkan
+    # SPIR-V outlines regular helpers with a whole descriptor operand.
+    source = source.replace('@HELPER', '@ti.func' if vulkan else '@ti.real_func')
     package = _source_package(tmp_path, monkeypatch, source)
     inputs = [np.arange(7, dtype=np.float32) + offset for offset in (3, -5)]
     references = []
@@ -32721,18 +32724,25 @@ class Model:
         model.step()
         references.append(model.out.to_numpy())
     output = tmp_path / 'sdk'
-    manifest = ti.aot.export_package(package, output, artifact_format='bc-library')
+    options = {} if vulkan else {'artifact_format': 'bc-library'}
+    manifest = ti.aot.export_package(package, output, **options)
     entries = [entry for entry in manifest['entries'].values() if entry['definition'].endswith('.Model.step')]
     assert len(entries) == 1
     entry = entries[0]
     capture_index = next(index for index, capture in enumerate(entry['captures'])
                          if capture.get('path') == ['child', 'values'])
     with zipfile.ZipFile(output / 'code.tcm') as archive:
-        metadata = json.loads(archive.read('aot_metadata.json'))
-        assert any(name.startswith('code_units/') for name in archive.namelist())
+        if vulkan:
+            kernels = json.loads(archive.read('metadata.json'))['kernels']
+            affine = {kernel['name']: kernel['runtime_affine_arrays'] for kernel in kernels}
+        else:
+            metadata = json.loads(archive.read('aot_metadata.json'))
+            affine = {item['key']: item['value'] for item in metadata['kernel_runtime_affine_arrays']}
+            assert any(name.startswith('code_units/') for name in archive.namelist())
+    assert [capture_index] in affine[entry['symbol']]
     # The consumer receives projected Host classes; the private helper body is absent.
     assert 'def sample(' not in (output / 'host' / 'model.py').read_text(encoding='utf8')
-    with Runtime('cuda') as runtime, load_package(runtime, output) as code:
+    with Runtime(manifest['target']) as runtime, load_package(runtime, output) as code:
         absent = code.host.Model(7)
         absent.step()
         np.testing.assert_array_equal(absent.out.to_numpy(), -1)
@@ -32757,8 +32767,6 @@ class Model:
         model.bind(None)
         model.step()
         np.testing.assert_array_equal(model.out.to_numpy(), -1)
-    affine = dict((item['key'], item['value']) for item in metadata['kernel_runtime_affine_arrays'])
-    assert [capture_index] in affine[entry['symbol']]
 
 
 @test_utils.test(arch=[ti.cpu, ti.cuda], offline_cache=False)

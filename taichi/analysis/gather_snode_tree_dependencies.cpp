@@ -42,8 +42,9 @@ class SNodeTreeDependencyCollector : public BasicStmtVisitor {
   explicit SNodeTreeDependencyCollector(bool include_source = false)
       : include_source_(include_source) {
   }
-  void collect_array_layouts() {
+  void collect_array_layouts(bool spirv_function_abi) {
     collect_array_layouts_ = true;
+    spirv_function_abi_ = spirv_function_abi;
   }
 
   void visit(FuncCallStmt *stmt) override {
@@ -281,17 +282,42 @@ class SNodeTreeDependencyCollector : public BasicStmtVisitor {
       return;
     }
     std::map<std::vector<int>, Stmt *> leaves;
+    std::map<std::vector<int>, std::vector<int>> origins;
     std::size_t offset = 0;
-    if ((!call->func->args_type && !call->args.empty()) ||
-        (call->func->args_type &&
-         !argument_leaves(call->func->args_type, call->args, offset, {}, leaves)) ||
-        offset != call->args.size()) {
+    if (auto *types = call->func->args_type) {
+      const auto &parameters = call->func->parameter_list;
+      if (spirv_function_abi_ && parameters.size() != types->elements().size()) {
+        arrays_.known = false;
+        return;
+      }
+      for (int i = 0; i < types->elements().size(); ++i) {
+        if (spirv_function_abi_ && parameters[i].ptype == ParameterType::kNdarray) {
+          // The SPIR-V call forwards the whole descriptor as one argument.
+          auto *source = offset < call->args.size()
+                             ? call->args[offset++]->cast<ArgLoadStmt>()
+                             : nullptr;
+          if (!source || !source->is_ptr || source->create_load ||
+              !source->ret_type.is_pointer() ||
+              (source->ret_type.ptr_removed() != parameters[i].get_dtype() &&
+               (const Type *)source->ret_type.ptr_removed() !=
+                   ndarray_descriptor_before_scalarization(parameters[i]))) {
+            arrays_.known = false;
+            return;
+          }
+          origins.emplace(std::vector<int>{i}, source->arg_id);
+        } else if (!argument_leaves(types->elements()[i].type, call->args,
+                                    offset, {i}, leaves)) {
+          arrays_.known = false;
+          return;
+        }
+      }
+    }
+    if (offset != call->args.size()) {
       arrays_.known = false;
       return;
     }
-    std::map<std::vector<int>, std::vector<int>> origins;
     for (const auto &[id, parameter] : call->func->nested_parameters) {
-      if (parameter.ptype != ParameterType::kNdarray)
+      if (parameter.ptype != ParameterType::kNdarray || origins.count(id))
         continue;
       const auto leaf = [&](std::vector<int> suffix) -> Stmt * {
         auto path = id;
@@ -388,6 +414,7 @@ class SNodeTreeDependencyCollector : public BasicStmtVisitor {
   bool may_trigger_hash_overflow_{false};
   std::uint32_t runtime_state_{runtime_state_known};
   bool collect_array_layouts_{false};
+  bool spirv_function_abi_{false};
   ArrayLayouts arrays_;
   std::unordered_map<Function *, FunctionArrayLayouts> function_array_layouts_;
 };
@@ -409,9 +436,10 @@ std::vector<int> gather_snode_tree_dependencies(const Kernel &kernel) {
   return gather_snode_tree_dependencies(*kernel.ir);
 }
 
-KernelRuntimeDependencies gather_kernel_runtime_dependencies(IRNode &ir) {
+KernelRuntimeDependencies gather_kernel_runtime_dependencies(
+    IRNode &ir, bool spirv_function_abi) {
   SNodeTreeDependencyCollector collector;
-  collector.collect_array_layouts();
+  collector.collect_array_layouts(spirv_function_abi);
   ir.accept(&collector);
   return {collector.result(), collector.relocation_structures(),
           collector.may_trigger_hash_overflow(), collector.runtime_state(),

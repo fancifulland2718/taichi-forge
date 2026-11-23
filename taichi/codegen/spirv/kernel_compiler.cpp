@@ -139,7 +139,8 @@ KernelCompiler::CKDPtr KernelCompiler::compile(
                 internal_data.src.spirv_src);
   }
   internal_data.metadata.num_snode_trees = config_.compiled_struct_data->size();
-  const auto dependencies = irpass::analysis::gather_kernel_runtime_dependencies(chi_ir);
+  const auto dependencies = irpass::analysis::gather_kernel_runtime_dependencies(
+      chi_ir, /*spirv_function_abi=*/true);
   internal_data.metadata.used_snode_tree_ids = dependencies.tree_ids;
   internal_data.metadata.kernel_attribs.runtime_affine_arrays = dependencies.runtime_affine_arrays;
   for (auto &code : internal_data.src.spirv_src)

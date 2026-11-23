@@ -5,6 +5,21 @@
 
 namespace taichi::lang::irpass::analysis {
 
+inline const Type *ndarray_descriptor_before_scalarization(
+    const CallableBase::Parameter &parameter) {
+  auto type = parameter.get_dtype();
+  // Array scalarization retains the original tensor element type in ArgLoad.
+  if (parameter.element_shape.empty())
+    return type;
+  auto *element = type->as<StructType>()
+                      ->get_element_type({TypeFactory::DATA_PTR_POS_IN_NDARRAY})
+                      ->as<PointerType>()->get_pointee_type();
+  auto &factory = TypeFactory::get_instance();
+  return factory.get_ndarray_struct_type(
+      factory.get_tensor_type(parameter.element_shape, element),
+      parameter.total_dim - parameter.element_shape.size(), parameter.needs_grad);
+}
+
 // A real-function call expands each array into its shape, strides, affine
 // flag and data/gradient addresses. Recover a single descriptor only when all
 // of those fields provably belong to the same source argument.
@@ -18,20 +33,8 @@ bool forwarded_ndarray(const CallableBase::Parameter &parameter, Leaf leaf,
   if (!pointer || pointer->is_grad)
     return false;
   const auto &origin = pointer->arg_id;
-  auto descriptor_type = parameter.get_dtype();
-  // Callable stores a scalar data pointer after ndarray scalarization, but
-  // the caller's descriptor ArgLoad keeps the original tensor element type.
-  // Both are the same ABI; preserve the exact rank/element/gradient layout.
-  const Type *tensor_descriptor_type = descriptor_type;
-  if (!parameter.element_shape.empty()) {
-    auto *element_type = descriptor_type->as<StructType>()
-                             ->get_element_type({TypeFactory::DATA_PTR_POS_IN_NDARRAY})
-                             ->as<PointerType>()->get_pointee_type();
-    auto &factory = TypeFactory::get_instance();
-    tensor_descriptor_type = factory.get_ndarray_struct_type(
-        factory.get_tensor_type(parameter.element_shape, element_type), ndim,
-        parameter.needs_grad);
-  }
+  const auto scalarized_type = parameter.get_dtype();
+  const auto *tensor_type = ndarray_descriptor_before_scalarization(parameter);
   bool valid = true;
   for (int axis = 0; axis < TypeFactory::ndarray_shape_member_count(ndim); ++axis) {
     Stmt *value = leaf({TypeFactory::SHAPE_POS_IN_NDARRAY, axis});
@@ -50,8 +53,8 @@ bool forwarded_ndarray(const CallableBase::Parameter &parameter, Leaf leaf,
     auto *source = member ? member->src->cast<ArgLoadStmt>() : nullptr;
     valid &= member && !member->is_ptr && source && source->is_ptr &&
              !source->create_load && source->arg_id == origin &&
-             (source->ret_type.ptr_removed() == descriptor_type ||
-              (const Type *)source->ret_type.ptr_removed() == tensor_descriptor_type) &&
+             (source->ret_type.ptr_removed() == scalarized_type ||
+              (const Type *)source->ret_type.ptr_removed() == tensor_type) &&
              member->index == std::vector<int>{TypeFactory::SHAPE_POS_IN_NDARRAY, field};
   }
   gradient = nullptr;

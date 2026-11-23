@@ -23,7 +23,8 @@ struct KernelRuntimeDependencies {
   std::uint32_t runtime_state{runtime_state_known};
   std::vector<std::vector<int>> runtime_affine_arrays;
 };
-KernelRuntimeDependencies gather_kernel_runtime_dependencies(IRNode &ir);
+KernelRuntimeDependencies gather_kernel_runtime_dependencies(
+    IRNode &ir, bool spirv_function_abi = false);
 
 // Returns sorted, unique SNodeTree ids referenced by the specialized kernel
 // IR. Both frontend and lowered statement forms are covered so graph
