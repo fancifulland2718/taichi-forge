@@ -27,6 +27,36 @@ def fixture_spec(tmp_path, files, selected, aliases=None):
     return spec
 
 
+@pytest.mark.parametrize("entry, expects_solver", [
+    ("from family.packet import Packet", False),
+    ("from family import Solver", True),
+    ("import family.packet\nSolver = family.Solver", True),
+    ("from family.packet import Packet\nfrom later import Solver", True),
+])
+def test_lazy_package_exports_follow_the_imported_interface(tmp_path, audit, entry, expects_solver):
+    files = {
+        "app.py": entry,
+        "family/__init__.py": (
+            "from .eager import default\n"
+            "def __getattr__(name):\n"
+            "    if name == 'Solver':\n"
+            "        from .solver import Solver\n"
+            "        return Solver\n"
+            "    raise AttributeError(name)\n"
+        ),
+        "family/eager.py": "default = 0",
+        "family/packet.py": "class Packet: pass",
+        "family/solver.py": "class Solver: pass",
+        "later.py": "from nested import Solver",
+        "nested.py": "from family import Solver",
+    }
+    fixture_spec(tmp_path, files, {"app": "app.py"})
+    available = audit["source_inventory"](tmp_path / "src")
+    visited = audit["audit_source_imports"](available, roots=["app"], include_type_checking=False)["visited"]
+    assert {"family", "family.eager"} <= set(visited)
+    assert ("family.solver" in visited) == expects_solver
+
+
 def test_audit_follows_lazy_imports_through_selected_modules_without_execution(tmp_path, audit):
     spec = fixture_spec(
         tmp_path,

@@ -116,6 +116,29 @@ def _runtime_import_nodes(tree):
         pending.extend(reversed(list(ast.iter_child_nodes(node))))
 
 
+def _lazy_facade_body(tree):
+    """A passive package's PEP 562 exports run on explicit member access."""
+    getter = None
+    for statement in tree.body:
+        if isinstance(statement, (ast.Import, ast.ImportFrom)):
+            continue
+        if isinstance(statement, ast.Expr) and isinstance(statement.value, ast.Constant):
+            continue
+        if isinstance(statement, ast.Assign) and all(isinstance(t, ast.Name) for t in statement.targets):
+            try:
+                ast.literal_eval(statement.value)
+            except (ValueError, TypeError):
+                return set()
+            continue
+        if (isinstance(statement, ast.FunctionDef) and not statement.decorator_list
+                and statement.name in ("__dir__", "__getattr__")):
+            if statement.name == "__getattr__":
+                getter = statement
+            continue
+        return set()
+    return {node for statement in getter.body for node in ast.walk(statement)} if getter else set()
+
+
 def audit_source_imports(available, *, roots=(), selected=None, aliases=None, include_type_checking=True):
     """Shared static dependency walk for audits and definition package exports."""
     selected, aliases = selected or {}, aliases or {}
@@ -141,6 +164,7 @@ def audit_source_imports(available, *, roots=(), selected=None, aliases=None, in
         if target not in available:
             raise ValueError(f"Audit root is not an inventoried local module: {name}")
     pending = deque((name, None, 0, "root") for name in roots)
+    lazy_facades = {}
     seen, edges, external, unresolved, dynamic, wildcard = set(), [], set(), [], [], []
     missing = {}
     while pending:
@@ -157,6 +181,8 @@ def audit_source_imports(available, *, roots=(), selected=None, aliases=None, in
                 external.add(name)
             continue
         edges.append(dict(module=name, requested=requested, importer=importer, line=line, kind=kind))
+        if kind != "package_initializer" and name in lazy_facades:
+            pending.extend(lazy_facades.pop(name))
         if name in seen:
             continue
         seen.add(name)
@@ -171,6 +197,15 @@ def audit_source_imports(available, *, roots=(), selected=None, aliases=None, in
             parent = parent.rpartition(".")[0]
         package = name if item["package"] else name.rpartition(".")[0]
         tree = ast.parse(data, filename=item["source"])
+        # Loading p.child initializes p, but does not call p.__getattr__.
+        # A later explicit import of p must include those exports, even if
+        # p was first visited only as a parent. Keep eager imports and the
+        # broad advisory inventory intact.
+        deferred = set()
+        if not include_type_checking and kind == "package_initializer" and item["package"]:
+            deferred = _lazy_facade_body(tree)
+            if deferred:
+                lazy_facades[name] = []
         # A local module named typing is not the stdlib contract. Advisory
         # audits retain their original broad walk unless explicitly requested.
         nodes = tuple(ast.walk(tree)) if include_type_checking or 'typing' in local_roots else tuple(_runtime_import_nodes(tree))
@@ -185,8 +220,17 @@ def audit_source_imports(available, *, roots=(), selected=None, aliases=None, in
                     if a.name == "importlib" or (a.name.startswith("importlib.") and a.asname is None)
                 )
         for node in nodes:
+            queue = lazy_facades[name] if node in deferred else pending
             if isinstance(node, ast.Import):
-                pending.extend((entry.name, name, node.lineno, "import") for entry in node.names)
+                for entry in node.names:
+                    queue.append((entry.name, name, node.lineno, "import"))
+                    if not include_type_checking and not entry.asname and "." in entry.name:
+                        # This spelling binds the package itself to a name.
+                        parent = entry.name.rpartition(".")[0]
+                        while parent:
+                            if parent in available:
+                                queue.append((parent, name, node.lineno, "import"))
+                            parent = parent.rpartition(".")[0]
             elif isinstance(node, ast.ImportFrom):
                 base = (
                     importlib.util.resolve_name("." * node.level + (node.module or ""), package)
@@ -195,14 +239,14 @@ def audit_source_imports(available, *, roots=(), selected=None, aliases=None, in
                 )
                 if not base or base == "__future__":
                     continue
-                pending.append((base, name, node.lineno, "from"))
+                queue.append((base, name, node.lineno, "from"))
                 for entry in node.names:
                     if entry.name == "*":
                         wildcard.append(dict(module=name, line=node.lineno, imported=base))
                     else:
                         child = base + "." + entry.name
                         if resolve(child)[0] in available:
-                            pending.append((child, name, node.lineno, "from_member"))
+                            queue.append((child, name, node.lineno, "from_member"))
             elif isinstance(node, ast.Call):
                 called = node.func
                 if (isinstance(called, ast.Name) and called.id in dynamic_names) or (
@@ -229,7 +273,7 @@ def audit_source_imports(available, *, roots=(), selected=None, aliases=None, in
                                 target = importlib.util.resolve_name(target, anchor.value)
                             else:
                                 continue
-                        pending.append((target, name, node.lineno, "literal_dynamic"))
+                        queue.append((target, name, node.lineno, "literal_dynamic"))
     return dict(
         version=1,
         coverage=("Static syntax only; optional branches may over-report and dynamic imports may be missed."
