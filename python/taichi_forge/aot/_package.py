@@ -2380,7 +2380,8 @@ def _export_package(output, declarations, source_root, caps, artifact_format, co
                         if changes:
                             manifest.setdefault("device_resources", {}).setdefault(target, []).extend(changes)
                 if item.get("owner_alternatives"):
-                    manifest["version"] = max(69, manifest["version"])
+                    version = 101 if item.get("prepared_type_guards") else 69
+                    manifest["version"] = max(version, manifest["version"])
                     manifest["owners"][name + "." + class_name][attribute]["owner_alternatives"] = [
                         dict(owner_type=choice["owner_type"], conditions=choice.get("conditions", {}))
                         for choice in item["owner_alternatives"]

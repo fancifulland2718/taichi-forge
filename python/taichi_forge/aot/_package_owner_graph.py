@@ -934,16 +934,15 @@ class OwnerGraph:
                     _ConditionalOwnerRecord(item["conditions"].items())
                     if item.get("conditions") else Record()
                 )
-                if item["kind"] == "owner_input":
-                    declarations[attribute] = record
-                    continue
-                value = child_values[attribute]
                 declarations[attribute] = (
                     _ChoiceRecord(item["choice_guards"].items(), optional=bool(item.get("conditions")),
                                   conditions=item.get("conditions", {}).items())
                     if item.get("owner_alternatives")
                     else record
                 )
+                if item["kind"] == "owner_input":
+                    continue
+                value = child_values[attribute]
             elif item["kind"] == "static":
                 domain = tuple(producer_static(read_static_key(key)) for key in item["choices"])
                 declarations[attribute] = StaticValue(choices=domain, kernel_only=item["kernel_only"])

@@ -650,19 +650,24 @@ class _ModuleBinding:
 
         # Validate before publication so a rejected rebind cannot replace a
         # valid instance's reference. Pending calls retain their own leases.
+        expected = declaration["owner_type"]
+        guards = declaration.get("prepared_type_guards", {})
+        actual = owner_type(value)
         if (getattr(value, "_forge_package_owner", None) is not self.package
-                or owner_type(value) != declaration["owner_type"]
+                or actual != expected and actual not in guards
                 or "reference_path" in declaration
                 and value is not path_value(scope._root, declaration["reference_path"])):
             raise ValueError("Owner input differs from its declared source type or identity")
 
         setattr(scope._root, name, value)
+        for kind, flag in guards.items():
+            setattr(scope._root, flag, actual == kind)
         check_owner_bindings(
             scope._root,
             (
                 dict(
                     path=[name],
-                    owner_type=declaration["owner_type"],
+                    owner_type=actual,
                     **({"reference_path": declaration["reference_path"]} if "reference_path" in declaration else {}),
                 ),
             ),
@@ -2070,6 +2075,7 @@ class LoadedPackage:
                 97,
                 98,
                 100,
+                101,
             )
             or manifest.get("kind") != "forge_definition_package_prototype"
         ):
@@ -2171,6 +2177,9 @@ class LoadedPackage:
                 member.get("kind") == "owner_input" and member.get("binding_phase") == "preparation"
                 for owner in manifest["owners"].values() for member in owner.values()):
             raise ValueError("Prepared owner inputs require definition package version 85")
+        if manifest["version"] < 101 and any(
+                "prepared_type_guards" in member for owner in manifest["owners"].values() for member in owner.values()):
+            raise ValueError("Prepared owner type choices require definition package version 101")
         if manifest["version"] < 81 and any(
             "prepare_static" in capture
             for entry in headers.values() for capture in entry.get("captures", ())

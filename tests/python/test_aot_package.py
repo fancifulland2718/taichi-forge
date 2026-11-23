@@ -10426,6 +10426,57 @@ print('PREPARED_OWNER_SOURCE_FREE_OK')
         load_package(runtime, tmp_path / 'sdk')
 
 
+@test_utils.test(arch=ti.cpu, offline_cache=False)
+def test_package_prepared_owner_union_uses_current_implementation(tmp_path, monkeypatch):
+    source = """
+import taichi_forge as ti
+@ti.data_oriented
+class Positive:
+    def __init__(self, n):
+        s = ti.experimental.ResourceScope(self)
+        s.state = s.field(ti.i32, shape=())
+        self.state[None] = n
+    @ti.func
+    def answer(self):
+        return self.state[None]
+@ti.data_oriented
+class Negative:
+    def __init__(self, n):
+        s = ti.experimental.ResourceScope(self)
+        s.state = s.field(ti.i32, shape=())
+        self.state[None] = n
+    @ti.func
+    def answer(self):
+        return -self.state[None]
+@ti.data_oriented
+class Model:
+    def __init__(self, n):
+        self.bind(Positive(n))
+    def bind(self, selected: Positive | Negative):
+        s = ti.experimental.ResourceScope(self)
+        s.owner_reference("selected", selected)
+    @ti.kernel
+    def read(self) -> ti.i32:
+        return self.selected.answer()
+"""
+    package = _source_package(tmp_path, monkeypatch, source, initializer="from .model import Positive, Negative, Model\n")
+    manifest = ti.aot.export_package(package, tmp_path / "sdk")
+    with Runtime(manifest["target"]) as runtime, load_package(runtime, tmp_path / "sdk") as code:
+        model = code.host.Model(4)
+        assert model.read() == 4
+        model.bind(code.host.Negative(6))
+        assert model.read() == -6
+        with pytest.raises(ValueError, match="source type"):
+            model.bind(model)
+        assert model.read() == -6
+        model.bind(code.host.Positive(9))
+        assert model.read() == 9
+    manifest["version"] = 100
+    (tmp_path / "sdk/package.json").write_text(json.dumps(manifest), encoding="utf8")
+    with Runtime(manifest["target"]) as runtime, pytest.raises(ValueError, match="version 101"):
+        load_package(runtime, tmp_path / "sdk")
+
+
 @pytest.mark.parametrize('case', ['untyped', 'reassigned', 'missing_binding'])
 @test_utils.test(arch=ti.cpu, offline_cache=False)
 def test_package_prepared_owner_requires_proven_type_and_binding(tmp_path, monkeypatch, case):

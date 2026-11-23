@@ -1255,6 +1255,7 @@ def scope_declarations(
 
     typed_owner_parameters = set()
     typed_owner_types = {}
+    prepared_owner_domains = {}
     from ._package_input_families import owner_annotation_types
 
     for parameter in parameters:
@@ -1264,6 +1265,10 @@ def scope_declarations(
             if len(choices) == 1:
                 declared = choices[0]
                 typed_owner_types[parameter.arg] = declared.__module__ + "." + declared.__qualname__
+            elif getattr(constructor, "_package_preparation_method", False):
+                prepared_owner_domains[parameter.arg] = tuple(
+                    cls.__module__ + "." + cls.__qualname__ for cls in choices
+                )
     defaults = (
         dict(
             zip(
@@ -1995,9 +2000,6 @@ def scope_declarations(
             from ._package_inputs import default_owner_call
 
             parameter = call.args[1].id if len(call.args) == 2 and isinstance(call.args[1], ast.Name) else None
-            if (getattr(constructor, "_package_preparation_method", False)
-                    and parameter in typed_owner_parameters and parameter not in typed_owner_types):
-                fail(module, call, "Prepared owner references require one declared source type")
             reference = call.args[1] if len(call.args) == 2 else None
             reference_path = []
             while isinstance(reference, ast.Attribute):
@@ -2035,15 +2037,32 @@ def scope_declarations(
                 )
             ):
                 fail(module, call, "Owner input requires a named constructor parameter or declared owner path")
+            choices = prepared_owner_domains.get(parameter, ())
+            choice_contract = {}
+            if choices:
+                name = call.args[0].value
+                guards = {}
+                alternatives = []
+                for index, owner_type in enumerate(choices):
+                    active = {flag: False for flag in guards.values()}
+                    if index < len(choices) - 1:
+                        flag = f"_forge_package_owner_type_{name}_{index}"
+                        add(flag, dict(kind="static", choices=[("bool", False), ("bool", True)],
+                                       kernel_only=False, prepared_presence=True, scope_allocation=origin(scope)), call)
+                        guards[owner_type] = flag
+                        active[flag] = True
+                    alternatives.append(dict(kind="owner_input", owner_type=owner_type, conditions=active))
+                choice_contract = dict(owner_type=choices[-1], owner_alternatives=alternatives,
+                                       prepared_type_guards=guards, input_method=constructor.name)
             add(
                 call.args[0].value,
                 dict(
                     kind="owner_input",
-                    **({"reference_path": reference_path} if declared_path else (
+                    **(choice_contract or ({"reference_path": reference_path} if declared_path else (
                         {"owner_type": typed_owner_types[parameter], "input_method": constructor.name}
                         if getattr(constructor, "_package_preparation_method", False)
                         and parameter in typed_owner_types else {"input_parameter": parameter}
-                    )),
+                    ))),
                     **({"conditions": dict(conditions)} if conditions else {}),
                     reference_declaration=[call.lineno, call.col_offset],
                     scope_allocation=origin(scope),
@@ -2058,6 +2077,7 @@ def scope_declarations(
 
             keywords = {keyword.arg: keyword.value for keyword in call.keywords}
             if "dtype" in keywords or "shape" in keywords:
+                mode = keywords.get("external", keywords.get("source_scope"))
                 if (
                     len(call.args) != 2
                     or not isinstance(call.args[0], ast.Constant)
