@@ -89,6 +89,8 @@ build("build/unified-v2")
 
 x64 目前支持组内分支和阶段之间的标量活值。多 lane 的执行屏障须位于工作组循环体的顶层，嵌套循环内的协作和设备专用子组指令仍有各自的支持范围。模型宽度可按实例改变，数组内容按调用读取。
 
+普通 x64 JIT 核在并行范围及其内联的 `@ti.func` 中，也用同一套逻辑工作组实现定长 `SharedArray` 和组内操作。JIT 在编译循环时确定组宽，统一包可在 prepare 时绑定已声明的模型宽度。
+
 ### 检查应用声明
 
 开发时可选调用 `ti.aot.check_package(module, arch="cuda", source_root="path/to/src")`。

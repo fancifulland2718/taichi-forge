@@ -797,7 +797,7 @@ class Exchange:
                     data.write(before.tobytes())
                     model.run(data)
                     np.testing.assert_array_equal(np.frombuffer(data.read(), np.int32), expected)
-                    if arch == ti.cuda and width == 16 and salt == 7:
+                    if arch == ti.cpu or (arch == ti.cuda and width == 16 and salt == 7):
                         jit_data = before.copy()
                         root.Exchange(width).run(jit_data)
                         np.testing.assert_array_equal(jit_data, expected)

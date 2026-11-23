@@ -8,9 +8,22 @@ def arch_uses_spv(arch):
     return arch == _ti_core.vulkan or arch == _ti_core.metal or arch == _ti_core.opengl or arch == _ti_core.dx11
 
 
+def _check_cpu_workgroup_scope(arch):
+    if arch in (_ti_core.x64, _ti_core.arm64) and isinstance(impl.get_runtime().compiling_callable, _ti_core.Function):
+        if not impl.inside_portable_capture():
+            raise ValueError("CPU workgroup operations require the enclosing kernel range. Use an inlined @ti.func.")
+
+
+def _uses_workgroup_ir(arch):
+    if arch in (_ti_core.x64, _ti_core.arm64):
+        _check_cpu_workgroup_scope(arch)
+        return True
+    return arch_uses_spv(arch) or impl.inside_portable_capture()
+
+
 def sync():
     arch = impl.get_runtime().prog.config().arch
-    if impl.inside_portable_capture() or arch_uses_spv(arch):
+    if _uses_workgroup_ir(arch):
         return impl.call_internal("workgroupBarrier", with_runtime_context=False)
     if arch == _ti_core.cuda or arch == _ti_core.amdgpu:
         return impl.call_internal("block_barrier", with_runtime_context=False)
@@ -40,7 +53,7 @@ def sync_count_nonzero(predicate):
 
 def mem_sync():
     arch = impl.get_runtime().prog.config().arch
-    if impl.inside_portable_capture() or arch_uses_spv(arch):
+    if _uses_workgroup_ir(arch):
         return impl.call_internal("workgroupMemoryBarrier", with_runtime_context=False)
     if arch == _ti_core.cuda:
         return impl.call_internal("block_barrier", with_runtime_context=False)
@@ -49,14 +62,14 @@ def mem_sync():
 
 def thread_idx():
     arch = impl.get_runtime().prog.config().arch
-    if arch == _ti_core.cuda or arch_uses_spv(arch) or impl.inside_portable_capture():
+    if arch == _ti_core.cuda or _uses_workgroup_ir(arch):
         return impl.call_internal("localInvocationId", with_runtime_context=False)
     raise ValueError(f"ti.block.thread_idx is not supported for arch {arch}")
 
 
 def global_thread_idx():
     arch = impl.get_runtime().prog.config().arch
-    if impl.inside_portable_capture() or arch_uses_spv(arch):
+    if _uses_workgroup_ir(arch):
         return impl.call_internal("vkGlobalThreadIdx", with_runtime_context=False)
     if arch == _ti_core.cuda or arch == _ti_core.amdgpu:
         return impl.get_runtime().compiling_callable.ast_builder().insert_thread_idx_expr()
@@ -76,6 +89,7 @@ class SharedArray:
     _is_taichi_class = True
 
     def __init__(self, shape, dtype):
+        _check_cpu_workgroup_scope(impl.get_runtime().prog.config().arch)
         if isinstance(shape, impl.Expr):
             shape = (shape,)
         self._model_allocation = None

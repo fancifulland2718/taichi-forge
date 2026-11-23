@@ -13,6 +13,7 @@
 #include "taichi/program/extension.h"
 #include "taichi/program/function.h"
 #include "taichi/program/kernel.h"
+#include "taichi/transforms/cpu_workgroup.h"
 #include "taichi/transforms/make_external_shared_staged.h"
 #include "taichi/util/lang_util.h"
 
@@ -713,10 +714,10 @@ void compile_to_offloads(IRNode *ir,
   validate_task_launch_policy_body(ir, task_launch_policy);
   CheckLoopParameterCopies::run(ir, parameter_copies);
 
-  {
+  auto cpu_workgroups = [&] {
     TI_COMPILE_PROFILER("cpp.ir.validate_shared_array_scope");
-    irpass::validate_shared_array_scope(ir);
-  }
+    return irpass::validate_shared_array_scope(ir, config.arch);
+  }();
 
   {
     TI_COMPILE_PROFILER("cpp.ir.eliminate_immutable_local_vars");
@@ -727,6 +728,11 @@ void compile_to_offloads(IRNode *ir,
   {
     TI_COMPILE_PROFILER("cpp.ir.type_check.initial");
     irpass::type_check(ir, config);
+    if (!cpu_workgroups.empty()) {
+      for (auto *range : cpu_workgroups)
+        materialize_cpu_workgroup(*range, config, false);
+      irpass::type_check(ir, config);
+    }
   }
   print("Typechecked");
   irpass::analysis::verify(ir);

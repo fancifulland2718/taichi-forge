@@ -162,7 +162,7 @@ void differentiation_validation_check(IRNode *root,
 bool determine_ad_stack_size(IRNode *root, const CompileConfig &config);
 bool constant_fold(IRNode *root);
 void associate_continue_scope(IRNode *root, const CompileConfig &config);
-void validate_shared_array_scope(IRNode *root);
+std::vector<RangeForStmt *> validate_shared_array_scope(IRNode *root, Arch arch);
 void offload(IRNode *root, const CompileConfig &config);
 bool transform_statements(
     IRNode *root,

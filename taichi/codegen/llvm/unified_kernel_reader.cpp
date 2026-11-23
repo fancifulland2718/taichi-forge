@@ -1,5 +1,5 @@
 #include "taichi/codegen/llvm/unified_kernel_reader.h"
-#include "taichi/codegen/llvm/unified_cpu_workgroup.h"
+#include "taichi/transforms/cpu_workgroup.h"
 
 #include <thread>
 
@@ -370,7 +370,7 @@ class KernelReader {
       block_order_[bb] = order++;
     region(&function.getEntryBlock(), nullptr, nullptr, *kernel.ir->as<Block>());
     for (auto *range : cpu_workgroups_) {
-      if (!materialize_cpu_workgroup(*range, kernel.program->compile_config(), needs_bound_device != nullptr))
+      if (!irpass::materialize_cpu_workgroup(*range, kernel.program->compile_config(), needs_bound_device != nullptr))
         *needs_bound_device = true;
     }
   }

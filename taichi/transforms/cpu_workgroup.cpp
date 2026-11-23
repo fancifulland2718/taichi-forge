@@ -1,9 +1,9 @@
-#include "taichi/codegen/llvm/unified_cpu_workgroup.h"
+#include "taichi/transforms/cpu_workgroup.h"
 
 #include "taichi/ir/statements.h"
 #include "taichi/ir/transforms.h"
 
-namespace taichi::lang::LLVM {
+namespace taichi::lang::irpass {
 namespace {
 
 bool builtin(Stmt *stmt, const char *name) {
@@ -204,6 +204,9 @@ class GroupPhases {
         local_addresses_.insert(result);
     } else {
       auto type = d.value->ret_type;
+      const bool private_local = d.value->is<AllocaStmt>();
+      if (private_local)
+        type = type.ptr_removed();
       TI_ERROR_IF(
           type.is_pointer() || !type->is<PrimitiveType>(),
           "Unsupported CPU workgroup value across an execution barrier: {}",
@@ -213,11 +216,17 @@ class GroupPhases {
         storage = group_.insert(
             Stmt::make<AllocaStmt>(std::vector<int>{width_}, type), 0);
         auto *ptr = d.phase->push_back<MatrixPtrStmt>(storage, d.lane);
-        d.phase->push_back<LocalStoreStmt>(ptr, d.value);
+        // A mutable lane-local needs its final value from the first phase.
+        // Later phases read and write the same lane's slot.
+        auto *value = private_local ? d.phase->push_back<LocalLoadStmt>(d.value)
+                                    : d.value;
+        d.phase->push_back<LocalStoreStmt>(ptr, value);
       }
-      result = here.push_back<LocalLoadStmt>(
-          here.push_back<MatrixPtrStmt>(storage, lane_));
-      result->ret_type = type;
+      result = here.push_back<MatrixPtrStmt>(storage, lane_);
+      if (!private_local) {
+        result = here.push_back<LocalLoadStmt>(result);
+        result->ret_type = type;
+      }
     }
     return restored_[key] = result;
   }
@@ -317,4 +326,4 @@ bool materialize_cpu_workgroup(RangeForStmt &range,
   phases.emit(std::move(statements));
   return true;
 }
-}  // namespace taichi::lang::LLVM
+}  // namespace taichi::lang::irpass

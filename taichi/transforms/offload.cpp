@@ -26,6 +26,18 @@ class ValidateSharedArrayScope : public BasicStmtVisitor {
  private:
   using BasicStmtVisitor::visit;
   bool qualify_;
+  bool collect_cpu_groups_;
+  std::vector<RangeForStmt *> cpu_groups_;
+
+  void note_cpu_group(Stmt *stmt) {
+    auto *owner = stmt;
+    while (auto *parent = owner->parent->parent_stmt())
+      owner = parent;
+    auto *range = owner->cast<RangeForStmt>();
+    TI_ERROR_IF(!range, "CPU workgroup operation requires a parallel range");
+    if (cpu_groups_.empty() || cpu_groups_.back() != range)
+      cpu_groups_.push_back(range);
+  }
 
   static bool is_inside_parallel_range_for(const Stmt *stmt) {
     for (auto block = stmt->parent; block != nullptr;
@@ -41,16 +53,32 @@ class ValidateSharedArrayScope : public BasicStmtVisitor {
   }
 
  public:
-  explicit ValidateSharedArrayScope(bool qualify) : qualify_(qualify) {}
+  ValidateSharedArrayScope(bool qualify, bool collect_cpu_groups)
+      : qualify_(qualify), collect_cpu_groups_(collect_cpu_groups) {}
   void visit(AllocaStmt *stmt) override {
-    if (stmt->is_shared && !is_inside_parallel_range_for(stmt)) {
+    if (!stmt->is_shared)
+      return;
+    if (!is_inside_parallel_range_for(stmt)) {
       ErrorEmitter(TaichiSyntaxError(), stmt, kSharedArrayScopeError);
     }
+    if (collect_cpu_groups_)
+      note_cpu_group(stmt);
+  }
+
+  void visit(InternalFuncStmt *stmt) override {
+    if (collect_cpu_groups_ &&
+        (stmt->func_name == "localInvocationId" ||
+         stmt->func_name == "vkGlobalThreadIdx" ||
+         stmt->func_name == "workgroupBarrier" ||
+         stmt->func_name == "workgroupMemoryBarrier"))
+      note_cpu_group(stmt);
   }
 
   void visit(DynamicSharedPtrStmt *stmt) override {
     if (!is_inside_parallel_range_for(stmt))
       ErrorEmitter(TaichiSyntaxError(), stmt, kSharedArrayScopeError);
+    if (collect_cpu_groups_)
+      note_cpu_group(stmt);
     auto *callable = stmt->get_callable();
     auto *kernel = dynamic_cast<Kernel *>(callable);
     TI_ERROR_IF(!kernel,
@@ -70,9 +98,11 @@ class ValidateSharedArrayScope : public BasicStmtVisitor {
     }
   }
 
-  static void run(IRNode *root, bool qualify = false) {
-    ValidateSharedArrayScope pass(qualify);
+  static std::vector<RangeForStmt *> run(IRNode *root, bool qualify,
+                                         bool collect_cpu_groups = false) {
+    ValidateSharedArrayScope pass(qualify, collect_cpu_groups);
     root->accept(&pass);
+    return std::move(pass.cpu_groups_);
   }
 };
 
@@ -982,8 +1012,8 @@ class AssociateContinueScope : public BasicStmtVisitor {
 
 }  // namespace
 
-void validate_shared_array_scope(IRNode *root) {
-  ValidateSharedArrayScope::run(root);
+std::vector<RangeForStmt *> validate_shared_array_scope(IRNode *root, Arch arch) {
+  return ValidateSharedArrayScope::run(root, false, arch_is_cpu(arch));
 }
 
 void associate_continue_scope(IRNode *root, const CompileConfig &config) {

@@ -120,6 +120,11 @@ The logical group's local index starts at zero. The global invocation index on x
 counts active lanes from the beginning of the parallel range. CUDA-only block vote
 operations require a CUDA device branch.
 
+Ordinary x64 JIT kernels use the same logical workgroup lowering for
+fixed-size `SharedArray` and block operations in a parallel range or an
+inlined `@ti.func`. A JIT kernel gets its width when it compiles the loop.
+A unified package can bind a declared model width at prepare time.
+
 ### Checking application declarations
 
 During development, optionally use

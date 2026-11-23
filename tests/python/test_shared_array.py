@@ -6,6 +6,65 @@ from taichi_forge.math import vec4
 from tests import test_utils
 
 
+@test_utils.test(arch=ti.cpu, default_cpu_block_dim=8)
+def test_cpu_workgroup_partial_range_and_live_local():
+    @ti.kernel
+    def exchange(begin: ti.i32, end: ti.i32, out: ti.types.ndarray(dtype=ti.i32, ndim=1)):
+        for i in range(begin, end):
+            lane = ti.simt.block.thread_idx()
+            offset = ti.simt.block.global_thread_idx()
+            scratch = ti.simt.block.SharedArray((8,), ti.i32)
+            value = offset
+            if lane % 2:
+                value += 17
+            scratch[lane] = value
+            ti.simt.block.mem_sync()
+            ti.simt.block.sync()
+            value += scratch[(lane + 1) % ti.min(8, end - (i - lane))]
+            ti.simt.block.sync()
+            out[i] = value
+
+    for begin, end in ((3, 94), (2, 3), (7, 7)):
+        out = np.full(100, -1, dtype=np.int32)
+        exchange(begin, end, out)
+        expected = np.full_like(out, -1)
+        for start in range(begin, end, 8):
+            size = min(8, end - start)
+            lanes = np.arange(size)
+            values = start - begin + lanes + (lanes % 2) * 17
+            expected[start:start + size] = values + np.roll(values, -1)
+        np.testing.assert_array_equal(out, expected)
+
+
+@test_utils.test(arch=ti.cpu)
+def test_cpu_workgroup_rejects_divergent_barrier():
+    @ti.kernel
+    def divergent(data: ti.types.ndarray(dtype=ti.i32, ndim=1)):
+        ti.loop_config(block_dim=8)
+        for i in range(data.shape[0]):
+            if data[i] > 0:
+                ti.simt.block.sync()
+            data[i] = i
+
+    with pytest.raises(RuntimeError, match="convergent top-level phases"):
+        divergent(np.zeros(16, dtype=np.int32))
+
+
+@test_utils.test(arch=ti.cpu)
+def test_cpu_workgroup_requires_inlined_helper():
+    @ti.real_func
+    def lane() -> ti.i32:
+        return ti.simt.block.thread_idx()
+
+    @ti.kernel
+    def run(data: ti.types.ndarray(dtype=ti.i32, ndim=1)):
+        for i in range(data.shape[0]):
+            data[i] = lane()
+
+    with pytest.raises(ti.TaichiCompilationError, match="enclosing kernel range"):
+        run(np.zeros(16, dtype=np.int32))
+
+
 @test_utils.test(arch=[ti.cuda])
 def test_large_shared_array():
     block_dim = 128
@@ -213,7 +272,7 @@ def test_multiple_shared_array():
     assert np.allclose(reference, a_arr, rtol=1e-4)
 
 
-@test_utils.test(arch=[ti.cuda, ti.vulkan, ti.amdgpu])
+@test_utils.test(arch=[ti.cpu, ti.cuda, ti.vulkan, ti.amdgpu])
 def test_shared_array_atomics():
     N = 256
     block_dim = 32
@@ -282,7 +341,7 @@ def test_shared_array_matrix():
     foo()
 
 
-@test_utils.test(arch=[ti.cuda, ti.vulkan])
+@test_utils.test(arch=[ti.cpu, ti.cuda, ti.vulkan])
 def test_shared_array_rejects_serial_scope():
     @ti.kernel
     def invalid(out: ti.types.ndarray()):
@@ -300,7 +359,7 @@ def test_shared_array_rejects_serial_scope():
         invalid(out)
 
 
-@test_utils.test(arch=[ti.cuda, ti.vulkan])
+@test_utils.test(arch=[ti.cpu, ti.cuda, ti.vulkan])
 def test_shared_array_rejects_serialized_range():
     @ti.kernel
     def invalid():
@@ -316,7 +375,7 @@ def test_shared_array_rejects_serialized_range():
         invalid()
 
 
-@test_utils.test(arch=[ti.cuda, ti.vulkan])
+@test_utils.test(arch=[ti.cpu, ti.cuda, ti.vulkan])
 def test_shared_array_in_inlined_function_keeps_range_scope():
     block_dim = 32
     size = block_dim * 4

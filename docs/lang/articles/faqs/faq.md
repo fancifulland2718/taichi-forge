@@ -26,7 +26,11 @@ for _ in range(1):  # This "ghost" loop will be "parallelized", but with only on
 
 You can call `ti.sync()`, which is similar to CUDA's `cudaStreamSynchronize()`, in Taichi to synchronize the parallel for loops.
 
-`__syncthreads()` is a block-level synchronization barrier, and Taichi provides a synonymous API `ti.simt.block.sync()`, which for now supports CUDA and Vulkan backends only. However, all block-level APIs are still experimental, and you should use this API only when it relates to SIMT operation synchronization and `SharedArray` reads and writes.
+`ti.simt.block.sync()` provides a block-level execution barrier. CUDA and
+Vulkan use a device workgroup. In an x64 CPU range-for, one worker runs
+the active lanes of a logical group up to the barrier before starting the
+next phase. Place the barrier at the top level of the range body so every
+lane reaches it. A final partial group contains only the remaining iterations.
 
 Declare `ti.simt.block.SharedArray` inside a parallel Taichi range-for loop so
 that its allocation has an unambiguous thread-block owner. The declaration may
