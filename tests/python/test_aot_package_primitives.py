@@ -79,6 +79,7 @@ class Model:
             assert count == len(eligible)
             direct = model.distinct(size=count)
             direct.run()
+            assert direct.workspace_bytes_peak == direct._graph._cached_call.info["workspace_bytes"]
             assert int(model.count.to_numpy()) == 4
             np.testing.assert_array_equal(model.unique_values.to_numpy()[:4], expected_values)
             prepared.close()

@@ -90,6 +90,15 @@ class PrimitiveSequence:
     def __init__(self, package):
         self.package, self.calls = package, []
         self._graph = None
+        self._workspace_bytes_peak = 0
+
+    @property
+    def workspace_bytes_peak(self):
+        """Peak native workspace of this sequence's own direct execution."""
+        if self._graph is not None and self._graph._cached_call is not None:
+            native = self._graph._cached_call.info["workspace_bytes"]
+            self._workspace_bytes_peak = max(self._workspace_bytes_peak, native)
+        return self._workspace_bytes_peak
 
     def _append(self, operations, bindings, resources=()):
         self.close()
@@ -98,6 +107,7 @@ class PrimitiveSequence:
 
     def close(self):
         if self._graph is not None:
+            self._workspace_bytes_peak = self.workspace_bytes_peak
             self._graph.close()
             self._graph = None
 
