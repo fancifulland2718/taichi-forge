@@ -33009,3 +33009,51 @@ class Model:
     with pytest.raises(ti.aot.PackageExportError, match='[Cc]onstruction'):
         ti.aot.export_package(package, tmp_path / 'sdk')
     assert not (tmp_path / 'sdk').exists()
+
+
+@test_utils.test(arch=ti.cpu, offline_cache=False)
+def test_package_optional_typed_grid_uses_supplied_field_or_owned_default(tmp_path, monkeypatch):
+    source = """
+import taichi_forge as ti
+Grid = ti.types.ndarray(dtype=ti.types.vector(3, ti.f32), ndim=1)
+@ti.data_oriented
+class Model:
+    def __init__(self, count):
+        self.count = count
+        scope = ti.experimental.ResourceScope(self)
+        count = scope.dim("count")
+        scope.source = scope.vector_field(3, ti.f32, shape=count)
+        scope.output = scope.vector_field(3, ti.f32, shape=count)
+
+    @ti.kernel
+    def copy(self, source: ti.template()):
+        for i in range(self.count):
+            self.output[i] = source[0] + i
+
+    def step(self, source: Grid = None):
+        field = self.source if source is None else source
+        self.copy(field)
+"""
+    package = _source_package(tmp_path, monkeypatch, source)
+    sdk = tmp_path / "sdk"
+    ti.aot.export_package(package, sdk, arch=ti.cpu, artifact_format="unified-bc-library")
+
+    def check(constructor):
+        first, second = constructor(2), constructor(5)
+        for number in (1, 4):
+            first.source.fill(number)
+            second.source.fill(2 * number)
+            first.step()
+            second.step(first.source)
+            for model in (first, second):
+                expected = np.repeat((number + np.arange(model.count))[:, None], 3, axis=1)
+                np.testing.assert_array_equal(model.output.to_numpy(), expected)
+            second.step()
+            expected = np.repeat((2 * number + np.arange(5))[:, None], 3, axis=1)
+            np.testing.assert_array_equal(second.output.to_numpy(), expected)
+
+
+    check(package.Model)
+    ti.reset()
+    with Runtime("x64") as runtime, load_package(runtime, sdk) as code:
+        check(code.host.Model)

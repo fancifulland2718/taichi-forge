@@ -1707,7 +1707,7 @@ def discover(sources, imported, *, preparation_receivers=None, preparation_guard
                         if isinstance(right, _Literal) and right.value is None:
                             if isinstance(left, _Literal):
                                 absent = left.value is None
-                            elif isinstance(left, (_Owner, _Graph, _Host, _Kernel, _Record)) or isinstance(left, _Resource) and not left.optional:
+                            elif isinstance(left, (_Owner, _Graph, _Host, _Kernel, _Record, _FieldABI)) or isinstance(left, _Resource) and not left.optional:
                                 absent = False
                             else:
                                 return None
