@@ -6,6 +6,20 @@
 #include "taichi/common/core.h"
 #include "taichi/ir/type_factory.h"
 
+namespace {
+// C API records also declare their fields outside the taichi namespace.
+struct Foo {
+  std::string k;
+  int v{-1};
+
+  bool operator==(const Foo &other) const {
+    return k == other.k && v == other.v;
+  }
+
+  TI_IO_DEF(k, v);
+};
+}  // namespace
+
 namespace taichi::lang {
 namespace {
 
@@ -210,17 +224,6 @@ TEST(SERIALIZATION, Type) {
   EXPECT_EQ(deserialized3->to_string(), quant_array_type->to_string());
 }
 
-struct Foo {
-  std::string k;
-  int v{-1};
-
-  bool operator==(const Foo &other) const {
-    return k == other.k && v == other.v;
-  }
-
-  TI_IO_DEF(k, v);
-};
-
 TEST(Serialization, JsonSerde) {
   using namespace ::liong::json;
 
@@ -233,6 +236,7 @@ TEST(Serialization, JsonSerde) {
   Foo foo, t;
   foo.k = "hello";
   foo.v = 42;
+  EXPECT_EQ(BinIoPair{}.run(foo), foo);
 
   // Serialize
   EXPECT_EQ(kCorrectJson, print(serialize(foo)));

@@ -25,8 +25,10 @@
 #ifdef TI_INCLUDED
 #include "taichi/common/logging.h"
 
+#define TI_IO_DETAIL ::taichi::detail
 namespace taichi {
 #else
+#define TI_IO_DETAIL ::detail
 #define TI_TRACE
 #define TI_CRITICAL
 #define TI_ASSERT assert
@@ -154,12 +156,12 @@ serialize_kv_impl(SER &ser,
 // compile time.
 // 2. Invoke serializer::operator("arg", arg) for each arg in __VA_ARGS__. This
 // is implemented inside detail::serialize_kv_impl.
-#define TI_IO(...)                                                     \
-  do {                                                                 \
-    constexpr size_t kDelimN = detail::count_delim(#__VA_ARGS__, ','); \
-    constexpr auto kSplitStrs =                                        \
-        detail::StrDelimSplitter<kDelimN>::make(#__VA_ARGS__, ',');    \
-    detail::serialize_kv_impl(serializer, kSplitStrs, __VA_ARGS__);    \
+#define TI_IO(...)                                                         \
+  do {                                                                     \
+    constexpr auto kDelimN = TI_IO_DETAIL::count_delim(#__VA_ARGS__, ','); \
+    constexpr auto kSplitStrs =                                            \
+        TI_IO_DETAIL::StrDelimSplitter<kDelimN>::make(#__VA_ARGS__, ',');  \
+    TI_IO_DETAIL::serialize_kv_impl(serializer, kSplitStrs, __VA_ARGS__);  \
   } while (0)
 
 #define TI_SERIALIZER_IS(T)                                                 \
