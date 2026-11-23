@@ -2588,6 +2588,11 @@ class _Capture:
                 previous = self.groups.setdefault(declaration.group, schema)
                 if previous != schema:
                     raise TaichiCompilationError("Resource group changed during compilation; retry")
+                if getattr(self.kernel, "_package_compilation", None) is not None:
+                    # The package allocates the whole group, but this numerical
+                    # body binds only the selected member's descriptor.
+                    dimensions = (axis for axis in (*declaration.shape, *getattr(declaration, "element_shape", ()))
+                                  if isinstance(axis, str))
                 for dim in dimensions:
                     self.dimension_dependency(dim)
                 self.member_paths[name] = (declaration.group, members[name])
@@ -3330,23 +3335,24 @@ class _ComponentCode:
         implementation. Rebuild those allocation facts without lowering the
         numerical body. No producer AST, owner or Field survives this operation.
 
-        This deliberately excludes model tensors and explicit dimension slots:
-        their symbolic extents can affect workspace and launch specialization.
+        Explicit dimension slots keep their original symbolic extents. Model
+        tensors retain their separate workspace and launch contracts.
         Ordinary Component/JIT candidates keep their original ownership rules.
         """
         import copy
 
         if not self.dynamic or self.fixed_groups or self.workspaces or self.model_static_ranges:
             return None
-        if any(self.used[name][0] != "dense_field" for name in self.dynamic):
+        if any(self.used[name][0] not in ("dense_field", "dimension", "value", "ndarray") for name in self.dynamic):
             return None
+        has_value_slots = any(self.used[name][0] != "dense_field" for name in self.dynamic)
         fields = {name for name, schema in self.used.items() if schema[0] == "dense_field"}
         if fields != self.member_paths.keys():
             return None  # A metadata-only Field has no proved descriptor/alias slot.
         used = {}
         axes, reverse_axes = {}, {}
         for name, schema in self.used.items():
-            if schema[0] == "dimension":
+            if schema[0] == "dimension" and not has_value_slots:
                 continue  # Rebuilt below from the current allocation relations.
             declaration = component.declarations.get(name)
             if declaration is None or component._paths[name] != self.capture_paths[name]:
@@ -3360,6 +3366,8 @@ class _ComponentCode:
                 actual = declaration.schema
                 if actual[0:2] != schema[0:2] or len(actual[2]) != len(schema[2]):
                     return None
+                if has_value_slots and actual[2] != schema[2]:
+                    return None  # Preserve dimensions that may also be used in expressions.
                 for old, new in zip(schema[2], actual[2]):
                     if isinstance(old, str) and isinstance(new, str):
                         if axes.setdefault(old, new) != new or reverse_axes.setdefault(new, old) != old:
@@ -3399,11 +3407,12 @@ class _ComponentCode:
             declaration = component.declarations[name]
             value = component.read(owner, name)
             description = declaration.validate(value)
-            schema, members, dimensions, _ = layouts.dense(declaration.group)
+            schema, members, _, _ = layouts.dense(declaration.group)
             bound.groups[declaration.group] = schema
             bound.member_paths[name] = (declaration.group, members[name])
-            for dim in dimensions:
-                dimension(dim)
+            for axis in declaration.shape:
+                if isinstance(axis, str):
+                    dimension(axis)
             if name in self.dynamic:
                 compact = json.loads(schema)["version"] == 1 and _extent_invariant_compact_member(value, description)
                 if access.get(name) != ("compact" if compact else "affine"):

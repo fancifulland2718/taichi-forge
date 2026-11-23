@@ -23993,6 +23993,37 @@ class Parent:
 """
 
 
+@test_utils.test(arch=ti.cpu, offline_cache=False)
+def test_package_ignores_unread_sibling_extent_in_mixed_capture(tmp_path, monkeypatch):
+    source = FIELD_SHAPE_CHOICE_SOURCE.replace(
+        "self.n, self.width, self.packed = n, width, packed",
+        "self.n, self.width, self.packed = n, width, packed\n        self.touch_values = False",
+    ).replace("scope.static('packed',", "scope.static('touch_values', choices=(False, True))\n        scope.static('packed',")
+    source = source.replace(
+        "self.result[i] = value\n",
+        """self.result[i] = value + self.n
+        if ti.static(self.touch_values):
+            for I in ti.grouped(self.values):
+                self.values[I] += value
+""",
+    )
+    package = _source_package(tmp_path, monkeypatch, source)
+    manifest = ti.aot.export_package(package, tmp_path / "sdk")
+    entries = [entry for entry in manifest["entries"].values()
+               if "definition_fixture.model.Model.independent" in entry["definitions"]]
+    # The two touched ranks need distinct code. Both untouched ranks share a
+    # single implementation even though it also captures a model dimension.
+    assert len(entries) == 3
+    with Runtime(manifest["target"]) as runtime, load_package(runtime, tmp_path / "sdk") as code:
+        for packed in (False, True):
+            model = code.host.Model(7, 4, packed)
+            for touch in (False, True):
+                model.touch_values = touch
+                model.independent(5)
+                np.testing.assert_array_equal(model.result.to_numpy(), 12)
+                np.testing.assert_array_equal(model.values.to_numpy(), 5 if touch else 0)
+
+
 @test_utils.test(arch=[ti.cpu, ti.cuda], offline_cache=False)
 def test_package_field_shape_choices_share_unaffected_code(tmp_path, monkeypatch):
     package = _source_package(tmp_path, monkeypatch, FIELD_SHAPE_CHOICE_SOURCE)
