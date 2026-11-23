@@ -23229,6 +23229,35 @@ class Model:
 """
 
 
+@test_utils.test(arch=ti.cpu, offline_cache=False)
+def test_package_shape_tuple_composition_keeps_model_extents(tmp_path, monkeypatch):
+    source = """
+import taichi_forge as ti
+@ti.data_oriented
+class Model:
+    def __init__(self, n: int, m: int):
+        self.n, self.m = n, m
+        scope = ti.experimental.ResourceScope(self)
+        rows, width = scope.dim('n'), scope.dim('m')
+        grid = (width + 1,) * 3
+        shape = (rows,) + grid
+        scope.values = scope.field(ti.i32, shape=shape)
+    @ti.kernel
+    def fill(self):
+        for p, i, j, k in self.values:
+            self.values[p, i, j, k] = 1000 * p + 100 * i + 10 * j + k
+"""
+    package = _source_package(tmp_path, monkeypatch, source)
+    manifest = ti.aot.export_package(package, tmp_path / "sdk")
+    with Runtime(manifest["target"]) as runtime, load_package(runtime, tmp_path / "sdk") as library:
+        for n, m in ((2, 3), (1, 1)):
+            original, packaged = package.Model(n, m), library.host.Model(n, m)
+            original.fill()
+            packaged.fill()
+            assert packaged.values.shape == (n, m + 1, m + 1, m + 1)
+            np.testing.assert_array_equal(packaged.values.to_numpy(), original.values.to_numpy())
+
+
 @pytest.mark.parametrize("explicit_builders", [False, True])
 @test_utils.test(arch=[ti.cpu, ti.cuda], offline_cache=False)
 def test_package_sequential_scope_aliases_preserve_allocation_boundaries(tmp_path, monkeypatch, explicit_builders):

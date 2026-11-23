@@ -1152,6 +1152,22 @@ def scope_declarations(
             methods = {ast.Add: "__add__", ast.Sub: "__sub__", ast.Mult: "__mul__", ast.FloorDiv: "__floordiv__"}
             method = methods.get(type(node.op))
             left, right = dimension(node.left, bindings), dimension(node.right, bindings)
+            if isinstance(left, tuple) or isinstance(right, tuple):
+                # Model dimensions remain symbolic. Only a known index rank
+                # may expand here, including when evaluating an unrelated Host
+                # assignment that happens to repeat a sequence many times.
+                from taichi_forge._lib import core
+
+                if isinstance(node.op, ast.Add) and isinstance(left, tuple) and isinstance(right, tuple):
+                    if len(left) + len(right) <= core.get_max_num_indices():
+                        return left + right
+                if isinstance(node.op, ast.Mult):
+                    axes, count = (left, right) if isinstance(left, tuple) else (right, left)
+                    if isinstance(count, Extent) and count.expression[0] == "const":
+                        repeats = count.expression[1]
+                        if len(axes) * repeats <= core.get_max_num_indices():
+                            return axes * repeats
+                return None
             if method is not None and isinstance(left, Extent) and isinstance(right, Extent):
                 result = getattr(left, method)(right)
                 extent_objects.append(result)
