@@ -50,6 +50,8 @@ __pycache__
 !python/taichi/examples/algorithm/circle-packing/*.png
 *.egg-info
 .tlang_cache
+.taichi_cache/
+*.tic
 /taichi/common/commit_hash.h
 /python/test_env
 /CHANGELOG.md
