@@ -2687,13 +2687,18 @@ struct cpu_block_task_helper_context {
 // TODO: TLS should be directly passed to the scheduler, so that it lives
 // with the threads (instead of blocks).
 
+// Expand in the task frame so the scratch storage lives through its callbacks.
+// The alignment argument to __builtin_alloca_with_align is in bits.
+#define TI_ALLOCATE_TASK_TLS(bytes) \
+  static_cast<char *>(__builtin_alloca_with_align((bytes), 64))
+
 void cpu_struct_for_block_helper(void *ctx_, int thread_id, int i) {
   auto ctx = (cpu_block_task_helper_context *)(ctx_);
   if (ctx->element_batch_size > 1) {
     int element_begin = i * ctx->element_batch_size;
     int element_end = std::min(element_begin + ctx->element_batch_size,
                                ctx->list->size());
-    __extension__ alignas(8) char tls_buffer[ctx->tls_buffer_size];
+    auto *tls_buffer = TI_ALLOCATE_TASK_TLS(ctx->tls_buffer_size);
     RuntimeContext this_thread_context = *ctx->context;
     this_thread_context.cpu_thread_id = thread_id;
     for (int element_id = element_begin; element_id < element_end;
@@ -2714,7 +2719,7 @@ void cpu_struct_for_block_helper(void *ctx_, int thread_id, int i) {
   int lower = e.loop_bounds[0] + part_id * part_size;
   int upper = e.loop_bounds[0] + (part_id + 1) * part_size;
   upper = std::min(upper, e.loop_bounds[1]);
-  __extension__ alignas(8) char tls_buffer[ctx->tls_buffer_size];
+  auto *tls_buffer = TI_ALLOCATE_TASK_TLS(ctx->tls_buffer_size);
 
   RuntimeContext this_thread_context = *ctx->context;
   this_thread_context.cpu_thread_id = thread_id;
@@ -2801,8 +2806,7 @@ void cpu_parallel_range_for_task(void *range_context,
                                  int thread_id,
                                  int task_id) {
   auto ctx = *(range_task_helper_context *)range_context;
-  __extension__ alignas(8) char tls_buffer[ctx.tls_size];
-  auto tls_ptr = &tls_buffer[0];
+  auto *tls_ptr = TI_ALLOCATE_TASK_TLS(ctx.tls_size);
   if (ctx.prologue)
     ctx.prologue(ctx.context, tls_ptr);
 
@@ -2833,8 +2837,7 @@ void cpu_parallel_range_for_cancellable_task(void *range_context,
     return;
   }
 
-  __extension__ alignas(8) char tls_buffer[ctx.tls_size];
-  auto tls_ptr = &tls_buffer[0];
+  auto *tls_ptr = TI_ALLOCATE_TASK_TLS(ctx.tls_size);
   if (ctx.prologue) {
     ctx.prologue(ctx.context, tls_ptr);
   }
@@ -3014,7 +3017,7 @@ void gpu_parallel_range_for(RuntimeContext *context,
 #ifdef ARCH_amdgpu
   alignas(8) char tls_buffer[64];
 #else
-  __extension__ alignas(8) char tls_buffer[tls_size];
+  auto *tls_buffer = TI_ALLOCATE_TASK_TLS(tls_size);
 #endif
   gpu_parallel_range_for_with_tls(context, begin, end, prologue, func, epilogue,
                                   tls_buffer);
@@ -3028,8 +3031,7 @@ void gpu_parallel_range_for_one_to_one(RuntimeContext *context,
                                        range_for_xlogue epilogue,
                                        const std::size_t tls_size) {
   int idx = thread_idx() + block_dim() * block_idx() + begin;
-  __extension__ alignas(8) char tls_buffer[tls_size];
-  auto tls_ptr = &tls_buffer[0];
+  auto *tls_ptr = TI_ALLOCATE_TASK_TLS(tls_size);
   if (prologue)
     prologue(context, tls_ptr);
   if (idx < end)
@@ -3066,7 +3068,7 @@ void gpu_parallel_range_for_shared_staged(RuntimeContext *context,
                                           RangeForTaskFunc *func,
                                           range_for_xlogue epilogue,
                                           const std::size_t tls_size) {
-  __extension__ alignas(8) char tls_buffer[tls_size];
+  auto *tls_buffer = TI_ALLOCATE_TASK_TLS(tls_size);
   gpu_parallel_range_for_shared_staged_with_tls(
       context, begin, end, prologue, bls_prologue, func, epilogue, tls_buffer);
 }
@@ -3114,7 +3116,7 @@ void gpu_parallel_range_for_shared_staged_2d(RuntimeContext *context,
                                              RangeForTaskFunc *func,
                                              range_for_xlogue epilogue,
                                              const std::size_t tls_size) {
-  __extension__ alignas(8) char tls_buffer[tls_size];
+  auto *tls_buffer = TI_ALLOCATE_TASK_TLS(tls_size);
   gpu_parallel_range_for_shared_staged_2d_with_tls(
       context, begin, end, logical_height, logical_width, tile_height,
       tile_width, prologue, bls_prologue, func, epilogue, tls_buffer);
@@ -3134,8 +3136,7 @@ void cpu_parallel_mesh_for_task(void *range_context,
                                 int thread_id,
                                 int task_id) {
   auto ctx = *(mesh_task_helper_context *)range_context;
-  __extension__ alignas(8) char tls_buffer[ctx.tls_size];
-  auto tls_ptr = &tls_buffer[0];
+  auto *tls_ptr = TI_ALLOCATE_TASK_TLS(ctx.tls_size);
 
   RuntimeContext this_thread_context = *ctx.context;
   this_thread_context.cpu_thread_id = thread_id;
@@ -3204,11 +3205,13 @@ void gpu_parallel_mesh_for(RuntimeContext *context,
 #ifdef ARCH_amdgpu
   alignas(8) char tls_buffer[64];
 #else
-  __extension__ alignas(8) char tls_buffer[tls_size];
+  auto *tls_buffer = TI_ALLOCATE_TASK_TLS(tls_size);
 #endif
   gpu_parallel_mesh_for_with_tls(context, num_patches, prologue, func, epilogue,
                                  tls_buffer);
 }
+
+#undef TI_ALLOCATE_TASK_TLS
 
 i32 linear_thread_idx(RuntimeContext *context) {
 #if ARCH_cuda || ARCH_amdgpu
