@@ -43,6 +43,25 @@ def owner_annotation_types(annotation, namespace):
     return (annotation,) if inspect.isclass(annotation) and annotation.__module__ != "builtins" else ()
 
 
+def local_owner_annotations(constructor, namespace, stores, deleted):
+    """Read single-write Host selections whose declared type is checked by owner_reference."""
+    result = {}
+    for statement in constructor.body:
+        if not (isinstance(statement, ast.AnnAssign) and isinstance(statement.target, ast.Name)
+                and statement.value is not None and stores[statement.target.id] == 1
+                and statement.target.id not in deleted and isinstance(statement.annotation, (ast.Name, ast.Attribute))):
+            continue
+        root = statement.annotation
+        while isinstance(root, ast.Attribute):
+            root = root.value
+        if isinstance(root, ast.Name) and root.id not in stores:
+            choices = owner_annotation_types(statement.annotation, namespace)
+            if choices and len(choices) == 1:
+                owner = choices[0]
+                result[statement.target.id] = (statement.lineno, owner.__module__ + "." + owner.__qualname__)
+    return result
+
+
 def source_class(tree, name):
     return getattr(tree, "_package_owner_contexts", {}).get(name, name)
 

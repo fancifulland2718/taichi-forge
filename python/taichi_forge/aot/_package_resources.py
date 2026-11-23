@@ -930,11 +930,26 @@ def scope_declarations(
                 if isinstance(root, ast.Name) and stores.get(root.id) == 1 and root.id not in deleted:
                     source_aliases[target.attr] = statement
 
-    def dimension(node, bindings=None):
+    def dimension(node, bindings=None, selection_scope=None):
         """Only the already-declared dimension algebra; no model-value evaluation."""
         bindings = bindings or {}
         if isinstance(node, ast.Constant) and type(node.value) is int and 0 <= node.value <= 2**31 - 1:
             return Extent(("const", node.value))
+        if selection_scope is not None and isinstance(node, ast.IfExp):
+            guard, invert = layout_guard(selection_scope, node)
+            branches = [dimension(branch, bindings, selection_scope) for branch in (node.body, node.orelse)]
+            if not all(isinstance(branch, Extent) for branch in branches):
+                return None
+            for branch in branches:
+                namespace_check(selection_scope, branch, node)
+            if invert:
+                branches.reverse()
+            flag = "_forge_package_layout_flag_" + guard
+            add(flag, dict(kind="dimension", dtype="i32", layout_guard=guard), node)
+            result = Extent(("if_layout", ("dim", flag), *(branch.expression for branch in branches)))
+            extent_objects.append(result)
+            extent_namespaces[id(result)] = set().union(*(extent_namespaces.get(id(branch), ()) for branch in branches))
+            return result
         if isinstance(node, ast.Name):
             if node.id in bindings:
                 return bindings[node.id]
@@ -942,12 +957,13 @@ def scope_declarations(
                 current_conditions.get(key) is not value for key, value in alias_conditions.get(node.id, {}).items()
             ):
                 fail(module, node, "Dimension alias must remain within its declaration branch")
-            if node.id in deferred_aliases:
+            choice = shape_aliases.get(node.id) if selection_scope is not None else None
+            if node.id in deferred_aliases or choice is not None:
                 if node.id in resolving_aliases:
                     return None
                 resolving_aliases.add(node.id)
                 try:
-                    value = dimension(deferred_aliases[node.id], bindings)
+                    value = dimension(choice if choice is not None else deferred_aliases[node.id], bindings, selection_scope)
                 finally:
                     resolving_aliases.remove(node.id)
                 if isinstance(value, Extent):
@@ -990,7 +1006,7 @@ def scope_declarations(
                             allowed.add(id(node.value))
                         return Extent(("const", value))
         if isinstance(node, (ast.Tuple, ast.List)):
-            values = tuple(dimension(item, bindings) for item in node.elts)
+            values = tuple(dimension(item, bindings, selection_scope) for item in node.elts)
             return values if all(isinstance(v, Extent) for v in values) else None
         if isinstance(node, ast.Subscript):
             # Project an already proven extent tuple. Never evaluate an owner
@@ -999,7 +1015,7 @@ def scope_declarations(
             if isinstance(index, ast.UnaryOp) and isinstance(index.op, ast.USub):
                 index, sign = index.operand, -1
             if isinstance(index, ast.Constant) and type(index.value) is int:
-                values = dimension(node.value, bindings)
+                values = dimension(node.value, bindings, selection_scope)
                 offset = sign * index.value
                 if isinstance(values, tuple) and -len(values) <= offset < len(values):
                     return values[offset]
@@ -1009,7 +1025,7 @@ def scope_declarations(
             for key, value in zip(node.keys, node.values):
                 if not isinstance(key, ast.Constant) or type(key.value) is not str or key.value in result:
                     return None
-                extent = dimension(value, bindings)
+                extent = dimension(value, bindings, selection_scope)
                 if not isinstance(extent, Extent):
                     return None
                 result[key.value] = extent
@@ -1041,24 +1057,7 @@ def scope_declarations(
                 fail(module, node, "Derived dimensions require a literal name and declared expression")
             local_name = node.args[0].value
             name = member(scope, local_name)
-            value = dimension(node.args[1], bindings)
-            if value is None:
-                choice = node.args[1]
-                visited = set()
-                while isinstance(choice, ast.Name) and choice.id in shape_aliases and choice.id not in visited:
-                    visited.add(choice.id)
-                    choice = shape_aliases[choice.id]
-                if isinstance(choice, ast.IfExp):
-                    guard, invert = layout_guard(scope, choice)
-                    branches = [dimension(branch, bindings) for branch in (choice.body, choice.orelse)]
-                    if all(isinstance(branch, Extent) for branch in branches):
-                        for branch in branches:
-                            namespace_check(scope, branch, choice)
-                        if invert:
-                            branches.reverse()
-                        flag = "_forge_package_layout_flag_" + guard
-                        add(flag, dict(kind="dimension", dtype="i32", layout_guard=guard), choice)
-                        value = Extent(("if_layout", ("dim", flag), *(branch.expression for branch in branches)))
+            value = dimension(node.args[1], bindings, scope)
             if not isinstance(value, Extent) or not extent_dependencies(value.expression):
                 fail(module, node, "Derived dimension requires the existing declared dimension algebra")
             expression = value.expression
@@ -1178,13 +1177,13 @@ def scope_declarations(
             ):
                 return None
             values = tuple(
-                dimension(generator.elt, {**bindings, loop.target.id: item.value}) for item in loop.iter.elts
+                dimension(generator.elt, {**bindings, loop.target.id: item.value}, selection_scope) for item in loop.iter.elts
             )
             return values if all(isinstance(item, Extent) for item in values) else None
         if isinstance(node, ast.BinOp):
             methods = {ast.Add: "__add__", ast.Sub: "__sub__", ast.Mult: "__mul__", ast.FloorDiv: "__floordiv__"}
             method = methods.get(type(node.op))
-            left, right = dimension(node.left, bindings), dimension(node.right, bindings)
+            left, right = dimension(node.left, bindings, selection_scope), dimension(node.right, bindings, selection_scope)
             if isinstance(left, tuple) or isinstance(right, tuple):
                 # Model dimensions remain symbolic. Only a known index rank
                 # may expand here, including when evaluating an unrelated Host
@@ -1215,7 +1214,7 @@ def scope_declarations(
             and len(node.args) == 1
             and not node.keywords
         ):
-            left, right = dimension(node.func.value, bindings), dimension(node.args[0], bindings)
+            left, right = dimension(node.func.value, bindings, selection_scope), dimension(node.args[0], bindings, selection_scope)
             if isinstance(left, Extent) and isinstance(right, Extent):
                 result = getattr(left, node.func.attr)(right)
                 extent_objects.append(result)
@@ -1258,6 +1257,9 @@ def scope_declarations(
     prepared_owner_domains = {}
     from ._package_input_families import owner_annotation_types
 
+    from ._package_input_families import local_owner_annotations
+
+    local_owner_types = local_owner_annotations(constructor, namespace, stores, deleted)
     for parameter in parameters:
         choices = owner_annotation_types(parameter.annotation, namespace)
         if choices:
@@ -2000,6 +2002,8 @@ def scope_declarations(
             from ._package_inputs import default_owner_call
 
             parameter = call.args[1].id if len(call.args) == 2 and isinstance(call.args[1], ast.Name) else None
+            local = local_owner_types.get(parameter)
+            selected_type = local[1] if local and local[0] < call.lineno else None
             reference = call.args[1] if len(call.args) == 2 else None
             reference_path = []
             while isinstance(reference, ast.Attribute):
@@ -2029,6 +2033,7 @@ def scope_declarations(
                 or type(call.args[0].value) is not str
                 or not call.args[0].value.isidentifier()
                 or not declared_path
+                and selected_type is None
                 and (
                     parameter not in parameter_names
                     or parameter in deleted
@@ -2058,7 +2063,8 @@ def scope_declarations(
                 call.args[0].value,
                 dict(
                     kind="owner_input",
-                    **(choice_contract or ({"reference_path": reference_path} if declared_path else (
+                    **(choice_contract or ({"owner_type": selected_type} if selected_type else
+                                           {"reference_path": reference_path} if declared_path else (
                         {"owner_type": typed_owner_types[parameter], "input_method": constructor.name}
                         if getattr(constructor, "_package_preparation_method", False)
                         and parameter in typed_owner_types else {"input_parameter": parameter}

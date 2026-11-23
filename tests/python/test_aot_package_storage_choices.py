@@ -101,3 +101,56 @@ class Model:
             owner.fill()
             np.testing.assert_array_equal(owner.ids.to_numpy(), np.arange(n + 1) + 2)
             np.testing.assert_array_equal(owner.points.to_numpy(), np.arange(n)[:, None] + np.arange(3))
+
+
+@test_utils.test(arch=ti.cpu, offline_cache=False)
+def test_same_type_owner_selection_and_nested_layout_arithmetic(tmp_path, monkeypatch):
+    source = """
+import taichi_forge as ti
+@ti.data_oriented
+class Buffer:
+    def __init__(self, n):
+        self.n = n
+        s = ti.experimental.ResourceScope(self)
+        s.data = s.field(ti.i32, shape=s.dim("n"))
+@ti.data_oriented
+class Model:
+    def __init__(self, first, second, flip, use_second, limit):
+        self.flip = flip
+        self.use_second = use_second
+        self.limit = limit
+        selected: Buffer = second if flip else first
+        s = ti.experimental.ResourceScope(self)
+        s.owner_reference("selected", selected)
+        s.static("flip", choices=(False, True))
+        s.static("use_second", choices=(False, True))
+        width = s.owner_dim("selected", "n")
+        n = s.dim("limit")
+        a = width if self.flip else n
+        b = n if self.use_second else width
+        self.extent = max(selected.n if flip else limit, limit if use_second else selected.n) + 1
+        extent = s.derived_dim("extent", a.maximum(b) + 1)
+        s.values = s.field(ti.i32, shape=extent)
+
+    @ti.kernel
+    def sample(self):
+        for i in self.values:
+            self.values[i] = self.selected.data[0] + i
+"""
+    package = _source_package(tmp_path, monkeypatch, source, initializer="from .model import Buffer, Model\n")
+    sdk = tmp_path / "selections"
+    ti.aot.export_package(package, sdk, arch=ti.cpu, artifact_format="unified-bc-library")
+    ti.reset()
+    with Runtime("x64") as runtime, load_package(runtime, sdk) as code:
+        a, b = code.host.Buffer(3), code.host.Buffer(19)
+        a.data.from_numpy(np.arange(3, dtype=np.int32) + 100)
+        b.data.from_numpy(np.arange(19, dtype=np.int32) + 200)
+        for flip in (False, True):
+            for use_second in (False, True):
+                owner = code.host.Model(a, b if flip else None, flip, use_second, 7)
+                assert owner.selected is (b if flip else a)
+                owner.sample()
+                assert owner.extent == (20 if flip else 8)
+                np.testing.assert_array_equal(owner.values.to_numpy(), np.arange(owner.extent) + (200 if flip else 100))
+        with pytest.raises(ValueError, match="source type|declared"):
+            code.host.Model(a, object(), True, True, 7)
