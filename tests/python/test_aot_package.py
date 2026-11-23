@@ -23261,6 +23261,25 @@ class Model:
 """
 
 
+@pytest.mark.parametrize("declared", [True, False])
+@test_utils.test(arch=ti.cpu, offline_cache=False)
+def test_package_extent_uses_declared_final_integer(tmp_path, monkeypatch, declared):
+    source = "from typing import Final\n" + SCOPE_FIELDS_SOURCE
+    annotation = ': "Final[int]"' if declared else ""
+    source = source.replace("constructors = 0", f"WIDTH{annotation} = 2\nconstructors = 0")
+    source = source.replace("(rows + 1) * 2", "(rows + 1) * WIDTH")
+    package = _source_package(tmp_path, monkeypatch, source)
+    if not declared:
+        with pytest.raises(ti.aot.PackageExportError, match="shape|extent|dimension"):
+            ti.aot.export_package(package, tmp_path / "sdk")
+        return
+    manifest = ti.aot.export_package(package, tmp_path / "sdk")
+    with Runtime(manifest["target"]) as runtime, load_package(runtime, tmp_path / "sdk") as loaded:
+        model = loaded.host.Model(3, 4)
+        model.step(1.0)
+        np.testing.assert_array_equal(model.a.to_numpy(), np.arange(8) + 3)
+
+
 @test_utils.test(arch=ti.cpu, offline_cache=False)
 def test_package_shape_tuple_composition_keeps_model_extents(tmp_path, monkeypatch):
     source = """

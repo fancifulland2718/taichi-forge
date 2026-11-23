@@ -43,26 +43,32 @@ def definition_names(expression, namespace, constructor):
         root = root.value
     if not isinstance(root, ast.Name):
         return None
-    for node in ast.walk(constructor):
-        if (
-            isinstance(node, ast.Name)
-            and node.id == root.id
-            and not isinstance(node.ctx, ast.Load)
-            or isinstance(node, ast.arg)
-            and node.arg == root.id
-            or isinstance(node, ast.alias)
-            and (node.asname or node.name.split(".")[0]) == root.id
-            or isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef, ast.ExceptHandler))
-            and node is not constructor
-            and node.name == root.id
-            or isinstance(node, (ast.Global, ast.Nonlocal))
-            and root.id in node.names
-        ):
-            return None
+    if locally_bound(constructor, root.id):
+        return None
     names = _source_value(expression, namespace)
     # Unlike a literal list written at this declaration, a global mutable list
     # can be populated by model preparation. It is not a definition contract.
     return names if type(names) is tuple else None
+
+
+def locally_bound(constructor, name):
+    for node in ast.walk(constructor):
+        if (
+            isinstance(node, ast.Name)
+            and node.id == name
+            and not isinstance(node.ctx, ast.Load)
+            or isinstance(node, ast.arg)
+            and node.arg == name
+            or isinstance(node, ast.alias)
+            and (node.asname or node.name.split(".")[0]) == name
+            or isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef, ast.ExceptHandler))
+            and node is not constructor
+            and node.name == name
+            or isinstance(node, (ast.Global, ast.Nonlocal))
+            and name in node.names
+        ):
+            return True
+    return False
 
 
 def class_constant(cls, name):

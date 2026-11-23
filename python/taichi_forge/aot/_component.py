@@ -84,8 +84,12 @@ def _final_global(function, name):
     annotations identify only the outer Final role; no annotation expression,
     type parameter, descriptor or subscription is evaluated.
     """
-    annotations = function.__globals__.get("__annotations__", {})
-    if name in function.__code__.co_freevars or type(annotations) is not dict:
+    return name not in function.__code__.co_freevars and _module_final(function.__globals__, name)
+
+
+def _module_final(namespace, name):
+    annotations = namespace.get("__annotations__", {})
+    if type(annotations) is not dict:
         return False
     annotation = annotations.get(name)
     if type(annotation) is str:
@@ -96,9 +100,9 @@ def _final_global(function, name):
         if isinstance(expression, ast.Subscript):
             expression = expression.value
         if isinstance(expression, ast.Name):
-            return function.__globals__.get(expression.id) is Final
+            return namespace.get(expression.id) is Final
         if isinstance(expression, ast.Attribute) and isinstance(expression.value, ast.Name):
-            module = function.__globals__.get(expression.value.id)
+            module = namespace.get(expression.value.id)
             return module is sys.modules.get("typing") and expression.attr == "Final"
         return False
     return annotation is Final or get_origin(annotation) is Final

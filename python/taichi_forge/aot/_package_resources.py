@@ -945,6 +945,14 @@ def scope_declarations(
                 if isinstance(value, Extent):
                     alias_checks[node.id] = value.expression
                 return value
+            if node.id not in aliases and node.id not in stores:
+                from ._component import _module_final
+                from ._package_constants import locally_bound
+
+                fixed = namespace.get(node.id)
+                if (type(fixed) is int and 0 <= fixed <= 2**31 - 1
+                        and _module_final(namespace, node.id) and not locally_bound(constructor, node.id)):
+                    return Extent(("const", fixed))
             return aliases.get(node.id)
         if isinstance(node, ast.Attribute):
             if not allow_member_dimensions:
