@@ -8575,7 +8575,8 @@ def entry() -> ti.i32:
     return 1
 def policy():
     arch = ti.lang.impl.current_cfg().arch
-    return arch.name, str(arch), str(arch).split('.')[-1]
+    data64 = ti.lang.misc.is_extension_supported(ti.cfg.arch, ti.extension.data64)
+    return data64, arch.name, str(arch), str(arch).split('.')[-1]
 """
     package = _source_package(tmp_path, monkeypatch, source, initializer="from .model import policy\n")
     expected = package.policy()

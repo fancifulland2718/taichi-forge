@@ -1416,6 +1416,17 @@ def _host_projection(
             return self.generic_visit(node)
 
         def visit_Call(self, node):
+            if (qualified_kind(node.func, kind) in ("lang.misc.is_extension_supported", "is_extension_supported")
+                    and len(node.args) == 2 and not node.keywords and backend_query(node.args[0], kind)
+                    and qualified_kind(node.args[1], kind) == "extension.data64"):
+                import taichi_forge as ti
+
+                # The frontend extension is an architecture contract. Vulkan's
+                # optional shader float64 capability has different semantics.
+                supported = tuple(name for name in sorted(BACKEND_NAMES - {"cpu"})
+                                  if ti.lang.misc.is_extension_supported(getattr(ti, name), ti.extension.data64))
+                target = ast.Attribute(self.visit(node.args[0]), "name", ast.Load())
+                return ast.copy_location(ast.Compare(target, [ast.In()], [ast.Constant(supported)]), node)
             if (
                 isinstance(node.func, ast.Name)
                 and node.func.id in ("getattr", "hasattr")
