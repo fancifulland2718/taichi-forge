@@ -25,6 +25,27 @@ def _shader_bytes(archive, name):
     return data
 
 
+@pytest.mark.parametrize("projection", ["prepare_static", "dynamic_storage_condition"])
+def test_outer_storage_guard_respects_projected_numerical_domain(projection):
+    from types import SimpleNamespace
+    from taichi_forge.aot._package_variants import compile_static_variants
+
+    entry = SimpleNamespace(_primal=SimpleNamespace())
+    captures = []
+
+    def compile_entry(*args, **kwargs):
+        captures.append(SimpleNamespace(static={}))
+        return captures[-1]
+
+    schema = {"query": {"kind": "static", "choices": [("bool", False), ("bool", True)], projection: True}}
+    environment = SimpleNamespace(compile=compile_entry)
+    assert compile_static_variants(environment, entry, (), object(), schema, fixed={"query": False}) == captures
+    assert len(captures) == 1
+    with pytest.raises(ValueError, match="outside the declared static domain"):
+        compile_static_variants(environment, entry, (), object(), schema, fixed={"query": 0})
+    assert len(captures) == 1
+
+
 def test_free_kernel_validation_uses_entry_headers():
     from types import SimpleNamespace
     from taichi_forge_runtime.aot._package_closures import _FunctionEntry

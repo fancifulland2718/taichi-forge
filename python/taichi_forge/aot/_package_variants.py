@@ -66,8 +66,14 @@ def compile_static_variants(environment, entry, arguments, owner, schema, *, tem
     aliases = _static_reference_aliases(schema, domains)
     for name, value in (fixed or {}).items():
         name = aliases.get(name, name)
+        item = schema.get(name, {})
+        if item.get("kind") == "static" and (item.get("prepare_static") or item.get("dynamic_storage_condition")):
+            # The outer selection still determines the witness layout. A
+            # projected argument need not select a separate numerical body.
+            if static_key(value) in map(tuple, item["choices"]):
+                continue
         if name not in domains or static_key(value) not in tuple(static_key(v) for v in domains[name]):
-            raise ValueError("Child implementation guard is outside the declared static domain")
+            raise ValueError(f"Child implementation guard is outside the declared static domain: {name!r} = {value!r}")
         domains[name] = (value,)
     records = {
         name: read_member(owner, name, schema)
