@@ -122,7 +122,8 @@
     CACHE_VALUE(std::string("spirv-quant-atomic-store-v1"));
     CACHE_VALUE(std::string("spirv-quant-atomic-return-v1"));
     CACHE_VALUE(std::string("spirv-pointer-freelist-merge-v1"));
-    CACHE_VALUE(std::string("spirv-descriptor-array-offsets-v1"));
+    // Cached shaders and their metadata must agree on helper-forwarded strides.
+    CACHE_VALUE(std::string("spirv-descriptor-array-offsets-v2"));
     CACHE_VALUE(std::string("spirv-rng-entry-variable-order-v2"));
     if (config.arch == Arch::vulkan)
       CACHE_VALUE(std::string("vulkan-whole-workgroup-launch-v1"));
