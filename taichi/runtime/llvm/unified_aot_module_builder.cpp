@@ -31,6 +31,29 @@ class UnifiedAotModuleBuilder final : public AotModuleBuilder {
   std::map<int, int> exported_snode_tree_bindings() const override {
     return tree_bindings_;
   }
+  int declare_storage(const SNode &root, const std::vector<DenseSNodeSchema::Parameter> &parameters,
+                      const std::string &binding_key = {}) {
+    const int id = root.get_snode_tree_id();
+    auto [recipe, members] = DenseSNodeSchema::capture_storage(root, parameters);
+    auto json = recipe.to_json();
+    auto hash = aot_artifact_sha256(json);
+    auto old = tree_bindings_.find(id);
+    auto named = named_slots_.find(binding_key);
+    const int next = static_cast<int>(layouts_.size());
+    const int slot = old != tree_bindings_.end() ? old->second :
+                     named != named_slots_.end() ? named->second : next;
+    TI_ERROR_IF((slot != next && layouts_.at(slot) != hash) ||
+                (named != named_slots_.end() && named->second != slot),
+                "Unified storage declarations disagree on an existing binding");
+    node_ordinals_.insert(members.begin(), members.end());
+    schemas_.try_emplace(hash, std::move(json));
+    if (!binding_key.empty())
+      named_slots_.emplace(binding_key, slot);
+    if (slot == next)
+      layouts_.push_back(std::move(hash));
+    tree_bindings_.emplace(id, slot);
+    return slot;
+  }
   void set_build_directory(const std::string &directory, bool cache_captures) {
     TI_ERROR_IF(!entries_.empty() || !directory_.empty(),
                 "Select the unified build directory before adding entries");
@@ -190,6 +213,7 @@ class UnifiedAotModuleBuilder final : public AotModuleBuilder {
   std::uint64_t emissions_{0}, hits_{0}, restored_{0};
   std::map<std::string, Root> roots_;
   std::map<int, int> tree_bindings_, node_ordinals_;
+  std::map<std::string, int> named_slots_;
   std::map<std::string, std::string> schemas_;
   std::vector<std::string> layouts_;
   std::map<std::string, std::vector<int>> entry_trees_;
@@ -215,17 +239,8 @@ class UnifiedAotModuleBuilder final : public AotModuleBuilder {
   }
 
   void register_tree(const SNode &root) {
-    const int id = root.get_snode_tree_id();
-    if (tree_bindings_.count(id))
-      return;
-    auto [recipe, members] =
-        DenseSNodeSchema::capture_tensor_members(root, {}, {});
-    auto json = recipe.to_json();
-    auto hash = aot_artifact_sha256(json);
-    node_ordinals_.insert(members.begin(), members.end());
-    schemas_.try_emplace(hash, std::move(json));
-    tree_bindings_.emplace(id, static_cast<int>(layouts_.size()));
-    layouts_.push_back(std::move(hash));
+    if (!tree_bindings_.count(root.get_snode_tree_id()))
+      declare_storage(root, {});
   }
 
   void add_per_backend(const std::string &name, Kernel *kernel) override {
@@ -259,9 +274,12 @@ class UnifiedAotModuleBuilder final : public AotModuleBuilder {
     // nodes. Its ids are only used to resolve this build's resource slots.
     const auto trees = kernel->source_snode_tree_dependencies();
     if (!trees.empty()) {
+      std::set<int> slots;
       for (int id : trees) {
         if (!tree_bindings_.count(id))
           register_tree(*kernel->program->get_snode_root(id));
+        TI_ERROR_IF(!slots.insert(tree_bindings_.at(id)).second,
+                    "Independent storage trees used by one entry require distinct bindings");
       }
       entry_trees_.emplace(name, trees);
     }
@@ -331,6 +349,13 @@ class UnifiedAotModuleBuilder final : public AotModuleBuilder {
   }
 };
 }  // namespace
+
+int declare_unified_storage(AotModuleBuilder &builder, const SNode &root,
+                            const std::vector<DenseSNodeSchema::Parameter> &parameters,
+                            const std::string &binding_key) {
+  auto &unified = dynamic_cast<UnifiedAotModuleBuilder &>(builder);
+  return unified.declare_storage(root, parameters, binding_key);
+}
 
 std::string unified_build_object(AotModuleBuilder &builder, const std::string &name) {
   auto *unified = dynamic_cast<UnifiedAotModuleBuilder *>(&builder);

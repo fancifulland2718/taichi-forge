@@ -10,6 +10,75 @@ import taichi_forge as ti
 from tests import test_utils
 
 
+@test_utils.test(arch=[ti.cpu, ti.cuda, ti.vulkan], offline_cache=False)
+def test_unified_native_sparse_iteration_and_instance_isolation(tmp_path):
+    from array import array
+    from contextlib import closing
+    from taichi_forge_runtime.aot import Runtime, Scalar
+
+    fields = ti.FieldsBuilder()
+    blocks = fields.pointer(ti.ij, 4, vk_max_active=8)
+    cells = blocks.bitmasked(ti.ij, 4)
+    data = ti.field(ti.i32)
+    cells.place(data)
+    fields.finalize()
+
+    @ti.kernel
+    def store(x: ti.i32, y: ti.i32, value: ti.i32):
+        data[x, y] = value
+
+    @ti.kernel
+    def visit(result: ti.types.ndarray(ti.i32, 1)):
+        for i, j in data:
+            result[0] += 1
+            result[1] += (17 * i + j) * data[i, j]
+
+    @ti.kernel
+    def remove(x: ti.i32, y: ti.i32):
+        ti.deactivate(cells, [x, y])
+
+    package = ti.aot.Module(artifact_format="unified-bc-library")
+    slot = package._aot_builder._declare_unified_storage(
+        fields.root.ptr, [(blocks.ptr, axis, "blocks") for axis in (0, 1)], "grid")
+    # Two capture witnesses for the same logical allocation share exactly one
+    # binding even when the concrete samples differ on a model axis.
+    witness = ti.FieldsBuilder()
+    outer = witness.pointer(ti.ij, 6, vk_max_active=8)
+    outer.bitmasked(ti.ij, 4).place(ti.field(ti.i32))
+    witness.finalize()
+    assert package._aot_builder._declare_unified_storage(
+        witness.root.ptr, [(outer.ptr, axis, "blocks") for axis in (0, 1)], "grid") == slot
+    for kernel in (store, visit, remove):
+        package.add_kernel(kernel)
+    path = tmp_path / "active.tcm"
+    package.archive(str(path))
+    arch = ti.lang.impl.current_cfg().arch.name
+    ti.reset()
+
+    def scalar(value):
+        return Scalar("i32", value)
+
+    with Runtime(arch) as runtime, runtime.load_module(path) as library:
+        with library._bind_native_storage({slot: {"blocks": 3}}) as first, library._bind_native_storage(
+            {slot: {"blocks": 6}}
+        ) as second, closing(
+            runtime.ndarray("i32", (2,))
+        ) as output:
+            def active(module):
+                output.write(bytes(8))
+                module.kernel("visit")(output)
+                return array("i", output.read()).tolist()
+
+            assert active(first) == [0, 0]
+            first.kernel("store")(scalar(1), scalar(2), scalar(3))
+            second.kernel("store")(scalar(0), scalar(20), scalar(7))
+            assert active(first) == [1, 57]
+            assert active(second) == [1, 140]
+            first.kernel("remove")(scalar(1), scalar(2))
+            assert active(first) == [0, 0]
+            assert active(second) == [1, 140]
+
+
 @test_utils.test(arch=ti.vulkan, offline_cache=False)
 def test_unified_vulkan_reuses_specialization_in_new_process(tmp_path, monkeypatch):
     import pytest

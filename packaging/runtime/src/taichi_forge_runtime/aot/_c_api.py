@@ -640,6 +640,13 @@ class Api:
             setattr(self, name, function)
         setattr(self, marker, True)
 
+    def load_unified_storage_binding(self):
+        if not hasattr(self, "ti_bind_unified_snode_module_ext"):
+            function = self.library.ti_bind_unified_snode_module_ext
+            function.argtypes = [Handle, Handle, C.c_uint64, C.c_char_p]
+            function.restype = Handle
+            self.ti_bind_unified_snode_module_ext = function
+
     def load_snode_instance_selection(self):
         if hasattr(self, "ti_create_aot_snode_instance_for_plan_ext"):
             return

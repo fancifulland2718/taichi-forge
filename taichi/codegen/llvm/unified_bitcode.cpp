@@ -133,7 +133,7 @@ std::unique_ptr<IRNode> lower_body(Callable &callable, bool ast) {
   auto root = irpass::analysis::clone(callable.ir.get());
   if (ast) {
     irpass::frontend_type_check(root.get());
-    irpass::lower_ast(root.get());
+    irpass::lower_ast(root.get(), true);
   }
   const auto &config = callable.program->compile_config();
   irpass::eliminate_immutable_local_vars(root.get());
@@ -628,6 +628,14 @@ class UnitWriter final : public IRVisitor {
         operation("field.address." + s->ret_type.ptr_removed()->to_string(),
                   b_.getPtrTy(), args);
   }
+  void visit(SNodeOpStmt *s) override {
+    TI_ERROR_IF(!SNodeOpStmt::activation_related(s->op_type) || s->val,
+                "Unsupported unified SNode operation {}", snode_op_type_name(s->op_type));
+    auto args = tree_binding(*s->snode);
+    args.push_back(b_.getInt32(static_cast<int>(s->op_type)));
+    args.push_back(value(s->ptr));
+    values_[s] = operation("field.activation", type(s->ret_type), args);
+  }
   void visit(MatrixInitStmt *s) override {
     llvm::Value *tensor = llvm::PoisonValue::get(type(s->ret_type));
     for (size_t i = 0; i < s->values.size(); ++i)
@@ -854,11 +862,6 @@ class UnitWriter final : public IRVisitor {
   void visit(RangeForStmt *s) override {
     TI_ERROR_IF(s->reversed || s->is_bit_vectorized,
                 "Unified LLVM reversed or vectorized range is not lowered");
-    auto *initial = b_.GetInsertBlock();
-    auto *head = llvm::BasicBlock::Create(ctx_, "range", entry_);
-    auto *body = llvm::BasicBlock::Create(ctx_, "body", entry_);
-    auto *latch = llvm::BasicBlock::Create(ctx_, "range.next", entry_);
-    auto *after = llvm::BasicBlock::Create(ctx_, "end", entry_);
     if (s->model_block_dim)
       operation("range.block_size", b_.getVoidTy(),
                 {value(s->model_block_dim)});
@@ -871,27 +874,52 @@ class UnitWriter final : public IRVisitor {
         options.push_back(value(argument));
       bound = operation("range.device_options", bound->getType(), options);
     }
+    parallel_loop(s, *s->body, value(s->begin), bound, s->strictly_serialized,
+                  s->requested_cpu_threads, s->block_dim, s->one_to_one, s->range_hint);
+  }
+  void visit(StructForStmt *s) override {
+    TI_ERROR_IF(s->is_bit_vectorized || s->block_initialization || s->block_finalization,
+                "Unsupported vectorized or lowered unified struct-for");
+    auto args = tree_binding(*s->snode);
+    // Keep cache hints tied to logical fields. Pointer addresses and container
+    // iteration order must not become part of the unit identity.
+    std::vector<std::tuple<int, int, int>> hints;
+    for (const auto &[node, flags] : s->mem_access_opt.get_all()) {
+      const auto field = tree_binding(*node);
+      for (auto flag : flags)
+        hints.emplace_back(llvm::cast<llvm::ConstantInt>(field[1])->getZExtValue(),
+                           llvm::cast<llvm::ConstantInt>(field[2])->getZExtValue(),
+                           static_cast<int>(flag));
+    }
+    std::sort(hints.begin(), hints.end());
+    for (auto [tree, member, flag] : hints) {
+      args.push_back(b_.getInt32(tree));
+      args.push_back(b_.getInt32(member));
+      args.push_back(b_.getInt32(flag));
+    }
+    auto *count = operation("field.active_count", b_.getInt32Ty(), args);
+    parallel_loop(s, *s->body, b_.getInt32(0), count, false,
+                  s->num_cpu_threads, s->block_dim, false, "");
+  }
+  void parallel_loop(Stmt *owner, Block &statements, llvm::Value *begin, llvm::Value *bound,
+                     bool serial, int threads, int width, bool one_to_one, llvm::StringRef hint) {
+    auto *initial = b_.GetInsertBlock();
+    auto *head = llvm::BasicBlock::Create(ctx_, "range", entry_);
+    auto *body = llvm::BasicBlock::Create(ctx_, "body", entry_);
+    auto *latch = llvm::BasicBlock::Create(ctx_, "range.next", entry_);
+    auto *after = llvm::BasicBlock::Create(ctx_, "end", entry_);
     b_.CreateBr(head);
     b_.SetInsertPoint(head);
-    auto *index = b_.CreatePHI(value(s->begin)->getType(), 2);
-    index->addIncoming(value(s->begin), initial);
-    indices_[s] = index;
-    auto *branch =
-        b_.CreateCondBr(b_.CreateICmpSLT(index, bound), body, after);
-    // The induction loop remains executable LLVM; dispatch decisions belong
-    // to prepare. A model-selected block size is an explicit SSA operand.
-    auto md = [&](int n) {
-      return llvm::ConstantAsMetadata::get(b_.getInt32(n));
-    };
-    branch->setMetadata(
-        "forge.range",
-        llvm::MDNode::get(ctx_,
-                          {md(s->strictly_serialized), md(s->requested_cpu_threads),
-                           md(s->block_dim), md(s->one_to_one),
-                           llvm::MDString::get(ctx_, s->range_hint)}));
+    auto *index = b_.CreatePHI(begin->getType(), 2);
+    index->addIncoming(begin, initial);
+    indices_[owner] = index;
+    auto *branch = b_.CreateCondBr(b_.CreateICmpSLT(index, bound), body, after);
+    auto md = [&](int n) { return llvm::ConstantAsMetadata::get(b_.getInt32(n)); };
+    branch->setMetadata("forge.range", llvm::MDNode::get(ctx_,
+        {md(serial), md(threads), md(width), md(one_to_one), llvm::MDString::get(ctx_, hint)}));
     b_.SetInsertPoint(body);
     loops_.emplace_back(latch, after);
-    s->body->accept(this);
+    statements.accept(this);
     loops_.pop_back();
     if (!bb_terminated())
       b_.CreateBr(latch);
@@ -900,10 +928,15 @@ class UnitWriter final : public IRVisitor {
         b_.CreateAdd(index, llvm::ConstantInt::get(index->getType(), 1));
     index->addIncoming(next, latch);
     b_.CreateBr(head);
-    indices_.erase(s);
+    indices_.erase(owner);
     b_.SetInsertPoint(after);
   }
   void visit(LoopIndexStmt *s) override {
+    if (s->loop->is<StructForStmt>()) {
+      values_[s] = operation("field.coordinate", b_.getInt32Ty(),
+                             {indices_.at(s->loop), b_.getInt32(s->index)});
+      return;
+    }
     TI_ERROR_IF(s->index != 0, "Unified LLVM non-range index is not lowered");
     values_[s] = indices_.at(s->loop);
   }

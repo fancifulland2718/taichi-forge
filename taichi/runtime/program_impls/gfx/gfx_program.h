@@ -75,10 +75,7 @@ class GfxProgramImpl : public ProgramImpl {
   std::unique_ptr<AotModuleBuilder> make_aot_module_builder(
       const DeviceCapabilityConfig &caps) override;
 
-  void destroy_snode_tree(SNodeTree *snode_tree) override {
-    TI_ASSERT(snode_tree_mgr_ != nullptr);
-    snode_tree_mgr_->destroy_snode_tree(snode_tree);
-  }
+  void destroy_snode_tree(SNodeTree *snode_tree) override;
 
   SparseSNodeTreeMemoryStatistics get_snode_tree_memory_statistics(
       SNodeTree *snode_tree,
@@ -137,6 +134,7 @@ class GfxProgramImpl : public ProgramImpl {
   DeviceCapabilityConfig get_device_caps() override;
 
   std::string fixed_snode_tree_layout_json(int tree_id) const;
+  const spirv::CompiledSNodeStructs &compiled_snode_layout(int tree_id) const;
 
  protected:
   std::unique_ptr<KernelCompiler> make_kernel_compiler() override;

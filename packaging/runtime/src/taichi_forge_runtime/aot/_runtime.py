@@ -1122,6 +1122,18 @@ class Module(_Resource):
 
     _kind = "module"
 
+    def _bind_native_storage(self, dimensions):
+        runtime = self._runtime
+        with runtime._lock:
+            self._check()
+            runtime._api.load_unified_storage_binding()
+            bindings = json.dumps(dimensions, separators=(",", ":")).encode()
+            handle = runtime._api.call(runtime._api.ti_bind_unified_snode_module_ext,
+                                       runtime._handle, self._handle, len(bindings), bindings)
+            instance = Module(runtime, handle)
+            instance._source_path = self._source_path
+            return instance
+
     def snode_instance(self, *, plan=None):
         """Allocate fixed-tree state for this module or a plan's compiled closure."""
         from ._snode_instance import SNodeInstance

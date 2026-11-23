@@ -6007,6 +6007,8 @@ void export_lang(py::module &m) {
       })
 #if TI_WITH_LLVM
       .def("_set_unified_build_directory", &LLVM::set_unified_build_directory)
+      .def("_declare_unified_storage", &LLVM::declare_unified_storage,
+           py::arg("root"), py::arg("parameters"), py::arg("binding_key") = "")
       .def("_add_unified_kernel",
            [](AotModuleBuilder &builder, Program &program, const std::string &name,
               const py::bytes &unit, const std::string &signature,

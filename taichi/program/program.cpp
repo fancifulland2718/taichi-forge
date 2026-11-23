@@ -70,6 +70,7 @@
 #include "taichi/program/vulkan_command_replay.h"
 #include "taichi/runtime/vulkan_execution_domain.h"
 #include "taichi/runtime/program_impls/vulkan/vulkan_program.h"
+#include "taichi/runtime/gfx/aot_snode_resources.h"
 #include "taichi/rhi/vulkan/vulkan_loader.h"
 #include "taichi/rhi/vulkan/vulkan_external_access.h"
 #endif
@@ -621,6 +622,13 @@ Program::snapshot_snode_tree_dependencies_unlocked(
 std::uint64_t Program::snode_tree_layout_fingerprint_for(int tree_id) const {
   return snapshot_snode_tree_dependencies({tree_id})[0].layout_fingerprint;
 }
+
+#ifdef TI_WITH_VULKAN
+gfx::AotSNodeTreeResources Program::gfx_aot_tree_resources(int tree_id) const {
+  const auto &backend = dynamic_cast<const GfxProgramImpl &>(*program_impl_);
+  return gfx::AotSNodeTreeResources::from_compiled(tree_id, backend.compiled_snode_layout(tree_id));
+}
+#endif
 
 std::string Program::fixed_snode_tree_layout_json(int tree_id) const {
   snapshot_snode_tree_dependencies({tree_id});

@@ -54,6 +54,7 @@ class LowerAST : public IRVisitor {
   Stmt *capturing_loop_;
   std::unordered_set<Stmt *> detected_fors_with_break_;
   Block *current_block_;
+  bool portable_schedule_;
   int current_block_depth_;
   bool current_stmt_replaced_{false};
   std::unordered_map<Stmt *, Stmt *> replacements_;
@@ -82,9 +83,11 @@ class LowerAST : public IRVisitor {
   }
 
  public:
-  explicit LowerAST(const std::unordered_set<Stmt *> &_detected_fors_with_break)
+  LowerAST(const std::unordered_set<Stmt *> &_detected_fors_with_break,
+           bool portable_schedule)
       : detected_fors_with_break_(_detected_fors_with_break),
         current_block_(nullptr),
+        portable_schedule_(portable_schedule),
         current_block_depth_(0) {
     // TODO: change this to false
     allow_undefined_visitor = true;
@@ -389,7 +392,8 @@ class LowerAST : public IRVisitor {
 
       auto &&new_for = std::make_unique<StructForStmt>(
           snode, std::move(stmt->body), stmt->is_bit_vectorized,
-          stmt->num_cpu_threads, stmt->block_dim);
+          portable_schedule_ ? stmt->requested_cpu_threads : stmt->num_cpu_threads,
+          stmt->block_dim);
       new_for->index_offsets = offsets;
       VecStatement new_statements;
       for (int i = 0; i < (int)stmt->loop_var_ids.size(); i++) {
@@ -711,8 +715,8 @@ class LowerAST : public IRVisitor {
     replace_with(stmt, std::move(ctx.stmts));
   }
 
-  static void run(IRNode *node) {
-    LowerAST inst(irpass::analysis::detect_fors_with_break(node));
+  static void run(IRNode *node, bool portable_schedule) {
+    LowerAST inst(irpass::analysis::detect_fors_with_break(node), portable_schedule);
     node->accept(&inst);
     RebindLoweredStatements rebind(inst.replacements_);
     node->accept(&rebind);
@@ -722,8 +726,12 @@ class LowerAST : public IRVisitor {
 namespace irpass {
 
 void lower_ast(IRNode *root) {
+  lower_ast(root, false);
+}
+
+void lower_ast(IRNode *root, bool portable_schedule) {
   TI_AUTO_PROF;
-  LowerAST::run(root);
+  LowerAST::run(root, portable_schedule);
 }
 
 }  // namespace irpass

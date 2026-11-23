@@ -1577,6 +1577,11 @@ ti_probe_native_resource_ext(TiRuntime runtime,
 // not copy live values or activation. Allocate before borrowing sparse views.
 TI_DLL_EXPORT TiNativeResource TI_API_CALL
 ti_create_aot_snode_instance_ext(TiRuntime runtime, TiAotModule module);
+// Bind native activation storage dimensions to an independent instance of a
+// unified module. The parent and instance share immutable numerical units.
+TI_DLL_EXPORT TiAotModule TI_API_CALL
+ti_bind_unified_snode_module_ext(TiRuntime runtime, TiAotModule module,
+                                 uint64_t description_size, const char *description);
 // Select only compiler-recorded tree dependencies of this ExecutionPlan,
 // including initialization and every control region. No numerical code runs.
 TI_DLL_EXPORT TiNativeResource TI_API_CALL

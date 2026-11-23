@@ -93,6 +93,8 @@ TiMemory Runtime::create_dense_snode_group(const std::string &schema_json,
   using namespace taichi::lang;
   std::lock_guard<std::recursive_mutex> lock(submission_mutex());
   auto schema = DenseSNodeSchema::from_json(schema_json);
+  if (schema.version == 4)
+    throw std::invalid_argument("Sparse activation storage requires a native SNode tree");
   const auto bindings = liong::json::parse_complete(dimensions);
   if (!bindings.is_obj())
     throw std::invalid_argument(

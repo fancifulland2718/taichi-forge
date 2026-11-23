@@ -12,10 +12,14 @@ namespace taichi::lang {
 GfxProgramImpl::GfxProgramImpl(CompileConfig &config) : ProgramImpl(config) {
 }
 
-std::string GfxProgramImpl::fixed_snode_tree_layout_json(int tree_id) const {
+const spirv::CompiledSNodeStructs &GfxProgramImpl::compiled_snode_layout(int tree_id) const {
   const auto &layouts = runtime_ ? snode_tree_mgr_->get_compiled_structs()
                                  : aot_compiled_snode_structs_;
-  return gfx::AotSNodeTreeResources::from_compiled(tree_id, layouts.at(tree_id))
+  return layouts.at(tree_id);
+}
+
+std::string GfxProgramImpl::fixed_snode_tree_layout_json(int tree_id) const {
+  return gfx::AotSNodeTreeResources::from_compiled(tree_id, compiled_snode_layout(tree_id))
       .normalized_layout_json();
 }
 
@@ -61,8 +65,17 @@ void GfxProgramImpl::compile_snode_tree_types(SNodeTree *tree) {
   } else {
     gfx::CompiledSNodeStructs compiled_structs =
         gfx::compile_snode_structs(*tree->root(), policy);
-    aot_compiled_snode_structs_.push_back(compiled_structs);
+    if (aot_compiled_snode_structs_.size() <= tree->id())
+      aot_compiled_snode_structs_.resize(tree->id() + 1);
+    aot_compiled_snode_structs_[tree->id()] = std::move(compiled_structs);
   }
+}
+
+void GfxProgramImpl::destroy_snode_tree(SNodeTree *tree) {
+  if (snode_tree_mgr_)
+    snode_tree_mgr_->destroy_snode_tree(tree);
+  else
+    aot_compiled_snode_structs_.at(tree->id()) = {};
 }
 
 void GfxProgramImpl::materialize_snode_tree(SNodeTree *tree,

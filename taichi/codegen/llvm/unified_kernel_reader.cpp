@@ -385,6 +385,7 @@ class KernelReader {
   std::unordered_set<const BB *> visited_;
   std::unordered_map<BB *, unsigned> block_order_;
   std::vector<BB *> range_latches_;
+  std::unordered_map<const llvm::Value *, StructForStmt *> struct_loops_;
   std::vector<Stmt *> results_;
   Stmt *model_block_dim_{nullptr};
   std::vector<RangeForStmt *> cpu_workgroups_;
@@ -655,6 +656,18 @@ class KernelReader {
     }
     if (name.starts_with("forge.range.device_options."))
       return arg(0);  // Scheduling is interpreted where the range consumes this bound.
+    if (name.starts_with("forge.field.active_count."))
+      return nullptr;  // Interpreted as native list generation by the enclosing loop.
+    if (name.starts_with("forge.field.coordinate.")) {
+      auto found = struct_loops_.find(call.getArgOperand(0));
+      TI_ERROR_IF(found == struct_loops_.end(), "Unified field coordinate outside its active list");
+      return block.push_back<LoopIndexStmt>(found->second, number(1));
+    }
+    if (name.starts_with("forge.field.activation.")) {
+      auto op = static_cast<SNodeOpType>(number(3));
+      TI_ERROR_IF(!SNodeOpStmt::activation_related(op), "Invalid unified activation operation");
+      return block.push_back<SNodeOpStmt>(op, storage_.at(number(1)).at(number(2)), arg(4));
+    }
     if (name.starts_with("forge.field.address.")) {
       auto *node = storage_.at(number(1)).at(number(2));
       TI_ERROR_IF(!node, "Missing unified field member");
@@ -1110,23 +1123,44 @@ class KernelReader {
     }
     int threads = kernel_.arch == Arch::cuda ? 1 :
                   requested ? requested : int(std::max(1u, std::thread::hardware_concurrency()));
-    auto *loop = block.push_back<RangeForStmt>(
-        value(block, index->getIncomingValue(start)), value(block, condition->getOperand(1)),
-        std::make_unique<Block>(), false, threads, width, serialized,
-        llvm::cast<llvm::MDString>(policy->getOperand(4))->getString().str())->as<RangeForStmt>();
-    loop->requested_cpu_threads = requested;
-    loop->model_block_dim = model_block_dim_;
+    Block *body;
+    if (options && options->getCalledFunction() &&
+        options->getCalledFunction()->getName().starts_with("forge.field.active_count.")) {
+      TI_ERROR_IF(options->arg_size() < 3 || options->arg_size() % 3 ||
+                      !llvm::PatternMatch::match(index->getIncomingValue(start), llvm::PatternMatch::m_Zero()),
+                  "Invalid unified active-list iteration");
+      auto node = [&](unsigned i) {
+        return storage_.at(literal(options->getArgOperand(i)))
+                       .at(literal(options->getArgOperand(i + 1)));
+      };
+      auto *loop = block.push_back<StructForStmt>(node(1), std::make_unique<Block>(),
+                                                  false, threads, width)->as<StructForStmt>();
+      for (unsigned i = 3; i < options->arg_size(); i += 3)
+        loop->mem_access_opt.add_flag(node(i),
+            static_cast<SNodeAccessFlag>(literal(options->getArgOperand(i + 2))));
+      struct_loops_.emplace(index, loop);
+      body = loop->body.get();
+    } else {
+      auto *loop = block.push_back<RangeForStmt>(
+          value(block, index->getIncomingValue(start)), value(block, condition->getOperand(1)),
+          std::make_unique<Block>(), false, threads, width, serialized,
+          llvm::cast<llvm::MDString>(policy->getOperand(4))->getString().str())->as<RangeForStmt>();
+      loop->requested_cpu_threads = requested;
+      loop->model_block_dim = model_block_dim_;
+      loop->one_to_one = item(3);
+      values_[index] = loop->body->push_back<LoopIndexStmt>(loop, 0);
+      body = loop->body.get();
+    }
     model_block_dim_ = nullptr;
-    loop->one_to_one = item(3);
-    values_[index] = loop->body->push_back<LoopIndexStmt>(loop, 0);
     range_latches_.push_back(latch);
-    region(branch.getSuccessor(0), latch, &head, *loop->body);
+    region(branch.getSuccessor(0), latch, &head, *body);
     range_latches_.pop_back();
     // Inlining a helper can merge its last body block with its latch. Those
     // instructions still belong to each iteration, before the induction step.
     for (const auto &inst : *latch)
       if (!inst.isTerminator() && (&inst != step || !step->hasOneUse()))
-        values_[&inst] = instruction(*loop->body, inst);
+        values_[&inst] = instruction(*body, inst);
+    struct_loops_.erase(index);
     return branch.getSuccessor(1);
   }
 

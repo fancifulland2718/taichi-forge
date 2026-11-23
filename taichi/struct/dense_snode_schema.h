@@ -50,7 +50,8 @@ struct DenseSNodeSchema {
     // lanes. Index extents remain on the original Dense nodes; no offsets or
     // strides are synthesized by the recipe.
     std::vector<Extent> tensor_extents;
-    TI_IO_DEF(parent, type, dtype, extents, tensor_extents);
+    std::int64_t max_active{-1};
+    TI_IO_DEF(parent, type, dtype, extents, tensor_extents, max_active);
   };
 
   int version{1};
@@ -60,6 +61,10 @@ struct DenseSNodeSchema {
   using Parameter = std::tuple<const SNode *, int, std::string>;
   static DenseSNodeSchema capture(const SNode &root,
                                   const std::vector<Parameter> &parameters);
+  // Native field instructions bind to these logical nodes at prepare. Sparse
+  // branches retain their activation and may repeat an axis at block/cell level.
+  static std::pair<DenseSNodeSchema, std::map<int, int>> capture_storage(
+      const SNode &root, const std::vector<Parameter> &parameters = {});
   using TensorParameter = std::tuple<std::vector<const SNode *>,
                                      std::vector<int>,
                                      std::vector<std::string>>;
@@ -86,6 +91,11 @@ struct DenseSNodeSchema {
       std::vector<std::vector<SNode *>> &recipe_nodes) const;
   std::string to_json() const;
   static DenseSNodeSchema from_json(const std::string &text);
+
+ private:
+  static DenseSNodeSchema capture_nodes(const SNode &root,
+                                        const std::vector<Parameter> &parameters,
+                                        std::map<int, int> *storage_members);
 };
 
 }  // namespace taichi::lang

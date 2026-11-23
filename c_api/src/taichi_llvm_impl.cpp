@@ -133,35 +133,38 @@ TiMemory LlvmRuntime::allocate_memory(
   return devalloc2devmem(*this, devalloc, params.size);
 }
 
+std::unique_ptr<taichi::lang::LLVM::KernelLauncher> make_llvm_aot_launcher(
+    taichi::lang::LlvmRuntimeExecutor &executor) {
+  const auto &config = executor.get_config();
+  if (taichi::arch_is_cpu(config.arch)) {
+    taichi::lang::cpu::KernelLauncher::Config cfg;
+    cfg.executor = &executor;
+    return std::make_unique<taichi::lang::cpu::KernelLauncher>(std::move(cfg));
+  } else {
+#ifdef TI_WITH_CUDA
+    TI_ASSERT(config.arch == taichi::Arch::cuda);
+    taichi::lang::cuda::KernelLauncher::Config cfg;
+    cfg.executor = &executor;
+    return std::make_unique<taichi::lang::cuda::KernelLauncher>(std::move(cfg));
+#else
+    TI_NOT_IMPLEMENTED;
+#endif
+  }
+}
+
 TiAotModule LlvmRuntime::load_aot_module(const char *module_path) {
-  const auto &config = executor_->get_config();
   std::unique_ptr<taichi::lang::aot::Module> aot_module{nullptr};
   taichi::lang::LLVM::AotModuleParams aot_params;
   aot_params.source = taichi::io::VirtualDir::open(module_path);
   aot_params.module_path = module_path;
   aot_params.executor_ = executor_;
   aot_params.allocation_result_buffer = result_buffer;
-
-  if (taichi::arch_is_cpu(config.arch)) {
-    taichi::lang::cpu::KernelLauncher::Config cfg;
-    cfg.executor = executor_;
-    aot_params.kernel_launcher =
-        std::make_unique<taichi::lang::cpu::KernelLauncher>(std::move(cfg));
-  } else {
-#ifdef TI_WITH_CUDA
-    TI_ASSERT(config.arch == taichi::Arch::cuda);
-    taichi::lang::cuda::KernelLauncher::Config cfg;
-    cfg.executor = executor_;
-    aot_params.kernel_launcher =
-        std::make_unique<taichi::lang::cuda::KernelLauncher>(std::move(cfg));
-#else
-    TI_NOT_IMPLEMENTED;
-#endif
-  }
+  aot_params.kernel_launcher = make_llvm_aot_launcher(*executor_);
 
   if (aot_params.source && is_unified_library(*aot_params.source))
     aot_module = load_unified_library(*this, std::move(aot_params.source),
-                                      std::move(aot_params.kernel_launcher), nullptr);
+                                      std::move(aot_params.kernel_launcher), nullptr,
+                                      executor_, result_buffer);
   else
     aot_module = taichi::lang::LLVM::make_aot_module(std::move(aot_params));
   // The module validates and reserves every tree identity at load time.

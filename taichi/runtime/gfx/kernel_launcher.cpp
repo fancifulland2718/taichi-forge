@@ -56,7 +56,8 @@ KernelLauncher::Handle KernelLauncher::register_kernel(
 }
 
 void KernelLauncher::retire_snode_tree(int tree_id) {
-  config_.gfx_runtime_->retire_snode_tree_kernels(tree_id);
+  if (config_.gfx_runtime_)
+    config_.gfx_runtime_->retire_snode_tree_kernels(tree_id);
 }
 
 std::size_t KernelLauncher::debug_registered_kernel_count() {

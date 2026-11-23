@@ -73,6 +73,7 @@ enum class CudaAsyncTileAdmissionReason : std::uint8_t;
 
 namespace gfx {
 class GfxRuntime;
+struct AotSNodeTreeResources;
 class ExternalGraphCommand;
 class FixedGraphRecording;
 struct GraphRecordingSource;
@@ -753,6 +754,9 @@ class TI_DLL_EXPORT Program {
 
   std::uint64_t snode_tree_layout_fingerprint_for(int tree_id) const;
   std::string fixed_snode_tree_layout_json(int tree_id) const;
+#ifdef TI_WITH_VULKAN
+  gfx::AotSNodeTreeResources gfx_aot_tree_resources(int tree_id) const;
+#endif
 
   bool prepare_relocatable_kernel_template(
       const Kernel &kernel_def,

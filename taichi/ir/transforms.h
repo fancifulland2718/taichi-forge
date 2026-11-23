@@ -98,6 +98,7 @@ std::function<void(const std::string &)> make_pass_printer(
     IRNode *ir);
 void frontend_type_check(IRNode *root);
 void lower_ast(IRNode *root);
+void lower_ast(IRNode *root, bool portable_schedule);
 void type_check(IRNode *root, const CompileConfig &config);
 bool inlining(IRNode *root,
               const CompileConfig &config,

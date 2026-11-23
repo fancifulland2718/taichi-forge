@@ -112,6 +112,19 @@ DenseSNodeTensorLayout dense_snode_tensor_layout(
 DenseSNodeSchema DenseSNodeSchema::capture(
     const SNode &root,
     const std::vector<Parameter> &parameters) {
+  return capture_nodes(root, parameters, nullptr);
+}
+
+std::pair<DenseSNodeSchema, std::map<int, int>> DenseSNodeSchema::capture_storage(
+    const SNode &root, const std::vector<Parameter> &parameters) {
+  std::map<int, int> members;
+  auto schema = capture_nodes(root, parameters, &members);
+  return {std::move(schema), std::move(members)};
+}
+
+DenseSNodeSchema DenseSNodeSchema::capture_nodes(
+    const SNode &root, const std::vector<Parameter> &parameters,
+    std::map<int, int> *storage_members) {
   require(root.type == SNodeType::root, "Dense schema requires an SNode root");
   std::map<std::pair<const SNode *, int>, std::string> requested;
   for (const auto &[node, axis, name] : parameters) {
@@ -134,9 +147,17 @@ DenseSNodeSchema DenseSNodeSchema::capture(
         Node node;
         node.parent = parent;
         node.type = source.type;
+        if (storage_members) {
+          storage_members->emplace(source.id, index);
+          node.max_active = source.vk_max_active_hint;
+          if (source.type == SNodeType::pointer ||
+              source.type == SNodeType::bitmasked)
+            schema.version = 4;
+        }
         if (source.type == SNodeType::place)
           node.dtype = source.dt;
-        if (source.type == SNodeType::dense) {
+        if (source.type == SNodeType::dense || (storage_members &&
+            (source.type == SNodeType::pointer || source.type == SNodeType::bitmasked))) {
           for (int axis = 0; axis < taichi_max_num_indices; ++axis) {
             if (!source.extractors[axis].active)
               continue;
@@ -338,7 +359,10 @@ DenseSNodeSchema::capture_tensor_layout_members(
 }
 
 void DenseSNodeSchema::validate() const {
-  require(version >= 1 && version <= 3, "Unsupported Dense schema version");
+  require(version >= 1 && version <= 4, "Unsupported SNode schema version");
+  const auto container = [this](SNodeType type) {
+    return type == SNodeType::dense || (version == 4 && (type == SNodeType::pointer || type == SNodeType::bitmasked));
+  };
   // Parent references and the normal SNode construction API use signed ints.
   // Do not impose a smaller deployment-only node-count policy.
   require(!nodes.empty() && nodes.size() <= std::numeric_limits<int>::max(),
@@ -355,17 +379,20 @@ void DenseSNodeSchema::validate() const {
         ancestors.pop_back();
       require(!ancestors.empty(),
               "Dense schema nodes must preserve preorder placement order");
-      require(node.type == SNodeType::dense || node.type == SNodeType::place,
+      require(container(node.type) || node.type == SNodeType::place,
               "Dense schema supports only dense and scalar place nodes");
       const auto parent_type = nodes[node.parent].type;
-      require(parent_type == SNodeType::root || parent_type == SNodeType::dense,
+      require(parent_type == SNodeType::root || container(parent_type),
               "Dense schema requires root or Dense parents");
     }
+    require(node.max_active == -1 ||
+                (version == 4 && node.type == SNodeType::pointer && node.max_active > 0),
+            "A native active-cell capacity requires a sparse pointer");
     require(node.type != SNodeType::place || supported_scalar(node.dtype),
             "Dense schema place requires a supported scalar dtype");
     require(node.type == SNodeType::place || node.dtype == PrimitiveType::gen,
             "Dense schema container must not have a scalar dtype");
-    const bool tensor = version >= 2 && node.type == SNodeType::place;
+    const bool tensor = (version == 2 || version == 3) && node.type == SNodeType::place;
     require(node.tensor_extents.empty() ||
                 (version == 3 && node.type == SNodeType::dense),
             "SOA tensor repetition requires a version 3 Dense branch");
@@ -395,7 +422,7 @@ void DenseSNodeSchema::validate() const {
                   (next == nodes.size() || nodes[next].parent < i),
               "SOA tensor repetition requires a single-leaf Dense chain");
     }
-    require(node.type == SNodeType::dense || tensor || node.extents.empty(),
+    require(container(node.type) || tensor || node.extents.empty(),
             "Only dense nodes or version 2 tensor places may declare extents");
     require(!tensor || node.extents.size() <= 2,
             "Tensor schema requires vector/matrix axes");
@@ -411,7 +438,7 @@ void DenseSNodeSchema::validate() const {
           extent.parameter.empty() ? extent.constant > 0 : extent.constant == 0,
           "Dense schema extent must be either a positive constant or a "
           "parameter");
-      if (!tensor) {
+      if (!tensor && version != 4) {
         for (int ancestor : ancestors) {
           for (const auto &outer : nodes[ancestor].extents)
             require(outer.axis != extent.axis,
@@ -496,12 +523,13 @@ std::unique_ptr<SNode> DenseSNodeSchema::instantiate_projected(
   projection[0].push_back(root.get());
   std::function<void(int, SNode *)> construct = [&](int i, SNode *parent) {
     const auto &node = nodes[i];
-    if (node.type == SNodeType::dense) {
+    if (node.type != SNodeType::place) {
       std::vector<Axis> axes;
       for (const auto &extent : node.extents)
         axes.emplace_back(extent.axis);
       for (int64_t lane = 0; lane < branch_counts[i]; ++lane) {
-        auto *branch = &parent->dense(axes, sizes[i]);
+        auto *branch = &parent->create_node(axes, sizes[i], node.type, DebugInfo());
+        branch->vk_max_active_hint = node.max_active;
         projection[i].push_back(branch);
         for (int child : children[i])
           construct(child, branch);
@@ -523,19 +551,24 @@ std::unique_ptr<SNode> DenseSNodeSchema::instantiate_projected(
 std::string DenseSNodeSchema::to_json() const {
   validate();
   auto data = liong::json::serialize(*this);
-  if (version < 3)
-    for (auto &node : data.obj.inner.at("nodes").arr.inner)
+  for (auto &node : data.obj.inner.at("nodes").arr.inner) {
+    if (version < 3)
       node.obj.inner.erase("tensor_extents");
+    if (node["max_active"].num_int == -1)
+      node.obj.inner.erase("max_active");
+  }
   return liong::json::print(data);
 }
 
 DenseSNodeSchema DenseSNodeSchema::from_json(const std::string &text) {
   DenseSNodeSchema schema;
   auto data = liong::json::parse_complete(text);
-  if (data["version"].num_int == 1 || data["version"].num_int == 2)
-    for (auto &node : data.obj.inner.at("nodes").arr.inner)
+  for (auto &node : data.obj.inner.at("nodes").arr.inner) {
+    if (data["version"].num_int == 1 || data["version"].num_int == 2)
       node.obj.inner.emplace("tensor_extents",
                              liong::json::JsonValue(liong::json::JsonArray()));
+    node.obj.inner.emplace("max_active", -1);
+  }
   liong::json::deserialize(data, schema);
   schema.validate();
   return schema;
