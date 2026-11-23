@@ -33144,3 +33144,36 @@ class Model(Base):
     ti.reset()
     with Runtime("x64") as runtime, load_package(runtime, sdk) as code:
         check(code.host.Model)
+
+@pytest.mark.parametrize("declaration", ("Final[int] = 2", "int = 2", "Final[list] = [2]"))
+@test_utils.test(arch=ti.cpu, offline_cache=False)
+def test_package_host_template_selection_accepts_only_final_scalars(tmp_path, monkeypatch, declaration):
+    source = """
+from typing import Final
+import taichi_forge as ti
+KIND: DECLARATION
+@ti.data_oriented
+class Model:
+    def __init__(self, n):
+        self.n = n
+        scope = ti.experimental.ResourceScope(self)
+        scope.output = scope.field(ti.i32, shape=scope.dim("n"))
+    @ti.kernel
+    def update(self, kind: ti.template()):
+        for i in range(self.n):
+            self.output[i] = i + ti.static(kind)
+    def advance(self):
+        self.update(KIND)
+""".replace("DECLARATION", declaration)
+    package = _source_package(tmp_path, monkeypatch, source)
+    sdk = tmp_path / "sdk"
+    if declaration != "Final[int] = 2":
+        with pytest.raises(ti.aot.PackageExportError, match="unproven template input|definition-proven"):
+            ti.aot.export_package(package, sdk, arch=ti.cpu, artifact_format="unified-bc-library")
+        return
+    ti.aot.export_package(package, sdk, arch=ti.cpu, artifact_format="unified-bc-library")
+    ti.reset()
+    with Runtime("x64") as runtime, load_package(runtime, sdk) as code:
+        solver = code.host.Model(3)
+        solver.advance()
+        np.testing.assert_array_equal(solver.output.to_numpy(), [2, 3, 4])

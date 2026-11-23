@@ -1357,6 +1357,10 @@ def discover(sources, imported, *, preparation_receivers=None, preparation_guard
                             resolved = _source_value(expression, namespace)
                             if inspect.isfunction(resolved) and resolved in kernels:
                                 return _Kernel(resolved)
+                            from ._component import _module_final
+
+                            if type(resolved) in (bool, int, float, str) and _module_final(function.__globals__, name):
+                                return _Literal(resolved)
                             if resource_inventory is not None and (name in namespace):
                                 from ._package_factories import _literal
                                 if _literal(resolved):
