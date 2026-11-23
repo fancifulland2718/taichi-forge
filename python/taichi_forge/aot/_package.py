@@ -1826,9 +1826,19 @@ def _preflight_package(package, *, arch=None, source_root=None, inputs=None, bui
     except ValueError as error:
         raise PackageExportError(str(error)) from error
     resolve_inputs(sources, imported_modules)
+    input_contexts = {
+        name + "." + base: [variant["owner"] for variant in variants]
+        for name, _, _, _, tree, *_ in sources
+        for base, variants in getattr(tree, "_package_input_families", {}).items()
+    }
     for name, _, _, _, tree, _, schemas, _ in sources:
         for owner, schema in schemas.items():
             for member, declaration in schema.items():
+                if declaration["kind"] == "host_owner_sequence":
+                    concrete = {child["owner_type"] for child in declaration["constructors"]}
+                    for declared in declaration.get("owner_types", ()):
+                        concrete.update(input_contexts.get(declared, (declared,)))
+                    declaration["owner_types"] = sorted(concrete)
                 if declaration.get("initial_owner_absence"):
                     _fail(name, tree, "Initial absent owner requires a typed optional preparation binding: "
                           + owner + "." + member)
@@ -2364,10 +2374,6 @@ def _export_package(output, declarations, source_root, caps, artifact_format, co
                         dict(owner_type=choice["owner_type"], conditions=choice.get("conditions", {}))
                         for choice in item["owner_alternatives"]
                     ]
-                if item["kind"] == "host_owner_sequence":
-                    manifest["owners"][name + "." + class_name][attribute]["owner_types"] = sorted(
-                        {child["owner_type"] for child in item["constructors"]}
-                    )
             if any(item["kind"] == "dense_field" for item in schema.values()):
                 from ._component import _dense_group
 

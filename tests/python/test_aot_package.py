@@ -8620,8 +8620,9 @@ def test_package_typed_inputs_reject_unproven_host_selection(tmp_path, monkeypat
     assert not (tmp_path / "sdk").exists()
 
 
+@pytest.mark.parametrize("record_projection", [False, True])
 @test_utils.test(arch=ti.cpu, offline_cache=False)
-def test_package_host_sequence_element_binds_template_owner(tmp_path, monkeypatch):
+def test_package_host_sequence_element_binds_template_owner(tmp_path, monkeypatch, record_projection):
     source = """
 import taichi_forge as ti
 @ti.data_oriented
@@ -8646,6 +8647,15 @@ class Model:
     def add_one(self, item: Item):
         self.add(item)
 """
+    if record_projection:
+        source = "from dataclasses import dataclass\n" + source
+        source = source.replace(
+            "@ti.data_oriented\nclass Model:",
+            "@dataclass(frozen=True)\nclass Binding:\n    item: Item\n"
+            '@ti.data_oriented\nclass Model:\n    items: "tuple[Item, ...]"\n'
+            "    def bind(self, value):\n        return Binding(Item(value))",
+        ).replace("self.items = tuple(Item(v) for v in values)",
+                  "records = tuple(self.bind(v) for v in values)\n        self.items = tuple(r.item for r in records)")
     package = _source_package(tmp_path, monkeypatch, source)
     manifest = ti.aot.export_package(package, tmp_path / "sdk")
     with Runtime(manifest["target"]) as runtime, load_package(runtime, tmp_path / "sdk") as code:

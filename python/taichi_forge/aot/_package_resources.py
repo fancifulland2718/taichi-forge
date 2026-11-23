@@ -1970,7 +1970,7 @@ def scope_declarations(
                 or not isinstance(call.args[1].value, ast.Name)
                 or call.args[1].value.id != "self"
                 or call.args[1].attr != call.args[0].value
-                or member_stores[call.args[0].value] != 1
+                or member_stores.get(call.args[0].value) != 1
             ):
                 fail(module, call, "Host owner sequence requires one named constructor assignment")
             add(

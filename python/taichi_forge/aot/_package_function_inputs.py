@@ -1313,7 +1313,7 @@ def discover(sources, imported, *, preparation_receivers=None, preparation_guard
                                 if isinstance(sequence_owner, _Owner):
                                     sequence = owners[sequence_owner.identity].get(source.attr, {})
                                     if sequence.get("kind") == "host_owner_sequence":
-                                        kinds = tuple(dict.fromkeys(
+                                        kinds = sequence.get("owner_types") or tuple(dict.fromkeys(
                                             item["owner_type"] for item in sequence.get("constructors", ())))
                                         if kinds and all(kind in owners for kind in kinds):
                                             origin = (function.__qualname__, source.lineno, name)
