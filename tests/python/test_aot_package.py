@@ -19857,6 +19857,34 @@ def test_package_graph_keeps_absent_late_plan_parameter_guard(tmp_path, monkeypa
             recording.append(other)
 
 
+@test_utils.test(arch=[ti.cpu, ti.cuda], offline_cache=False)
+def test_package_graph_branch_selects_body_from_recorded_predicate(tmp_path, monkeypatch):
+    package = _source_package(tmp_path, monkeypatch, PACKAGE_WHILE_SOURCE)
+    manifest = ti.aot.export_package(package, tmp_path / "sdk")
+    with Runtime(manifest["target"]) as runtime, load_package(runtime, tmp_path / "sdk") as code:
+        for limit, expected in ((0, 4), (1, 2)):
+            owner = code.host.Model(3, limit, 2)
+            builder = code.graph_builder()
+            predicate = builder.private_ndarray("predicate", "i32", (1,))
+            counter = builder.private_ndarray("counter", "i32", (1,))
+            builder.dispatch(owner.reset, counter)
+            condition = builder.create_sequential()
+            condition.dispatch(owner.condition, predicate, counter)
+            yes, no = builder.create_sequential(), builder.create_sequential()
+            yes.dispatch(owner.advance, counter)
+            no.append(yes)
+            no.append(yes)
+            with pytest.raises(ValueError, match="recorded condition"):
+                builder.if_then_else(condition, yes, predicate="missing")
+            builder.if_then_else(condition, yes, predicate=predicate, control_inputs=(counter,),
+                                 else_region=no, lowering_mode="native_required")
+            graph = builder.compile()
+            graph.run({})
+            assert graph.written_resources()
+            graph.close()
+            np.testing.assert_array_equal(owner.values.to_numpy(), expected * np.arange(1, 4))
+
+
 @pytest.mark.parametrize("plan_value", [False, True, "scalar"])
 @test_utils.test(arch=[ti.cpu, ti.cuda], offline_cache=False)
 def test_package_while_private_arrays_are_prepared_per_invocation(tmp_path, monkeypatch, plan_value):

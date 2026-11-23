@@ -464,6 +464,56 @@ class GraphBuilder:
         self._native_effects.update(effects)
         return self
 
+    def if_then_else(self, condition, then_region, *, predicate, control_inputs=(), else_region=None,
+                     lowering_mode="auto", name="if"):
+        """Record a conditional against the same bound storage as its condition kernels."""
+        self.package._check()
+        if lowering_mode not in ("auto", "native_required", "portable") or not isinstance(name, str) or not name:
+            raise ValueError("Invalid package branch options")
+        arch = self.package.runtime.arch
+        if arch in ("x64", "arm64"):
+            lowering = "cpu"
+        elif arch == "cuda":
+            lowering = "cuda_host" if lowering_mode == "portable" else "cuda_conditional"
+        elif arch == "vulkan" and lowering_mode != "native_required":
+            lowering = "vulkan_host"
+        else:
+            raise ValueError(f"Package branch requires an available {lowering_mode} control route on {arch}")
+
+        bodies = [then_region] if else_region is None else [then_region, else_region]
+        merged = self.create_sequential()
+        for region in (condition, *bodies):
+            if not isinstance(region, GraphBuilder) or region._bindings is not self._bindings or region is self:
+                raise ValueError("Package branch regions must belong to the same recording")
+            merged.append(region)
+
+        def control_name(arg):
+            if isinstance(arg, _PrivateArg) and arg.scope is not self._bindings:
+                raise ValueError("Private branch control belongs to another recording")
+            key = arg.name if isinstance(arg, Arg) else arg
+            if not isinstance(key, str) or key not in condition.arguments and key not in condition._constants:
+                raise ValueError("Graph branch controls must be used in the recorded condition")
+            return key
+
+        selector = control_name(predicate)
+        extra = tuple(control_name(arg) for arg in control_inputs)
+        if len(set(extra)) != len(extra):
+            raise ValueError("Duplicate graph branch control inputs")
+        schema = condition.arguments.get(selector)
+        if schema is None:
+            res = condition._constants[selector]
+            valid = res["kind"] == "ndarray" and res["dtype"] == "i32" and res["shape"] in ([], [1])
+        else:
+            valid = schema.get("kind") == "ndarray" and schema.get("ndim") in (0, 1) and schema["element"] == {
+                "kind": "scalar", "dtype": "i32", "element_shape": []}
+        if not valid:
+            raise ValueError("Graph branch predicate requires scalar i32 storage")
+        merged.operations = [dict(kind="branch", selector=selector, selection="nonzero",
+                                  has_default=else_region is not None, condition=copy.deepcopy(condition.operations),
+                                  bodies=[copy.deepcopy(region.operations) for region in bodies],
+                                  lowering=dict(kind=lowering, version=1))]
+        return self.append(merged)
+
     def while_loop(
         self,
         condition,
@@ -621,6 +671,11 @@ class Graph:
 
         def visit(operations):
             for operation in operations:
+                if operation["kind"] == "branch":
+                    visit(operation["condition"])
+                    for body in operation["bodies"]:
+                        visit(body)
+                    continue
                 if operation["kind"] == "while":
                     visit(operation["condition"])
                     if operation["max_iterations"]:
