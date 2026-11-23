@@ -23280,6 +23280,46 @@ def test_package_extent_uses_declared_final_integer(tmp_path, monkeypatch, decla
         np.testing.assert_array_equal(model.a.to_numpy(), np.arange(8) + 3)
 
 
+@pytest.mark.parametrize("trigger", ["extra", "base"])
+@test_utils.test(arch=ti.cpu, offline_cache=False)
+def test_package_constraint_follows_resource_presence(tmp_path, monkeypatch, trigger):
+    source = """
+import taichi_forge as ti
+@ti.data_oriented
+class Model:
+    def __init__(self, n: int, enabled: bool):
+        self.n, self.enabled = n, enabled
+        scope = ti.experimental.ResourceScope(self)
+        scope.static('enabled', choices=(False, True))
+        n = scope.dim('n')
+        scope.base = scope.field(ti.i32, shape=())
+        if self.enabled:
+            scope.extra = scope.field(ti.i32, shape=n)
+            scope.require_le('fits', n, 4, when='TRIGGER')
+    @ti.kernel
+    def write(self):
+        self.base[None] = 1
+        if ti.static(self.enabled):
+            self.extra[0] = 7
+""".replace("TRIGGER", trigger)
+    package = _source_package(tmp_path, monkeypatch, source)
+    if trigger == "base":
+        with pytest.raises(ti.aot.PackageExportError, match="whenever its trigger"):
+            ti.aot.export_package(package, tmp_path / "sdk")
+        return
+    manifest = ti.aot.export_package(package, tmp_path / "sdk")
+    with Runtime(manifest["target"]) as runtime, load_package(runtime, tmp_path / "sdk") as loaded:
+        disabled = loaded.host.Model(6, False)
+        disabled.write()
+        assert disabled.base[None] == 1
+        enabled = loaded.host.Model(3, True)
+        enabled.write()
+        assert enabled.extra[0] == 7
+        with pytest.raises(ValueError, match="fits"):
+            invalid = loaded.host.Model(6, True)
+            invalid.write()
+
+
 @test_utils.test(arch=ti.cpu, offline_cache=False)
 def test_package_shape_tuple_composition_keeps_model_extents(tmp_path, monkeypatch):
     source = """

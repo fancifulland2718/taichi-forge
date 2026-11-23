@@ -2169,8 +2169,7 @@ def scope_declarations(
             from taichi_forge_runtime._dimensions import validate_constraints
 
             if not (
-                not conditions
-                and len(call.args) == 3
+                len(call.args) == 3
                 and len(call.keywords) == 1
                 and call.keywords[0].arg == "when"
                 and isinstance(call.args[0], ast.Constant)
@@ -2205,6 +2204,13 @@ def scope_declarations(
                 validate_constraints({name: spec}, dimensions, roles)
             except ValueError as error:
                 fail(module, call, str(error))
+            trigger_conditions = declarations[trigger].get("conditions", {})
+            if any(trigger_conditions.get(key) is not value for key, value in conditions.items()):
+                fail(module, call, "Dimension constraint must apply whenever its trigger is present")
+            for dependency in extent_dependencies(left.expression) | extent_dependencies(right.expression):
+                if any(trigger_conditions.get(key) is not value
+                       for key, value in declarations[dependency].get("conditions", {}).items()):
+                    fail(module, call, "Dimension constraint depends on a dimension absent from its trigger")
             constraints = declarations[trigger].setdefault("constraints", {})
             if name in constraint_declarations and constraint_declarations[name] != spec:
                 fail(module, call, "Dimension constraint already has another declaration")
