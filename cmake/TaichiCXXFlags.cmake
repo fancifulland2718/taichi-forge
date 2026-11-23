@@ -52,6 +52,9 @@ if (WIN32)
             set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} /EHsc")
         endif()
         set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} /Zc:__cplusplus /Zc:inline /std:c++17")
+        # Diagnose ambiguous conditional conversions (e.g. DataType and Type *)
+        # on MSVC as GCC and Clang do.
+        add_compile_options($<$<COMPILE_LANG_AND_ID:CXX,MSVC>:/Zc:ternary>)
         # UTF-8 source/exec charset (required by fmt 11 / spdlog 1.15+; all
         # non-ASCII source files in this repo verified valid UTF-8 2026-04-29).
         set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} /utf-8")
