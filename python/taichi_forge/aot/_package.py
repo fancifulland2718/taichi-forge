@@ -668,6 +668,7 @@ def _host_projection(
             self.producer_only = []
             self.host_functions = []
             self.runtime_requirements = set()
+            self.uses_algorithms = False
 
         def producer_allocation(self, node, role):
             if not self.host_functions:
@@ -923,6 +924,7 @@ def _host_projection(
                     self.minimum_version = max(self.minimum_version, 97)
                 if any(a.name == "algorithms" for a in node.names):
                     self.minimum_version = max(self.minimum_version, 61)
+                    self.uses_algorithms = True
                 names = [a for a in node.names if a.name not in _DECORATORS]
                 tensors = [a for a in names if a.name in ("Vector", "Matrix")]
                 names = [a for a in names if a not in tensors]
@@ -1359,6 +1361,7 @@ def _host_projection(
             role = kind(node)
             if role == "algorithms":
                 self.minimum_version = max(self.minimum_version, 61)
+                self.uses_algorithms = True
             if role in ("hardware", "TaichiRuntimeError"):
                 self.minimum_version = max(self.minimum_version, 97)
             if role in ("Format", "Texture"):
@@ -1415,6 +1418,7 @@ def _host_projection(
                 and kind(ast.Attribute(node.args[0], "algorithms", ast.Load())) == "algorithms"
             ):
                 self.minimum_version = max(self.minimum_version, 61)
+                self.uses_algorithms = True
             method = node.func.attr if isinstance(node.func, ast.Attribute) else None
             for item in binding_schemas.get(self.owner, {}).values():
                 if method == "owner_reference" and item.get("reference_declaration") == [
@@ -1679,6 +1683,8 @@ def _host_projection(
         compile(projected, f"<projected-host:{module}>", "exec")
         source = (_ProjectedHost(projected, deferred_entries) if deferred_entries is not None
                   else ast.unparse(projected) + "\n")
+        if deferred_entries is not None:
+            source.uses_algorithms = projector.uses_algorithms
         return (source, projector.minimum_version,
                 projector.producer_only, sorted(projector.runtime_requirements))
     finally:
@@ -2143,6 +2149,8 @@ def _export_package(output, declarations, source_root, caps, artifact_format, co
     if host_failures:
         raise PackageExportError("Package Host projection failed before numerical compilation:\n"
                                  + "\n".join(host_failures))
+    from ._primitive_exports import export_host_unique_recipes
+    export_host_unique_recipes(module, sources, host_projections)
     shared_entries, pyfunc_kernels, closure_kernels = {}, {}, {}
     factory_modules = {fact["definition"].rpartition(".")[0] for fact in manifest["declaration_factories"]}
     for source_index, (name, source_path, relative, text, tree, kind, schemas, definitions) in enumerate(sources):

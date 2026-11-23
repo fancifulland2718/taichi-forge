@@ -363,7 +363,7 @@ class GraphBuilder:
         return self
 
     def append_native(self, sequence, *, prewarm=False, admission="explicit"):
-        from ._package_algorithms import PrimitiveSequence, sort_inputs
+        from ._package_algorithms import PrimitiveSequence
         from ._package_native import NativeRecording, NativeObject
 
         self.package._check()
@@ -419,19 +419,49 @@ class GraphBuilder:
             raise TypeError("Native prewarm must be bool")
         # Recording only describes the operation. Existing Plan preparation
         # admits the device provider, allocates scratch and freezes each binding.
-        operations, captures = [], {}
-        for arrays in sequence.calls:
-            sort_inputs(self.package, *arrays)
-            operation = dict(kind="sort")
-            for port, array in zip(("keys", "values"), arrays):
-                if array not in self._bindings.native_resources:
-                    self._bindings.native_resources[array] = SimpleNamespace(value=array)
-                holder = self._bindings.native_resources[array]
+        operations, captures, constants, effects = [], {}, {}, {}
+        for steps, arrays, private in sequence.calls:
+            names = {}
+            for port, array in arrays.items():
+                holder = self._bindings.native_resources.setdefault(array, SimpleNamespace(value=array))
                 name, binding = self._bindings.capture(holder, dict(name="value", kind="ndarray"))
-                operation[port], captures[name] = name, binding
-            operations.append(operation)
+                names[port], captures[name] = name, binding
+            for resource in private:
+                names[resource["name"]] = self._bindings.name()
+            for item in private:
+                resource = dict(item, name=names[item["name"]])
+                if resource["kind"] == "ndarray":
+                    resource["shape"] = [dict(axis=axis["axis"], array=names[axis["array"]])
+                                         if isinstance(axis, dict) else axis for axis in item["shape"]]
+                elif resource["kind"] == "extent":
+                    resource["array"] = names[item["array"]]
+                constants[resource["name"]] = resource
+            for step in steps:
+                kind = step["kind"]
+                if kind == "kernel":
+                    operation = dict(step, arguments=[names[name] for name in step["arguments"]])
+                    # The consecutive-run classifier writes only its private head flags.
+                    writes = [operation["arguments"][1]]
+                else:
+                    operation = {port: names[value] for port, value in step.items() if port not in ("kind", "columns")}
+                    operation["kind"] = kind
+                    if "columns" in step:
+                        operation["columns"] = [{port: names[value] for port, value in column.items()}
+                                                for column in step["columns"]]
+                    if kind == "sort":
+                        writes = [operation[port] for port in ("keys", "values") if port in operation]
+                    elif kind == "compact":
+                        writes = [operation["count"], *(col["output"] for col in operation.get("columns", ()))]
+                        if "output" in operation:
+                            writes.append(operation["output"])
+                    else:
+                        raise ValueError("Unsupported package primitive operation: " + kind)
+                effects[json.dumps(operation, sort_keys=True)] = dict.fromkeys(writes, True)
+                operations.append(operation)
         self.operations.extend(operations)
         self._captures.update(captures)
+        self._constants.update(constants)
+        self._native_effects.update(effects)
         return self
 
     def while_loop(
@@ -596,13 +626,11 @@ class Graph:
                     if operation["max_iterations"]:
                         visit(operation["body"])
                     continue
+                effects = self.native_effects.get(json.dumps(operation, sort_keys=True))
+                if effects is not None:
+                    written.update(name for name, writes in effects.items() if writes)
+                    continue
                 if operation["kind"] != "kernel":
-                    if operation["kind"] == "native":
-                        effects = self.native_effects.get(json.dumps(operation, sort_keys=True))
-                        if effects is None:
-                            raise ValueError("Native operation has no recorded effect contract")
-                        written.update(name for name, writes in effects.items() if writes)
-                        continue
                     if operation["kind"] == "sort":
                         written.update(value for key, value in operation.items() if key != "kind")
                         continue

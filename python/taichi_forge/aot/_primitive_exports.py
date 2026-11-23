@@ -120,3 +120,44 @@ def export_primitive(module, name, kind, version, options):
                 raise
     module.add_execution_plan(name, recipe.plan)
     return recipe.plan
+
+
+def export_host_unique_recipes(module, sources, projections):
+    """Compile the existing run-boundary helper for retained Host calls and their key types."""
+    import ast
+    from ._package_types import qualified_kind
+
+    supported = {"i32", "u32", "i64", "u64"}
+    required = set()
+    for name, _, _, _, _, kind, schemas, _ in sources:
+        # Host projection excludes numerical bodies and producer-only paths. Its release
+        # after module assembly still follows the normal streaming compilation lifetime.
+        host, _, _, requirements = projections[name]
+        if not host.uses_algorithms:
+            continue
+        projected = host.tree
+        methods = {"CompactWorkspace", "RunLengthWorkspace", "sort_by_key", "compact", "unique_by_key",
+                   "prepare_sort", "prepare_compact", "prepare_compact_columns", "prepare_unique_by_key"}
+        if any(isinstance(node, ast.Attribute) and node.attr in methods for node in ast.walk(projected)):
+            requirements.append("host_compact_unique_v1")
+        # If the input is a plain typed owner field, retain just that helper.
+        # A Host parameter can carry any supported integer key type at binding.
+        owners = {}
+        for cls in projected.body:
+            if isinstance(cls, ast.ClassDef):
+                schema = schemas.get(cls.name, {})
+                owners.update((id(call), schema) for call in ast.walk(cls) if isinstance(call, ast.Call))
+        for call in ast.walk(projected):
+            if not isinstance(call, ast.Call) or not isinstance(call.func, ast.Attribute):
+                continue
+            if call.func.attr not in ("unique_by_key", "prepare_unique_by_key"):
+                continue
+            keys = call.args[0] if call.args else next((kw.value for kw in call.keywords if kw.arg == "keys"), None)
+            declaration = (owners.get(id(call), {}).get(keys.attr, {}) if isinstance(keys, ast.Attribute)
+                           and isinstance(keys.value, ast.Name) and keys.value.id == "self" else {})
+            dtype = declaration.get("type_node")
+            fixed = qualified_kind(dtype, kind) if dtype is not None and not declaration.get("dtype_policy") else None
+            required.update((fixed,) if fixed in supported else supported)
+    for dtype in sorted(required):
+        module.add_primitive("__forge_package_unique_by_key_" + dtype, "unique", key_dtype=dtype,
+                             values="values", unique_values="unique_values")

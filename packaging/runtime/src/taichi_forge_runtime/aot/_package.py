@@ -2127,7 +2127,7 @@ class LoadedPackage:
 
         requirements = manifest.get("runtime_requirements", [])
         if not isinstance(requirements, list) or any(
-            item not in ("fault_snapshot", RUNTIME_REQUIREMENT) for item in requirements
+            item not in ("fault_snapshot", "host_compact_unique_v1", RUNTIME_REQUIREMENT) for item in requirements
         ):
             raise ValueError("Unsupported package runtime requirement")
         if "fault_snapshot" in requirements:
