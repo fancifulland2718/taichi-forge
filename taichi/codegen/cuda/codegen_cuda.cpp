@@ -150,9 +150,6 @@ class TaskCodeGenCUDA : public TaskCodeGenLLVM {
   }
 
   void prepare_dynamic_shared(OffloadedStmt *task) {
-    dynamic_shared_layouts.clear();
-    dynamic_shared_offsets.clear();
-    dynamic_shared_buffer = nullptr;
     for (auto *statement : irpass::analysis::gather_statements(
              task->body.get(), [](Stmt *s) { return s->is<DynamicSharedPtrStmt>(); })) {
       auto *pointer = statement->as<DynamicSharedPtrStmt>();
@@ -1173,7 +1170,9 @@ class TaskCodeGenCUDA : public TaskCodeGenLLVM {
       emit_cuda_gc(stmt);
     } else {
       init_offloaded_task_function(stmt);
-      prepare_dynamic_shared(stmt);
+      if (stmt->has_body()) {
+        prepare_dynamic_shared(stmt);
+      }
       if (stmt->task_type == Type::serial) {
         stmt->body->accept(this);
       } else if (stmt->task_type == Type::range_for) {
