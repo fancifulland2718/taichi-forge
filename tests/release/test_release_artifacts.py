@@ -451,6 +451,23 @@ def test_bundle_retains_runtime_producer_separately(source, bundle, tmp_path):
     assert manifest["commit"] != "b" * 40
 
 
+def test_constraint_provenance_uses_tagged_bytes_and_windows_checkout(source):
+    import hashlib
+
+    revision = run(source, "rev-parse", "HEAD")
+    path = "packaging/constraints/release-build.txt"
+    blob = artifacts.git(source, "cat-file", "blob", f"{revision}:{path}")
+    crlf = blob.replace(b"\n", b"\r\n")
+    changed = crlf + b"extra-package==1\r\n"
+    (source / path).write_bytes(changed)
+
+    linux = set(artifacts.constraint_digests(source, revision, path, "linux"))
+    windows = set(artifacts.constraint_digests(source, revision, path, "windows"))
+    assert linux == {hashlib.sha256(blob).hexdigest()}
+    assert windows == linux | {hashlib.sha256(crlf).hexdigest()}
+    assert hashlib.sha256(changed).hexdigest() not in windows
+
+
 def test_runtime_record_requires_complete_index_and_correct_build(published_sources, monkeypatch, tmp_path):
     directory, shim, runtime, state = published_sources
     for path in directory.glob("taichi_forge-*.whl"):

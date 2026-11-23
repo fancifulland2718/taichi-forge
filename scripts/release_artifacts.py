@@ -40,6 +40,15 @@ def digest(path: Path) -> str:
         return hashlib.file_digest(stream, "sha256").hexdigest()
 
 
+def constraint_digests(root: Path, commit: str, relative: str, platform: str):
+    content = git(root, "cat-file", "blob", f"{commit}:{relative}")
+    yield hashlib.sha256(content).hexdigest()
+    # Windows runtime records predating the LF checkout rule hash Git's
+    # autocrlf rendition of the same blob. Keep their original digests.
+    if platform == "windows" and b"\r" not in content:
+        yield hashlib.sha256(content.replace(b"\n", b"\r\n")).hexdigest()
+
+
 def write_json(path: Path, value) -> None:
     path.write_text(json.dumps(value, indent=2, ensure_ascii=False, sort_keys=True) + "\n", encoding="utf-8")
 
@@ -205,8 +214,8 @@ def build_bundle(root: Path, wheels: Path, output: Path, ref: str, *, runtime_ve
         for relative, checksum in record["constraints"].items():
             if not re.fullmatch(r"[0-9a-f]{64}", checksum):
                 raise ValueError("Invalid runtime build constraint digest")
-            if record["commit"] == commit and digest(root / relative) != checksum:
-                raise ValueError("Runtime build constraints differ from release source")
+            if record["commit"] == commit and checksum not in constraint_digests(root, commit, relative, platform):
+                raise ValueError(f"Runtime build constraints differ from release source: {platform} {relative}")
         build_inputs.append(record)
     if len({record["commit"] for record in build_inputs}) != 1:
         raise ValueError("Runtime platforms must share their actual source commit")
