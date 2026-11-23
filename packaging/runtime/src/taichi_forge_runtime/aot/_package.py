@@ -1819,7 +1819,7 @@ class entry:
                 return updated.run()
         selected = self._select(owner)
         contract = selected.contract
-        from ._package_calls import CachedCall, OwnerGuard, reusable_value, specialization_constant_args
+        from ._package_calls import CachedCall, OwnerGuard, reusable_scalar, reusable_value, specialization_constant_args
         from ._package_values import owner_type
 
         check_admission(owner, contract, arch=package.runtime.arch)
@@ -1890,7 +1890,7 @@ class entry:
                 # Host arrays must upload/download on every call. Mutable
                 # tensor/scalar wrappers also require a fresh value snapshot.
                 reusable = not buffers.pending and all(
-                    item["kind"] != "value" or type(value) in (bool, int, float)
+                    item["kind"] != "value" or reusable_scalar(value)
                     for item, value in zip(contract["arguments"], values)
                 ) and all(
                     item["kind"] != "value" or not item.get("element_shape")

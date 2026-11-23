@@ -109,6 +109,18 @@ def specialization_constant_args(contract, owner_schema, owners=None):
     return tuple(result)
 
 
+def _numpy_scalar(value):
+    if type(value).__module__ != "numpy":
+        return False
+    import numpy as np
+
+    return isinstance(value, np.generic) and value.dtype.kind in "biuf" and type(value) is value.dtype.type
+
+
+def reusable_scalar(value):
+    return type(value) in (bool, int, float) or _numpy_scalar(value)
+
+
 def _token(value):
     # Exact types distinguish bool/int and +0/-0. Keep the observed objects
     # alive in the guard/call so an identity cannot be recycled underneath it.
@@ -117,6 +129,8 @@ def _token(value):
         return kind, value
     if kind is float:
         return kind, struct.pack("=d", value)
+    if _numpy_scalar(value):
+        return kind, value.tobytes()
     if kind in (tuple, list):
         return kind, tuple(_token(x) for x in value)
     if kind is dict:
@@ -134,7 +148,7 @@ def _token(value):
 
 def reusable_value(value):
     """Values whose complete mutable contents are represented by _token."""
-    if type(value) in (bool, int, float) or isinstance(value, HostTensor):
+    if reusable_scalar(value) or isinstance(value, HostTensor):
         return True
     if type(value) in (tuple, list):
         return all(reusable_value(item) for item in value)
@@ -463,7 +477,7 @@ class CachedCall:
         updates = []
         for index, (spec, value) in enumerate(zip(self.argument_specs, values)):
             if spec["kind"] == "value":
-                if type(value) not in (bool, int, float):
+                if not reusable_scalar(value):
                     return None
                 arguments[index] = Scalar(spec["dtype"], value)
             elif spec["kind"] == "compound":

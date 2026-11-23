@@ -20155,13 +20155,15 @@ class Model:
     def __init__(self, n: int):
         self.n = n
         self.bias = ti.Vector([1.0, 2.0], ti.f32)
+        self.offset = 0.0
         s = ti.experimental.ResourceScope(self)
         s.value('bias', ti.types.vector(2, ti.f32))
+        s.value('offset', ti.f32)
         s.output = s.field(ti.f32, shape=s.dim('n'))
     @ti.kernel
     def step(self, gain: ti.f32):
         for i in range(self.n):
-            self.output[i] = self.output[i] + gain + self.bias[0] + self.bias[1]
+            self.output[i] = self.output[i] + gain + self.bias[0] + self.bias[1] + self.offset
     @ti.kernel
     def shift(self, delta: ti.types.vector(2, ti.f32)):
         for i in range(self.n):
@@ -20185,12 +20187,14 @@ class Model:
     monkeypatch.setattr(_plan.ExecutionPlan, 'prepare', graph)
     with ti.aot.borrow_runtime() as runtime, load_package(runtime, tmp_path / "sdk") as code:
         a, b = code.host.Model(7), code.host.Model(13)
+        a.offset = np.float32(0.)
+        b.offset = np.float32(0.)
         for _ in range(2):
-            a.step(1.0)
+            a.step(np.float32(1.0))
             b.step(2.0)
         initial = counts.copy()
         for _ in range(3):
-            a.step(1.0)
+            a.step(np.float32(1.0))
             b.step(2.0)
         assert counts == initial
         np.testing.assert_array_equal(a.output.to_numpy(), np.full(7, 20))
