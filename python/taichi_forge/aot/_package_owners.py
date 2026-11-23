@@ -4,7 +4,9 @@ import ast
 import copy
 import inspect
 
-from ._package_construction import construction_functions, ordinary_owner_lookup
+from ._package_construction import (
+    construction_call_sites, construction_early_guards, construction_functions, ordinary_owner_lookup,
+)
 
 
 def resolve_owners(sources, imported, owner_schema, fail):
@@ -67,6 +69,62 @@ def resolve_owners(sources, imported, owner_schema, fail):
         for (owner, _), entry in definitions.items():
             if owner is cls:
                 entry["requires_owner"] = True
+
+    def inherited_allocation_order(cls, base, methods, overrides):
+        """Follow self-only allocation hooks invoked by the effective constructor."""
+        local = {method.name: method for method in methods}
+        inherited = {}
+        for declaring in cls.__mro__:
+            if declaring is base or declaring not in classes:
+                continue
+            origin, owner_node, owner_kind, _ = classes[declaring]
+            for method in owner_node.body:
+                if (getattr(method, "_package_construction_method", False)
+                        and method.name not in local
+                        and inspect.getattr_static(cls, method.name, None) is vars(declaring).get(method.name)):
+                    inherited[method.name] = (origin, owner_node, owner_kind, method)
+        def receiver_calls(method):
+            return sorted((call for call in ast.walk(method) if isinstance(call, ast.Call)
+                           and isinstance(call.func, ast.Attribute) and isinstance(call.func.value, ast.Name)
+                           and call.func.value.id == "self"), key=lambda call: (call.lineno, call.col_offset))
+
+        if not inherited or not any(call.func.attr in inherited for method in methods for call in receiver_calls(method)):
+            return methods
+        ordered, seen = [], set()
+        module = classes[base][0]
+        rebound = {part.attr for method in methods for part in ast.walk(method)
+                   if isinstance(part, ast.Attribute) and not isinstance(part.ctx, ast.Load)
+                   and isinstance(part.value, ast.Name) and part.value.id == "self"}
+
+        def visit(method, origin, conditions):
+            if method.name in seen:
+                fail(origin, method, "Construction resource methods must have one call site")
+            seen.add(method.name)
+            ordered.append(method)
+            sites = construction_call_sites(method, conditions)
+            for call in receiver_calls(method):
+                name = call.func.attr
+                if name in local:
+                    child = local[name]
+                    visit(child, module, getattr(child, "_package_construction_conditions", {}))
+                elif name in inherited:
+                    if (name in rebound or not ordinary_owner_lookup(cls) or call.args or call.keywords
+                            or id(call) not in sites):
+                        fail(origin, call, "Inherited allocation requires an ordinary self-only construction call")
+                    source, source_owner, source_kind, body = inherited[name]
+                    child = copy.copy(body)
+                    child._package_construction_conditions = dict(sites[id(call)])
+                    construction_early_guards(child, child._package_construction_conditions)
+                    overrides[child] = (source, source_owner, source_kind, child)
+                    receivers = getattr(trees[source], "_package_construction_owners", {})
+                    receivers.setdefault(source_owner.name, set()).update((
+                        source + "." + source_owner.name, classes[cls][0] + "." + classes[cls][1].name,
+                    ))
+                    trees[source]._package_construction_owners = receivers
+                    visit(child, source, child._package_construction_conditions)
+
+        visit(methods[0], module, {})
+        return ordered
 
     def constructor_schema(cls, start=0):
         mro = cls.__mro__
@@ -138,6 +196,7 @@ def resolve_owners(sources, imported, owner_schema, fail):
             inherited = constructor_schema(cls, index + 1)
         methods = [method for method in construction_functions(node)
                    if not getattr(method, "_package_preparation_method", False)]
+        methods = inherited_allocation_order(cls, base, methods, overrides)
         if overrides:
             own = {}
             for method in methods:

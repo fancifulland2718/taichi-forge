@@ -33088,3 +33088,59 @@ class Model:
     ti.reset()
     with Runtime("x64") as runtime, load_package(runtime, sdk) as code:
         check(code.host.Model)
+
+@pytest.mark.parametrize("case", ("direct", "repeated", "shadowed", "opaque_condition"))
+@test_utils.test(arch=ti.cpu, offline_cache=False)
+def test_package_derived_constructor_calls_inherited_allocation_without_base_constructor(tmp_path, monkeypatch, case):
+    base = """
+import taichi_forge as ti
+@ti.data_oriented
+class Base:
+    def __init__(self, n):
+        self.n = n
+        self._allocate_grid()
+        own = ti.experimental.ResourceScope(self)
+        own.base_status = own.field(ti.i32, shape=())
+
+    def _allocate_grid(self):
+        group = ti.experimental.ResourceScope(self)
+        group.grid = group.field(ti.f32, shape=group.dim("n"))
+
+    @ti.kernel
+    def advance(self, delta: ti.f32):
+        for i in range(self.n):
+            self.grid[i] += (1 + i) * delta
+"""
+    derived = """
+from .base import Base
+class Model(Base):
+    def __init__(self, n):
+        self.n = n
+        self._allocate_grid()
+"""
+    if case == "repeated":
+        derived += "        self._allocate_grid()\n"
+    elif case == "shadowed":
+        derived = derived.replace("        self._allocate_grid()", "        self._allocate_grid = lambda: None\n        self._allocate_grid()")
+    elif case == "opaque_condition":
+        derived = derived.replace("        self._allocate_grid()", "        if n > 3:\n            self._allocate_grid()")
+    package = _source_package(tmp_path, monkeypatch, derived, extra_modules={"base": base})
+    if case != "direct":
+        with pytest.raises(ti.aot.PackageExportError, match="one call site|ordinary self-only construction call"):
+            ti.aot.export_package(package, tmp_path / "sdk", arch=ti.cpu, artifact_format="unified-bc-library")
+        return
+    sdk = tmp_path / "sdk"
+    ti.aot.export_package(package, sdk, arch=ti.cpu, artifact_format="unified-bc-library")
+
+    def check(constructor):
+        for n in (2, 5):
+            owner = constructor(n)
+            assert not hasattr(owner, "base_status")
+            owner.grid.fill(1)
+            owner.advance(3)
+            np.testing.assert_array_equal(owner.grid.to_numpy(), 1 + 3 * np.arange(1, n + 1))
+
+    check(package.Model)
+    ti.reset()
+    with Runtime("x64") as runtime, load_package(runtime, sdk) as code:
+        check(code.host.Model)

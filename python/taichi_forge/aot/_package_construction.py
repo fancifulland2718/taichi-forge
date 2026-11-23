@@ -130,6 +130,75 @@ def materialize_inherited_construction(tree, namespace, module, fail, kind):
     return facts
 
 
+def owner_guard(test):
+    negated = isinstance(test, ast.UnaryOp) and isinstance(test.op, ast.Not)
+    value = test.operand if negated else test
+    if isinstance(value, ast.Attribute) and isinstance(value.value, ast.Name) and value.value.id == "self":
+        return value.attr, not negated
+    return None, None
+
+
+def construction_call_sites(function, conditions):
+    sites = {}
+
+    def expression(value, guards):
+        if guards is None:
+            return
+        if isinstance(value, ast.Call):
+            sites[id(value)] = dict(guards)
+        elif isinstance(value, ast.IfExp):
+            expression(value.body, guarded(value.test, guards, True))
+            expression(value.orelse, guarded(value.test, guards, False))
+
+    def guarded(test, guards, expected):
+        name, positive = owner_guard(test)
+        if name is None or name in guards:
+            return None
+        return {**guards, name: positive == expected}
+
+    def body(statements, guards):
+        if guards is None:
+            return
+        for statement in statements:
+            if isinstance(statement, (ast.Expr, ast.Assign, ast.AnnAssign)):
+                expression(statement.value, guards)
+            elif isinstance(statement, ast.If):
+                body(statement.body, guarded(statement.test, guards, True))
+                body(statement.orelse, guarded(statement.test, guards, False))
+            elif (isinstance(statement, ast.Try) and statement.handlers
+                  and not statement.finalbody
+                  and all(handler.body and isinstance(handler.body[-1], ast.Raise)
+                          and handler.body[-1].exc is None
+                          and not any(isinstance(part, ast.Return) for part in ast.walk(handler))
+                          for handler in statement.handlers)):
+                # Cleanup handlers rethrow: only the normal body can
+                # produce a usable owner. Retain the actual try/except
+                # in Host code, and do not admit allocations in handlers.
+                body(statement.body, guards)
+                body(statement.orelse, guards)
+
+    body(function.body, conditions)
+    return sites
+
+
+def construction_early_guards(method, conditions):
+    early_returns = set()
+    start = 1 if ast.get_docstring(method, clean=False) is not None else 0
+    for statement in method.body[start:]:
+        if not (isinstance(statement, ast.If) and not statement.orelse
+                and len(statement.body) == 1 and isinstance(statement.body[0], ast.Return)):
+            break
+        returned = statement.body[0]
+        if returned.value is not None and not (
+                isinstance(returned.value, ast.Constant) and returned.value.value is None):
+            break
+        name, positive = owner_guard(statement.test)
+        if name is None or conditions.setdefault(name, not positive) == positive:
+            break
+        early_returns.add(returned)
+    return early_returns
+
+
 def discover_construction_methods(tree, namespace, module, fail, kind):
     facts = []
     for cls in tree.body:
@@ -314,61 +383,12 @@ def discover_construction_methods(tree, namespace, module, fail, kind):
                 break
             needed = expanded
 
-        def owner_guard(test):
-            negated = isinstance(test, ast.UnaryOp) and isinstance(test.op, ast.Not)
-            value = test.operand if negated else test
-            if isinstance(value, ast.Attribute) and isinstance(value.value, ast.Name) and value.value.id == "self":
-                return value.attr, not negated
-            return None, None
-
-        def call_sites(function, conditions):
-            sites = {}
-
-            def expression(value, guards):
-                if guards is None:
-                    return
-                if isinstance(value, ast.Call):
-                    sites[id(value)] = dict(guards)
-                elif isinstance(value, ast.IfExp):
-                    expression(value.body, guarded(value.test, guards, True))
-                    expression(value.orelse, guarded(value.test, guards, False))
-
-            def guarded(test, guards, expected):
-                name, positive = owner_guard(test)
-                if name is None or name in guards:
-                    return None
-                return {**guards, name: positive == expected}
-
-            def body(statements, guards):
-                if guards is None:
-                    return
-                for statement in statements:
-                    if isinstance(statement, (ast.Expr, ast.Assign, ast.AnnAssign)):
-                        expression(statement.value, guards)
-                    elif isinstance(statement, ast.If):
-                        body(statement.body, guarded(statement.test, guards, True))
-                        body(statement.orelse, guarded(statement.test, guards, False))
-                    elif (isinstance(statement, ast.Try) and statement.handlers
-                          and not statement.finalbody
-                          and all(handler.body and isinstance(handler.body[-1], ast.Raise)
-                                  and handler.body[-1].exc is None
-                                  and not any(isinstance(part, ast.Return) for part in ast.walk(handler))
-                                  for handler in statement.handlers)):
-                        # Cleanup handlers rethrow: only the normal body can
-                        # produce a usable owner. Retain the actual try/except
-                        # in Host code, and do not admit allocations in handlers.
-                        body(statement.body, guards)
-                        body(statement.orelse, guards)
-
-            body(function.body, conditions)
-            return sites
-
         def visit(function, conditions=None):
             conditions = conditions or {}
             if function.name in active:
                 fail(module, function, "Recursive construction methods require explicit resource declarations")
             active.add(function.name)
-            sites = call_sites(function, conditions)
+            sites = construction_call_sites(function, conditions)
             for call in calls(function):
                 method = methods[call.func.attr]
                 if method.name not in needed:
@@ -394,20 +414,7 @@ def discover_construction_methods(tree, namespace, module, fail, kind):
                 # Keep the Host method intact and let the normal owner-schema
                 # pass verify that the guard denotes a declared layout choice.
                 method_conditions = dict(sites[id(call)])
-                early_returns = set()
-                start = 1 if ast.get_docstring(method, clean=False) is not None else 0
-                for statement in method.body[start:]:
-                    if not (isinstance(statement, ast.If) and not statement.orelse
-                            and len(statement.body) == 1 and isinstance(statement.body[0], ast.Return)):
-                        break
-                    returned = statement.body[0]
-                    if returned.value is not None and not (
-                            isinstance(returned.value, ast.Constant) and returned.value.value is None):
-                        break
-                    name, positive = owner_guard(statement.test)
-                    if name is None or method_conditions.setdefault(name, not positive) == positive:
-                        break
-                    early_returns.add(returned)
+                early_returns = construction_early_guards(method, method_conditions)
                 if any(
                     isinstance(n, (ast.Yield, ast.YieldFrom, ast.AsyncFunctionDef))
                     or isinstance(n, ast.Return)
