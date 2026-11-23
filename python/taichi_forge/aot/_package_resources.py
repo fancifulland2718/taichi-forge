@@ -997,6 +997,11 @@ def scope_declarations(
             if isinstance(node.value, ast.Name) and (node.value.id == "self" or binding in scopes):
                 name = member(binding, node.attr) if binding in scopes else node.attr
                 item = declarations.get(name, (earlier or {}).get(name, {}))
+                if (item.get("kind") == "dimension" and not member_stores.get(name)
+                        and all(current_conditions.get(key) is value for key, value in item.get("conditions", {}).items())):
+                    if binding in scopes:
+                        allowed.add(id(node.value))
+                    return Extent(("dim", name))
                 if item.get("kind") == "constant" and "value" in item:
                     from taichi_forge_runtime._static_values import read_static_key
 

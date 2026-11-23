@@ -86,11 +86,33 @@ def resolve_owners(sources, imported, owner_schema, fail):
         for method, original in getattr(node, "_package_type_methods", {}).items():
             if inspect.getattr_static(cls, method) is not original:
                 fail(name, node, "Overridden type construction requires a concrete constructor contract")
+        overrides = {}
         for method in node.body:
             if getattr(method, "_package_construction_method", False) and (
                 inspect.getattr_static(cls, method.name) is not inspect.getattr_static(base, method.name)
             ):
-                fail(name, method, "Overridden construction resource methods require their own constructor contract")
+                origin = next(owner for owner in mro if method.name in vars(owner))
+                origin_info = classes.get(origin)
+                actual = vars(origin)[method.name]
+                if origin_info is None or not ordinary_owner_lookup(cls) or not inspect.isfunction(actual):
+                    fail(name, method, "Allocation hook must resolve to an ordinary scanned method")
+                override = next((part for part in origin_info[1].body if isinstance(part, ast.FunctionDef)
+                                 and part.name == method.name), None)
+                if (override is None or override.decorator_list
+                        or tuple(inspect.signature(actual).parameters) != ("self",)):
+                    fail(name, method, "Allocation hook must have an ordinary bound receiver")
+                # The base constructor records each allocation hook at its call
+                # site. A nested hook would also change that original call graph.
+                if any(isinstance(call, ast.Call) and (
+                        isinstance(call.func, ast.Attribute) and isinstance(call.func.value, ast.Name)
+                        and call.func.value.id == "self" or isinstance(call.func, ast.Name) and call.func.id == "super")
+                       for body in (override, method) for call in ast.walk(body)):
+                    fail(name, method, "Overridden nested allocation hooks require their own constructor contract")
+                if any(isinstance(part, ast.Return) and part is not override.body[-1] for part in ast.walk(override)):
+                    fail(name, method, "Overridden allocation hooks require a single construction path")
+                replacement = copy.copy(override)
+                replacement._package_construction_conditions = getattr(method, "_package_construction_conditions", {})
+                overrides[method] = (*origin_info[:3], replacement)
         constructor = next((n for n in node.body if isinstance(n, ast.FunctionDef) and n.name == "__init__"), None)
         if constructor is None:
             fail(name, node, "constructor replacement requires an explicit resource contract")
@@ -114,19 +136,17 @@ def resolve_owners(sources, imported, owner_schema, fail):
             ):
                 fail(name, constructor, "owner construction requires one unconditional super().__init__ call")
             inherited = constructor_schema(cls, index + 1)
-        own = owner_schema(
-            name,
-            node,
-            kind,
-            vars(imported[name]),
-            functions=[
-                method
-                for method in construction_functions(node)
-                if not getattr(method, "_package_preparation_method", False)
-            ],
-            inherited=inherited,
-            owner_class=cls,
-        )
+        methods = [method for method in construction_functions(node)
+                   if not getattr(method, "_package_preparation_method", False)]
+        if overrides:
+            own = {}
+            for method in methods:
+                origin, owner_node, owner_kind, body = overrides.get(method, (name, node, kind, method))
+                own = owner_schema(origin, owner_node, owner_kind, vars(imported[origin]), functions=[body],
+                                   earlier=own, inherited=inherited, owner_class=cls)
+        else:
+            own = owner_schema(name, node, kind, vars(imported[name]), functions=methods,
+                               inherited=inherited, owner_class=cls)
         if any(item.get("owner_dimension", [None])[0] in inherited for item in own.values()):
             node._package_inherited_resource_dependencies = True
         if calls:

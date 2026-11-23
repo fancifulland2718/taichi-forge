@@ -8666,6 +8666,46 @@ class Model:
             assert model.total[None] == sum(values[1:])
 
 
+@test_utils.test(arch=ti.cpu, offline_cache=False)
+def test_package_super_constructor_uses_concrete_allocation_hook(tmp_path, monkeypatch):
+    source = """
+import taichi_forge as ti
+@ti.data_oriented
+class Base:
+    def __init__(self, n):
+        scope = ti.experimental.ResourceScope(self)
+        self.n = n
+        scope.dim("n")
+        self.allocate()
+    def allocate(self):
+        scope = ti.experimental.ResourceScope(self)
+        scope.field_value = scope.field(ti.i32, shape=self.n)
+    @ti.kernel
+    def write(self, value: ti.f32):
+        self.field_value[0] = value
+"""
+    child = """
+import taichi_forge as ti
+from .storage import Base
+class Model(Base):
+    def __init__(self, n):
+        super().__init__(n)
+    def allocate(self):
+        scope = ti.experimental.ResourceScope(self)
+        scope.field_value = scope.field(ti.f32, shape=self.n)
+"""
+    package = _source_package(tmp_path, monkeypatch, child, extra_modules={"storage": source},
+                              initializer="from .model import Model, Base\n")
+    manifest = ti.aot.export_package(package, tmp_path / "sdk")
+    with Runtime(manifest["target"]) as runtime, load_package(runtime, tmp_path / "sdk") as code:
+        for cls, value in ((code.host.Base, 2), (code.host.Model, 2.75)):
+            obj = cls(7)
+            obj.write(2.75)
+            actual = obj.field_value.to_numpy()
+            assert actual.shape == (7,)
+            assert actual[0] == value
+
+
 @pytest.mark.parametrize("reverse", [False, True])
 @test_utils.test(arch=[ti.cpu, ti.cuda], offline_cache=False)
 def test_package_host_owner_sequences_reuse_independent_typed_entries(tmp_path, monkeypatch, reverse):
