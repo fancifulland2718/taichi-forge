@@ -615,7 +615,7 @@ class OwnerGraph:
                     self._validate(choice["owner_type"], (*ancestors, identity))
 
     def construct(self, identity, *, resource_only=False, references=(), choices=None, path=(), resource_paths=None,
-                  contract_only=False, numerical_paths=None):
+                  contract_only=False, numerical_paths=None, dimension_witnesses=None):
         import taichi_forge as ti
         from taichi_forge.lang.matrix import MatrixType
         from taichi_forge_runtime._static_values import read_static_key
@@ -713,6 +713,7 @@ class OwnerGraph:
                     path,
                     None if numerical_paths is None else tuple(sorted(numerical_paths)),
                     tuple(schema),
+                    tuple(sorted((dimension_witnesses or {}).items())),
                     tuple(sorted((child, tuple(sorted(paths))) for child, paths in source_children.items())),
                     tuple(
                         sorted(
@@ -816,7 +817,7 @@ class OwnerGraph:
         # Dimensions and field_like may read child allocation metadata before
         # this owner's fields are allocated. Build each declared child once;
         # attach owned children after the parent's record namespaces exist.
-        children, child_values = {}, {}
+        children, child_values, child_calls = {}, {}, {}
         for attribute, item in schema.items():
             if item["kind"] in ("owner", "owner_input"):
                 if contract_only and attribute not in source_children:
@@ -884,16 +885,15 @@ class OwnerGraph:
                     prefix = tuple(item.get('path', (attribute,)))
                     child_numerical_paths = tuple(member[len(prefix):] for member in numerical_paths
                                                   if member[:len(prefix)] == prefix)
-                elif item["kind"] == "owner_input" and not contract_only:
-                    # Ordinary owner methods use the same query dependency
-                    # projection as free-kernel call contexts. A borrowed
-                    # query may itself own numeric children used by its methods.
+                elif not contract_only and (item["kind"] == "owner_input" or child_paths):
+                    # A child layout dependency can select just one dimension.
+                    # Keep the fields that the parent's numerical methods also read.
                     prefix = tuple(item.get('path', (attribute,)))
                     parent_paths = self._numerical_paths(identity, self._device_paths.get(identity, ()))
-                    child_numerical_paths = tuple(member[len(prefix):] for member in parent_paths
-                                                  if member[:len(prefix)] == prefix)
-                value, _, child, expanded = self.construct(
-                    item["owner_type"],
+                    reads = tuple(member[len(prefix):] for member in parent_paths if member[:len(prefix)] == prefix)
+                    if reads or item["kind"] == "owner_input":
+                        child_numerical_paths = reads
+                child_calls[attribute] = dict(
                     resource_only=contract_only or resource_only or item["kind"] == "owner_input",
                     references=references,
                     choices=child_choices,
@@ -901,6 +901,7 @@ class OwnerGraph:
                     resource_paths=child_paths,
                     numerical_paths=child_numerical_paths,
                 )
+                value, _, child, expanded = self.construct(item["owner_type"], **child_calls[attribute])
                 children[attribute] = (child, expanded)
                 child_values[attribute] = value
                 if item["kind"] == "owner_input":
@@ -917,10 +918,28 @@ class OwnerGraph:
                 value = getattr(value, part)
             return value
 
-        declarations = construct_fields(owner, schema, vars(imported), self.module,
-                                        imported_modules=self.imported, source_dimension=source_dimension,
-                                        field_trees=self.field_trees, witnesses=self._field_witnesses,
-                                        witness_scope=(name, class_name, path))
+        def allocate_fields():
+            return construct_fields(owner, schema, vars(imported), self.module,
+                                    imported_modules=self.imported, source_dimension=source_dimension,
+                                    field_trees=self.field_trees, witnesses=self._field_witnesses,
+                                    witness_scope=(name, class_name, path), dimension_witnesses=dimension_witnesses)
+
+        declarations = allocate_fields()
+        resized = {}
+        for item in schema.values():
+            member = item.get("path", ())
+            if item["kind"] == "dimension" and item.get("expression") and len(member) == 2 and member[0] in children:
+                attribute, count = member
+                expected = getattr(getattr(owner, attribute), count)
+                if expected != getattr(child_values[attribute], count):
+                    resized.setdefault(attribute, {})[count] = expected
+        for attribute, extents in resized.items():
+            value, _, child, expanded = self.construct(schema[attribute]["owner_type"], **child_calls[attribute],
+                                                      dimension_witnesses=extents)
+            child_values[attribute], children[attribute] = value, (child, expanded)
+        if resized:
+            # Parent allocations may borrow their physical extent from a child.
+            declarations = allocate_fields()
         for attribute, item in schema.items():
             if item["kind"] in ("dense_field", "dimension", "borrowed_field", "host_owner_sequence"):
                 continue
@@ -1063,10 +1082,16 @@ def _compose(environment, schema, children):
         for key, original in child.declarations.items():
             value = original
             if isinstance(value, Dimension):
+                parent_dimension = declarations.get(names[key])
+                relation = expression(value.expression) if value.expression else ()
+                if isinstance(parent_dimension, Dimension) and parent_dimension.expression:
+                    if relation and relation != parent_dimension.expression:
+                        raise ValueError("Child dimension has conflicting owner relations")
+                    relation = parent_dimension.expression
                 value = Dimension(
                     value.kind,
                     names[value.capacity] if value.capacity else "",
-                    expression(value.expression) if value.expression else (),
+                    relation,
                 )
             elif isinstance(value, DenseField):
                 shape = tuple(names[n] if isinstance(n, str) else n for n in value.shape)
@@ -1198,6 +1223,9 @@ def _compose(environment, schema, children):
                 ]
             if owner_conditions:
                 transformed["conditions"] = {**transformed.get("conditions", {}), **owner_conditions}
+            parent_dimension = schema.get(names[key], {})
+            if item["kind"] == "dimension" and parent_dimension.get("expression"):
+                transformed["expression"] = parent_dimension["expression"]
             expanded[names[key]] = transformed
     environment._set_declarations(declarations)
     environment._paths = MappingProxyType(paths)

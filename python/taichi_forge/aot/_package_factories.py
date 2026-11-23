@@ -626,7 +626,7 @@ def normalize_factories(tree, namespace, module, fail, kind):
                         or isinstance(statement.value.func, ast.Attribute)
                         and isinstance(statement.value.func.value, ast.Name)
                         and statement.value.func.value.id in scopes
-                        and statement.value.func.attr == "record"
+                        and statement.value.func.attr in ("record", "child")
                     )
                     and isinstance(statement, ast.Assign)
                     and len(statement.targets) == 1

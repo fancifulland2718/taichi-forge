@@ -149,7 +149,7 @@ def field_declarations(module, constructor, kind, fail):
 
 def construct_fields(
     owner, schema, namespace, module, *, field_trees, imported_modules=None, source_dimension=None,
-    witnesses=None, witness_scope=None,
+    witnesses=None, witness_scope=None, dimension_witnesses=None,
 ):
     """Use original FieldsBuilder and DenseField capture, not a layout emulator."""
     import taichi_forge as ti
@@ -330,7 +330,7 @@ def construct_fields(
                 return value
             expression = schema[name].get("expression")
             value = (evaluate_extent(expression, lambda key: witness(key, (*visiting, name)))
-                     if expression else minima.get(name, 1))
+                     if expression else (dimension_witnesses or {}).get(name, minima.get(name, 1)))
             if not 0 <= value <= 2**31 - 1:
                 raise ValueError("Declared dimension needs a legal symbolic construction witness")
             write_member(owner, name, value, schema)

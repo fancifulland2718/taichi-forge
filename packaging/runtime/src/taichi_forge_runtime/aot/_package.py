@@ -1326,6 +1326,24 @@ class _ResourceScope:
             raise ValueError("Owner input requires its managed constructor scope")
         setattr(self._owner, name, None)
 
+    def child(self, name, owner):
+        from ._package_values import owner_type, selected_owner_declaration
+
+        package = getattr(self._root, "_forge_package_owner", None)
+        if package is None or type(name) is not str or not name.isidentifier() or self._parent is not None:
+            raise ValueError("A child scope requires a named member of a managed owner")
+        package._check()
+        schema = package._manifest["owners"][owner_type(self._root)]
+        contract = selected_owner_declaration(self._owner, schema.get(name, {}))
+        if contract.get("kind") != "owner" or owner_type(owner) != contract["owner_type"]:
+            raise ValueError("Child scope requires its declared owner type")
+        if getattr(owner, "_forge_package_owner", None) is not package or owner is self._root:
+            raise ValueError("Child scope requires a distinct owner from this package")
+        if getattr(self._owner, name, owner) is not owner:
+            raise ValueError("An existing child resource owner cannot be replaced")
+        setattr(self._owner, name, owner)
+        return _ResourceScope(owner, parent=self, path=(*self._path, name))
+
     def record(self, name, value, *, optional=False):
         if (
             type(name) is not str

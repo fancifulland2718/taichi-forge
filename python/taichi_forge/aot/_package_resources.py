@@ -717,20 +717,24 @@ def scope_declarations(
 
     scope_paths = {key: () for key in scopes}
     record_calls = set()
+    from ._package_child_scopes import child_contract, unconditional_scope_statements
     # Records describe existing plain values, including frozen dataclasses.
     # Their constructors are never evaluated to discover numerical inputs.
-    for statement in constructor.body:
+    for statement in unconditional_scope_statements(constructor.body, contexts):
         if not isinstance(statement, ast.Assign) or not isinstance(statement.value, ast.Call):
             continue
         call = statement.value
         if not (
             isinstance(call.func, ast.Attribute)
             and isinstance(call.func.value, ast.Name)
-            and call.func.value.id in scopes
-            and call.func.attr == "record"
+            and context_bindings.get(id(call.func.value), call.func.value.id) in scopes
+            and call.func.attr in ("record", "child")
         ):
             continue
-        parent = call.func.value.id
+        parent = context_bindings.get(id(call.func.value), call.func.value.id)
+        owning = call.func.attr == "child"
+        if owning and scope_paths[parent]:
+            fail(module, call, "An owned child requires its owning parent's resource scope")
         if not (
             len(statement.targets) == 1
             and isinstance(statement.targets[0], ast.Name)
@@ -738,7 +742,7 @@ def scope_declarations(
             and len(call.args) == 2
             and (
                 not call.keywords
-                or len(call.keywords) == 1
+                or not owning and len(call.keywords) == 1
                 and call.keywords[0].arg == "optional"
                 and isinstance(call.keywords[0].value, ast.Constant)
                 and type(call.keywords[0].value.value) is bool
@@ -764,9 +768,12 @@ def scope_declarations(
         identity = _capture_id(path)
         if identity in declarations:
             fail(module, statement, "Record declaration cannot replace an existing member")
+        spec = (child_contract(module, constructor, call, path[-1], namespace, fail)
+                if owning else dict(kind="record", path=list(path)))
+        if owning and initial_conditions:
+            spec["conditions"] = dict(initial_conditions)
         declarations[identity] = dict(
-            kind="record",
-            path=list(path),
+            **spec,
             **({"optional": True} if call.keywords and call.keywords[0].value.value else {}),
             scope_allocation=[
                 scopes[parent].value.lineno,
@@ -1921,7 +1928,7 @@ def scope_declarations(
         scope, method = operation(call)
         if conditions and method == "constant":
             fail(module, statement, "Definition constants must remain unconditional")
-        if method == "record" and id(call) in record_calls:
+        if method in ("record", "child") and id(call) in record_calls:
             continue
         if method in ("record", "owner_reference") and isinstance(statement, ast.Expr) and id(call) in optional_records:
             allowed.add(id(call.func.value))
