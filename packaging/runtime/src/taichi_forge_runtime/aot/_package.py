@@ -379,6 +379,28 @@ class _ModuleBinding:
     def entry(self, symbol):
         return entry(self.package, symbol)
 
+    def _native_storage(self, owner, group):
+        from ._package_native_storage import NativeStorage
+
+        state = getattr(owner, "_forge_package_native_storage", None)
+        if state is None:
+            state = owner._forge_package_native_storage = NativeStorage(self.package, owner)
+            construction = _construction.get()
+            if construction is not None:
+                construction[3].callback(state.close)
+        state.group(group)
+        return state
+
+    def native_storage_node(self, owner, group, attribute):
+        from ._package_native_storage import StorageNode
+
+        return StorageNode(self._native_storage(owner, group), group, attribute)
+
+    def native_storage_field(self, owner, group, name):
+        from ._package_native_storage import field
+
+        return field(self._native_storage(owner, group), group, name)
+
     def ndarray_view(self, value):
         from ._runtime import NdArray
 
@@ -1848,9 +1870,14 @@ class entry:
                     if item["kind"] in ("value", "dimension") and not item.get("element_shape")
                     else value
                 )
-            kernel = package._kernels.get(selected.symbol)
-            if kernel is None:
-                kernel = package._kernels[selected.symbol] = package._module.kernel(selected.symbol)
+            if contract.get("native_storage"):
+                from ._package_native_storage import entry_storage
+
+                kernel = entry_storage(owner, contract).kernel(selected.symbol)
+            else:
+                kernel = package._kernels.get(selected.symbol)
+                if kernel is None:
+                    kernel = package._kernels[selected.symbol] = package._module.kernel(selected.symbol)
             from ._package_buffers import HostBuffers
 
             buffers = HostBuffers(package.runtime, contract["arguments"], arguments)
@@ -2125,6 +2152,7 @@ class LoadedPackage:
                 100,
                 101,
                 102,
+                103,
             )
             or manifest.get("kind") != "forge_definition_package_prototype"
         ):
@@ -2331,6 +2359,7 @@ class LoadedPackage:
             raise ValueError("Prepared static inputs require a specialization-capable numerical entry")
         self._module = runtime.load_module(self.directory / "code.tcm")
         self._arrays, self._kernels = [], {}
+        self._native_views = weakref.WeakSet()
         self._call_lock = threading.RLock()
         self._call_caches = []
         self._graphs = weakref.WeakSet()
@@ -2416,6 +2445,9 @@ class LoadedPackage:
                     workspace.close()
             cache.clear()
         self._call_caches.clear()
+        for view in tuple(self._native_views):
+            view.close()
+        self._native_views.clear()
         for array in reversed(self._arrays):
             array.close()
         self._arrays.clear()

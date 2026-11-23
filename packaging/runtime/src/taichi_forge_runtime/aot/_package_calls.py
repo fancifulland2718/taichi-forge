@@ -219,6 +219,9 @@ class OwnerGuard:
         for contract in contracts:
             visit(contract.get("admission", {}))
             captures.extend(contract["captures"])
+            for binding in contract.get("native_storage", ()):
+                if binding["owner_path"]:
+                    path((*binding["owner_path"], "_forge_package_native_storage"))
         for spec in captures:
             if package._manifest.get("frontend_target") in spec.get("absent_devices", ()):
                 continue

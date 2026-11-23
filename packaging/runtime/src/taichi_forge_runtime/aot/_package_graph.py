@@ -287,12 +287,19 @@ class GraphBuilder:
         self.operations.append(dict(kind="kernel", entry=kernel.symbol, arguments=names))
         self.arguments = arguments
         self._captures, self._constants = captures, constants
-        if kernel.contract.get("admission"):
+        if kernel.contract.get("admission") or kernel.contract.get("native_storage"):
             self._admissions.append((owner, kernel.contract))
         if kernel.contract.get("model_static_ranges"):
             self._range_checks.append((kernel.contract["model_static_ranges"],
                                        {key: binding[0] for key, binding in captured.items()}))
         return self
+
+    def _dispatch_native_storage(self, owner, group, slot, name):
+        self.package._check()
+        if owner._forge_package_owner is not self.package:
+            raise ValueError("Native storage belongs to another package")
+        self.operations.append(dict(kind="kernel", entry=name, arguments=[]))
+        self._admissions.append((owner, {"captures": [], "native_storage": [dict(slot=slot, owner_path=[], group=group)]}))
 
     def private_scalar(self, name, dtype, value):
         self.package._check()
@@ -760,8 +767,16 @@ class Graph:
         self.package._check()
         if arguments.keys() != self.arguments.keys():
             raise ValueError("Graph binding must supply exactly its declared arguments")
+        module = self.package._module
         for owner, contract in self.admissions:
             check_admission(owner, contract, arch=self.package.runtime.arch)
+            if contract.get("native_storage"):
+                from ._package_native_storage import entry_storage
+
+                selected = entry_storage(owner, contract).bind()
+                if module is not self.package._module and module is not selected:
+                    raise ValueError("Graph uses independently owned native storage modules")
+                module = selected
         for owner, schema, previous in self.plan_values.values():
             if _plan_key(_plan_value(owner, schema)) != _plan_key(previous):
                 raise ValueError(f"Plan parameter {schema['name']!r} changed; rebuild the Graph before preparing")
@@ -771,7 +786,7 @@ class Graph:
             if schema["kind"] == "value":
                 value = Scalar(schema["dtype"], value)
             elif schema["kind"] == "compound":
-                value = self.plan.value(self.package._module, name, value)
+                value = self.plan.value(module, name, value)
             values[name] = value
         captured = {}
         for name, (owner, schema) in self.captures.items():
@@ -798,7 +813,7 @@ class Graph:
             value = captured[name]
             if schema["kind"] in ("value", "dimension"):
                 value = (
-                    self.plan.value(self.package._module, name, value)
+                    self.plan.value(module, name, value)
                     if schema.get("element_shape")
                     else Scalar(schema["dtype"], value)
                 )
@@ -816,7 +831,7 @@ class Graph:
             shape = extent if isinstance(extent, tuple) else (extent,)
             if not isinstance(array, NdArray) or array.shape[:len(shape)] != shape:
                 raise ValueError("Native whole-array extent differs from its recording")
-        prepared = plan.prepare(self.package._module, values, execution_domain=execution_domain,
+        prepared = plan.prepare(module, values, execution_domain=execution_domain,
                                 mutable_parameters=mutable_parameters)
         # A cached call must not create Graph -> call -> Graph ownership cycles.
         # Native owners already retain the module and every argument resource.
