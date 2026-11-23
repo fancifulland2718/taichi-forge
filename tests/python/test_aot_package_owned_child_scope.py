@@ -25,7 +25,7 @@ class Model:
     def __init__(self, count, extra=1):
         self.count = count
         scope = ti.experimental.ResourceScope(self)
-        scope.dim("count")
+        scope.output = scope.field(ti.i32, shape=scope.dim("count"), initialization="zero")
         child = scope.child("workspace", Workspace(count + extra))
         child.derived_dim("count", child.parent_dim("count") + 1)
 
@@ -33,6 +33,8 @@ class Model:
     def update(self, x: ti.i32):
         for i in range(self.workspace.count):
             self.workspace.values[i] = i + x
+        for i in self.output:
+            self.output[i] = self.workspace.values[i] + 1
 """
 
 
@@ -62,6 +64,7 @@ def test_package_owned_child_checks_parent_extent(tmp_path, monkeypatch, attach_
             owner = code.host.Model(n)
             owner.update(-4)
             np.testing.assert_array_equal(owner.workspace.values.to_numpy(), np.arange(n + 1) - 4)
+            np.testing.assert_array_equal(owner.output.to_numpy(), np.arange(n) - 3)
         with pytest.raises(ValueError, match="dimension|Dimension"):
             code.host.Model(3, extra=2)
         owner.count += 1

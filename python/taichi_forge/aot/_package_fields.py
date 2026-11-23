@@ -149,7 +149,7 @@ def field_declarations(module, constructor, kind, fail):
 
 def construct_fields(
     owner, schema, namespace, module, *, field_trees, imported_modules=None, source_dimension=None,
-    witnesses=None, witness_scope=None, dimension_witnesses=None,
+    witnesses=None, witness_scope=None, dimension_witnesses=None, dimensions_only=False,
 ):
     """Use original FieldsBuilder and DenseField capture, not a layout emulator."""
     import taichi_forge as ti
@@ -340,7 +340,7 @@ def construct_fields(
             if item["kind"] == "dimension":
                 declarations[name] = Dimension(kind="active", expression=item.get("expression", ()))
                 witness(name)
-        if not fields:
+        if dimensions_only or not fields:
             return declarations
         typed = []
         for name, item in fields.items():

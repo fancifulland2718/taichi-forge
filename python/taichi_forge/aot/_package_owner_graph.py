@@ -918,28 +918,28 @@ class OwnerGraph:
                 value = getattr(value, part)
             return value
 
-        def allocate_fields():
+        def allocate_fields(*, dimensions_only=False):
             return construct_fields(owner, schema, vars(imported), self.module,
                                     imported_modules=self.imported, source_dimension=source_dimension,
                                     field_trees=self.field_trees, witnesses=self._field_witnesses,
-                                    witness_scope=(name, class_name, path), dimension_witnesses=dimension_witnesses)
+                                    witness_scope=(name, class_name, path), dimension_witnesses=dimension_witnesses,
+                                    dimensions_only=dimensions_only)
 
-        declarations = allocate_fields()
+        relations = [member for item in schema.values() if item["kind"] == "dimension" and item.get("expression")
+                     and len(member := item.get("path", ())) == 2 and member[0] in children]
         resized = {}
-        for item in schema.values():
-            member = item.get("path", ())
-            if item["kind"] == "dimension" and item.get("expression") and len(member) == 2 and member[0] in children:
-                attribute, count = member
-                expected = getattr(getattr(owner, attribute), count)
-                if expected != getattr(child_values[attribute], count):
-                    resized.setdefault(attribute, {})[count] = expected
+        if relations:
+            allocate_fields(dimensions_only=True)
+        for attribute, count in relations:
+            expected = getattr(getattr(owner, attribute), count)
+            if expected != getattr(child_values[attribute], count):
+                resized.setdefault(attribute, {})[count] = expected
         for attribute, extents in resized.items():
             value, _, child, expanded = self.construct(schema[attribute]["owner_type"], **child_calls[attribute],
                                                       dimension_witnesses=extents)
             child_values[attribute], children[attribute] = value, (child, expanded)
-        if resized:
-            # Parent allocations may borrow their physical extent from a child.
-            declarations = allocate_fields()
+        # Parent fields see each child's final extent and retain their original dtype AST.
+        declarations = allocate_fields()
         for attribute, item in schema.items():
             if item["kind"] in ("dense_field", "dimension", "borrowed_field", "host_owner_sequence"):
                 continue
