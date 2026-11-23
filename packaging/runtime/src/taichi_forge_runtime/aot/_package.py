@@ -1250,6 +1250,12 @@ class _ResourceScope:
         return self._parent.dim(name)
 
     def owner_sequence(self, name, values):
+        return self._owner_sequence(name, values, borrowed=False)
+
+    def owner_sequence_reference(self, name, values):
+        return self._owner_sequence(name, values, borrowed=True)
+
+    def _owner_sequence(self, name, values, *, borrowed):
         from ._package_values import owner_type
 
         package = self._root._forge_package_owner
@@ -1265,10 +1271,14 @@ class _ResourceScope:
         ):
             raise ValueError("Host owner sequence requires its declared managed construction")
         declaration = package._manifest["owners"][owner_type(self._root)].get(name, {})
-        if declaration.get("kind") != "host_owner_sequence" or any(
-            getattr(value, "_forge_package_owner", None) is not package
-            or owner_type(value) not in declaration["owner_types"]
-            for value in values
+        if (
+            declaration.get("kind") != "host_owner_sequence"
+            or declaration.get("borrowed_sequence", False) != borrowed
+            or any(
+                getattr(value, "_forge_package_owner", None) is not package
+                or owner_type(value) not in declaration["owner_types"]
+                for value in values
+            )
         ):
             raise ValueError("Host owner sequence differs from its declared input types")
         return values
@@ -1535,7 +1545,9 @@ def managed_class(package, cls):
             )
             for name, item in package._manifest["owners"].get(selected_key, {}).items():
                 if item["kind"] == "host_owner_sequence":
-                    _ResourceScope(self).owner_sequence(name, getattr(self, name))
+                    _ResourceScope(self)._owner_sequence(
+                        name, getattr(self, name), borrowed=item.get("borrowed_sequence", False)
+                    )
         except BaseException:
             rollback.close()
             for value in reversed(allocated):

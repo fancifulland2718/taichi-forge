@@ -86,6 +86,11 @@ def resolve_sequences(sources, imported):
             )
             for name, item in sequences.items():
                 domain = _declared_element_types(getattr(imported[module], node.name), name, classes, imported)
+                if item.get("borrowed_sequence"):
+                    if not domain:
+                        raise ValueError("Borrowed owner sequence requires an explicit element type: " + name)
+                    item.update(owner_types=domain, constructors=[])
+                    continue
                 declarations = [
                     dict(kind="owner", owner_type=owner, constructor_call=call, declaration_module=module)
                     for attribute, call, owner in calls

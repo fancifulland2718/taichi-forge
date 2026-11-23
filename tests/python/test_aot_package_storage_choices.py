@@ -154,3 +154,41 @@ class Model:
                 np.testing.assert_array_equal(owner.values.to_numpy(), np.arange(owner.extent) + (200 if flip else 100))
         with pytest.raises(ValueError, match="source type|declared"):
             code.host.Model(a, object(), True, True, 7)
+
+
+@test_utils.test(arch=ti.cpu, offline_cache=False)
+def test_borrowed_owner_sequences_retain_caller_storage(tmp_path, monkeypatch):
+    source = """
+import taichi_forge as ti
+@ti.data_oriented
+class Leaf:
+    def __init__(self):
+        s = ti.experimental.ResourceScope(self)
+        s.value = s.field(ti.i32, shape=(), initialization="zero")
+    @ti.kernel
+    def increment(self):
+        self.value[None] += 1
+@ti.data_oriented
+class Model:
+    leaves: tuple[Leaf, ...]
+    def __init__(self, leaves):
+        self.leaves = tuple(leaves)
+        s = ti.experimental.ResourceScope(self)
+        s.owner_sequence_reference("leaves", self.leaves)
+    def run(self):
+        for leaf in self.leaves:
+            leaf.increment()
+"""
+    package = _source_package(tmp_path, monkeypatch, source, initializer="from .model import Leaf, Model\n")
+    sdk = tmp_path / "references"
+    ti.aot.export_package(package, sdk, arch=ti.cpu, artifact_format="unified-bc-library")
+    ti.reset()
+    with Runtime("x64") as runtime, load_package(runtime, sdk) as code:
+        a, b = code.host.Leaf(), code.host.Leaf()
+        for refs in ((), (a,), (b, a, b)):
+            owner = code.host.Model(refs)
+            assert owner.leaves == refs and not owner._forge_package_field_groups
+            owner.run()
+        assert int(a.value.to_numpy()) == int(b.value.to_numpy()) == 2
+        with pytest.raises(ValueError, match="types"):
+            code.host.Model([object()])

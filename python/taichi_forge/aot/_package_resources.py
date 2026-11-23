@@ -1388,7 +1388,9 @@ def scope_declarations(
                 if (len(call.args) != 2 or call.keywords
                         or not isinstance(call.args[0], ast.Constant)
                         or not (isinstance(call.args[1], ast.Name)
-                                and call.args[1].id in typed_owner_parameters
+                                and (call.args[1].id in typed_owner_parameters
+                                     or call.args[1].id in local_owner_types
+                                     and local_owner_types[call.args[1].id][0] < call.lineno)
                                 or declared_owner_path(call.args[1]))):
                     return None
                 fields.add(call.args[0].value)
@@ -1984,7 +1986,7 @@ def scope_declarations(
                 ),
                 statement,
             )
-        elif method == "owner_sequence" and isinstance(statement, ast.Expr):
+        elif method in ("owner_sequence", "owner_sequence_reference") and isinstance(statement, ast.Expr):
             if (
                 scope_paths[scope]
                 or conditions
@@ -2004,6 +2006,7 @@ def scope_declarations(
                 call.args[0].value,
                 dict(
                     kind="host_owner_sequence",
+                    **({"borrowed_sequence": True} if method == "owner_sequence_reference" else {}),
                     sequence_declaration=[call.lineno, call.col_offset],
                     scope_allocation=origin(scope),
                 ),
