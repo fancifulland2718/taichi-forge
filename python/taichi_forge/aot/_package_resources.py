@@ -1389,13 +1389,27 @@ def scope_declarations(
 
     def presence_parameter(statement, parameter, *, nonnull=False):
         calls = paired_records(statement)
-        if calls is None:
+        if not calls:
             return None
         name = (
             "_forge_package_presence_"
             + hashlib.sha256(f"{module}:{constructor.lineno}:{parameter}".encode()).hexdigest()
         )
         scope, _ = operation(calls[0])
+        binding = constructor.name != "__init__" and nonnull and parameter in typed_owner_parameters
+        if binding:
+            # Both arms must bind the same port. Its actual value then supplies
+            # presence even when the method is called again with a new owner.
+            present, absent = (statement.body, statement.orelse) if isinstance(
+                statement.test.ops[0], ast.IsNot) else (statement.orelse, statement.body)
+            if (len(present) != 1 or len(absent) != 1 or len(calls) != 1
+                    or not isinstance(present[0], ast.Expr) or not isinstance(present[0].value, ast.Call)):
+                return None
+            ref = present[0].value
+            if (operation(ref) != (scope, "owner_reference") or len(ref.args) != 2
+                    or not isinstance(ref.args[1], ast.Name) or ref.args[1].id != parameter):
+                return None
+            statement._package_bound_owner_presence = (name, parameter)
         if name not in declarations:
             add(
                 name,
@@ -1403,8 +1417,9 @@ def scope_declarations(
                     kind="static",
                     choices=[("bool", False), ("bool", True)],
                     kernel_only=False,
-                    presence_parameter=parameter,
-                    **({"presence_nonnull": True} if nonnull else {}),
+                    **({"prepared_presence": True} if binding else {
+                        "presence_parameter": parameter, **({"presence_nonnull": True} if nonnull else {})
+                    }),
                     scope_allocation=origin(scope),
                 ),
                 statement,

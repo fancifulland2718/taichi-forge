@@ -7496,7 +7496,7 @@ def test_package_owner_union_checks_declared_constructor_calls(tmp_path, monkeyp
 def test_package_optional_owner_union_constructs_absent_without_extra_context(tmp_path, monkeypatch, implicit_presence):
     source = TYPED_OWNER_INPUT_SOURCE.split('@ti.data_oriented\nclass Model:')[0]
     source = source.replace('def __init__(self, source):',
-        'def __init__(self, n: int, source: ScalarStorage | VectorStorage = None):')
+        'def __init__(self, n: int, source: ScalarStorage | VectorStorage | None = None):')
     source = source.replace("        scope.owner_reference('source', source)\n"
                             "        self.n = source.n\n"
                             "        scope.derived_dim('n', scope.owner_dim('source', 'n'))",
@@ -10288,11 +10288,19 @@ def test_package_prepared_child_reference_requires_owner_path_and_presence(tmp_p
     assert ti.lang.impl.get_runtime().get_num_compiled_functions() == 0
 
 
+@pytest.mark.parametrize("direct", [False, True])
 @test_utils.test(arch=[ti.cpu, ti.cuda], offline_cache=False)
-def test_package_typed_owner_preparation_rebinds_optional_input(tmp_path, monkeypatch):
-    package = _source_package(tmp_path, monkeypatch, PREPARED_OWNER_INPUT_SOURCE)
+def test_package_typed_owner_preparation_rebinds_optional_input(tmp_path, monkeypatch, direct):
+    source = PREPARED_OWNER_INPUT_SOURCE
+    if direct:
+        source = "import typing\n" + source.replace("source: Storage = None", "source: 'typing.Optional[Storage]' = None")
+        source = source.replace("        self.has_source = False\n", "").replace(
+            "        scope.static('has_source', choices=(False, True))\n", "")
+        source = source.replace("        self.has_source = source is not None\n", "").replace(
+            "if self.has_source:", "if source is not None:")
+    package = _source_package(tmp_path, monkeypatch, source)
     manifest = ti.aot.export_package(package, tmp_path / 'sdk')
-    assert manifest['version'] == 85
+    assert manifest['version'] == 93  # Nullable owner record used by step.
     with Runtime(manifest['target']) as runtime, load_package(runtime, tmp_path / 'sdk') as code:
         model = code.host.Model(5)
         first, second = code.host.model.Storage(5), code.host.model.Storage(5)
@@ -10366,9 +10374,9 @@ print('PREPARED_OWNER_SOURCE_FREE_OK')
         capture_output=True, text=True, timeout=90)
     assert result.returncode == 0, result.stdout + result.stderr
     assert 'PREPARED_OWNER_SOURCE_FREE_OK' in result.stdout
-    manifest['version'] = 84
+    manifest['version'] = 92
     (tmp_path / 'sdk/package.json').write_text(json.dumps(manifest), encoding='utf8')
-    with Runtime(manifest['target']) as runtime, pytest.raises(ValueError, match='version 85'):
+    with Runtime(manifest['target']) as runtime, pytest.raises(ValueError, match='version 93'):
         load_package(runtime, tmp_path / 'sdk')
 
 

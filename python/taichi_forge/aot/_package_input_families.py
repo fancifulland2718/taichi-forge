@@ -17,15 +17,29 @@ def owner_annotation_types(annotation, namespace):
         annotation = ast.parse(annotation, mode="eval").body
     if isinstance(annotation, ast.Constant) and isinstance(annotation.value, str):
         return owner_annotation_types(annotation.value, namespace)
+    def union(arms):
+        choices = []
+        for arm in arms:
+            if arm is type(None) or isinstance(arm, ast.Constant) and arm.value is None:
+                continue
+            choice = owner_annotation_types(arm, namespace)
+            if not choice:
+                return None
+            choices.extend(choice)
+        return tuple(dict.fromkeys(choices))
+
     if isinstance(annotation, ast.BinOp) and isinstance(annotation.op, ast.BitOr):
-        left = owner_annotation_types(annotation.left, namespace)
-        right = owner_annotation_types(annotation.right, namespace)
-        return tuple(dict.fromkeys((*left, *right))) if left and right else None
+        return union((annotation.left, annotation.right))
+    if isinstance(annotation, ast.Subscript):
+        origin = _source_value(annotation.value, namespace)
+        if origin is typing.Optional:
+            return union((annotation.slice, type(None)))
+        if origin is typing.Union:
+            return union(annotation.slice.elts if isinstance(annotation.slice, ast.Tuple) else (annotation.slice,))
     if isinstance(annotation, ast.AST):
         annotation = _source_value(annotation, namespace)
     if typing.get_origin(annotation) in (typing.Union, types.UnionType):
-        choices = [owner_annotation_types(item, namespace) for item in typing.get_args(annotation)]
-        return tuple(dict.fromkeys(kind for choice in choices for kind in choice)) if all(choices) else None
+        return union(typing.get_args(annotation))
     return (annotation,) if inspect.isclass(annotation) and annotation.__module__ != "builtins" else ()
 
 

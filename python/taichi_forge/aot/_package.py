@@ -299,6 +299,7 @@ _SOURCE_RESOURCE_FIELDS = frozenset((
     "default_constructor_call",
     "order_source",
     "sequence_declaration",
+    "prepared_presence",
     "constructors",
     "owner_alternatives",
     "choice_guards",
@@ -711,6 +712,14 @@ def _host_projection(
                     binding_schemas[self.owner] = schema
                     self.target_mask = outer
                 return node
+            bound_presence = getattr(node, "_package_bound_owner_presence", None)
+            if bound_presence:
+                flag, parameter = bound_presence
+                update = ast.Assign(
+                    [ast.Attribute(ast.Name("self", ast.Load()), flag, ast.Store())],
+                    ast.Compare(ast.Name(parameter, ast.Load()), [ast.IsNot()], [ast.Constant(None)]),
+                )
+                return [self.generic_visit(node), ast.copy_location(update, node)]
             optional = getattr(node, "_package_optional_input_borrows", ())
             if optional:
                 absent = []
@@ -1046,6 +1055,9 @@ def _host_projection(
             self.owner = previous
             if not node.body:
                 node.body = [ast.Pass()]
+            for flag, item in binding_schemas.get(node.name, {}).items():
+                if item.get("prepared_presence"):
+                    node.body.append(ast.Assign([ast.Name(flag, ast.Store())], ast.Constant(False)))
             if managed:
                 node.decorator_list = [
                     ast.Attribute(ast.Name(_PREFIX + "runtime", ast.Load()), "managed_class", ast.Load())
