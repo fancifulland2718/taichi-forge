@@ -6,6 +6,8 @@
 
 ## 版本与安装
 
+使用 GitHub 附件时，请按平台和 Python 版本选择前端及 Runtime。0.7.1 的 Vulkan 布局修复位于 GitHub Runtime 构建号 1。[从 Release 安装与验证](install_release.zh.md)
+
 这些文档以 **Taichi Forge 0.7.1** 为基础，版本变化与升级说明见
 [发布说明](release_notes.zh.md)。尚未进入发行包的修复单列于[待发布修复](pending_fixes.zh.md)。
 下面的安装命令选择最新已发布包；固定版本的用法请查阅对应 release tag 的文档。

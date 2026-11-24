@@ -8,6 +8,10 @@ native 算法及可选硬件 provider。
 
 ## 安装
 
+使用含 Vulkan 字段布局修复的 0.7.1 时，请从 Release 安装前端和 Runtime 构建号 1。参见[从 GitHub Release 安装](docs/forge/install_release.zh.md)。
+
+从 PyPI 安装可使用以下命令。
+
 ```bash
 python -m pip install -U taichi-forge
 ```
