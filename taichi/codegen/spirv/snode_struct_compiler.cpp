@@ -423,11 +423,9 @@ class StructCompiler {
             std::max(cell_alignment, container_alignments_.at(ch->id));
         i += 1;
       }
-      std::sort(
-          element_strides.begin(), element_strides.end(),
-          [](const std::pair<size_t, int> &a, const std::pair<size_t, int> &b) {
-            return a.first < b.first;
-          });
+      // Break size ties by declaration index so tensor lanes have the same
+      // physical order in producers and consumers on every host.
+      std::sort(element_strides.begin(), element_strides.end());
 
       std::size_t cell_stride = 0;
       for (auto &[snode_size, i] : element_strides) {

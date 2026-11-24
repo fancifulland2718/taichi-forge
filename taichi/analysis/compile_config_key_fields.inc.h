@@ -116,9 +116,9 @@
   CACHE_FIELD(spirv_adaptive_opt);
   CACHE_FIELD(spirv_adaptive_opt_threshold);
   if (arch_uses_spirv(config.arch)) {
-    // Old SPIR-V may address mixed-width SNodes with unaligned offsets/pools.
-    // This is a compiler layout revision, independent of wheel/commit identity.
-    CACHE_VALUE(std::string("spirv-snode-scalar-alignment-v1"));
+    // Cached shaders embed SNode offsets, including the order of equal-size
+    // siblings. Invalidate them when the physical layout changes.
+    CACHE_VALUE(std::string("spirv-snode-layout-v2"));
     CACHE_VALUE(std::string("spirv-quant-atomic-store-v1"));
     CACHE_VALUE(std::string("spirv-quant-atomic-return-v1"));
     CACHE_VALUE(std::string("spirv-pointer-freelist-merge-v1"));

@@ -806,6 +806,27 @@ TEST(GfxSNodeResources, DenseLayoutHasNoSparseResources) {
   EXPECT_NO_THROW(gfx::validate_snode_tree_resources(resources));
 }
 
+TEST(GfxSNodeResources, EqualSizeTensorLanesKeepDeclarationOrder) {
+  SNode root{0, SNodeType::root};
+  auto &dense = root.dense({Axis{0}}, 2);
+  auto &wide = dense.insert_children(SNodeType::place);
+  wide.dt = PrimitiveType::i64;
+  constexpr int lanes = 26;
+  for (int i = 0; i < lanes; ++i) {
+    dense.insert_children(SNodeType::place).dt = PrimitiveType::i32;
+  }
+
+  const auto compiled = spirv::compile_snode_structs(root);
+  for (int i = 0; i < lanes; ++i) {
+    const auto &lane = *dense.ch[i + 1];
+    const auto offset = i * sizeof(int32_t);
+    EXPECT_EQ(lane.offset_bytes_in_parent_cell, offset);
+    EXPECT_EQ(compiled.snode_descriptors.at(lane.id).mem_offset_in_parent_cell,
+              offset);
+  }
+  EXPECT_EQ(wide.offset_bytes_in_parent_cell, lanes * sizeof(int32_t));
+}
+
 TEST(GfxSNodeResources, PointerPoliciesSurviveSourceTreeRetirement) {
   for (bool independent : {false, true}) {
     for (const auto *kind : {"bump", "chunked"}) {
