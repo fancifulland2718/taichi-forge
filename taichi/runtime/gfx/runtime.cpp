@@ -91,15 +91,31 @@ int bound_block_size(const TaskAttributes &task, LaunchContextBuilder &ctx) {
 }
 
 int host_launch_groups(const TaskAttributes &task,
-                       LaunchContextBuilder &ctx) {
+                       LaunchContextBuilder &ctx,
+                       Device *device) {
   const int block = bound_block_size(task, ctx);
   const int baseline = static_cast<int>(
       (std::int64_t(task.advisory_total_num_threads) + block - 1) / block);
-  return task.range_for_attribs
-             ? task.range_for_attribs->launch_grid(
-                   baseline, block, ctx.get_context().arg_buffer,
-                   ctx.arg_buffer_size, &ctx.mutable_argument_ranges)
-             : baseline;
+  if (!task.range_for_attribs)
+    return baseline;
+  const auto &range = *task.range_for_attribs;
+  const int groups = range.launch_grid(baseline, block,
+                                       ctx.get_context().arg_buffer,
+                                       ctx.arg_buffer_size,
+                                       &ctx.mutable_argument_ranges);
+#ifdef TI_WITH_VULKAN
+  // Every Vulkan device supports at least 65535 groups along X. Above that,
+  // independent grid-stride iterations can share physical lanes: the shader
+  // advances by the actual NumWorkgroups, not the advisory launch size.
+  if (groups > 65535 && !task.one_to_one &&
+      range.empty_group_elision == EmptyRangeGroupProof::independent_iterations) {
+    if (auto *vk = dynamic_cast<vulkan::VulkanDevice *>(device)) {
+      const auto &limits = vk->get_vk_physical_device_props().limits;
+      return std::min<uint32_t>(groups, limits.maxComputeWorkGroupCount[0]);
+    }
+  }
+#endif
+  return groups;
 }
 
 std::atomic<uint64_t> graph_replay_slot_saturation_fallbacks{0};
@@ -2524,7 +2540,7 @@ void GfxRuntime::launch_kernel(KernelHandle handle,
     }
     auto vp = model_pipelines.empty() ? ti_kernel->bound_pipeline(i, host_ctx)
                                       : model_pipelines[i];
-    const int group_x = host_launch_groups(attribs, host_ctx);
+    const int group_x = host_launch_groups(attribs, host_ctx, device_);
     std::unique_ptr<ShaderResourceSet> one_shot_bindings;
     ShaderResourceSet *bindings = nullptr;
     if (dispatch_cache_) {
@@ -4326,7 +4342,7 @@ GfxRuntime::GraphReplayState GfxRuntime::record_fixed_graph(
                       RhiResult::success,
                   "Prepared Vulkan Graph resource binding failed");
       const auto &task = tasks[i];
-      const int groups = host_launch_groups(task, *pd.host_ctx);
+      const int groups = host_launch_groups(task, *pd.host_ctx, device_);
       TI_ERROR_IF(record_graph_dispatch(commands.get(),
                                         range ? range->packet() : pd.indirect_dispatch,
                                         groups) != RhiResult::success,
@@ -5080,7 +5096,7 @@ bool GfxRuntime::launch_graph_impl(
         structure_key.push_back(pipeline);
       }
       if (task.range_for_attribs && task.range_for_attribs->uses_host_launch_grid()) {
-        const auto groups = host_launch_groups(task, *dispatch.host_ctx);
+        const auto groups = host_launch_groups(task, *dispatch.host_ctx, device_);
         key.push_back(groups);
         structure_key.push_back(groups);
       }
@@ -5359,7 +5375,8 @@ bool GfxRuntime::launch_graph_impl(
         if (attribs.advisory_num_threads_per_group <= 0) {
           return reject();
         }
-        const int group_x = host_launch_groups(attribs, *prepared[i].host_ctx);
+        const int group_x =
+            host_launch_groups(attribs, *prepared[i].host_ctx, device_);
         if (group_x < 0) {
           return reject();
         }
@@ -5460,7 +5477,7 @@ bool GfxRuntime::launch_graph_impl(
           return reject();
         }
         const int group_x =
-            host_launch_groups(attribs, *prepared[dispatch_index].host_ctx);
+            host_launch_groups(attribs, *prepared[dispatch_index].host_ctx, device_);
         if (group_x < 0) {
           return reject();
         }
@@ -6397,7 +6414,7 @@ bool GfxRuntime::launch_graph_impl(
                                   /*patch_existing=*/false),
             "Vulkan structured Graph descriptor preparation failed");
         const auto &attribs = task_attribs[task_index];
-        const int group_x = host_launch_groups(attribs, *pd.host_ctx);
+        const int group_x = host_launch_groups(attribs, *pd.host_ctx, device_);
         StructuredTask task;
         task.dispatch = &pd;
         task.task_index = task_index;
@@ -7345,7 +7362,7 @@ bool GfxRuntime::launch_graph_impl(
                   "Vulkan graph resource binding error: RhiResult({})",
                   status);
 
-      const int group_x = host_launch_groups(attribs, *pd.host_ctx);
+      const int group_x = host_launch_groups(attribs, *pd.host_ctx, device_);
       if (pd.indirect_dispatch != kDeviceNullPtr) {
         insert_all_pending(/*exit_boundary=*/false);
       }

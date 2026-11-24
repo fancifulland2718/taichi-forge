@@ -49,6 +49,34 @@ def metrics_graph(kernel):
     return builder.compile()
 
 
+@test_utils.test(arch=ti.vulkan, offline_cache=False)
+def test_independent_range_spans_vulkan_dispatch_limit():
+    # With one lane per group this needs three grid-stride iterations on a
+    # device supporting the Vulkan minimum of 65535 groups along X.
+    size = 2 * 65535 + 1
+    output = ti.ndarray(ti.i32, size)
+
+    @ti.kernel
+    def fill(out: ti.types.ndarray(ti.i32, 1), bias: ti.i32):
+        ti.loop_config(block_dim=1)
+        for i in range(out.shape[0]):
+            out[i] = i + bias
+
+    indices = np.arange(size, dtype=np.int32)
+    fill(output, 1)
+    np.testing.assert_array_equal(output.to_numpy(), indices + 1)
+
+    builder = ti.graph.GraphBuilder()
+    builder.dispatch(fill, ti.graph.Arg(ti.graph.ArgKind.NDARRAY, "out", ti.i32, ndim=1),
+                     ti.graph.Arg(ti.graph.ArgKind.SCALAR, "bias", ti.i32))
+    graph = builder.compile()
+    try:
+        graph.run(dict(out=output, bias=5))
+        np.testing.assert_array_equal(output.to_numpy(), indices + 5)
+    finally:
+        graph.close()
+
+
 @test_utils.test(arch=[ti.cpu, ti.cuda, ti.vulkan], offline_cache=False,
                  saturating_grid_dim=2)
 def test_collectives_keep_tail_and_grid_stride_work_across_jit_graph_aot(tmp_path):
