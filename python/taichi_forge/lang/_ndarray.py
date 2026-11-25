@@ -58,6 +58,7 @@ def _native_bulk_copy_needs_sync():
 
 
 _STRUCT_MEMBER_NATIVE_HOST_COPY_MIN_PAYLOAD_BYTES = 1 << 20
+_STRUCT_CUDA_SPAN_UPLOAD_MIN_BYTES = 128 << 10
 _STRUCT_MEMBER_NATIVE_HOST_COPY_DTYPES = (
     primitive_types.u32,
     primitive_types.i32,
@@ -947,6 +948,7 @@ class StructNdarray(Ndarray):
         self.numpy_dtype = _struct_numpy_dtype(struct_type)
         nelement = int(np.prod(arr_shape, dtype=np.int64))
         byte_size = nelement * _ti_core.data_type_size(self.dtype)
+        self._host_copy_bytes = byte_size
         zero_fill_on_create = byte_size % 4 == 0
         self.arr = impl.get_runtime().prog.create_ndarray(
             self.dtype,
@@ -1055,6 +1057,14 @@ class StructNdarray(Ndarray):
         impl.get_runtime().prog.copy_ndarray_from_host(self.arr, arr)
 
     def _packed_host_field_layout(self, paths, *, upload):
+        min_bytes = _STRUCT_MEMBER_NATIVE_HOST_COPY_MIN_PAYLOAD_BYTES
+        if (upload and _STRUCT_CUDA_SPAN_UPLOAD_MIN_BYTES <= self._host_copy_bytes < min_bytes
+                and impl.current_cfg().arch == _ti_core.Arch.cuda):
+            min_bytes = _STRUCT_CUDA_SPAN_UPLOAD_MIN_BYTES
+        if len(paths) < len(self.struct_type.members) and self._host_copy_bytes < min_bytes:
+            # Each path can cover at most one top-level member. A strict subset
+            # this small will use the ordinary read-modify-write path.
+            return None
         fields = []
         for path in paths:
             _, dtype, offset = _resolve_struct_member_path(self.struct_type, self.numpy_dtype, path)
@@ -1075,11 +1085,9 @@ class StructNdarray(Ndarray):
         stride = self.numpy_dtype.itemsize
         transfer = None
         if width < stride:
-            record_bytes = self._get_nelement() * stride
-            min_bytes = _STRUCT_MEMBER_NATIVE_HOST_COPY_MIN_PAYLOAD_BYTES
-            if upload and len(runs) == 1 and impl.current_cfg().arch == _ti_core.Arch.cuda:
-                min_bytes = 128 << 10
-            if not (min_bytes <= record_bytes <= 0xFFFFFFFF):
+            if len(runs) != 1:
+                min_bytes = _STRUCT_MEMBER_NATIVE_HOST_COPY_MIN_PAYLOAD_BYTES
+            if not (min_bytes <= self._host_copy_bytes <= 0xFFFFFFFF):
                 return None
             if width * 2 > stride or stride % 4 or any((a | b | n) % 4 for a, b, n in runs):
                 return None
@@ -1128,8 +1136,7 @@ class StructNdarray(Ndarray):
                 }
             except TypeError:
                 pass
-        if (len(names) > 1 and
-                self._get_nelement() * self.numpy_dtype.itemsize >= _STRUCT_MEMBER_NATIVE_HOST_COPY_MIN_PAYLOAD_BYTES):
+        if len(names) > 1 and self._host_copy_bytes >= _STRUCT_MEMBER_NATIVE_HOST_COPY_MIN_PAYLOAD_BYTES:
             paths = [_normalize_struct_member_path(name) for name in names]
             layout = self._packed_host_field_layout(paths, upload=False)
             if layout is not None and layout[2] is not None:
@@ -1143,7 +1150,8 @@ class StructNdarray(Ndarray):
         result = {}
         for name in names:
             path = _normalize_struct_member_path(name)
-            _resolve_struct_member_path(self.struct_type, self.numpy_dtype, path)
+            if len(path) != 1 or path[0] not in self.numpy_dtype.fields:
+                _resolve_struct_member_path(self.struct_type, self.numpy_dtype, path)
             result[_format_struct_member_path(path)] = np.ascontiguousarray(_extract_struct_numpy_member(struct_arr, path))
         return result
 
@@ -1169,6 +1177,8 @@ class StructNdarray(Ndarray):
         layout = self._packed_host_field_layout(paths, upload=True)
         struct_arr = np.empty(self.shape, dtype=layout[0]) if layout is not None else self.to_numpy()
         for path, value in zip(paths, updates.values()):
+            if layout is None and (len(path) != 1 or path[0] not in self.numpy_dtype.fields):
+                _resolve_struct_member_path(self.struct_type, self.numpy_dtype, path)
             target = (
                 struct_arr[_format_struct_member_path(path)]
                 if layout is not None else _extract_struct_numpy_member(struct_arr, path)

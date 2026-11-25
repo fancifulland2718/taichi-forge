@@ -1,5 +1,6 @@
 import json
 import tempfile
+from contextlib import closing
 from pathlib import Path
 
 import numpy as np
@@ -7,6 +8,39 @@ import numpy as np
 import taichi_forge as ti
 from tests import test_utils
 from tests.cpp.aot.python_scripts.struct_ndarray_aot import export
+
+
+@test_utils.test(arch=[ti.cpu, ti.cuda, ti.vulkan], offline_cache=False)
+def test_struct_member_transfers_round_trip_through_an_exported_kernel(tmp_path):
+    arch = "cpu" if ti.cfg.arch == ti.cpu else ti.cfg.arch.name
+    record, _, _ = export(arch, tmp_path, initialize=False)
+    n = 32768
+    array = ti.ndarray(record, n)
+    expected = np.empty(n, dtype=array.numpy_dtype)
+    expected.view(np.uint8).fill(0xA5)
+    expected["tag"] = expected["inner"]["code"] = 0
+    expected["inner"]["value"] = expected["velocity"] = expected["basis"] = 0
+    array.from_numpy(expected)
+    values = np.arange(n, dtype=np.float32) % 103
+    velocity = np.zeros((n, 3), dtype=np.float32)
+    velocity.view(np.uint32)[:, 0] = 0x7F801234
+    velocity[:, 1] = 2
+    array.from_numpy_fields({"inner.value": values, "velocity": velocity})
+    expected["inner"]["value"], expected["velocity"] = values + 1, velocity
+
+    with ti.aot.borrow_runtime() as runtime, runtime.load_module(tmp_path) as module:
+        update = module.kernel("update")
+        with closing(runtime.ndarray(update.ndarray_layout(0), n)) as records, closing(runtime.ndarray("f32", n)) as output:
+            records.write(array.to_numpy().tobytes())
+            with update.prepare(records, output) as call:
+                call()
+            np.testing.assert_array_equal(np.frombuffer(output.read(), np.float32), values + 2)
+            result = records.read()
+    assert result == expected.tobytes()
+    array.from_numpy(np.frombuffer(result, dtype=array.numpy_dtype))
+    fields = array.to_numpy_fields("velocity", "inner.value")
+    np.testing.assert_array_equal(fields["velocity"].view(np.uint32), velocity.view(np.uint32))
+    np.testing.assert_array_equal(fields["inner.value"], values + 1)
 
 
 @test_utils.test(arch=[ti.cpu, ti.cuda, ti.vulkan], offline_cache=False)
