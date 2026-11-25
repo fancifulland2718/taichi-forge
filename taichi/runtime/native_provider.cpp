@@ -11,6 +11,15 @@ std::string copy_string(const char *text) {
   return text ? text : "";
 }
 
+// A definition can accept multiple SDK families. A single-family adapter
+// still advertises the same identity when used by an older client.
+bool accepts_family(const std::string &accepted, const char *reported) {
+  const auto family = copy_string(reported);
+  return family == accepted ||
+         (!family.empty() && family.find(',') == std::string::npos &&
+          ("," + accepted + ",").find("," + family + ",") != std::string::npos);
+}
+
 NativeProviderRuntimeInfo copy_runtime_info(const TiForgeRuntimeInfo &info) {
   if (info.struct_size < sizeof(info)) {
     throw NativeProviderError(TI_FORGE_RUNTIME_PROVIDER_ERROR_ABI_MISMATCH,
@@ -79,8 +88,8 @@ NativeProviderModule::NativeProviderModule(
       info.struct_size < sizeof(info) ||
       info.provider_abi_version != TI_FORGE_RUNTIME_PROVIDER_ABI_VERSION ||
       copy_string(info.provider_id) != definition.provider_id ||
-      copy_string(info.supported_version_family) !=
-          definition.supported_version_family ||
+      !accepts_family(definition.supported_version_family,
+                      info.supported_version_family) ||
       (info.features & required_features) != required_features ||
       (info.required_symbol_count == 0 &&
        !(info.features & TI_FORGE_RUNTIME_PROVIDER_FEATURE_EMBEDDED_RUNTIME)) ||

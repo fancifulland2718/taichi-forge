@@ -3,6 +3,8 @@ option(TI_BUILD_BUNDLED_OPTIX_PROVIDERS
 include(${CMAKE_CURRENT_LIST_DIR}/TaichiProviderSdk.cmake)
 option(TI_ALLOW_UNQUALIFIED_OPTIX_PTX_TOOLKIT
        "Allow non-release CUDA Toolkit versions for local adapter builds" OFF)
+set(TI_OPTIX_ROOT_105 "" CACHE PATH
+    "Optional OptiX ABI 105 header root for a bundled-provider build")
 set(TI_OPTIX_ROOT_118 "" CACHE PATH
     "Optional OptiX ABI 118 header root for a bundled-provider build")
 
@@ -29,8 +31,7 @@ if(NOT TI_ALLOW_UNQUALIFIED_OPTIX_PTX_TOOLKIT AND
    (CUDAToolkit_VERSION VERSION_LESS "12.8" OR
     NOT CUDAToolkit_VERSION VERSION_LESS "12.9"))
     message(FATAL_ERROR
-        "Bundled OptiX providers require CUDA Toolkit 12.8.x for PTX 8.7 "
-        "with the OptiX 9.1 / R590 runtime contract; found "
+        "Bundled OptiX providers require CUDA Toolkit 12.8.x to generate PTX 8.7; found "
         "CUDA ${CUDAToolkit_VERSION}")
 endif()
 if(TI_ALLOW_UNQUALIFIED_OPTIX_PTX_TOOLKIT)
@@ -40,7 +41,7 @@ if(TI_ALLOW_UNQUALIFIED_OPTIX_PTX_TOOLKIT)
         "this output must not enter a release wheel")
 endif()
 
-set(_ti_optix_supported_abis 118)
+set(_ti_optix_supported_abis 105 118)
 
 function(_ti_validate_optix_root root expected_abi out_abi)
     if(NOT EXISTS "${root}/include/optix.h" OR
@@ -56,7 +57,7 @@ function(_ti_validate_optix_root root expected_abi out_abi)
     if(_supported_index EQUAL -1)
         message(FATAL_ERROR
             "Unsupported OptiX header ABI ${_header_abi}; Forge supports "
-            "ABI 118 (OptiX 9.1)")
+            "ABI 105 (OptiX 9.0) and ABI 118 (OptiX 9.1)")
     endif()
     if(NOT "${expected_abi}" STREQUAL "any" AND
        NOT "${_header_abi}" STREQUAL "${expected_abi}")
@@ -66,102 +67,73 @@ function(_ti_validate_optix_root root expected_abi out_abi)
     set(${out_abi} "${_header_abi}" PARENT_SCOPE)
 endfunction()
 
-function(_ti_add_optix_provider target_name root)
-    _ti_validate_optix_root("${root}" any _header_abi)
-    set(_generated_dir
-        "${CMAKE_CURRENT_BINARY_DIR}/generated/optix_provider_${_header_abi}")
-    # This custom PTX command does not enable CMake's CUDA language, so honor
-    # its explicit host-compiler setting ourselves. The PTX toolchain may use
-    # an older supported MSVC than the native runtime/shim toolchain.
+# Built-in kernels use only OptiX 9.0 device intrinsics. Generate their PTX once
+# with the oldest supported SDK so all host function-table versions can use it.
+function(_ti_add_optix_ptx root)
+    set(_generated_dir "${CMAKE_CURRENT_BINARY_DIR}/generated/optix_provider")
     set(_ptx_host_options)
     if(CMAKE_CUDA_HOST_COMPILER)
-        list(APPEND _ptx_host_options
-             --compiler-bindir "${CMAKE_CUDA_HOST_COMPILER}")
+        list(APPEND _ptx_host_options --compiler-bindir "${CMAKE_CUDA_HOST_COMPILER}")
     endif()
-    set(_ptx_headers)
-    # Keep the legacy four-payload module independent from typed-hit payloads.
-    # Optional modules 2 (alpha) and 3 (face + alpha) also use typed hits.
-    # All modules keep the same portable PTX version and target contract.
-    foreach(_typed IN ITEMS 0 1 2 3)
-        set(_ptx "${_generated_dir}/device_program_${_typed}.ptx")
-        set(_ptx_header "${_generated_dir}/device_program_${_typed}_ptx.h")
-        list(APPEND _ptx_headers "${_ptx_header}")
+    set(_source "${CMAKE_CURRENT_SOURCE_DIR}/taichi/optix/provider/device_program.cu")
+    foreach(_variant IN ITEMS 0 1 2 3 transform_pack)
+        if(_variant STREQUAL "transform_pack")
+            set(_name instance_transform_pack)
+            set(_define TI_FORGE_OPTIX_TRANSFORM_PACK=1)
+            set(_symbol ti_forge_optix_instance_transform_pack_ptx)
+        else()
+            set(_name device_program_${_variant})
+            set(_define TI_FORGE_OPTIX_TYPED=${_variant})
+            set(_symbol ti_forge_optix_device_${_variant}_ptx)
+        endif()
+        set(_ptx "${_generated_dir}/${_name}.ptx")
+        set(_header "${_generated_dir}/${_name}_ptx.h")
         add_custom_command(
             OUTPUT "${_ptx}"
             COMMAND ${CMAKE_COMMAND} -E make_directory "${_generated_dir}"
-            COMMAND "${CUDAToolkit_NVCC_EXECUTABLE}"
-                    ${_ptx_host_options}
-                    --ptx --std=c++17 --use_fast_math
-                    --gpu-architecture=compute_75
-                    -DTI_FORGE_OPTIX_TYPED=${_typed}
-                    -I "${root}/include"
-                    "${CMAKE_CURRENT_SOURCE_DIR}/taichi/optix/provider/device_program.cu"
-                    -o "${_ptx}"
-            DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/taichi/optix/provider/device_program.cu"
+            COMMAND "${CUDAToolkit_NVCC_EXECUTABLE}" ${_ptx_host_options}
+                    --ptx --std=c++17 --use_fast_math --gpu-architecture=compute_75
+                    -D${_define} -I "${root}/include" "${_source}" -o "${_ptx}"
+                    -MD -MF "${_ptx}.d"
+            DEPENDS "${_source}"
+            DEPFILE "${_ptx}.d"
             VERBATIM)
         add_custom_command(
-            OUTPUT "${_ptx_header}"
+            OUTPUT "${_header}"
             COMMAND ${CMAKE_COMMAND}
-                    "-DINPUT_FILE=${_ptx}"
-                    "-DOUTPUT_FILE=${_ptx_header}"
-                    "-DSYMBOL_NAME=ti_forge_optix_device_${_typed}_ptx"
+                    "-DINPUT_FILE=${_ptx}" "-DOUTPUT_FILE=${_header}"
+                    "-DSYMBOL_NAME=${_symbol}"
                     "-DEXPECTED_PTX_VERSION=${_ti_optix_expected_ptx_version}"
                     "-DEXPECTED_PTX_TARGET=sm_75"
                     -P "${CMAKE_CURRENT_SOURCE_DIR}/cmake/EmbedText.cmake"
             DEPENDS "${_ptx}" "${CMAKE_CURRENT_SOURCE_DIR}/cmake/EmbedText.cmake"
             VERBATIM)
+        list(APPEND _ptx_headers "${_header}")
     endforeach()
+    add_custom_target(taichi_forge_optix_ptx DEPENDS ${_ptx_headers})
+endfunction()
 
-    # A separate CUDA-driver module packs device-produced f32 3x4 matrices
-    # into retained OptixInstance records. Keeping it separate avoids loading
-    # OptiX device intrinsics through cuModuleLoadData and preserves the same
-    # pinned PTX/toolkit contract as the trace modules.
-    set(_pack_ptx "${_generated_dir}/instance_transform_pack.ptx")
-    set(_pack_ptx_header "${_generated_dir}/instance_transform_pack_ptx.h")
-    list(APPEND _ptx_headers "${_pack_ptx_header}")
-    add_custom_command(
-        OUTPUT "${_pack_ptx}"
-        COMMAND ${CMAKE_COMMAND} -E make_directory "${_generated_dir}"
-        COMMAND "${CUDAToolkit_NVCC_EXECUTABLE}"
-                ${_ptx_host_options}
-                --ptx --std=c++17 --use_fast_math
-                --gpu-architecture=compute_75
-                -DTI_FORGE_OPTIX_TRANSFORM_PACK=1
-                "${CMAKE_CURRENT_SOURCE_DIR}/taichi/optix/provider/device_program.cu"
-                -o "${_pack_ptx}"
-        DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/taichi/optix/provider/device_program.cu"
-        VERBATIM)
-    add_custom_command(
-        OUTPUT "${_pack_ptx_header}"
-        COMMAND ${CMAKE_COMMAND}
-                "-DINPUT_FILE=${_pack_ptx}"
-                "-DOUTPUT_FILE=${_pack_ptx_header}"
-                "-DSYMBOL_NAME=ti_forge_optix_instance_transform_pack_ptx"
-                "-DEXPECTED_PTX_VERSION=${_ti_optix_expected_ptx_version}"
-                "-DEXPECTED_PTX_TARGET=sm_75"
-                -P "${CMAKE_CURRENT_SOURCE_DIR}/cmake/EmbedText.cmake"
-        DEPENDS "${_pack_ptx}" "${CMAKE_CURRENT_SOURCE_DIR}/cmake/EmbedText.cmake"
-        VERBATIM)
-
+function(_ti_add_optix_provider target_name root)
+    _ti_validate_optix_root("${root}" any _header_abi)
     add_library(${target_name} SHARED
         "${CMAKE_CURRENT_SOURCE_DIR}/taichi/optix/provider/provider.cpp"
         "${CMAKE_CURRENT_SOURCE_DIR}/taichi/optix/provider/program.cpp"
-        "${CMAKE_CURRENT_SOURCE_DIR}/taichi/optix/provider/runtime_provider.cpp"
+        $<TARGET_OBJECTS:taichi_forge_optix_common>
         "${CMAKE_CURRENT_SOURCE_DIR}/taichi/optix/forge_optix_provider.h"
         "${CMAKE_CURRENT_SOURCE_DIR}/taichi/optix/forge_optix_runtime_provider.h"
-        "${CMAKE_CURRENT_SOURCE_DIR}/taichi/optix/forge_optix_query.h"
-        ${_ptx_headers})
+        "${CMAKE_CURRENT_SOURCE_DIR}/taichi/optix/forge_optix_query.h")
     target_compile_features(${target_name} PRIVATE cxx_std_17)
     target_compile_definitions(${target_name}
         PRIVATE TI_FORGE_OPTIX_PROVIDER_BUILD OPTIX_ENABLE_SDK_MIXING)
     target_include_directories(${target_name} PRIVATE
         "${CMAKE_CURRENT_SOURCE_DIR}"
         "${root}/include"
-        "${_generated_dir}"
+        "${CMAKE_CURRENT_BINARY_DIR}/generated/optix_provider"
         "${CUDAToolkit_INCLUDE_DIRS}")
     target_link_libraries(${target_name} PRIVATE CUDA::cuda_driver ${CMAKE_DL_LIBS})
     set_target_properties(${target_name} PROPERTIES
         OUTPUT_NAME "taichi_forge_optix_provider_abi1_optix${_header_abi}")
+    add_dependencies(${target_name} taichi_forge_optix_ptx)
     add_dependencies(taichi_forge_optix_providers ${target_name})
 
     install(TARGETS ${target_name}
@@ -210,8 +182,20 @@ function(_ti_resolve_optix_headers abi version commit out_root)
     set(${out_root} "${_source_dir}" PARENT_SCOPE)
 endfunction()
 
-# The immutable commit pins the single OptiX adapter in the runtime wheel.
+# Pin both SDK header sets for reproducible builds of the platform wheel.
+_ti_resolve_optix_headers(
+    105 9.0.0 fff65c2a7c592f1ea5f1661ad7d2381cf965f9bd _root_105)
 _ti_resolve_optix_headers(
     118 9.1.0 f1f6dd803f3159992d248178f6e09421c6eb8b6d _root_118)
 
+_ti_add_optix_ptx("${_root_105}")
+# The common Forge session bridge does not include any NVIDIA ABI types.
+add_library(taichi_forge_optix_common OBJECT
+    "${CMAKE_CURRENT_SOURCE_DIR}/taichi/optix/provider/runtime_provider.cpp")
+target_compile_features(taichi_forge_optix_common PRIVATE cxx_std_17)
+target_compile_definitions(taichi_forge_optix_common PRIVATE TI_FORGE_OPTIX_PROVIDER_BUILD)
+target_include_directories(taichi_forge_optix_common PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}")
+set_target_properties(taichi_forge_optix_common PROPERTIES POSITION_INDEPENDENT_CODE ON)
+
+_ti_add_optix_provider(taichi_forge_optix_provider_105 "${_root_105}")
 _ti_add_optix_provider(taichi_forge_optix_provider_118 "${_root_118}")

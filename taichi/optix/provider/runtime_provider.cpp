@@ -20,6 +20,7 @@ TiForgeRuntimeProviderResult translate(TiForgeOptixResult result) {
       return TI_FORGE_RUNTIME_PROVIDER_ERROR_INVALID_ARGUMENT;
     case TI_FORGE_OPTIX_ERROR_ABI_MISMATCH:
       return TI_FORGE_RUNTIME_PROVIDER_ERROR_ABI_MISMATCH;
+    case TI_FORGE_OPTIX_ERROR_UNSUPPORTED_DRIVER_ABI:
     case TI_FORGE_OPTIX_ERROR_CUDA_CONTEXT:
       return TI_FORGE_RUNTIME_PROVIDER_ERROR_RUNTIME_INCOMPATIBLE;
     case TI_FORGE_OPTIX_ERROR_OPTIX_UNAVAILABLE:
@@ -205,7 +206,7 @@ taichi_forge_optix_runtime_provider_query(uint32_t requested_abi_version,
     api.info.required_symbol_count = 1;  // optixQueryFunctionTable
     api.info.provider_id = "optix";
     api.info.provider_name = legacy.info.provider_name;
-    api.info.supported_version_family = TI_FORGE_OPTIX_RUNTIME_VERSION_FAMILY;
+    api.info.supported_version_family = legacy.info.optix_abi_version == 105 ? "9.0" : "9.1";
     api.info.build_identity = legacy.info.build_identity;
     api.probe_runtime = probe;
     api.create_runtime = create;

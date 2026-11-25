@@ -5,11 +5,57 @@ import json
 from pathlib import Path
 import subprocess
 import sys
+from threading import RLock
 import time
+from types import SimpleNamespace
 
 import pytest
 import taichi_forge as ti
 from tests import test_utils
+
+
+def test_package_selects_optix_adapter_before_creating_context(monkeypatch, tmp_path):
+    from taichi_forge_runtime.aot import _package_ray
+
+    newest, baseline = tmp_path / "118", tmp_path / "105"
+    runtime = SimpleNamespace(arch="cuda", _lock=RLock(), _provider_paths={})
+    package = SimpleNamespace(runtime=runtime, _check=lambda: None)
+    api = _package_ray.RayAPI(package)
+    probes, allocations = [], []
+
+    def configure(provider, *, adapter_path, library_path):
+        if adapter_path is None:
+            runtime._provider_paths.pop(b"optix", None)
+        else:
+            runtime._provider_paths[b"optix"] = (os.fsencode(adapter_path), None)
+
+    def probe(kind):
+        path = Path(os.fsdecode(runtime._provider_paths[b"optix"][0]))
+        probes.append(path)
+        return {"available": path == baseline}
+
+    def create(provider, kind, *, parameters):
+        allocations.append(Path(os.fsdecode(runtime._provider_paths[b"optix"][0])))
+        return object()
+
+    runtime.configure_provider = configure
+    runtime.probe_native_resource = probe
+    runtime.native_resource = create
+    monkeypatch.setattr(_package_ray, "bundled_optix_adapters", lambda: (newest, baseline))
+    monkeypatch.setattr(_package_ray, "_Provider", lambda package, resource, path: path)
+    assert api.load_optix_provider() == baseline
+    assert api.load_optix_provider() == baseline
+    assert probes == [newest]
+    assert allocations == [baseline, baseline]
+
+    def fail(*args, **kwargs):
+        raise RuntimeError("device allocation failed")
+
+    runtime.native_resource = fail
+    with pytest.raises(RuntimeError, match="device allocation failed"):
+        api.load_optix_provider(provider_path=newest)
+    assert runtime._provider_paths[b"optix"] == (os.fsencode(baseline), None)
+    assert probes == [newest]
 
 
 @test_utils.test(arch=[ti.cpu, ti.vulkan])

@@ -7,9 +7,9 @@ inputs; contexts, acceleration structures and calls retain the native leases.
 from dataclasses import dataclass
 from pathlib import Path
 from types import SimpleNamespace
-import importlib.util
 import os
 
+from .._optix_adapters import bundled_optix_adapters
 from ._package_native import NativeObject, NativeRecording
 
 
@@ -163,36 +163,28 @@ class RayAPI:
         runtime = self.package.runtime
         with runtime._lock:
             configured = runtime._provider_paths.get(b"optix")
-        paths = [Path(provider_path)] if provider_path else []
-        if not paths and configured is not None:
-            paths = [Path(os.fsdecode(configured[0]))]
-            if library_path is None and configured[1] is not None:
-                library_path = os.fsdecode(configured[1])
-        if not paths:
-            for name in ("taichi_forge_runtime", "taichi_forge"):
-                try:
-                    spec = importlib.util.find_spec(name)
-                except ImportError:
-                    continue
-                for root in (() if spec is None else spec.submodule_search_locations or ()):
-                    directory = Path(root) / "_lib" / "hardware_providers"
-                    suffix = ".dll" if os.name == "nt" else ".so"
-                    paths.extend(sorted(directory.glob("*taichi_forge_optix_provider_abi1_optix118" + suffix)))
-        if not paths:
-            raise RuntimeError("No bundled OptiX provider adapter; supply provider_path")
-        # Configuration belongs to this Runtime; creation validates the actual
-        # adapter ABI/features and retains its library independent of later changes.
-        errors = []
-        for path in paths:
-            runtime.configure_provider("optix", adapter_path=path,
-                                       library_path=library_path or os.environ.get("TAICHI_FORGE_OPTIX_LIBRARY"))
+            if provider_path is None and configured is not None:
+                provider_path = os.fsdecode(configured[0])
+                if library_path is None and configured[1] is not None:
+                    library_path = os.fsdecode(configured[1])
+            paths = [Path(provider_path)] if provider_path is not None else list(bundled_optix_adapters())
+            if not paths:
+                raise RuntimeError("No bundled OptiX provider adapter; supply provider_path")
+            vendor = library_path or os.environ.get("TAICHI_FORGE_OPTIX_LIBRARY")
             try:
-                resource = runtime.native_resource("optix", "context", parameters=dict(validation=validation))
-            except Exception as exc:
-                errors.append(f"{path}: {exc}")
-                continue
-            return _Provider(self.package, resource, path)
-        raise RuntimeError("Cannot create OptiX context: " + "; ".join(errors))
+                for index, path in enumerate(paths):
+                    runtime.configure_provider("optix", adapter_path=path, library_path=vendor)
+                    # Let the final candidate report the original driver error.
+                    if index + 1 < len(paths) and not runtime.probe_native_resource("optix_context")["available"]:
+                        continue
+                    resource = runtime.native_resource("optix", "context", parameters=dict(validation=validation))
+                    return _Provider(self.package, resource, path)
+            except BaseException:
+                previous_path, previous_vendor = configured or (None, None)
+                runtime.configure_provider("optix",
+                    adapter_path=os.fsdecode(previous_path) if previous_path else None,
+                    library_path=os.fsdecode(previous_vendor) if previous_vendor else None)
+                raise
 
 
 class _Provider(NativeObject):

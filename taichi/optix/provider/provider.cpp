@@ -29,8 +29,8 @@
 #include "device_program_3_ptx.h"
 #include "instance_transform_pack_ptx.h"
 
-#if OPTIX_ABI_VERSION != 118
-#error "Forge OptiX provider supports only SDK ABI 118 (OptiX 9.1)"
+#if OPTIX_ABI_VERSION != 105 && OPTIX_ABI_VERSION != 118
+#error "Forge OptiX provider supports only SDK ABI 105 and 118"
 #endif
 
 namespace taichi::optix_provider {
@@ -281,7 +281,13 @@ void optix_log(unsigned int level,
 
 OptixResult init_optix_library(const std::string &library_path, void **handle) {
   if (library_path.empty()) {
-    return optixInitWithHandle(handle);
+    const auto result = optixInitWithHandle(handle);
+    // The SDK also returns its library handle when the ABI query fails.
+    if (result != OPTIX_SUCCESS && *handle != nullptr) {
+      optixUninitWithHandle(*handle);
+      *handle = nullptr;
+    }
+    return result;
   }
   *handle = nullptr;
 #if defined(_WIN32)
@@ -332,7 +338,9 @@ TiForgeOptixResult retain_optix_loader(const char *library_path) {
     const auto result = init_optix_library(requested, &optix_library_handle);
     if (result != OPTIX_SUCCESS) {
       optix_library_handle = nullptr;
-      return fail(TI_FORGE_OPTIX_ERROR_OPTIX_UNAVAILABLE,
+      return fail(result == OPTIX_ERROR_UNSUPPORTED_ABI_VERSION
+                      ? TI_FORGE_OPTIX_ERROR_UNSUPPORTED_DRIVER_ABI
+                      : TI_FORGE_OPTIX_ERROR_OPTIX_UNAVAILABLE,
                   std::string("OptiX runtime initialization failed: ") +
                       (optixGetErrorName(result) == nullptr
                            ? std::to_string(static_cast<int>(result))
@@ -376,7 +384,9 @@ TiForgeOptixResult probe_runtime(const char *library_path) {
   void *handle = nullptr;
   const auto result = init_optix_library(requested, &handle);
   if (result != OPTIX_SUCCESS) {
-    return fail(TI_FORGE_OPTIX_ERROR_OPTIX_UNAVAILABLE,
+    return fail(result == OPTIX_ERROR_UNSUPPORTED_ABI_VERSION
+                    ? TI_FORGE_OPTIX_ERROR_UNSUPPORTED_DRIVER_ABI
+                    : TI_FORGE_OPTIX_ERROR_OPTIX_UNAVAILABLE,
                 std::string("OptiX runtime probe failed: ") +
                     (optixGetErrorName(result) == nullptr
                          ? std::to_string(static_cast<int>(result))
@@ -421,10 +431,12 @@ TiForgeOptixResult create_pipeline(Context *owner,
   pipeline_options.numAttributeValues = 2;
   pipeline_options.exceptionFlags = OPTIX_EXCEPTION_FLAG_NONE;
   pipeline_options.pipelineLaunchParamsVariableName = "params";
+#if OPTIX_ABI_VERSION == 118
   pipeline_options.pipelineLaunchParamsSizeInBytes =
       variant == 4 ? sizeof(FaceLaunchParams)
       : alpha      ? sizeof(AlphaLaunchParams)
                    : sizeof(LaunchParams);
+#endif
 
   char log[8192]{};
   std::size_t log_size = sizeof(log);

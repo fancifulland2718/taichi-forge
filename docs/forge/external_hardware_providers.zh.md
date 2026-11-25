@@ -24,7 +24,7 @@ retained-provider API，而 discovery probe 始终不执行算法。
 | cuFFT | 已注册 provider | 用户 CUDA 环境 | `ti.hardware.probe("cufft")` | 显式 plan 或 root Graph；不能在 kernel 内调用 |
 | VkFFT 1.3.4 | 可选 ABI1 Vulkan JIT adapter | 当前 runtime 构建配置包含，旧产物可能没有 | `ti.hardware.probe("vkfft")` 或显式路径 | 固定存储计划/root Graph；匹配扩展支持显式 batch 与完整 Graph secondary recipe |
 | cuDSS 0.8.x | 已注册 bundled-adapter ABI | Forge 提供 adapter；用户提供 vendor runtime | `ti.hardware.probe("cudss", library_path=...)` | 领域级 auto/explicit 或 root Graph；不能在 kernel 内调用 |
-| OptiX ABI 118 | 已注册 bundled-adapter ABI | Forge 提供 adapter；用户/driver 提供 vendor runtime | `ti.hardware.probe("optix", library_path=...)` | 显式 scene/launch 或 root Graph；不能在 kernel 内调用 |
+| OptiX ABI 105 / 118 | 已注册 bundled-adapter ABI | Forge 提供 adapter；用户/driver 提供 vendor runtime | `ti.hardware.probe("optix", library_path=...)` | 显式 scene/launch 或 root Graph；不能在 kernel 内调用 |
 | Vulkan driver/ICD | 后端驱动依赖 | OS/GPU driver 安装 | `ti.init(arch=ti.vulkan)` 加 capability query | kernel 与已公开 native Vulkan API |
 | cuSPARSELt 0.8.x-0.9.x | 已注册 bundled-adapter ABI | Forge 提供 adapter；用户安装可选包 | `ti.hardware.tensor.CusparseLtProvider` / `ti.linalg.record_sparse_matmul` | retained FP16 2:4 capture 与完整 shared-A matmul recipe；无 kernel intrinsic 或自动 rewrite |
 | cuTENSOR 2.0.x-2.7.x | 已注册 bundled-adapter ABI | Forge 提供 adapter；用户安装可选包 | `ti.hardware.tensor.CutensorProvider` / `ti.linalg.record_contraction` | retained root Graph capture 与完整 contraction 数据流；无 kernel intrinsic 或隐式 auto rewrite |
@@ -543,15 +543,15 @@ preparation/selection 复用只保存 JSON 事实，不保存 CSR 数据或 vend
 
 ### OptiX runtime provider
 
-Windows 和 Linux 的 `taichi-forge-runtime` wheel 仅携带一份 Forge 自有 adapter，
-使用固定的 NVIDIA 官方 OptiX 9.1 头文件构建（SDK ABI 118、Forge provider C ABI 1）。
-0.7.0 移除 OptiX 8.1/9.0 adapter 及对应 ABI 回退。用户需要提供 OptiX runtime 的
-NVIDIA R590+ 驱动，无需安装 OptiX SDK、CUDA Toolkit 或重编 Forge。wheel 不包含
-`nvoptix.dll`、`libnvoptix.so.1`，也不产生 CUDA/OptiX 版本化变体。
+Windows 和 Linux 的新版 runtime 构建均提供两份 Forge C ABI 1 适配器。创建
+provider 时优先尝试 OptiX 9.1（ABI 118，R590+），OptiX 9.0（ABI 105，R570+）
+可覆盖 R580 等驱动。创建上下文后，后续渲染调用复用所选适配器。显式指定
+`provider_path` 时只使用该适配器。
 
-adapter 内嵌 CUDA Toolkit 12.8.x（发布安装器固定为 12.8.1）生成的 `compute_75`
-PTX 8.7。构建阶段检查 PTX 版本和 target；这是生产工具链策略，不是消费端 Toolkit
-依赖。runtime 不兼容时明确报错，不回退到已移除的 SDK ABI，也不在执行出错后换实现。
+发布构建使用 CUDA Toolkit 12.8.1，为两份适配器生成同一组 `compute_75` PTX 8.7
+程序。用户机器上的 NVIDIA 驱动需要同时支持所选 OptiX ABI 和该 PTX，无需安装
+Toolkit 或 OptiX SDK。原先发布的 0.7.1 wheel 只有 ABI 118，R580 需使用带 ABI 105
+路由的新版 runtime 和前端。
 
 runtime 发现顺序如下：
 

@@ -32,6 +32,7 @@ typedef enum TiForgeOptixResult {
   TI_FORGE_OPTIX_ERROR_OUT_OF_MEMORY = 7,
   TI_FORGE_OPTIX_ERROR_LIFETIME = 8,
   TI_FORGE_OPTIX_ERROR_INTERNAL = 9,
+  TI_FORGE_OPTIX_ERROR_UNSUPPORTED_DRIVER_ABI = 10,
 } TiForgeOptixResult;
 
 typedef enum TiForgeOptixFeature {

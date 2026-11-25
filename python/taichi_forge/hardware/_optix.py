@@ -47,10 +47,10 @@ from taichi_forge.types.primitive_types import f32, i32, u32
 PROVIDER_ABI_VERSION = 1
 PROVIDER_ABI_NAME = "taichi-forge-optix-provider-c-abi1"
 PROVIDER_QUERY_SYMBOL = "taichi_forge_optix_provider_query"
-SUPPORTED_OPTIX_ABIS = (118,)
+SUPPORTED_OPTIX_ABIS = (105, 118)
 
 _SUCCESS = 0
-_OPTIX_UNAVAILABLE = 4
+_UNSUPPORTED_DRIVER_ABI = 10
 _REQUIRED_FEATURES = (1 << 0) | (1 << 1) | (1 << 2) | (1 << 3) | (1 << 4)
 _TYPED_HITS = 1 << 6
 _WORD_ALIGNED_QUERY_STORAGE = 1 << 7
@@ -102,11 +102,20 @@ def _runtime_package_roots():
 
 
 def _bundled_provider_candidates():
+    try:
+        from taichi_forge_runtime._optix_adapters import bundled_optix_adapters
+    except ModuleNotFoundError as exc:
+        if exc.name not in ("taichi_forge_runtime", "taichi_forge_runtime._optix_adapters"):
+            raise
+    else:
+        return tuple(str(path) for path in bundled_optix_adapters())
+    # A monolithic source build can run without a separate Runtime distribution.
     candidates = []
     seen = set()
-    for root in _runtime_package_roots():
-        directory = root / "_lib" / "hardware_providers"
-        for optix_abi in reversed(SUPPORTED_OPTIX_ABIS):
+    roots = _runtime_package_roots()
+    for optix_abi in reversed(SUPPORTED_OPTIX_ABIS):
+        for root in roots:
+            directory = root / "_lib" / "hardware_providers"
             candidate = directory / _provider_filename(optix_abi)
             key = os.path.normcase(str(candidate))
             if key not in seen and candidate.is_file():
@@ -523,13 +532,6 @@ def _runtime_library_argument(runtime_path):
     return None if runtime_path is None else os.fsencode(runtime_path)
 
 
-def _probe_provider_runtime(loaded, runtime_path):
-    result = int(loaded.api.probe_runtime(_runtime_library_argument(runtime_path)))
-    if result != _SUCCESS:
-        raise RuntimeError(_provider_error(loaded.api))
-    return True
-
-
 def _format_optix_version(value):
     value = int(value)
     return f"{value // 10000}.{(value // 100) % 100}.{value % 100}"
@@ -580,10 +582,15 @@ def probe_provider(path=None):
     for candidate in candidates:
         try:
             loaded = _query_provider(candidate)
-            runtime_compatible = _probe_provider_runtime(loaded, runtime_path)
         except (AttributeError, OSError, RuntimeError, TypeError, ValueError) as exc:
             failures.append(f"{candidate}: {str(exc) or type(exc).__name__}")
             continue
+        status = int(loaded.api.probe_runtime(_runtime_library_argument(runtime_path)))
+        if status != _SUCCESS:
+            failures.append(f"{candidate}: {_provider_error(loaded.api)}")
+            if status == _UNSUPPORTED_DRIVER_ABI:
+                continue
+            break
         info = loaded.api.info
         result.update(
             discovery="present",
@@ -595,7 +602,7 @@ def probe_provider(path=None):
             library_loaded_transiently=True,
             runtime_probe_only=True,
             context_created=False,
-            vendor_runtime_abi_compatible=runtime_compatible,
+            vendor_runtime_abi_compatible=True,
             optix_abi_version=int(info.optix_abi_version),
             optix_version=int(info.optix_version),
             provider_name=_decode(info.provider_name),
@@ -796,65 +803,39 @@ class OptixProvider:
                 raise TaichiRuntimeError(
                     "Forge runtime wheel does not contain an OptiX provider adapter"
                 )
-            queried_candidates = []
-            load_failures = []
-            for candidate in candidates:
-                try:
-                    queried = _query_provider(candidate)
-                    if int(queried.api.info.features) & required_mask != required_mask:
-                        load_failures.append(f"{candidate}: missing required features {required_features}")
-                        continue
-                    queried_candidates.append(queried)
-                except (
-                    AttributeError,
-                    OSError,
-                    RuntimeError,
-                    TypeError,
-                    ValueError,
-                ) as exc:
-                    load_failures.append(
-                        f"{candidate}: {str(exc) or type(exc).__name__}"
-                    )
-            if not queried_candidates:
-                raise TaichiRuntimeError(
-                    "no loadable OptiX provider adapter: " + "; ".join(load_failures)
-                )
         self._definition = NativeDefinition("optix", "context", dict(validation=validation))
-        failures = list(load_failures)
-        loaded = None
-        context = None
+        failures = []
         attempted = []
-        with hardware_failure_phase("provider_plan_failure"):
-            for candidate_loaded in queried_candidates:
-                attempted.append(candidate_loaded.path)
-                candidate_context = ctypes.c_void_p()
+        for candidate in candidates:
+            with hardware_failure_phase("provider_load_failure"):
+                try:
+                    loaded = _query_provider(candidate)
+                except (AttributeError, OSError, RuntimeError, TypeError, ValueError) as exc:
+                    failures.append(f"{candidate}: {exc}")
+                    continue
+                if int(loaded.api.info.features) & required_mask != required_mask:
+                    failures.append(f"{candidate}: missing required features {required_features}")
+                    continue
+            with hardware_failure_phase("provider_plan_failure"):
+                attempted.append(loaded.path)
+                context = ctypes.c_void_p()
                 desc = _ContextDesc(
-                    ctypes.sizeof(_ContextDesc),
-                    0,
-                    0,
-                    int(self._definition.parameters["validation"]),
-                    0,
+                    ctypes.sizeof(_ContextDesc), 0, 0, int(validation), 0,
                     _runtime_library_argument(runtime_path),
                 )
-                result = int(
-                    _invoke_cold(
-                        program,
-                        candidate_loaded.api.create_context,
-                        ctypes.byref(desc), ctypes.byref(candidate_context)
-                    )
-                )
-                if result == _SUCCESS and candidate_context.value:
-                    loaded = candidate_loaded
-                    context = candidate_context
+                result = int(_invoke_cold(
+                    program, loaded.api.create_context, ctypes.byref(desc), ctypes.byref(context)
+                ))
+                if result == _SUCCESS and context.value:
                     break
-                message = _provider_error(candidate_loaded.api)
-                failures.append(f"{candidate_loaded.path}: {message}")
-                if result != _OPTIX_UNAVAILABLE:
-                    raise TaichiRuntimeError(message)
-            if loaded is None or context is None:
-                raise TaichiRuntimeError(
-                    "no compatible OptiX provider adapter: " + "; ".join(failures)
-                )
+                message = _provider_error(loaded.api)
+                if result != _UNSUPPORTED_DRIVER_ABI:
+                    raise TaichiRuntimeError(f"{candidate}: {message}")
+                failures.append(f"{candidate}: {message}")
+        else:
+            phase = "provider_plan_failure" if attempted else "provider_load_failure"
+            with hardware_failure_phase(phase):
+                raise TaichiRuntimeError("no compatible OptiX provider adapter: " + "; ".join(failures))
         self._loaded = loaded
         self._context = context
         self._runtime_prog = program

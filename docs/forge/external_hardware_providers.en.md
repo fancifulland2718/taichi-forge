@@ -28,7 +28,7 @@ initialization and workload-specific checks still determine whether it can run.
 | cuFFT | Registered provider | User CUDA environment | `ti.hardware.probe("cufft")` | Explicit plan or root Graph; not kernel-callable |
 | VkFFT 1.3.4 | Optional ABI1 Vulkan JIT adapter | Current runtime build configuration; older artifacts may omit it | `ti.hardware.probe("vkfft")` or explicit library path | Fixed-storage plan/root Graph; explicit batch and whole-Graph secondary recipes with matching extensions |
 | cuDSS 0.8.x | Registered bundled-adapter ABI | Forge adapter; user vendor runtime | `ti.hardware.probe("cudss", library_path=...)` | Domain auto/explicit or root Graph; not kernel-callable |
-| OptiX ABI 118 | Registered bundled-adapter ABI | Forge adapter; user/driver vendor runtime | `ti.hardware.probe("optix", library_path=...)` | Explicit scene/launch or root Graph; not kernel-callable |
+| OptiX ABI 105 / 118 | Registered bundled-adapter ABI | Forge adapter; user/driver vendor runtime | `ti.hardware.probe("optix", library_path=...)` | Explicit scene/launch or root Graph; not kernel-callable |
 | Vulkan driver/ICD | Backend driver dependency | OS/GPU driver installation | `ti.init(arch=ti.vulkan)` plus capability queries | Kernel and documented native Vulkan APIs |
 | cuSPARSELt 0.8.x-0.9.x | Registered bundled-adapter ABI | Forge adapter; user optional package | `ti.hardware.tensor.CusparseLtProvider` / `ti.linalg.record_sparse_matmul` | Retained FP16 2:4 capture and complete shared-A matmul recipes; no kernel intrinsic or automatic rewrite |
 | cuTENSOR 2.0.x-2.7.x | Registered bundled-adapter ABI | Forge adapter; user optional package | `ti.hardware.tensor.CutensorProvider` / `ti.linalg.record_contraction` | Retained root Graph capture and complete contraction dataflows; no kernel intrinsic or implicit auto rewrite |
@@ -703,18 +703,16 @@ Neither Python executables nor CUDA graphs are deserialized from the report.
 
 ### OptiX runtime provider
 
-The Windows and Linux `taichi-forge-runtime` wheels contain one Forge-owned
-adapter built against pinned official OptiX 9.1 headers (SDK ABI 118, Forge
-provider C ABI 1). OptiX 8.1/9.0 adapters and fallback to those SDK ABIs are
-removed in 0.7.0. Users need an NVIDIA R590+ driver with the OptiX runtime;
-they do not need an OptiX SDK, a CUDA Toolkit, or a Forge rebuild. The wheel
-does not contain `nvoptix.dll` or `libnvoptix.so.1` and has no CUDA/OptiX variant.
+New Windows and Linux runtime builds provide two Forge C ABI 1 adapters. During
+provider initialization Forge tries OptiX 9.1 (ABI 118, R590+) first. OptiX 9.0
+(ABI 105, R570+) covers drivers such as R580. Once a context exists, subsequent
+launches use the selected adapter. An explicit provider path selects one adapter.
 
-The adapter embeds `compute_75` PTX 8.7 produced by CUDA Toolkit 12.8.x
-(release installer: 12.8.1). Both PTX version and target are checked during
-the build. This is a producer toolchain policy, not a user Toolkit dependency.
-An incompatible runtime produces an explicit failure; Forge does not fall
-back to a retired OptiX ABI or switch implementations after execution errors.
+The release build uses CUDA Toolkit 12.8.1 to generate one set of `compute_75`
+PTX 8.7 programs for both adapters. On the consumer machine the NVIDIA driver
+must support the selected OptiX ABI and this PTX. Installing the Toolkit or
+OptiX SDK on that machine is unnecessary. The original 0.7.1 wheels contain
+only ABI 118. On R580, use a runtime and frontend built with ABI 105 routing.
 
 Runtime discovery uses this order:
 
