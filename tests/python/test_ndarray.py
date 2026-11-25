@@ -437,6 +437,53 @@ def test_struct_ndarray_large_tensor_member_view_native_host_copy_no_compile():
     assert impl.get_runtime().get_num_compiled_functions() == compiled_functions
 
 
+@test_utils.test(arch=[ti.cpu, ti.cuda, ti.vulkan])
+def test_struct_host_fields_preserve_padding_and_float_bits_before_publishing():
+    dt = ti.types.struct(tag=ti.u8, value=ti.f32, pair=ti.types.vector(2, ti.f32), tail=ti.i32)
+    n = 65536
+    arr = ti.ndarray(dt, n)
+    host = np.empty(n, dtype=arr.numpy_dtype)
+    host.view(np.uint8).fill(0x5A)
+    bits = np.resize(np.array([0x80000000, 0x7F801234, 0xFFC01234, 1], np.uint32), n)
+    host["value"] = bits.view(np.float32)
+    host["pair"] = host["value"][:, None]
+    arr.from_numpy(host)
+    for name in ("value", "pair"):
+        np.testing.assert_array_equal(arr.field(name).to_numpy().view(np.uint32), host[name].view(np.uint32))
+        reversed_values = host[name][::-1].copy()
+        arr.field(name).from_numpy(reversed_values)
+        host[name] = reversed_values
+    tail = np.arange(n, dtype=np.int32)[::-1]
+    arr.from_numpy_fields(value=bits.view(np.float32), tail=tail)
+    host["value"], host["tail"] = bits.view(np.float32), tail
+    selected = arr.to_numpy_fields("tail", "value")
+    assert tuple(selected) == ("tail", "value")
+    np.testing.assert_array_equal(selected["value"].view(np.uint32), bits)
+    np.testing.assert_array_equal(selected["tail"], tail)
+    with pytest.raises(ValueError, match="shape"):
+        arr.from_numpy_fields(value=np.zeros(n, np.float32), tail=tail[:-1])
+    np.testing.assert_array_equal(arr.to_numpy().view(np.uint8), host.view(np.uint8))
+
+
+@test_utils.test(arch=[ti.cpu, ti.cuda, ti.vulkan])
+def test_struct_host_full_overwrite_follows_pending_kernel():
+    record = ti.types.struct(x=ti.i32, y=ti.i32)
+    data = ti.ndarray(record, 57)
+
+    @ti.kernel
+    def produce(dst: ti.types.ndarray(dtype=record, ndim=1)):
+        for i in range(dst.shape[0]):
+            dst[i].x = -1
+            dst[i].y = -2
+
+    x = np.arange(57, dtype=np.int32)
+    produce(data)
+    data.from_numpy_fields(y=-x, x=x)
+    result = data.to_numpy()
+    np.testing.assert_array_equal(result["x"], x)
+    np.testing.assert_array_equal(result["y"], -x)
+
+
 @test_utils.test(arch=get_host_arch_list())
 def test_struct_ndarray_scalar_member_view_rejections():
     inner = ti.types.struct(a=ti.i32)

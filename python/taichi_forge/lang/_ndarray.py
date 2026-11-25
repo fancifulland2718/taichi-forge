@@ -1,3 +1,5 @@
+import threading
+
 import numpy as np
 from taichi_forge._lib import core as _ti_core
 from taichi_forge.lang import impl
@@ -101,6 +103,33 @@ def _struct_tensor_member_native_host_copy_worthwhile(view):
     if payload_bytes < _STRUCT_MEMBER_NATIVE_HOST_COPY_MIN_PAYLOAD_BYTES:
         return False
     return member_bytes < payload_bytes
+
+
+def _struct_host_copy_method():
+    backend = {
+        _ti_core.Arch.x64: "cpu",
+        _ti_core.Arch.cuda: "cuda_device",
+        _ti_core.Arch.vulkan: "vulkan",
+    }.get(impl.current_cfg().arch)
+    prog = impl.get_runtime().prog
+    if backend is not None and getattr(prog, backend + "_transform_available")():
+        return getattr(prog, backend + "_transform_affine_packed_strided_ndarray")
+    return None
+
+
+def _copy_struct_member_host(view, array, *, upload):
+    method = _struct_host_copy_method()
+    if method is None or (view.offset | view.stride | view.element_size) % 4:
+        return False
+    count = view.base._get_nelement()
+    if count * view.stride > 0xFFFFFFFF or array.nbytes != count * view.element_size:
+        return False
+    runs = ((view.offset, 0, view.element_size),)
+    with view._native_host_copy_lock:
+        view._native_host_copy_tmp = view.base._copy_packed_host_fields(
+            array, runs, method, upload=upload, scratch=view._native_host_copy_tmp
+        )
+    return True
 
 
 def _struct_member_numpy_layout(dtype):
@@ -795,6 +824,7 @@ class StructNdarrayScalarMemberView:
         self.stride = _ti_core.data_type_size(base.dtype)
         self.element_size = _ti_core.data_type_size(self.dtype)
         self._native_host_copy_tmp = None
+        self._native_host_copy_lock = threading.Lock()
         self._native_host_copy_enabled = _struct_scalar_member_native_host_copy_worthwhile(self)
 
     @property
@@ -803,9 +833,10 @@ class StructNdarrayScalarMemberView:
 
     @python_scope
     def to_numpy(self):
-        native = self._try_native_to_numpy()
-        if native is not None:
-            return native
+        if self._native_host_copy_enabled:
+            out = np.empty(self.shape, dtype=to_numpy_type(self.dtype))
+            if _copy_struct_member_host(self, out, upload=False):
+                return out
         member = _extract_struct_numpy_member(self.base.to_numpy(), self.path)
         if self.component is not None:
             member = member[(...,) + self.component]
@@ -820,7 +851,9 @@ class StructNdarrayScalarMemberView:
         expected_dtype = np.dtype(to_numpy_type(self.dtype))
         if arr.dtype != expected_dtype:
             raise TypeError(f"Mismatch dtype: {expected_dtype} expected, but {arr.dtype} provided")
-        if self._try_native_from_numpy(arr):
+        if self._native_host_copy_enabled and _copy_struct_member_host(
+            self, np.ascontiguousarray(arr), upload=True
+        ):
             return
         struct_arr = self.base.to_numpy()
         member = _extract_struct_numpy_member(struct_arr, self.path)
@@ -829,38 +862,6 @@ class StructNdarrayScalarMemberView:
         else:
             member[...] = np.ascontiguousarray(arr)
         self.base.from_numpy(struct_arr)
-
-    def _native_host_copy_temp(self):
-        if self._native_host_copy_tmp is None:
-            self._native_host_copy_tmp = ScalarNdarray(self.dtype, self.shape)
-        return self._native_host_copy_tmp
-
-    def _try_native_to_numpy(self):
-        if not self._native_host_copy_enabled:
-            return None
-        try:
-            from taichi_forge.algorithms import experimental_transform  # pylint: disable=C0415
-
-            tmp = self._native_host_copy_temp()
-            experimental_transform(self, tmp)
-            return tmp.to_numpy()
-        except (RuntimeError, TypeError, ValueError):
-            return None
-
-    def _try_native_from_numpy(self, arr):
-        if not self._native_host_copy_enabled:
-            return False
-        if not arr.flags.c_contiguous:
-            arr = np.ascontiguousarray(arr)
-        try:
-            from taichi_forge.algorithms import experimental_transform  # pylint: disable=C0415
-
-            tmp = self._native_host_copy_temp()
-            tmp.from_numpy(arr)
-            experimental_transform(tmp, self)
-            return True
-        except (RuntimeError, TypeError, ValueError):
-            return False
 
     def get_type(self):
         return NdarrayTypeMetadata(self.element_type, self.shape, False)
@@ -890,7 +891,7 @@ class StructNdarrayTensorMemberView:
         self.stride = _ti_core.data_type_size(base.dtype)
         self.element_size = _ti_core.data_type_size(self.element_type)
         self._native_host_copy_tmp = None
-        self._native_host_copy_tmp_view = None
+        self._native_host_copy_lock = threading.Lock()
         self._native_host_copy_enabled = _struct_tensor_member_native_host_copy_worthwhile(self)
 
     @property
@@ -899,9 +900,10 @@ class StructNdarrayTensorMemberView:
 
     @python_scope
     def to_numpy(self):
-        native = self._try_native_to_numpy()
-        if native is not None:
-            return native
+        if self._native_host_copy_enabled:
+            out = np.empty(self.shape + self.element_shape, dtype=to_numpy_type(self.scalar_dtype))
+            if _copy_struct_member_host(self, out, upload=False):
+                return out
         return np.ascontiguousarray(_extract_struct_numpy_member(self.base.to_numpy(), self.path))
 
     @python_scope
@@ -914,50 +916,14 @@ class StructNdarrayTensorMemberView:
         expected_dtype = np.dtype(to_numpy_type(self.dtype.dtype))
         if arr.dtype != expected_dtype:
             raise TypeError(f"Mismatch dtype: {expected_dtype} expected, but {arr.dtype} provided")
-        if self._try_native_from_numpy(arr):
+        if self._native_host_copy_enabled and _copy_struct_member_host(
+            self, np.ascontiguousarray(arr), upload=True
+        ):
             return
         struct_arr = self.base.to_numpy()
         member = _extract_struct_numpy_member(struct_arr, self.path)
         member[...] = np.ascontiguousarray(arr)
         self.base.from_numpy(struct_arr)
-
-    def _native_host_copy_temp_view(self):
-        if self._native_host_copy_tmp is None:
-            from taichi_forge.types import compound_types  # pylint: disable=C0415
-
-            temp_type = compound_types.struct(value=self.dtype)
-            self._native_host_copy_tmp = StructNdarray(temp_type, self.shape)
-            self._native_host_copy_tmp_view = self._native_host_copy_tmp.field("value")
-        return self._native_host_copy_tmp, self._native_host_copy_tmp_view
-
-    def _try_native_to_numpy(self):
-        if not self._native_host_copy_enabled:
-            return None
-        try:
-            from taichi_forge.algorithms import experimental_transform  # pylint: disable=C0415
-
-            tmp, tmp_view = self._native_host_copy_temp_view()
-            experimental_transform(self, tmp_view)
-            return np.ascontiguousarray(tmp.to_numpy()["value"])
-        except (RuntimeError, TypeError, ValueError):
-            return None
-
-    def _try_native_from_numpy(self, arr):
-        if not self._native_host_copy_enabled:
-            return False
-        if not arr.flags.c_contiguous:
-            arr = np.ascontiguousarray(arr)
-        try:
-            from taichi_forge.algorithms import experimental_transform  # pylint: disable=C0415
-
-            tmp, tmp_view = self._native_host_copy_temp_view()
-            struct_arr = np.empty(shape=self.shape, dtype=tmp.numpy_dtype)
-            struct_arr["value"] = arr
-            tmp.from_numpy(struct_arr)
-            experimental_transform(tmp_view, self)
-            return True
-        except (RuntimeError, TypeError, ValueError):
-            return False
 
     def get_type(self):
         return NdarrayTypeMetadata(self.element_type, self.shape, False)
@@ -1088,6 +1054,70 @@ class StructNdarray(Ndarray):
         self._sync_pending_device_write()
         impl.get_runtime().prog.copy_ndarray_from_host(self.arr, arr)
 
+    def _packed_host_field_layout(self, paths, *, upload):
+        fields = []
+        for path in paths:
+            _, dtype, offset = _resolve_struct_member_path(self.struct_type, self.numpy_dtype, path)
+            fields.append((offset, _format_struct_member_path(path), dtype))
+        if any(dtype.names is not None for _, _, dtype in fields):
+            return None  # Structured assignment can leave internal padding untouched.
+        fields.sort(key=lambda field: field[0])
+        runs = []
+        width = 0
+        for offset, _, dtype in fields:
+            if runs and offset < runs[-1][0] + runs[-1][2]:
+                return None  # Overlapping paths keep the caller's assignment order.
+            if runs and offset == runs[-1][0] + runs[-1][2]:
+                runs[-1][2] += dtype.itemsize
+            else:
+                runs.append([offset, width, dtype.itemsize])
+            width += dtype.itemsize
+        stride = self.numpy_dtype.itemsize
+        transfer = None
+        if width < stride:
+            record_bytes = self._get_nelement() * stride
+            min_bytes = _STRUCT_MEMBER_NATIVE_HOST_COPY_MIN_PAYLOAD_BYTES
+            if upload and len(runs) == 1 and impl.current_cfg().arch == _ti_core.Arch.cuda:
+                min_bytes = 128 << 10
+            if not (min_bytes <= record_bytes <= 0xFFFFFFFF):
+                return None
+            if width * 2 > stride or stride % 4 or any((a | b | n) % 4 for a, b, n in runs):
+                return None
+            transfer = _struct_host_copy_method()
+            if transfer is None:
+                return None
+        return np.dtype([(name, dtype) for _, name, dtype in fields]), runs, transfer
+
+    def _copy_packed_host_fields(self, packed, runs, transfer, *, upload, scratch=None):
+        # Unsigned identity transfers preserve every bit, including floating
+        # point payloads. Only this call has access to scratch until completion.
+        from taichi_forge.algorithms._primitive_definitions import NATIVE_VALUE_TYPE
+
+        word = primitive_types.u32
+        stride = self.numpy_dtype.itemsize
+        width = packed.nbytes // self._get_nelement()
+        if scratch is None:
+            record = _ti_core.get_type_factory_instance().get_tensor_type((width // 4,), word)
+            scratch = ScalarNdarray._private_scratch_storage(record, self.shape)
+        runtime = impl.get_runtime()
+        device = _native_bulk_copy_needs_sync()
+        if device:
+            runtime.sync()
+        if upload:
+            runtime.prog.copy_ndarray_from_host(scratch.arr, packed)
+        for offset, packed_offset, length in runs:
+            if upload:
+                transfer(scratch.arr, self.arr, NATIVE_VALUE_TYPE[word], length // 4,
+                         packed_offset, width, offset, stride, 1, 0)
+            else:
+                transfer(self.arr, scratch.arr, NATIVE_VALUE_TYPE[word], length // 4,
+                         offset, stride, packed_offset, width, 1, 0)
+        if device:
+            runtime.sync()
+        if not upload:
+            runtime.prog.copy_ndarray_to_host(scratch.arr, packed)
+        return scratch
+
     @python_scope
     def to_numpy_fields(self, *names):
         if len(names) == 1:
@@ -1098,6 +1128,15 @@ class StructNdarray(Ndarray):
                 }
             except TypeError:
                 pass
+        if (len(names) > 1 and
+                self._get_nelement() * self.numpy_dtype.itemsize >= _STRUCT_MEMBER_NATIVE_HOST_COPY_MIN_PAYLOAD_BYTES):
+            paths = [_normalize_struct_member_path(name) for name in names]
+            layout = self._packed_host_field_layout(paths, upload=False)
+            if layout is not None and layout[2] is not None:
+                dtype, runs, transfer = layout
+                packed = np.empty(self.shape, dtype=dtype)
+                self._copy_packed_host_fields(packed, runs, transfer, upload=False)
+                return {name: np.ascontiguousarray(packed[name]) for name in map(_format_struct_member_path, paths)}
         struct_arr = self.to_numpy()
         if len(names) == 0:
             names = tuple(self.struct_type.members.keys())
@@ -1126,11 +1165,14 @@ class StructNdarray(Ndarray):
                 return
             except TypeError:
                 pass
-        struct_arr = self.to_numpy()
-        for name, value in updates.items():
-            path = _normalize_struct_member_path(name)
-            _resolve_struct_member_path(self.struct_type, self.numpy_dtype, path)
-            target = _extract_struct_numpy_member(struct_arr, path)
+        paths = [_normalize_struct_member_path(name) for name in updates]
+        layout = self._packed_host_field_layout(paths, upload=True)
+        struct_arr = np.empty(self.shape, dtype=layout[0]) if layout is not None else self.to_numpy()
+        for path, value in zip(paths, updates.values()):
+            target = (
+                struct_arr[_format_struct_member_path(path)]
+                if layout is not None else _extract_struct_numpy_member(struct_arr, path)
+            )
             value = np.asarray(value)
             if tuple(value.shape) != tuple(target.shape):
                 raise ValueError(
@@ -1142,8 +1184,15 @@ class StructNdarray(Ndarray):
                     f"Mismatch dtype for member '{_format_struct_member_path(path)}': "
                     f"{target.dtype} expected, but {value.dtype} provided"
                 )
-            target[...] = np.ascontiguousarray(value)
-        self.from_numpy(struct_arr)
+            target[...] = value
+        if layout is not None and layout[2] is not None:
+            self._copy_packed_host_fields(struct_arr, layout[1], layout[2], upload=True)
+        else:
+            if layout is not None and not self._sync_pending_device_write() and _native_bulk_copy_needs_sync():
+                # A full overwrite skips the readback that used to flush
+                # earlier kernel writes before submitting the host transfer.
+                impl.get_runtime().sync()
+            self.from_numpy(struct_arr.view(self.numpy_dtype))
 
     @python_scope
     def debug_getitem(self, key):
