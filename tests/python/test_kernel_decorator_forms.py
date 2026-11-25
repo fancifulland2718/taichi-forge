@@ -14,6 +14,25 @@ def module_configured(value: ti.i32) -> ti.i32:
     return value + 2
 
 
+def test_class_binding_without_source_file():
+    namespace = {"ti": ti, "__name__": "generated_model"}
+    exec(
+        "class Model:\n"
+        "    @ti.kernel\n"
+        "    def method(self): pass\n"
+        "    @ti.func\n"
+        "    def helper(self): pass\n"
+        "def factory():\n"
+        "    @ti.kernel\n"
+        "    def local(): pass\n"
+        "    return local\n",
+        namespace,
+    )
+    assert namespace["Model"].method._primal.classkernel
+    assert namespace["Model"].helper.func.classfunc
+    assert not namespace["factory"]()._primal.classkernel
+
+
 @pytest.mark.parametrize("form", ["bare", None, "fast", "balanced", "full"])
 @test_utils.test(arch=[ti.cpu, ti.cuda, ti.vulkan], offline_cache=False)
 def test_kernel_decorator_forms_preserve_class_and_module_binding(form):

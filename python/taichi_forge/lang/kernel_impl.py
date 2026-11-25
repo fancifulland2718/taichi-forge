@@ -4,7 +4,6 @@ import functools
 import inspect
 import operator
 import os
-import re
 import sys
 import threading
 import time
@@ -87,7 +86,7 @@ def func(fn, is_real_function=False):
     is_classfunc = (
         compiled_template.is_class
         if compiled_template is not None
-        else _inside_class(level_of_class_stackframe=3 + is_real_function)
+        else _inside_class(2 + is_real_function)
     )
 
     fun = Func(fn, _classfunc=is_classfunc, is_real_function=is_real_function)
@@ -125,7 +124,7 @@ def pyfunc(fn):
     is_classfunc = (
         compiled_template.is_class
         if compiled_template is not None
-        else _inside_class(level_of_class_stackframe=3)
+        else _inside_class(2)
     )
     fun = Func(fn, _classfunc=is_classfunc, _pyfunc=True)
 
@@ -4420,46 +4419,22 @@ class _OffloadExecutionPlanBinding:
         return _build_gpu_artifact_qualification(snapshot, raw, fixed_cost_seconds)
 
 
-# For a Taichi class definition like below:
-#
-# @ti.data_oriented
-# class X:
-#   @ti.kernel
-#   def foo(self):
-#     ...
-#
-# When ti.kernel runs, the stackframe's |code_context| of Python 3.8(+) is
-# different from that of Python 3.7 and below. In 3.8+, it is 'class X:',
-# whereas in <=3.7, it is '@ti.data_oriented'. More interestingly, if the class
-# inherits, i.e. class X(object):, then in both versions, |code_context| is
-# 'class X(object):'...
-_KERNEL_CLASS_STACKFRAME_STMT_RES = [
-    re.compile(r"@(\w+\.)?data_oriented"),
-    re.compile(r"class "),
-]
-
-
-def _inside_class(level_of_class_stackframe):
+def _inside_class(depth):
+    # A class body executes in a named, unoptimized scope. Inspect the frame
+    # applying the decorator directly, including when its source is unavailable.
     try:
-        maybe_class_frame = sys._getframe(level_of_class_stackframe)
-        statement_list = inspect.getframeinfo(maybe_class_frame)[3]
-        first_statment = statement_list[0].strip()
-        for pat in _KERNEL_CLASS_STACKFRAME_STMT_RES:
-            if pat.match(first_statment):
-                return True
-    except:
-        pass
-    return False
+        code = sys._getframe(depth).f_code
+    except ValueError:
+        return False
+    return code.co_name != "<module>" and not (code.co_flags & inspect.CO_OPTIMIZED)
 
 
-def _kernel_impl(_func, level_of_class_stackframe, verbose=False, opt_level=None):
-    # Can decorators determine if a function is being defined inside a class?
-    # https://stackoverflow.com/a/8793684/12003165
+def _kernel_impl(_func, verbose=False, opt_level=None):
     compiled_template = getattr(_func, "_taichi_compiled_template", None)
     is_classkernel = (
         compiled_template.is_class
         if compiled_template is not None
-        else _inside_class(level_of_class_stackframe + 1)
+        else _inside_class(3)
     )
 
     if verbose:
@@ -4558,15 +4533,12 @@ def kernel(fn=None, *, opt_level=None):
         >>>     # Compiled with reduced optimization for faster compile time.
         >>>     pass
     """
-    # Support both bare `@ti.kernel` and parameterized `@ti.kernel(opt_level=...)`.
-    # When called bare, fn is the user function (level_of_class_stackframe=3:
-    # _kernel_impl -> kernel -> user). The returned decorator has the same
-    # application depth: the earlier kernel(...) factory call has returned.
+    # Both decorator forms call _kernel_impl from the same application depth.
     if fn is not None:
-        return _kernel_impl(fn, level_of_class_stackframe=3, opt_level=opt_level)
+        return _kernel_impl(fn, opt_level=opt_level)
 
     def _decorator(_fn):
-        return _kernel_impl(_fn, level_of_class_stackframe=3, opt_level=opt_level)
+        return _kernel_impl(_fn, opt_level=opt_level)
 
     return _decorator
 
