@@ -84,6 +84,21 @@ def test_segmented_layout_validates_and_normalizes_both_encodings():
     np.testing.assert_array_equal(output.to_numpy(), expected)
 
 
+@test_utils.test(arch=[ti.cpu, ti.cuda, ti.vulkan])
+def test_segmented_layout_owns_its_validated_device_offsets():
+    original = _offsets()
+    source = ti.ndarray(ti.i32, original.size)
+    source.from_numpy(original)
+    layout = ti.algorithms.SegmentedLayout.from_offsets(source, capacity=27)
+    source.fill(0)
+    np.testing.assert_array_equal(layout._offsets.to_numpy(), original)
+    expected = np.repeat(np.arange(6, dtype=np.int32), np.diff(original))
+    np.testing.assert_array_equal(layout._segment_ids.to_numpy(), np.r_[expected, [-1] * 4])
+    source.from_numpy(original[::-1].copy())
+    with pytest.raises(ValueError, match="start at zero"):
+        ti.algorithms.SegmentedLayout.from_offsets(source)
+
+
 @test_utils.test(arch=ti.cpu)
 def test_segmented_layout_rejects_invalid_topology_before_device_use():
     with pytest.raises(TypeError, match="integer"):

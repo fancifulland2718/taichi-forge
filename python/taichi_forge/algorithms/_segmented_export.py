@@ -21,13 +21,9 @@ def _topology_binding(layout, context, *, segment_ids=False):
         if layout._encoding != "device_counts" or layout._device_generation_stats is None:
             raise TaichiRuntimeError("AOT segmented operations require a published immutable topology")
         return arrays.declare_snapshot(owner)
+    data = np.asarray(layout._offsets_host, dtype=np.int32)
     if segment_ids:
-        # Capacity, including ignored padding, is part of the grouped strategy.
-        data = np.full(layout.capacity, -1, dtype=np.int32)
-        for segment, (begin, end) in enumerate(zip(layout._offsets_host, layout._offsets_host[1:])):
-            data[begin:end] = segment
-    else:
-        data = np.asarray(layout._offsets_host, dtype=np.int32)
+        data = algorithms._segment_ids_from_offsets(data, layout.capacity)
     return arrays.declare_data(owner, data.tobytes())
 
 

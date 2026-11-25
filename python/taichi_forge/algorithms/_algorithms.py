@@ -4868,7 +4868,7 @@ def _segmented_host_integer_array(source, name):
         raise ValueError(f"{name} must be one-dimensional.")
     if host.dtype.kind not in ("i", "u"):
         raise TypeError(f"{name} must contain integer values.")
-    if host.size > 0:
+    if host.size > 0 and not np.can_cast(host.dtype, np.int32, casting="safe"):
         if host.dtype.kind == "u":
             if np.any(host > np.iinfo(np.int32).max):
                 raise ValueError(f"{name} values must fit in ti.i32.")
@@ -4877,6 +4877,17 @@ def _segmented_host_integer_array(source, name):
         ):
             raise ValueError(f"{name} values must fit in ti.i32.")
     return np.asarray(host, dtype=np.int32)
+
+
+def _segment_ids_from_offsets(offsets, capacity):
+    # Include inactive capacity in the same expansion. Repeated offsets
+    # contribute zero copies and the final run always has the padding ID.
+    lengths = np.empty(len(offsets), dtype=np.intp)
+    np.subtract(offsets[1:], offsets[:-1], out=lengths[:-1])
+    lengths[-1] = capacity - int(offsets[-1])
+    segments = np.arange(len(offsets), dtype=np.int32)
+    segments[-1] = -1
+    return np.repeat(segments, lengths)
 
 
 class SegmentedLayout:
@@ -4895,6 +4906,7 @@ class SegmentedLayout:
         segment_ids_host,
         num_items,
         capacity,
+        _owned_offsets=None,
     ):
         self._encoding = str(encoding)
         self._num_items = int(num_items)
@@ -4903,10 +4915,12 @@ class SegmentedLayout:
         self._max_segment_length = int(
             np.max(np.diff(offsets_host), initial=0)
         )
-        self._offsets_host = tuple(int(value) for value in offsets_host)
-        self._offsets = ti_ndarray(i32, shape=self._num_segments + 1)
-        self._segment_ids = ti_ndarray(i32, shape=self._capacity)
-        self._offsets.from_numpy(np.asarray(offsets_host, dtype=np.int32))
+        self._offsets_host = tuple(offsets_host.tolist())
+        self._offsets = _owned_offsets
+        if self._offsets is None:
+            self._offsets = ScalarNdarray._private_scratch_storage(i32, (self._num_segments + 1,))
+            self._offsets.from_numpy(np.asarray(offsets_host, dtype=np.int32))
+        self._segment_ids = ScalarNdarray._private_scratch_storage(i32, (self._capacity,))
         self._segment_ids.from_numpy(
             np.asarray(segment_ids_host, dtype=np.int32)
         )
@@ -5001,11 +5015,9 @@ class SegmentedLayout:
             )
 
         offsets = ti_ndarray(i32, shape=num_segments + 1)
-        segment_ids = ti_ndarray(i32, shape=capacity)
+        segment_ids = ScalarNdarray._private_scratch_storage(i32, (capacity,))
         control = ti_ndarray(i32, shape=3)
-        offsets.fill(0)
         segment_ids.fill(-1)
-        control.fill(0)
         segmented_layout_prepare_device_counts(
             counts,
             offsets,
@@ -5135,7 +5147,22 @@ class SegmentedLayout:
         represented by repeated offsets.
         """
 
-        offsets_host = _segmented_host_integer_array(offsets, "offsets")
+        owned_offsets = None
+        if (
+            type(offsets) is ScalarNdarray
+            and offsets.dtype == i32
+            and len(offsets.shape) == 1
+            and offsets.shape[0] >= 2
+            and offsets._runtime_prog is get_runtime().prog
+            and current_cfg().arch in (cuda, vulkan)
+        ):
+            # Validate the same immutable allocation the layout will use, even
+            # when the caller immediately overwrites its source after publication.
+            owned_offsets = ScalarNdarray._private_scratch_storage(i32, offsets.shape)
+            owned_offsets.copy_from(offsets)
+            offsets_host = owned_offsets.to_numpy()
+        else:
+            offsets_host = _segmented_host_integer_array(offsets, "offsets")
         if offsets_host.size < 2:
             raise ValueError("offsets must contain at least [0, end].")
         if int(offsets_host[0]) != 0:
@@ -5156,18 +5183,13 @@ class SegmentedLayout:
             raise ValueError(
                 "offsets final value must not exceed fixed layout capacity."
             )
-        num_segments = offsets_host.size - 1
-        ids_host = np.full(capacity, -1, dtype=np.int32)
-        for segment in range(num_segments):
-            begin = int(offsets_host[segment])
-            end = int(offsets_host[segment + 1])
-            ids_host[begin:end] = segment
         return cls(
             encoding="offsets",
             offsets_host=offsets_host,
-            segment_ids_host=ids_host,
+            segment_ids_host=_segment_ids_from_offsets(offsets_host, capacity),
             num_items=num_items,
             capacity=capacity,
+            _owned_offsets=owned_offsets,
         )
 
     @classmethod
