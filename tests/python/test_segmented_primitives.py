@@ -209,6 +209,32 @@ def test_segmented_integer_scan_in_place():
         )
 
 
+@pytest.mark.parametrize("n", [128, 8192, 262144])
+@test_utils.test(arch=[ti.cpu, ti.cuda, ti.vulkan])
+def test_shifted_global_scan_reuses_private_storage_without_narrowing(n):
+    from taichi_forge.algorithms._primitive_definitions import NATIVE_VALUE_TYPE
+
+    if ti.cfg.arch == ti.vulkan and not ti.lang.impl.get_runtime().prog.vulkan_scan_value_type_available(
+        NATIVE_VALUE_TYPE[ti.i64]
+    ):
+        pytest.skip("This Vulkan device does not support native i64 scans")
+    offsets = np.array([0, 0, 31, 31, n], dtype=np.int32)
+    layout = ti.algorithms.SegmentedLayout.from_offsets(offsets)
+    source = ti.field(ti.i64, shape=n, offset=-19)
+    other = ti.field(ti.i64, shape=n, offset=7)
+    values = (np.arange(n, dtype=np.int64) % 7 - 2) + (1 << 34)
+    workspace = ti.algorithms.SegmentedWorkspace()
+    for output, inclusive in ((other, False), (source, True)):
+        source.from_numpy(values)
+        ti.algorithms.experimental_segmented_scan(
+            source, layout, output, inclusive=inclusive, method="global_scan", workspace=workspace
+        )
+        np.testing.assert_array_equal(output.to_numpy(), _segmented_scan_expected(values, offsets, inclusive))
+    assert workspace.workspace_bytes_current == (n + len(offsets) - 1) * values.itemsize
+    workspace.clear()
+    assert workspace.workspace_bytes_current == 0
+
+
 @test_utils.test(
     arch=[ti.cpu, ti.cuda, ti.vulkan],
     exclude=[(ti.vulkan, "Darwin")],

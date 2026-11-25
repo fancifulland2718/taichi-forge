@@ -72,6 +72,7 @@ from taichi_forge._kernels import (
     compact_scatter_field,
     compact_stable_serial_field_static_n,
     compact_single_item_field,
+    ext_arr_to_tensor,
     fill_i32_arange_ndarray,
     gather_f32_field,
     gather_f32_ndarray,
@@ -133,6 +134,7 @@ from taichi_forge._kernels import (
     scatter_add_i32_ndarray,
     scatter_i32_field,
     scatter_i32_ndarray,
+    tensor_to_ext_arr,
     transform_affine_f32_field,
     transform_affine_f32_ndarray,
     transform_affine_i32_field,
@@ -5291,8 +5293,8 @@ class SegmentedWorkspace:
         self.max_segments = max_segments
         self.workspace_bytes_current = 0
         self.workspace_bytes_peak = 0
-        self._base_buffers = {}
-        self._base_bytes = 0
+        self._buffers = {}
+        self._buffer_bytes = 0
         self._scan_executors = {}
         self._grouped_reduce_workspace = None
         self._transform_workspace = None
@@ -5368,13 +5370,23 @@ class SegmentedWorkspace:
         return executor
 
     def _get_base_buffer(self, dtype, layout):
-        key = (str(dtype), layout.num_segments)
-        bases = self._base_buffers.get(key)
-        if bases is None:
-            bases = ti_ndarray(dtype, shape=layout.num_segments)
-            self._base_buffers[key] = bases
-            self._base_bytes += layout.num_segments * _dtype_nbytes(dtype)
-        return bases
+        return self._private_buffer("segment_bases", dtype, layout.num_segments)
+
+    def _shifted_scan_storage(self, values, output, layout):
+        if isinstance(values, ScalarField) and (values.snode.ptr.offset or output.snode.ptr.offset):
+            # Native ndarray scans index from zero. Stage in logical Field order
+            # and keep the same scratch resident across direct calls or replays.
+            return self._private_buffer("global_scan", values.dtype, layout.capacity)
+        return None
+
+    def _private_buffer(self, role, dtype, count):
+        key = (role, dtype, count)
+        buffer = self._buffers.get(key)
+        if buffer is None:
+            buffer = ScalarNdarray._private_scratch_storage(dtype, (count,))
+            self._buffers[key] = buffer
+            self._buffer_bytes += count * _dtype_nbytes(dtype)
+        return buffer
 
     def _scan_provider_workspace_bytes(self):
         prog = get_runtime().prog
@@ -5420,7 +5432,7 @@ class SegmentedWorkspace:
             if executor.large_arr is not None
         )
         self.workspace_bytes_current = (
-            self._base_bytes
+            self._buffer_bytes
             + grouped_current
             + transform_current
             + field_scan_bytes
@@ -5432,7 +5444,7 @@ class SegmentedWorkspace:
         )
         self.workspace_bytes_peak = max(
             self.workspace_bytes_peak,
-            self._base_bytes
+            self._buffer_bytes
             + grouped_peak
             + transform_peak
             + field_scan_bytes
@@ -5448,11 +5460,11 @@ class SegmentedWorkspace:
         prog = get_runtime().prog
         if prog is not None and current_cfg().arch == cuda:
             _call_optional_prog_method(prog, "cuda_device_scan_clear_workspace")
-        self._base_buffers.clear()
+        self._buffers.clear()
         self._scan_executors.clear()
         self._grouped_reduce_workspace = None
         self._transform_workspace = None
-        self._base_bytes = 0
+        self._buffer_bytes = 0
         self.workspace_bytes_current = 0
         self.workspace_bytes_peak = 0
         self._last_scan_method = None
@@ -10956,7 +10968,10 @@ def experimental_segmented_scan(
         definition.serial_kernel(values, layout._offsets, output, definition.num_segments, int(definition.inclusive))
         workspace._update_usage()
         return workspace
-    if definition.copy is not None:
+    scratch = workspace._shifted_scan_storage(values, output, layout)
+    if scratch is not None:
+        tensor_to_ext_arr(values, scratch)
+    elif definition.copy is not None:
         experimental_transform(
             values,
             output,
@@ -10966,7 +10981,9 @@ def experimental_segmented_scan(
             workspace=workspace._get_transform_workspace(layout),
         )
     executor = workspace._get_scan_executor(layout)
-    executor.run(output)
+    executor.run(output if scratch is None else scratch)
+    if scratch is not None:
+        ext_arr_to_tensor(scratch, output)
     bases = workspace._get_base_buffer(values.dtype, layout)
     gather, apply = definition.correction_kernels
     gather(output, layout._offsets, bases, definition.num_segments)
