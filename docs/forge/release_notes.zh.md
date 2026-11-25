@@ -28,6 +28,8 @@
 
 ## 0.7.1
 
+**GitHub wheel 构建 2。** R580 用户请同时安装构建 2 的前端和 Runtime。Forge 优先使用 OptiX 9.1（ABI 118），并可在相容驱动上使用 OptiX 9.0（ABI 105）。本次构建包含 Runtime 构建 1 的 Vulkan 字段布局修复。[安装指南](install_release.zh.md)
+
 ### 从 Python 定义交付可独立运行的数值库
 
 - **Produce（构建）。** `ti.aot.export_package` 可从一个或多个 Python 模块的定义导出数值入口、共享函数、可读的 Host 构造与调度代码。可以指定单一后端，也可以用 `artifact_format="unified-bc-library"` 生成一份面向 x64、CUDA 和 Vulkan 的可移植 LLVM 库。使用设备专有操作的入口仍需要相应硬件和 provider。[按包导出](package_aot.zh.md)

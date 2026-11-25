@@ -29,6 +29,8 @@ Use the documentation at your release tag for version-specific API details.
 
 ## 0.7.1
 
+**GitHub wheel build 2.** Install both build 2 wheels to use OptiX on R580. Forge tries OptiX 9.1 (ABI 118) and can use OptiX 9.0 (ABI 105) on compatible drivers. The Vulkan field layout fixes from runtime build 1 are included. [Installation guide](install_release.en.md)
+
 ### Ship a numerical library from Python definitions
 
 - **Produce.** `ti.aot.export_package` exports numerical entry points, shared functions, and readable Python for construction and scheduling from one or more modules. Target one backend or select `artifact_format="unified-bc-library"` to produce one portable LLVM library for x64, CUDA, and Vulkan. Device-specific operations still require the corresponding hardware and providers. [Package export](package_aot.en.md)
