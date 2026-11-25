@@ -69,15 +69,18 @@ An empty Windows component list invokes the unrestricted silent installer; an ou
 ending at `-s` alone does not prove a deadlock. The pinned action's `log-file-suffix`
 only handles Linux logs and does not provide a Windows installation log.
 
-The 12.8.1 installer pin selects the CUDA 12.8 toolchain supported by the existing
-action; it emits PTX 8.7. CMake rejects other Toolkit minor versions for release
-adapters. As of 2026-10-27, the latest official
-[OptiX 9.1.0](https://github.com/NVIDIA/optix-dev/releases/tag/v9.1.0) is the only
-bundled adapter (ABI 118, R590+ driver). The 8.1/9.0 adapters are removed.
-This pin is Forge's build policy, not OptiX's maximum supported CUDA version.
-Forge's native conditional Graphs separately require **Driver API 12.8+**: core
-runtime uses dynamically loaded symbols, its own ABI declarations and embedded
-PTX, so this SDK pin does not disable those features.
+CUDA Toolkit 12.8.1 compiles the shared device programs against the OptiX 9.0
+headers. The build checks PTX 8.7 and target `compute_75`. The same wheel
+contains the ABI 105 (R570+) and ABI 118 (R590+) host adapters. Validate new
+release builds with `--require-optix-routing`. NVIDIA publishes the [OptiX SDK
+driver requirements](https://developer.nvidia.com/designworks/optix/downloads/legacy)
+and [CUDA 12.8.1 driver versions](https://docs.nvidia.com/cuda/archive/12.8.1/cuda-toolkit-release-notes/index.html).
+
+CUDA conditional Graphs check Driver API 12.8+ and the required symbols at
+runtime. The driver-only build disables CUPTI profiling and the Toolkit
+reference implementation for CUDA primitives. Optional vendor libraries such
+as cuDSS load when requested. cuFFT LTO callbacks additionally need compatible
+NVRTC and nvJitLink libraries.
 
 ## Writing release notes
 

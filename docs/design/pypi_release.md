@@ -61,13 +61,15 @@ CCCL 头文件（Windows 12.8 安装组件名为 `thrust`）提供 OptiX 9.1 的
 Windows action 的空组件列表会调用全量静默安装器；仅有 `-s` 输出不能证明发生死锁。
 该版本 action 的 `log-file-suffix` 只处理 Linux 日志，不能当作 Windows 安装日志。
 
-发布安装器固定为现有 action 支持的 12.8.1，生成 PTX 8.7；CMake 对 release adapter
-拒绝其他 Toolkit 次版本。截至 2026-10-27，官方最新
-[OptiX 9.1.0](https://github.com/NVIDIA/optix-dev/releases/tag/v9.1.0) 是唯一随包
-adapter（ABI 118，要求 R590+ 驱动），8.1/9.0 adapter 已移除。
-这是 Forge 的构建策略，不是 OptiX 的最高 CUDA 支持版本。
-Forge 原生条件 Graph 的 **Driver API 12.8+** 要求独立检查，核心 runtime 使用动态符号、
-自有 ABI 声明及内嵌 PTX，不依赖这次安装的 SDK 版本启用这些功能。
+发布构建固定 CUDA Toolkit 12.8.1，以 OptiX 9.0 头文件编译共用设备程序，
+检查 PTX 8.7 和 `compute_75`。同一 wheel 包含 ABI 105（R570+）和 ABI 118
+（R590+）两份主机适配器。新发行构建使用 `--require-optix-routing` 校验。
+驱动版本可查阅 [OptiX SDK 要求](https://developer.nvidia.com/designworks/optix/downloads/legacy)
+和 [CUDA 12.8.1 发布说明](https://docs.nvidia.com/cuda/archive/12.8.1/cuda-toolkit-release-notes/index.html)。
+
+CUDA 条件 Graph 在运行时检查 Driver API 12.8+ 及所需符号。标准驱动版关闭 CUPTI
+分析和 CUDA 原语的 Toolkit 参考实现。cuDSS 等可选库由调用它们的功能加载。
+cuFFT LTO 回调另外需要版本相容的 NVRTC 和 nvJitLink。
 
 ## 发布说明的写法
 

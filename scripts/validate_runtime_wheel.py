@@ -56,7 +56,8 @@ FORBIDDEN_VENDOR_RUNTIME = re.compile(
     r")",
     re.IGNORECASE,
 )
-OPTIX_PROVIDER_ABIS = (118,)
+OPTIX_PROVIDER_ABIS = (105, 118)
+OPTIX_ROUTER = f"{PACKAGE}/_optix_adapters.py"
 CUDSS_PROVIDER_HEADER_VERSIONS = (80,)
 OPTIONAL_RUNTIME_PROVIDERS = {
     "cusparselt": (
@@ -155,11 +156,16 @@ def _validate_vkfft_payload(zf: ZipFile, names: list[str], platform: str, requir
     return {expected}
 
 
-def _expected_optix_provider_members(platform: str, version: str) -> set[str]:
+def _expected_optix_provider_members(platform: str, version: str, *, routed: bool = False) -> set[str]:
     if platform == "macos":
         return set()
-    # Published 0.6.x wheels keep their original manifest; new releases ship 9.1 only.
-    abis = OPTIX_PROVIDER_ABIS if Version(version).release >= (0, 7, 0) else (93, 105, 118)
+    release = Version(version).release
+    if release < (0, 7, 0):
+        abis = (93, 105, 118)
+    elif release <= (0, 7, 1) and not routed:
+        abis = (118,)  # Already published before driver routing was introduced.
+    else:
+        abis = OPTIX_PROVIDER_ABIS
     prefix = f"{PACKAGE}/_lib/hardware_providers/"
     if platform == "windows":
         return {f"{prefix}taichi_forge_optix_provider_abi1_optix{abi}.dll" for abi in abis}
@@ -570,7 +576,7 @@ def _strict_wheel_dependencies(
                 binary,
                 platform,
                 allowed_cudart_major=cuda_major if member == runtime else None,
-                allowed_cuda_driver=member in _expected_optix_provider_members(platform, version),
+                allowed_cuda_driver=member in _expected_optix_provider_members(platform, version, routed=OPTIX_ROUTER in names),
             )
 
 
@@ -582,6 +588,7 @@ def inspect_runtime_wheel(
     required_export_manifest_schema: int | None = None,
     require_vkfft: bool = False,
     require_amdgpu: bool = False,
+    require_optix_routing: bool = False,
 ) -> RuntimeWheelInfo:
     if expected_dependency_class not in {
         "driver-only",
@@ -633,7 +640,10 @@ def inspect_runtime_wheel(
                 if name.startswith(provider_prefix) and "taichi_forge_optix_provider" in Path(name).name
             ]
             actual_optix_providers = set(optix_provider_entries)
-            expected_optix_providers = _expected_optix_provider_members(platform, version)
+            routed = OPTIX_ROUTER in names
+            if platform != "macos" and (require_optix_routing or Version(version).release > (0, 7, 1)) and not routed:
+                raise RuntimeError("Runtime wheel is missing the OptiX driver router")
+            expected_optix_providers = _expected_optix_provider_members(platform, version, routed=routed)
             if (
                 len(optix_provider_entries) != len(actual_optix_providers)
                 or actual_optix_providers != expected_optix_providers
@@ -842,6 +852,7 @@ def validate_runtime_wheels(
     required_export_manifest_schema: int | None = None,
     require_vkfft: bool = False,
     require_amdgpu: bool = False,
+    require_optix_routing: bool = False,
 ) -> list[RuntimeWheelInfo]:
     wheels = sorted(wheel_dir.glob("*.whl"))
     expected_count = 2 if expected_platform == "pair" else 1
@@ -858,6 +869,7 @@ def validate_runtime_wheels(
             required_export_manifest_schema,
             require_vkfft,
             require_amdgpu,
+            require_optix_routing,
         )
         for wheel in wheels
     ]
@@ -891,6 +903,8 @@ def main() -> None:
         required=True,
     )
     parser.add_argument("--cuda-major", type=int)
+    parser.add_argument("--require-optix-routing", action="store_true",
+                        help="Require the current OptiX router and both CUDA 12.8 adapters")
     parser.add_argument("--require-amdgpu", action="store_true",
                         help="Require AMDGPU compiler bitcode and its license")
     parser.add_argument(
@@ -935,6 +949,7 @@ def main() -> None:
             args.export_manifest_schema,
             args.require_vkfft,
             args.require_amdgpu,
+            args.require_optix_routing,
         )
     except (OSError, RuntimeError, UnicodeError) as exc:
         raise SystemExit(str(exc)) from exc

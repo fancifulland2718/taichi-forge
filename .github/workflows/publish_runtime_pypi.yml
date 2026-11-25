@@ -67,7 +67,7 @@ env:
   TI_CI: "1"
   # Producer SDK for the bundled providers, not the consumer's CUDA API level.
   # OptiX device code is PTX-JITed by the display driver. CUDA 12.8 emits PTX
-  # 8.7 for the single OptiX 9.1 / R590 adapter. Conditional Graphs use dynamic
+  # 8.7 for both OptiX 9.0 and 9.1 adapters. Conditional Graphs use dynamic
   # Driver API 12.8+ symbols and toolkit-independent PTX in the core runtime.
   CUDA_TOOLKIT_VERSION: "12.8.1"
   LLVM20_WIN_URL: ${{ vars.LLVM20_WIN_URL }}
@@ -299,7 +299,7 @@ jobs:
           set -euo pipefail
           python scripts/validate_runtime_wheel.py \
             --wheel-dir dist-runtime --platform linux \
-            --dependency-class driver-only --strict-binary --require-vkfft --require-amdgpu
+            --dependency-class driver-only --strict-binary --require-vkfft --require-amdgpu --require-optix-routing
 
       - name: Audit runtime wheel
         run: |
@@ -315,7 +315,7 @@ jobs:
           auditwheel show wheelhouse-runtime/*.whl
           python scripts/validate_runtime_wheel.py \
             --wheel-dir wheelhouse-runtime --platform manylinux \
-            --dependency-class driver-only --strict-binary --require-vkfft --require-amdgpu
+            --dependency-class driver-only --strict-binary --require-vkfft --require-amdgpu --require-optix-routing
 
       - name: Record actual build inputs
         run: python -m scripts.record_release_build --platform linux --output wheelhouse-runtime/build-info-linux.json
@@ -524,7 +524,7 @@ jobs:
           $ErrorActionPreference = 'Stop'
           python scripts/validate_runtime_wheel.py `
             --wheel-dir dist-runtime --platform windows `
-            --dependency-class driver-only --strict-binary --require-vkfft --require-amdgpu
+            --dependency-class driver-only --strict-binary --require-vkfft --require-amdgpu --require-optix-routing
 
       - name: Record actual build inputs
         shell: pwsh

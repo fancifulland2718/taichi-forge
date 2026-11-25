@@ -55,6 +55,7 @@ def _write_runtime_wheel(
     requirements: tuple[str, ...] = (),
     include_optix_providers: bool = True,
     extra_optix_abi: int | None = None,
+    routed_optix: bool = False,
     include_cudss_provider: bool = True,
     include_optional_runtime_providers: bool = True,
     include_cusolverdn_provider: bool = True,
@@ -86,9 +87,13 @@ def _write_runtime_wheel(
         if Version(version).release >= (0, 7, 0) and include_aot_consumer:
             for name in validate_runtime_wheel.AOT_CONSUMER_FILES:
                 zf.writestr(name, "# lightweight consumer\n")
+        if routed_optix:
+            zf.writestr(validate_runtime_wheel.OPTIX_ROUTER, "# driver routing\n")
         if include_optix_providers and Version(version) >= Version("0.6.3") and platform != "macos":
             provider_dir = "taichi_forge_runtime/_lib/hardware_providers"
             optix_abis = (118,) if Version(version).release >= (0, 7, 0) else (93, 105, 118)
+            if routed_optix:
+                optix_abis = (105, 118)
             if extra_optix_abi is not None:
                 optix_abis += (extra_optix_abi,)
             for optix_abi in optix_abis:
@@ -935,6 +940,21 @@ def test_current_runtime_wheel_rejects_retired_optix_adapters(tmp_path, platform
     else:
         with pytest.raises(RuntimeError, match="adapter set is incomplete or ambiguous"):
             validate_runtime_wheel.inspect_runtime_wheel(wheel, expected_dependency_class="driver-only")
+
+
+@pytest.mark.parametrize("platform,tag", (("windows", "win_amd64"), ("manylinux", "manylinux_2_35_x86_64")))
+def test_routed_optix_wheel_and_original_071(tmp_path, platform, tag):
+    wheel = tmp_path / f"taichi_forge_runtime-0.7.1-py3-none-{tag}.whl"
+    args = dict(platform=platform, version="0.7.1", cuda_major=12, dependency_class="driver-only")
+    _write_runtime_wheel(wheel, **args)
+    validate_runtime_wheel.inspect_runtime_wheel(wheel)
+    with pytest.raises(RuntimeError, match="missing the OptiX driver router"):
+        validate_runtime_wheel.inspect_runtime_wheel(wheel, require_optix_routing=True)
+    _write_runtime_wheel(wheel, **args, routed_optix=True)
+    validate_runtime_wheel.inspect_runtime_wheel(wheel, require_optix_routing=True)
+    _write_runtime_wheel(wheel, **args, routed_optix=True, extra_optix_abi=93)
+    with pytest.raises(RuntimeError, match="adapter set is incomplete"):
+        validate_runtime_wheel.inspect_runtime_wheel(wheel, require_optix_routing=True)
 
 
 @pytest.mark.parametrize(
