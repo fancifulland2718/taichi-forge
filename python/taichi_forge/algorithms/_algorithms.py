@@ -10768,39 +10768,26 @@ def _check_segmented_request(
     if int(output.shape[0]) != expected_output:
         role = "layout capacity" if scan else "layout segment count"
         raise ValueError(f"{op_name} output length must equal {role}.")
-    values_view = _primitive_view(values)
-    output_view = _primitive_view(output)
-    if values_view is None or output_view is None:
-        raise TypeError(
-            f"{op_name} values/output must be plain ti.ndarray or root dense "
-            "scalar ti.field."
-        )
+    views = []
+    for operand in (values, output):
+        # The Field kernels apply the logical index origin themselves. A
+        # shifted Field need not qualify for a zero-origin raw array binding.
+        if isinstance(operand, ScalarField) and operand.snode.ptr.offset:
+            view = _dense_field_view(operand)
+        else:
+            view = _primitive_view(operand)
+        if view is None:
+            raise TypeError(f"{op_name} values/output must be plain ti.ndarray or root dense scalar ti.field.")
+        views.append(view)
     ndarray_mode = isinstance(values, Ndarray) or isinstance(output, Ndarray)
-    if ndarray_mode:
-        if not (
-            isinstance(values, Ndarray)
-            and isinstance(output, Ndarray)
-            and values_view.is_plain_ndarray
-            and output_view.is_plain_ndarray
-        ):
-            raise TypeError(
-                f"{op_name} ndarray mode requires plain ti.ndarray values/output."
-            )
-    elif not (values_view.is_dense_field and output_view.is_dense_field):
-        raise TypeError(
-            f"{op_name} field mode requires root dense scalar fields."
-        )
-    input_keys = _rle_storage_keys(values)
-    output_keys = _rle_storage_keys(output)
-    overlap = bool(input_keys.intersection(output_keys))
-    if scan:
-        if overlap and input_keys != output_keys:
-            raise ValueError(
-                f"{op_name} values/output must be exactly in-place or disjoint."
-            )
-    elif overlap:
+    if ndarray_mode and not all(view.is_plain_ndarray for view in views):
+        raise TypeError(f"{op_name} ndarray mode requires plain ti.ndarray values/output.")
+    if not ndarray_mode and not all(view.is_dense_field for view in views):
+        raise TypeError(f"{op_name} field mode requires root dense scalar fields.")
+    in_place = _primitive_view_descriptor_key(views[0]) == _primitive_view_descriptor_key(views[1])
+    if not scan and in_place:
         raise ValueError(f"{op_name} values/output must not alias.")
-    return ndarray_mode, input_keys == output_keys
+    return ndarray_mode, in_place
 
 
 def _segmented_default_workspace(kind, values, layout, output, semantic_key):

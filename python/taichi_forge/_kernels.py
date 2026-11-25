@@ -1445,10 +1445,10 @@ def segmented_reduce_sum_field(
     num_segments: i32,
 ):
     values_offset = static(
-        values.snode.ptr.offset if len(values.snode.ptr.offset) != 0 else 0
+        values.snode.ptr.offset[0] if len(values.snode.ptr.offset) != 0 else 0
     )
     output_offset = static(
-        output.snode.ptr.offset if len(output.snode.ptr.offset) != 0 else 0
+        output.snode.ptr.offset[0] if len(output.snode.ptr.offset) != 0 else 0
     )
     for segment in range(num_segments):
         acc = ops.cast(0, values.dtype)
@@ -1498,10 +1498,10 @@ def segmented_scan_sum_serial_field(
     inclusive: i32,
 ):
     values_offset = static(
-        values.snode.ptr.offset if len(values.snode.ptr.offset) != 0 else 0
+        values.snode.ptr.offset[0] if len(values.snode.ptr.offset) != 0 else 0
     )
     output_offset = static(
-        output.snode.ptr.offset if len(output.snode.ptr.offset) != 0 else 0
+        output.snode.ptr.offset[0] if len(output.snode.ptr.offset) != 0 else 0
     )
     for segment in range(num_segments):
         acc = ops.cast(0, values.dtype)
@@ -1542,7 +1542,7 @@ def segmented_scan_gather_bases_field(
     num_segments: i32,
 ):
     scanned_offset = static(
-        scanned.snode.ptr.offset if len(scanned.snode.ptr.offset) != 0 else 0
+        scanned.snode.ptr.offset[0] if len(scanned.snode.ptr.offset) != 0 else 0
     )
     for segment in range(num_segments):
         begin = offsets[segment]
@@ -1588,7 +1588,7 @@ def segmented_scan_apply_bases_field(
     inclusive: i32,
 ):
     scanned_offset = static(
-        scanned.snode.ptr.offset if len(scanned.snode.ptr.offset) != 0 else 0
+        scanned.snode.ptr.offset[0] if len(scanned.snode.ptr.offset) != 0 else 0
     )
     for segment in range(num_segments):
         begin = offsets[segment]
