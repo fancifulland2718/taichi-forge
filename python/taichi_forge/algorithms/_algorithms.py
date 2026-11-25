@@ -8269,7 +8269,6 @@ def _parallel_sort_legacy(keys, values=None):
     """
     N = keys.shape[0]
 
-    num_stages = 0
     p = 1
     while p < N:
         k = p
@@ -8279,10 +8278,12 @@ def _parallel_sort_legacy(keys, values=None):
                 sort_stage(keys, 0, keys, N, p, k, invocations)
             else:
                 sort_stage(keys, 1, values, N, p, k, invocations)
-            num_stages += 1
-            sync()
             k = int(k / 2)
         p = int(p * 2)
+    # Consecutive dispatches already execute in order. Preserve completion at
+    # the public call boundary without waiting between compare-exchange stages.
+    if N > 1:
+        sync()
 
 
 def _check_sort_request(
@@ -8342,45 +8343,19 @@ def _check_sort_request(
         )
 
 
-def _stable_sort_order(keys_np, descending=False, nan_policy="last"):
-    order = np.argsort(keys_np, kind="stable")
-    if not descending or order.shape[0] <= 1:
-        return order
-
-    sorted_keys = keys_np[order]
-    if np.issubdtype(sorted_keys.dtype, np.floating) and nan_policy == "last":
-        nan_mask = np.isnan(sorted_keys)
-        nan_order = order[nan_mask]
-        order = order[~nan_mask]
-        sorted_keys = keys_np[order]
-    else:
-        nan_order = np.empty(0, dtype=order.dtype)
-
-    groups = []
-    start = 0
-    while start < order.shape[0]:
-        end = start + 1
-        while end < order.shape[0] and sorted_keys[end] == sorted_keys[start]:
-            end += 1
-        groups.append(order[start:end])
-        start = end
-
-    if groups:
-        descending_order = np.concatenate(groups[::-1])
-    else:
-        descending_order = order
-    if nan_order.shape[0] > 0:
-        descending_order = np.concatenate((descending_order, nan_order))
-    return descending_order
+def _stable_sort_order(keys_np, descending=False):
+    if descending:
+        # Complement reverses integer order even at the signed minimum. Float
+        # negation keeps equal zeros tied and NumPy's stable sort puts NaNs last.
+        keys_np = -keys_np if keys_np.dtype.kind == "f" else ~keys_np
+    return np.argsort(keys_np, kind="stable")
 
 
 def _host_stable_sort(keys, values=None, descending=False, nan_policy="last"):
     if nan_policy == "bitwise":
         raise NotImplementedError("nan_policy='bitwise' needs a device sortable-key path.")
     keys_np = keys.to_numpy()
-    order = _stable_sort_order(
-        keys_np, descending=descending, nan_policy=nan_policy
-    )
+    order = _stable_sort_order(keys_np, descending=descending)
     if values is None:
         keys.from_numpy(np.ascontiguousarray(keys_np[order]))
         sync()

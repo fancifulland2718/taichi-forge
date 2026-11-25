@@ -474,6 +474,15 @@ def test_sort_auto_is_stable_for_duplicate_keys():
     assert values.to_numpy().tolist() == [0, 2, 4, 6, 1, 3, 5, 7]
 
 
+@pytest.mark.parametrize("dtype", [np.int32, np.uint32, np.int64, np.uint64])
+def test_descending_host_order_preserves_integer_extrema_and_ties(dtype):
+    from taichi_forge.algorithms._algorithms import _stable_sort_order
+
+    info = np.iinfo(dtype)
+    keys = np.array([info.min, info.max, info.min, 1, info.max], dtype=dtype)
+    np.testing.assert_array_equal(_stable_sort_order(keys, descending=True), [1, 4, 3, 0, 2])
+
+
 @test_utils.test(arch=[ti.cpu])
 def test_sort_host_stable_descending_preserves_duplicate_order():
     keys = ti.field(ti.i32, 8)
