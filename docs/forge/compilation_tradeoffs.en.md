@@ -18,10 +18,13 @@ canonical option inventory.
 ## Fast compilation by default, runtime optimization on demand
 
 Python `ti.init()` defaults to `compile_tier="fast"` and
-`advanced_optimization=False`, giving ordinary use a smaller compilation budget.
-Applications that repeatedly simulate or render can explicitly spend more on
-optimization for a possible runtime benefit. Tier names describe compilation
-policies; they do not guarantee increasing runtime speed.
+`advanced_optimization=False`. The default balances time to first result with
+the cost of running the compiled kernel. For example, CPU `fast` keeps LLVM O1.
+When evaluating a pass for the default, measure a short run, a workload that
+frequently creates new specializations, and a workload that reuses the same
+specialization enough to benefit. If the gain requires many calls to recover
+the compilation cost, applications can opt in for those workloads. The fastest
+execution tier depends on the kernel and backend.
 
 | Workload need | Initialization | Reason to choose it |
 | --- | --- | --- |
