@@ -252,9 +252,20 @@ void Ndarray::write(const std::vector<int> &I, TypedConstant val) const {
   std::memcpy(device_arr_ptr, &val.value_bits, size_);
 
   staging_buf_->device->unmap(*staging_buf_);
-  staging_buf_->device->memcpy_internal(
-      this->ndarray_alloc_.get_ptr(index * size_), staging_buf_->get_ptr(),
-      size_);
+  const DevicePtr dst = ndarray_alloc_.get_ptr(index * size_);
+  const DevicePtr src = staging_buf_->get_ptr();
+  if (prog_->compile_config().arch == Arch::vulkan) {
+    // Record after pending kernels and copies before making this host write
+    // visible. An immediate RHI submission could overtake the open list.
+    prog_->enqueue_compute_op_lambda(
+        [dst, src, size_](Device *, CommandList *cmd) {
+          cmd->buffer_copy(dst, src, size_);
+          cmd->buffer_barrier(dst, size_);
+        },
+        {});
+  } else {
+    staging_buf_->device->memcpy_internal(dst, src, size_);
+  }
 
   prog_->synchronize();
 }

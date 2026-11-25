@@ -642,6 +642,9 @@ class TI_DLL_EXPORT Program {
   // retires all domains before releasing code/storage and the backend.
   std::shared_ptr<cuda::ExecutionDomainRegistry> cuda_execution_domains();
   std::shared_ptr<vulkan::ExecutionDomainRegistry> vulkan_execution_domains();
+  // Wait for already submitted independent queues. A borrowed runtime can
+  // consume ordinary ndarray operations outside the default queue.
+  bool synchronize_execution_domains();
   RuntimeStatisticsSnapshot runtime_statistics_snapshot();
   HostMemoryPoolStats get_host_memory_pool_stats() const;
   PrimitiveWorkspaceSnapshot primitive_workspace_snapshot() const noexcept {

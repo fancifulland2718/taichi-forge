@@ -739,6 +739,64 @@ def test_ndarray_native_copy_from():
     assert (dst_mat.to_numpy() == src_mat_np).all()
 
 
+@test_utils.test(arch=ti.vulkan)
+def test_ndarray_copy_chain_keeps_temporaries_and_orders_host_write():
+    n = 257
+    src, tmp, dst = (ti.ndarray(ti.i32, n) for _ in range(3))
+    expected = np.arange(n, dtype=np.int32)
+    src.from_numpy(expected)
+    prog = impl.get_runtime().prog
+    before = prog._runtime_statistics_snapshot()
+    tmp.copy_from(src)
+    dst.copy_from(tmp)
+    after = prog._runtime_statistics_snapshot()
+    assert after["synchronization"]["program_syncs"] == before["synchronization"]["program_syncs"]
+    copied_bytes = after["transfer"]["device_to_device_bytes"] - before["transfer"]["device_to_device_bytes"]
+    assert copied_bytes == 2 * expected.nbytes
+    del src, tmp
+    gc.collect()
+    assert prog._debug_ndarray_resource_stats()["retiring"] == 2
+
+    dst[3] = -17
+    expected[3] = -17
+    np.testing.assert_array_equal(dst.to_numpy(), expected)
+    assert prog._debug_ndarray_resource_stats()["retiring"] == 0
+
+
+@test_utils.test(arch=ti.vulkan, offline_cache=False)
+def test_ndarray_copy_between_independent_queue_submissions():
+    try:
+        domain = ti.graph.execution_domain()
+    except RuntimeError as error:
+        if "No independent Vulkan compute queue" in str(error) or "timeline support" in str(error):
+            pytest.skip(str(error))
+        raise
+
+    @ti.kernel
+    def increment(src: ti.types.ndarray(ti.i32, 1), dst: ti.types.ndarray(ti.i32, 1)):
+        for i in src:
+            dst[i] = src[i] + 1
+
+    n = 8193
+    src, dst = (ti.ndarray(ti.i32, n) for _ in range(2))
+    expected = np.arange(n, dtype=np.int32)
+    src.from_numpy(expected)
+    builder = ti.graph.GraphBuilder()
+    args = [ti.graph.Arg(ti.graph.ArgKind.NDARRAY, name, ti.i32, ndim=1) for name in ("src", "dst")]
+    builder.dispatch(increment, *args)
+    call = builder.compile().prepare(dict(src=src, dst=dst), execution_domain=domain)
+    try:
+        call.initialize()
+        first = call.submit()
+        src.copy_from(dst)
+        call.submit().wait()
+        assert first.done()
+        np.testing.assert_array_equal(dst.to_numpy(), expected + 2)
+    finally:
+        call.close()
+        domain.close()
+
+
 @test_utils.test(
     arch=[ti.cpu, ti.cuda, ti.vulkan],
     exclude=[(ti.vulkan, "Darwin")],

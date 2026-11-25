@@ -3344,6 +3344,8 @@ void export_lang(py::module &m) {
              return program->get_ndarray_data_ptr_as_int(ndarray);
            },
            py::call_guard<py::gil_scoped_release>())
+      .def("_synchronize_execution_domains", &Program::synchronize_execution_domains,
+           py::call_guard<py::gil_scoped_release>())
       .def("fill_float",
            [](Program *program, Ndarray *ndarray, float val) {
              uint32_t bits;

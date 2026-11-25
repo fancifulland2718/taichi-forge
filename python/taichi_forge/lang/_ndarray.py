@@ -592,9 +592,13 @@ class Ndarray:
         assert isinstance(other, Ndarray)
         assert tuple(self.arr.shape) == tuple(other.arr.shape)
         if self._can_fast_copy_from(other) and _native_copy_ad_supported(other, self):
-            impl.get_runtime().prog.copy_ndarray(self.arr, other.arr)
-            if _native_bulk_copy_needs_sync():
-                impl.get_runtime().sync()
+            runtime = impl.get_runtime()
+            arch = impl.current_cfg().arch
+            # A borrowed runtime can submit work on an independent queue.
+            shared = arch == _ti_core.Arch.vulkan and runtime.prog._synchronize_execution_domains()
+            runtime.prog.copy_ndarray(self.arr, other.arr)
+            if shared or arch == _ti_core.Arch.cuda:
+                runtime.sync()
             if not _record_native_copy_ad(other, self):
                 raise RuntimeError(
                     "Native ndarray copy could not record an autodiff "

@@ -7640,29 +7640,42 @@ Program::debug_texture_resource_identity(const Texture *view) const {
           {"generation", handle.generation}};
 }
 
+bool Program::synchronize_execution_domains() {
+#ifdef TI_WITH_CUDA
+  if (compile_config().arch == Arch::cuda) {
+    std::shared_ptr<cuda::ExecutionDomainRegistry> domains;
+    {
+      std::lock_guard<std::recursive_mutex> lock(
+          runtime_resource_submission_mutex_);
+      domains = cuda_execution_domains_;
+    }
+    if (domains) {
+      domains->synchronize();
+      return true;
+    }
+  }
+#endif
+#ifdef TI_WITH_VULKAN
+  if (compile_config().arch == Arch::vulkan) {
+    std::shared_ptr<vulkan::ExecutionDomainRegistry> domains;
+    {
+      std::lock_guard<std::recursive_mutex> lock(
+          runtime_resource_submission_mutex_);
+      domains = vulkan_execution_domains_;
+    }
+    if (domains) {
+      domains->synchronize();
+      return true;
+    }
+  }
+#endif
+  return false;
+}
+
 void Program::synchronize() {
   ensure_runtime_submission_allowed("Program synchronize");
   RuntimeProgramSyncStatisticsScope statistics_scope(this);
-#ifdef TI_WITH_CUDA
-  std::shared_ptr<cuda::ExecutionDomainRegistry> domains;
-  {
-    std::lock_guard<std::recursive_mutex> lock(
-        runtime_resource_submission_mutex_);
-    domains = cuda_execution_domains_;
-  }
-  if (domains)
-    domains->synchronize();
-#endif
-#ifdef TI_WITH_VULKAN
-  std::shared_ptr<vulkan::ExecutionDomainRegistry> vulkan_domains;
-  {
-    std::lock_guard<std::recursive_mutex> lock(
-        runtime_resource_submission_mutex_);
-    vulkan_domains = vulkan_execution_domains_;
-  }
-  if (vulkan_domains)
-    vulkan_domains->synchronize();
-#endif
+  synchronize_execution_domains();
   std::lock_guard<std::recursive_mutex> submission_lock(
       runtime_resource_submission_mutex_);
   const bool tracking_was_enabled =
@@ -8938,6 +8951,9 @@ void Program::copy_ndarray_fast(Ndarray *dst, Ndarray *src) {
   if (compile_config().arch == Arch::vulkan) {
     const DeviceAllocation dst_alloc = dst->ndarray_alloc_;
     const DeviceAllocation src_alloc = src->ndarray_alloc_;
+    if (!leases.empty()) {
+      pin_ndarray_launch_leases(leases);
+    }
     enqueue_compute_op_lambda(
         [dst_alloc, src_alloc, dst_bytes](Device * /*device*/,
                                           CommandList *cmdlist) {
@@ -8946,6 +8962,7 @@ void Program::copy_ndarray_fast(Ndarray *dst, Ndarray *src) {
           cmdlist->buffer_barrier(dst_alloc);
         },
         {});
+    mark_runtime_submission_pending();
     return;
   }
 
