@@ -2,6 +2,7 @@ import math
 import operator
 
 from taichi_forge.lang.exception import TaichiRuntimeError, TaichiTypeError
+from taichi_forge.lang.util import to_numpy_type
 
 import taichi_forge as ti
 
@@ -102,17 +103,11 @@ def MatrixFreeCG(A, b, x, tol=1e-6, maxiter=5000, quiet=True):
     vector_fields_builder.dense(axes, size).place(p, r, Ap, Ax)
     vector_fields_snode_tree = vector_fields_builder.finalize()
 
-    scalar_builder = ti.FieldsBuilder()
-    alpha = ti.field(dtype=solver_dtype)
-    beta = ti.field(dtype=solver_dtype)
-    scalar_builder.place(alpha, beta)
-    scalar_snode_tree = scalar_builder.finalize()
-
     @ti.kernel
     def init():
         for I in ti.grouped(x):
             r[I] = b[I] - Ax[I]
-            p[I] = 0.0
+            p[I] = r[I]
             Ap[I] = 0.0
 
     @ti.kernel
@@ -123,19 +118,19 @@ def MatrixFreeCG(A, b, x, tol=1e-6, maxiter=5000, quiet=True):
         return result
 
     @ti.kernel
-    def update_x():
+    def update_x(alpha: solver_dtype):
         for I in ti.grouped(x):
-            x[I] += alpha[None] * p[I]
+            x[I] += alpha * p[I]
 
     @ti.kernel
-    def update_r():
+    def update_r(alpha: solver_dtype):
         for I in ti.grouped(r):
-            r[I] -= alpha[None] * Ap[I]
+            r[I] -= alpha * Ap[I]
 
     @ti.kernel
-    def update_p():
+    def update_p(beta: solver_dtype):
         for I in ti.grouped(p):
-            p[I] = r[I] + beta[None] * p[I]
+            p[I] = r[I] + beta * p[I]
 
     def solve():
         succeeded = True
@@ -147,15 +142,14 @@ def MatrixFreeCG(A, b, x, tol=1e-6, maxiter=5000, quiet=True):
             print(f">>> Initial residual = {initial_residual_norm!r}")
         old_rTr = initial_rTr
         new_rTr = initial_rTr
-        update_p()
         if initial_residual_norm is not None and initial_residual_norm > tol:
             # -- Main loop --
             for i in range(maxiter):
                 A._matvec(p, Ap)  # compute Ap = A x p
                 pAp = reduce(p, Ap)
-                alpha[None] = old_rTr / pAp
-                update_x()
-                update_r()
+                alpha = old_rTr / pAp
+                update_x(alpha)
+                update_r(alpha)
                 new_rTr = reduce(r, r)
                 new_residual_norm = _residual_norm(new_rTr)
                 if new_residual_norm is None or new_residual_norm <= tol:
@@ -164,8 +158,7 @@ def MatrixFreeCG(A, b, x, tol=1e-6, maxiter=5000, quiet=True):
                             print(">>> Conjugate Gradient method converged.")
                             print(f">>> #iterations {i}")
                     break
-                beta[None] = new_rTr / old_rTr
-                update_p()
+                update_p(new_rTr / old_rTr)
                 old_rTr = new_rTr
                 if not quiet:
                     print(
@@ -187,7 +180,6 @@ def MatrixFreeCG(A, b, x, tol=1e-6, maxiter=5000, quiet=True):
         return solve()
     finally:
         vector_fields_snode_tree.destroy()
-        scalar_snode_tree.destroy()
 
 
 def MatrixFreeBICGSTAB(A, b, x, tol=1e-6, maxiter=5000, quiet=True):
@@ -232,7 +224,6 @@ def MatrixFreeBICGSTAB(A, b, x, tol=1e-6, maxiter=5000, quiet=True):
     t = ti.field(dtype=solver_dtype)
     Ap = ti.field(dtype=solver_dtype)
     Ax = ti.field(dtype=solver_dtype)
-    Ashat = ti.field(dtype=solver_dtype)
     if len(size) == 1:
         axes = ti.i
     elif len(size) == 2:
@@ -241,32 +232,19 @@ def MatrixFreeBICGSTAB(A, b, x, tol=1e-6, maxiter=5000, quiet=True):
         axes = ti.ijk
     else:
         raise TaichiRuntimeError(f"MatrixFreeBICGSTAB only support 1D, 2D, 3D inputs; your inputs is {len(size)}-D.")
-    vector_fields_builder.dense(axes, size).place(p, p_hat, r, r_tld, s, s_hat, t, Ap, Ax, Ashat)
+    vector_fields_builder.dense(axes, size).place(p, p_hat, r, r_tld, s, s_hat, t, Ap, Ax)
     vector_fields_snode_tree = vector_fields_builder.finalize()
-
-    scalar_builder = ti.FieldsBuilder()
-    alpha = ti.field(dtype=solver_dtype)
-    beta = ti.field(dtype=solver_dtype)
-    omega = ti.field(dtype=solver_dtype)
-    rho = ti.field(dtype=solver_dtype)
-    rho_1 = ti.field(dtype=solver_dtype)
-    scalar_builder.place(alpha, beta, omega, rho, rho_1)
-    scalar_snode_tree = scalar_builder.finalize()
-    succeeded = True
+    coefficient_type = to_numpy_type(solver_dtype)
 
     @ti.kernel
     def init():
         for I in ti.grouped(x):
             r[I] = b[I] - Ax[I]
             r_tld[I] = b[I]
-            p[I] = 0.0
+            p[I] = r[I]
+            p_hat[I] = p[I]
             Ap[I] = 0.0
-            Ashat[I] = 0.0
-        rho[None] = 0.0
-        rho_1[None] = 1.0
-        alpha[None] = 1.0
-        beta[None] = 1.0
-        omega[None] = 1.0
+            t[I] = 0.0
 
     @ti.kernel
     def reduce(p: ti.template(), q: ti.template()) -> solver_dtype:
@@ -276,39 +254,26 @@ def MatrixFreeBICGSTAB(A, b, x, tol=1e-6, maxiter=5000, quiet=True):
         return result
 
     @ti.kernel
-    def copy(orig: ti.template(), dest: ti.template()):
-        for I in ti.grouped(orig):
-            dest[I] = orig[I]
-
-    @ti.kernel
-    def update_p():
+    def update_p(beta: solver_dtype, omega: solver_dtype):
         for I in ti.grouped(p):
-            p[I] = r[I] + beta[None] * (p[I] - omega[None] * Ap[I])
-
-    @ti.kernel
-    def update_phat():
-        for I in ti.grouped(p_hat):
+            p[I] = r[I] + beta * (p[I] - omega * Ap[I])
             p_hat[I] = p[I]
 
     @ti.kernel
-    def update_s():
+    def update_s(alpha: solver_dtype):
         for I in ti.grouped(s):
-            s[I] = r[I] - alpha[None] * Ap[I]
-
-    @ti.kernel
-    def update_shat():
-        for I in ti.grouped(s_hat):
+            s[I] = r[I] - alpha * Ap[I]
             s_hat[I] = s[I]
 
     @ti.kernel
-    def update_x():
+    def update_x(alpha: solver_dtype, omega: solver_dtype):
         for I in ti.grouped(x):
-            x[I] += alpha[None] * p_hat[I] + omega[None] * s_hat[I]
+            x[I] += alpha * p_hat[I] + omega * s_hat[I]
 
     @ti.kernel
-    def update_r():
+    def update_r(omega: solver_dtype):
         for I in ti.grouped(r):
-            r[I] = s[I] - omega[None] * t[I]
+            r[I] = s[I] - omega * t[I]
 
     def solve():
         succeeded = True
@@ -317,34 +282,30 @@ def MatrixFreeBICGSTAB(A, b, x, tol=1e-6, maxiter=5000, quiet=True):
         initial_rTr = reduce(r, r)
         initial_residual_norm = _residual_norm(initial_rTr)
         rTr = initial_rTr
+        rho_1 = alpha = omega = 1.0
         if not quiet:
             print(f">>> Initial residual = {initial_residual_norm!r}")
         if initial_residual_norm is not None and initial_residual_norm > tol:
             for i in range(maxiter):
-                rho[None] = reduce(r, r_tld)
-                if rho[None] == 0.0:
+                rho = reduce(r, r_tld)
+                if rho == 0.0:
                     if not quiet:
                         print(">>> BICGSTAB failed because r@r_tld = 0.")
                     succeeded = False
                     break
-                if i == 0:
-                    copy(orig=r, dest=p)
-                else:
-                    beta[None] = (rho[None] / rho_1[None]) * (alpha[None] / omega[None])
-                    update_p()
-                update_phat()
+                if i:
+                    update_p((rho / rho_1) * (alpha / omega), omega)
                 A._matvec(p, Ap)
                 alpha_lower = reduce(r_tld, Ap)
-                alpha[None] = rho[None] / alpha_lower
-                update_s()
-                update_shat()
-                A._matvec(s_hat, Ashat)
-                copy(orig=Ashat, dest=t)
+                # Preserve coefficient storage precision before the next host recurrence.
+                alpha = float(coefficient_type(rho / alpha_lower))
+                update_s(alpha)
+                A._matvec(s_hat, t)
                 omega_upper = reduce(t, s)
                 omega_lower = reduce(t, t)
-                omega[None] = omega_upper / (omega_lower + 1e-16) if omega_lower == 0.0 else omega_upper / omega_lower
-                update_x()
-                update_r()
+                omega = float(coefficient_type(omega_upper / (1e-16 if omega_lower == 0.0 else omega_lower)))
+                update_x(alpha, omega)
+                update_r(omega)
                 rTr = reduce(r, r)
                 residual_norm = _residual_norm(rTr)
                 if not quiet:
@@ -360,7 +321,7 @@ def MatrixFreeBICGSTAB(A, b, x, tol=1e-6, maxiter=5000, quiet=True):
                                 f"#iterations {i}"
                             )
                     break
-                rho_1[None] = rho[None]
+                rho_1 = rho
         final_residual_norm = _residual_norm(rTr)
         if final_residual_norm is None or final_residual_norm > tol:
             if not quiet:
@@ -375,4 +336,3 @@ def MatrixFreeBICGSTAB(A, b, x, tol=1e-6, maxiter=5000, quiet=True):
         return solve()
     finally:
         vector_fields_snode_tree.destroy()
-        scalar_snode_tree.destroy()
