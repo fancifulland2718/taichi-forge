@@ -40,6 +40,13 @@ switch. Combined with `fast`, it retains fast LLVM levels and skips the external
 SPIR-V optimizer on Vulkan, so it is not equivalent to `balanced`. An explicit
 `advanced_optimization=False` remains effective with `balanced` or `full`.
 
+In the current CPU backend, `full` with advanced IR optimization also hoists
+top-level scalar arguments passed by value out of inner loops. This lets the
+compiler move dependent invariant expressions, such as the sine and cosine of
+a viewing angle, out of a ray-marching loop. Each kernel invocation uses its
+own argument values. Global memory caching has a separate
+`cache_loop_invariant_global_vars` option.
+
 Advanced optimization does **not necessarily increase total compilation time**.
 LICM, CSE, CFG and algebraic simplification cost time, but smaller IR can reduce
 later LLVM, code generation and driver work. The current pipeline avoids repeated

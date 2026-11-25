@@ -32,6 +32,11 @@ Python `ti.init()` 默认使用 `compile_tier="fast"`、`advanced_optimization=F
 策略选择等级，Vulkan 仍跳过外部 SPIR-V optimizer。它不等同于 `balanced`。
 显式传入 `advanced_optimization=False` 时，`balanced/full` 也不会强行打开它。
 
+在当前源码的 CPU 后端，`full` 配合高级 IR 优化还会把嵌套循环中按值传入的顶层标量参数
+提到内层循环之前。依赖这些参数的循环不变表达式也可以随之外提，例如光线步进中由视角计算的
+正弦和余弦。每次 kernel 调用使用本次传入的参数。全局内存缓存由独立选项
+`cache_loop_invariant_global_vars` 控制。
+
 高级优化的**总编译成本不一定更高**。LICM、CSE、CFG 和代数化简需要时间，但精简后的
 IR 也可能减少后续 LLVM、代码生成和驱动编译工作。当前管线已减少重复扫描，并限制
 `balanced` 的全局简化批次；不能沿用旧版本的开销估计，也不能从少量小 kernel 推断

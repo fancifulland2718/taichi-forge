@@ -55,7 +55,14 @@ class LoopInvariantCodeMotion : public LoopInvariantDetector {
   }
 
   void visit(ArgLoadStmt *stmt) override {
-    if (config.cache_loop_invariant_global_vars &&
+    // A by-value scalar is immutable for this invocation. Exposing it before
+    // the inner loop also lets LICM lift expressions that depend on it.
+    const bool full_cpu_scalar =
+        arch_is_cpu(config.arch) && config.compile_tier == "full" &&
+        config.advanced_optimization && stmt->arg_depth == 0 &&
+        stmt->arg_id.size() == 1 && stmt->create_load && !stmt->is_ptr &&
+        stmt->ret_type->is<PrimitiveType>();
+    if ((config.cache_loop_invariant_global_vars || full_cpu_scalar) &&
         is_loop_invariant(stmt, stmt->parent)) {
       auto replacement = stmt->clone();
       stmt->replace_usages_with(replacement.get());

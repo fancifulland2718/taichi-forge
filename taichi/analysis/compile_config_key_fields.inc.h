@@ -39,6 +39,10 @@
   CACHE_FIELD(fast_math);
   CACHE_FIELD(flatten_if);
   CACHE_FIELD(cache_loop_invariant_global_vars);
+  if (arch_is_cpu(config.arch) && config.compile_tier == "full" &&
+      config.advanced_optimization && !config.cache_loop_invariant_global_vars) {
+    CACHE_VALUE(std::string("cpu-full-scalar-arg-licm-v1"));
+  }
   CACHE_FIELD(make_thread_local);
   CACHE_FIELD(make_block_local);
   CACHE_FIELD(detect_read_only);

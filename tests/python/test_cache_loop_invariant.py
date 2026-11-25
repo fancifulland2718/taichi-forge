@@ -25,3 +25,20 @@ def test_local_matrix_non_constant_index_real_matrix():
                     assert x_print == x[i][1]
 
     test_invariant_cache()
+
+
+@test_utils.test(arch=ti.cpu, compile_tier="full", cache_loop_invariant_global_vars=False)
+def test_full_cpu_loop_uses_current_scalar_arguments_and_array_values():
+    values = ti.ndarray(ti.i32, shape=8)
+
+    @ti.kernel
+    def accumulate(data: ti.types.ndarray(ti.i32, ndim=1), steps: ti.i32, increment: ti.i32):
+        for i in range(8):
+            for _ in range(steps):
+                data[i] = 2 * data[i] + increment
+
+    values.fill(1)
+    accumulate(values, 3, 2)
+    accumulate(values, 0, 100)
+    accumulate(values, 1, -1)
+    assert values.to_numpy().tolist() == [43] * 8
