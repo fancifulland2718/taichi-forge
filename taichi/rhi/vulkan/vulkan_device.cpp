@@ -1893,6 +1893,50 @@ void VulkanCommandList::buffer_fill(DevicePtr ptr,
   buffer_->refs.push_back(buffer);
 }
 
+void VulkanCommandList::buffer_fill_u64(DeviceAllocation dst,
+                                        size_t count,
+                                        uint64_t bits) noexcept {
+  count = std::min(count, ti_device_->get_vkbuffer_size(dst) / sizeof(bits));
+  if (!count) {
+    return;
+  }
+  const auto bytes = count * sizeof(bits);
+  const auto word = static_cast<uint32_t>(bits);
+  if (word == bits >> 32) {
+    buffer_fill(dst.get_ptr(0), bytes, word);
+    return;
+  }
+  // vkCmdFillBuffer repeats one 32-bit word. Inline a bounded seed, then
+  // copy the completed prefix into disjoint ranges of the same buffer.
+  std::array<uint64_t, 128> seed;
+  const size_t seed_count = std::min(count, seed.size());
+  std::fill_n(seed.begin(), seed_count, bits);
+  size_t filled = seed_count * sizeof(bits);
+  const auto dst_buffer = ti_device_->get_vkbuffer(dst);
+  auto &vk = buffer_->device.functions();
+  vk.vkCmdUpdateBuffer(buffer_->buffer, dst_buffer->buffer, 0, filled,
+                       seed.data());
+  buffer_->refs.push_back(dst_buffer);
+  while (filled < bytes) {
+    buffer_transition(dst.get_ptr(0), filled,
+                      {BufferBarrierStage::Transfer,
+                       BufferBarrierAccess::TransferWrite,
+                       BufferBarrierStage::Transfer,
+                       BufferBarrierAccess::TransferRead});
+    std::array<VkBufferCopy, 32> regions;
+    uint32_t n = 0;
+    size_t end = filled;
+    while (end < bytes && n < regions.size()) {
+      const size_t size = std::min(filled, bytes - end);
+      regions[n++] = {0, end, size};
+      end += size;
+    }
+    vk.vkCmdCopyBuffer(buffer_->buffer, dst_buffer->buffer, dst_buffer->buffer,
+                       n, regions.data());
+    filled = end;
+  }
+}
+
 void VulkanCommandList::push_constants(const void *data,
                                        uint32_t size) noexcept {
   if (!current_pipeline_ || !data || size == 0) {

@@ -64,7 +64,7 @@ _STRUCT_MEMBER_NATIVE_HOST_COPY_DTYPES = (
     primitive_types.i64,
     primitive_types.f64,
 )
-_NDARRAY_NATIVE_HOST_STAGING_FILL_DTYPES = (
+_NDARRAY_64BIT_FILL_DTYPES = (
     primitive_types.u64,
     primitive_types.i64,
     primitive_types.f64,
@@ -400,7 +400,7 @@ class Ndarray:
             impl.get_runtime().prog.fill_int(self.arr, val)
         elif self.dtype == primitive_types.u32:
             impl.get_runtime().prog.fill_uint(self.arr, val)
-        elif self._try_fast_host_staging_fill(val):
+        elif self._try_fill_64bit_scalar(val):
             return
         else:
             self._fill_by_kernel(val)
@@ -433,21 +433,19 @@ class Ndarray:
         return is_scalar and isinstance(val, (bool, int, float, np.integer, np.floating))
 
     @python_scope
-    def _try_fast_host_staging_fill(self, val):
-        if self.dtype not in _NDARRAY_NATIVE_HOST_STAGING_FILL_DTYPES:
-            return False
-        if not self._can_fast_scalar_fill(val):
+    def _try_fill_64bit_scalar(self, val):
+        if self.dtype not in _NDARRAY_64BIT_FILL_DTYPES or not self._can_fast_scalar_fill(val):
             return False
         try:
-            arr = np.empty(shape=self.arr.total_shape(), dtype=to_numpy_type(self.dtype))
-            arr.fill(np.array(val, dtype=arr.dtype).item())
+            bits = np.asarray(val, dtype=to_numpy_type(self.dtype)).view(np.uint64).item()
         except (TypeError, ValueError, OverflowError):
             return False
-        if not self._can_fast_host_copy(arr, is_from_host=True):
-            return False
-        if _native_bulk_copy_needs_sync():
-            impl.get_runtime().sync()
-        impl.get_runtime().prog.copy_ndarray_from_host(self.arr, arr)
+        runtime = impl.get_runtime()
+        arch = impl.current_cfg().arch
+        shared = arch != _ti_core.Arch.x64 and runtime.prog._synchronize_execution_domains()
+        runtime.prog.fill_uint64(self.arr, bits)
+        if shared or arch == _ti_core.Arch.cuda:
+            runtime.sync()
         return True
 
     @python_scope

@@ -68,6 +68,7 @@
 
 #ifdef TI_WITH_VULKAN
 #include "taichi/program/vulkan_command_replay.h"
+#include "taichi/rhi/vulkan/vulkan_device.h"
 #include "taichi/runtime/vulkan_execution_domain.h"
 #include "taichi/runtime/program_impls/vulkan/vulkan_program.h"
 #include "taichi/runtime/gfx/aot_snode_resources.h"
@@ -16097,6 +16098,61 @@ void cpu_fill_dense_field_typed(uint8_t *dst_ptr,
   for (std::size_t i = 0; i < n; ++i) {
     *reinterpret_cast<T *>(dst_ptr + i * dst_stride) = value;
   }
+}
+
+void Program::fill_ndarray_fast_u64(Ndarray *ndarray, uint64_t bits) {
+  ScopedCpuPrimitiveProgram scope(this);
+  TI_ERROR_IF(!ndarray, "64-bit fill requires an ndarray.");
+  auto leases = acquire_ndarray_leases({ndarray});
+  const auto dtype = ndarray->get_element_data_type();
+  TI_ERROR_IF(dtype != PrimitiveType::u64 && dtype != PrimitiveType::i64 &&
+                  dtype != PrimitiveType::f64,
+              "64-bit fill requires u64, i64 or f64 elements.");
+  const auto count =
+      ndarray->get_nelement() * (ndarray->get_element_size() / sizeof(bits));
+  if (!count) {
+    return;
+  }
+  const auto dst = ndarray->get_device_allocation();
+  const auto arch = compile_config().arch;
+  if (arch_is_cpu(arch)) {
+    auto *data = program_impl_->get_device_alloc_info_ptr(dst);
+    cpu_fill_dense_field_typed<uint64_t>(
+        reinterpret_cast<uint8_t *>(data), sizeof(bits), count, bits,
+        std::max(1, compile_config().cpu_max_num_threads));
+    return;
+  }
+  if (!leases.empty()) {
+    pin_ndarray_launch_leases(leases);
+  }
+  if (arch == Arch::cuda) {
+#ifdef TI_WITH_CUDA
+    auto *executor = static_cast<LlvmProgramImpl *>(program_impl_.get())
+                         ->get_runtime_executor();
+    constexpr std::size_t block = 256;
+    const auto blocks = std::min<std::size_t>(1 + (count - 1) / block, 65535);
+    executor->get_runtime_jit_module()->launch<uint64_t *, uint64_t, uint64_t>(
+        "runtime_fill_u64", blocks, block, 0,
+        executor->get_device_alloc_info_ptr(dst), count, bits);
+#else
+    TI_NOT_IMPLEMENTED;
+#endif
+  } else if (arch == Arch::vulkan) {
+#ifdef TI_WITH_VULKAN
+    enqueue_compute_op_lambda(
+        [dst, count, bits](Device *, CommandList *cmd) {
+          static_cast<vulkan::VulkanCommandList *>(cmd)->buffer_fill_u64(
+              dst, count, bits);
+          cmd->buffer_barrier(dst);
+        },
+        {});
+#else
+    TI_NOT_IMPLEMENTED;
+#endif
+  } else {
+    TI_ERROR("Native 64-bit ndarray fill is unavailable on this backend.");
+  }
+  mark_runtime_submission_pending();
 }
 
 double dense_field_fill_value_as_double(int value_type, uint64_t value_bits) {

@@ -1072,6 +1072,8 @@ def test_matrix_ndarray_scalar_fill_native_no_compile():
 @test_utils.test(arch=[ti.cpu, ti.cuda, ti.vulkan], exclude=[(ti.vulkan, "Darwin")])
 def test_ndarray_64bit_scalar_fill_no_compile():
     n = 257
+    prog = impl.get_runtime().prog
+    uploaded = prog._runtime_statistics_snapshot()["transfer"]["host_to_device_bytes"]
 
     scalar_f64 = ti.ndarray(ti.f64, shape=n)
     compiled_functions = impl.get_runtime().get_num_compiled_functions()
@@ -1105,6 +1107,21 @@ def test_ndarray_64bit_scalar_fill_no_compile():
     np.testing.assert_array_equal(
         mat_u64.to_numpy(), np.full((n, 2, 2), fill_value, dtype=np.uint64)
     )
+    for bits in (0x8000000000000000, 0x7FF8000000001234, 0x7FF0000000000000):
+        scalar_f64.fill(np.uint64(bits).view(np.float64))
+        np.testing.assert_array_equal(
+            scalar_f64.to_numpy().view(np.uint64), np.full(n, bits, dtype=np.uint64)
+        )
+    assert prog._runtime_statistics_snapshot()["transfer"]["host_to_device_bytes"] == uploaded
+
+
+@test_utils.test(arch=ti.vulkan)
+def test_ndarray_64bit_fill_partial_last_copy():
+    for n in (1, 128, 129, 128 * 33 + 1, (1 << 20) + 1):
+        arr = ti.ndarray(ti.u64, shape=n)
+        for bits in (np.uint64(0x89ABCDEF01234567), np.uint64(0x8765432187654321)):
+            arr.fill(bits)
+            assert np.all(arr.to_numpy() == bits)
 
 
 @test_utils.test(arch=[ti.cpu, ti.cuda, ti.vulkan], exclude=[(ti.vulkan, "Darwin")])

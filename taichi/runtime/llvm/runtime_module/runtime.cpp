@@ -1712,6 +1712,16 @@ void runtime_initialize_rand_states_cuda(LLVMRuntime *runtime,
   initialize_rand_state(&runtime->rand_states[i], starting_rand_state + i);
 }
 
+#if ARCH_cuda
+void runtime_fill_u64(uint64 *dst, uint64 count, uint64 bits) {
+  const uint64 stride = block_dim() * grid_dim();
+  for (uint64 i = block_idx() * block_dim() + thread_idx(); i < count;
+       i += stride) {
+    dst[i] = bits;
+  }
+}
+#endif
+
 void runtime_initialize_rand_states_serial(LLVMRuntime *runtime,
                                            int starting_rand_state) {
   for (int i = 0; i < runtime->num_rand_states; i++) {

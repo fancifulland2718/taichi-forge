@@ -3365,6 +3365,8 @@ void export_lang(py::module &m) {
              program->fill_ndarray_fast_u32(ndarray, val);
            },
            py::call_guard<py::gil_scoped_release>())
+      .def("fill_uint64", &Program::fill_ndarray_fast_u64,
+           py::call_guard<py::gil_scoped_release>())
       .def("copy_ndarray",
            [](Program *program, Ndarray *dst, Ndarray *src) {
              program->copy_ndarray_fast(dst, src);

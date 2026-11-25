@@ -601,6 +601,7 @@ class VulkanCommandList : public CommandList {
   void graphics_memory_barrier(bool before_renderpass) noexcept;
   void buffer_copy(DevicePtr dst, DevicePtr src, size_t size) noexcept final;
   void buffer_fill(DevicePtr ptr, size_t size, uint32_t data) noexcept final;
+  void buffer_fill_u64(DeviceAllocation dst, size_t count, uint64_t bits) noexcept;
   void push_constants(const void *data, uint32_t size) noexcept;
   RhiResult dispatch(uint32_t x, uint32_t y = 1, uint32_t z = 1) noexcept final;
   RhiResult dispatch_indirect(DevicePtr indirect) noexcept final;
