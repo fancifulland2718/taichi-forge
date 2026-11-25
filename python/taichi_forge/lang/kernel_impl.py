@@ -2050,10 +2050,7 @@ class Kernel:
                     # Purpose: DO NOT GC |tmp|!
                     tmps.append(tmp)
 
-                    def callback(original, updated):
-                        np.copyto(original, np.asfortranarray(updated))
-
-                    callbacks.append(functools.partial(callback, v, tmp))
+                    callbacks.append(functools.partial(np.copyto, v, tmp))
                     launch_ctx.set_arg_external_array_with_shape(
                         indices, int(tmp.ctypes.data), tmp.nbytes, array_shape, 0
                     )
