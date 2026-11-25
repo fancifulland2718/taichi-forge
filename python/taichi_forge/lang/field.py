@@ -604,7 +604,7 @@ class ScalarField(Field):
             return False
         return True
 
-    def _try_native_dense_to_numpy(self, arr):
+    def _try_native_dense_to_numpy(self, arr, *, sync_before=True):
         if not hasattr(arr, "flags") or not arr.flags.c_contiguous:
             return False
 
@@ -627,7 +627,7 @@ class ScalarField(Field):
         if method is None:
             return False
         impl.get_runtime().materialize()
-        if _dense_native_bulk_host_copy_needs_sync():
+        if sync_before and _dense_native_bulk_host_copy_needs_sync():
             impl.get_runtime().sync()
         try:
             method(prog, self.snode.ptr, arr, value_type, int(arr.size))

@@ -1513,17 +1513,16 @@ class MatrixField(Field):
             return False
         if self._try_native_dense_packed_to_numpy(arr, as_vector):
             return True
-        shape = tuple(self.shape)
-        for i in range(self.n):
-            js = (0,) if as_vector else range(self.m)
-            for j in js:
-                tmp = np.empty(shape, dtype=arr.dtype)
-                if not self.get_scalar_field(i, j)._try_native_dense_to_numpy(tmp):
-                    return False
-                if as_vector:
-                    arr[..., i] = tmp
-                else:
-                    arr[..., i, j] = tmp
+        tmp = np.empty(self.shape, dtype=arr.dtype)
+        for lane, (i, j) in enumerate(self._native_dense_component_indices(as_vector)):
+            # The first component waits for the producer. Each native host read
+            # completes before returning, so its temporary can serve the next lane.
+            if not self.get_scalar_field(i, j)._try_native_dense_to_numpy(tmp, sync_before=lane == 0):
+                return False
+            if as_vector:
+                arr[..., i] = tmp
+            else:
+                arr[..., i, j] = tmp
         return True
 
     def _try_native_dense_packed_to_numpy(self, arr, as_vector):
