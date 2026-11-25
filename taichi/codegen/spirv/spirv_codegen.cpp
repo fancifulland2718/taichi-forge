@@ -5116,10 +5116,7 @@ class TaskCodegen : public IRVisitor {
                                    spv::MemorySemanticsAcquireReleaseMask));
       val = ir_->const_i32_zero_;
     } else if (stmt->func_name == "subgroupElect") {
-      val = ir_->make_value(
-          spv::OpGroupNonUniformElect, ir_->bool_type(),
-          ir_->int_immediate_number(ir_->i32_type(), spv::ScopeSubgroup));
-      val = ir_->cast(ir_->i32_type(), val);
+      val = ir_->cast(ir_->i32_type(), ir_->subgroup_elect());
     } else if (stmt->func_name == "subgroupBarrier") {
       ir_->make_inst(
           spv::OpControlBarrier,
@@ -5148,7 +5145,6 @@ class TaskCodegen : public IRVisitor {
                inclusive_scan_ops.find(stmt->func_name) !=
                    inclusive_scan_ops.end()) {
       auto arg = ir_->query_value(stmt->args[0]->raw_name());
-      auto stype = ir_->get_primitive_type(stmt->args[0]->ret_type);
       spv::Op spv_op;
 
       if (ends_with(stmt->func_name, "Add")) {
@@ -5198,10 +5194,7 @@ class TaskCodegen : public IRVisitor {
               ? spv::GroupOperationReduce
               : spv::GroupOperationInclusiveScan;
 
-      val = ir_->make_value(
-          spv_op, stype,
-          ir_->int_immediate_number(ir_->i32_type(), spv::ScopeSubgroup),
-          group_op, arg);
+      val = ir_->subgroup_arithmetic(spv_op, group_op, arg);
     } else if (shuffle_ops.find(stmt->func_name) != shuffle_ops.end()) {
       const auto dtype = stmt->args[0]->ret_type;
       TI_ERROR_IF(dtype != PrimitiveType::i32 && dtype != PrimitiveType::u32 &&
@@ -5231,6 +5224,51 @@ class TaskCodegen : public IRVisitor {
                 "Internal operation '{}' is not implemented by SPIR-V codegen.",
                 stmt->func_name);
     ir_->register_value(stmt->raw_name(), val);
+  }
+
+  bool can_group_scalar_minmax(AtomicOpStmt *stmt) {
+    // The size floor keeps short kernels on the original path. Only consider
+    // statically large dense launches that would otherwise use software CAS.
+    constexpr int64_t min_iterations = 65536;
+    if (arch_ != Arch::vulkan ||
+        task_ir_->task_type != OffloadedTaskType::range_for ||
+        !task_ir_->const_begin || !task_ir_->const_end ||
+        int64_t(task_ir_->end_value) - task_ir_->begin_value < min_iterations ||
+        task_attribs_.advisory_num_threads_per_group < 32 ||
+        !caps_->get(DeviceCapability::spirv_has_subgroup_arithmetic) ||
+        !caps_->get(DeviceCapability::spirv_has_subgroup_basic) ||
+        caps_->get(DeviceCapability::spirv_version) < 0x10300 ||
+        stmt->parent != task_ir_->body.get())
+      return false;
+    auto *dest = stmt->dest->cast<GetChStmt>();
+    if (!dest || !dest->output_snode->is_scalar())
+      return false;
+
+    if (!scalar_reduction_checked_) {
+      scalar_reduction_checked_ = true;
+      // Check nested control flow too. It may compute the input locally, but
+      // it must not observe the destination or the old value of the atomic.
+      const bool interferes = irpass::analysis::any_statement(
+          task_ir_->body.get(), [&](Stmt *item) {
+            if (item == stmt)
+              return false;
+            if (item->is<AtomicOpStmt>() || item->is<FuncCallStmt>() ||
+                item->is<ExternalFuncCallStmt>())
+              return true;
+            for (int i = 0; i < item->num_operands(); ++i) {
+              auto *operand = item->operand(i);
+              auto *field = operand ? operand->cast<GetChStmt>() : nullptr;
+              if (operand == stmt ||
+                  (field && field->output_snode == dest->output_snode))
+                return true;
+            }
+            return false;
+          });
+      if (interferes)
+        return false;
+      scalar_reduction_ = stmt;
+    }
+    return scalar_reduction_ == stmt;
   }
 
   void visit(AtomicOpStmt *stmt) override {
@@ -5341,6 +5379,15 @@ class TaskCodegen : public IRVisitor {
                      : at_buffer(stmt->dest, ir_->get_taichi_uint_type(dt));
     } else {
       addr_ptr = dest_is_ptr ? dest_val : at_buffer(stmt->dest, dt);
+    }
+
+    if (!use_native_float_atomic && !use_subgroup_reduction &&
+        dt == PrimitiveType::f32 &&
+        (stmt->op_type == AtomicOpType::min ||
+         stmt->op_type == AtomicOpType::max) &&
+        can_group_scalar_minmax(stmt)) {
+      ir_->subgroup_atomic_float_minmax(stmt->op_type, addr_ptr, data);
+      return;  // The analysis proved the old value is unused.
     }
 
     auto ret_type = ir_->get_primitive_type(dt);
@@ -8092,6 +8139,8 @@ class TaskCodegen : public IRVisitor {
       */
 
   OffloadedStmt *const task_ir_;  // not owned
+  bool scalar_reduction_checked_{false};
+  AtomicOpStmt *scalar_reduction_{nullptr};
   const std::vector<CompiledSNodeStructs> &compiled_structs_;
   const std::unordered_map<int, int> &snode_to_root_;
   const ShaderBodyPlans &body_plans_;

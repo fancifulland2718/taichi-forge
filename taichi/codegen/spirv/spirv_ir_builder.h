@@ -695,6 +695,9 @@ class IRBuilder {
   Value rand_u32(Value global_tmp_);
   Value rand_f32(Value global_tmp_, int significand_bits = 24);
   Value rand_i32(Value global_tmp_);
+  Value subgroup_elect();
+  Value subgroup_arithmetic(spv::Op op, spv::GroupOperation group, Value value);
+  void subgroup_atomic_float_minmax(AtomicOpType op, Value addr, Value data);
   Value subgroup_shuffle(spv::Op op, Value value, Value index);
 
  private:

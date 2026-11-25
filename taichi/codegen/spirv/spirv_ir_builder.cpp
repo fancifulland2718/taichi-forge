@@ -150,6 +150,7 @@ void IRBuilder::init_header() {
   // OpGroupNonUniformElect / OpGroupNonUniformBroadcast paths also need
   // GroupNonUniform; declaring it here is forward-compatible).
   if (caps_->get(cap::spirv_has_subgroup_ballot)) {
+    dynamic_capabilities_.insert(spv::CapabilityGroupNonUniform);
     ib_.begin(spv::OpCapability)
         .add(spv::CapabilityGroupNonUniform)
         .commit(&header_);
@@ -240,6 +241,99 @@ void IRBuilder::init_header() {
   extension_end_ = header_.size();
 
   this->init_pre_defs();
+}
+
+Value IRBuilder::subgroup_elect() {
+  TI_ERROR_IF(!caps_->get(cap::spirv_has_subgroup_basic),
+              "Subgroup election requires subgroup basic operations");
+  declare_capability(spv::CapabilityGroupNonUniform);
+  return make_value(spv::OpGroupNonUniformElect, bool_type(),
+                    uint_immediate_number(u32_type(), spv::ScopeSubgroup));
+}
+
+Value IRBuilder::subgroup_arithmetic(spv::Op op,
+                                     spv::GroupOperation group,
+                                     Value value) {
+  TI_ERROR_IF(!caps_->get(cap::spirv_has_subgroup_arithmetic),
+              "Subgroup arithmetic requires subgroup arithmetic support");
+  declare_capability(spv::CapabilityGroupNonUniformArithmetic);
+  return make_value(op, value.stype,
+                    uint_immediate_number(u32_type(), spv::ScopeSubgroup),
+                    group, value);
+}
+
+void IRBuilder::subgroup_atomic_float_minmax(AtomicOpType op,
+                                             Value addr,
+                                             Value data) {
+  // FMin/FMax have a unique, bit-exact winner among finite normal inputs.
+  // An infinity sentinel forces the whole subgroup onto the per-lane path
+  // if any input is a signed zero, denormal, infinity or NaN.
+  const bool minimum = op == AtomicOpType::min;
+  TI_ASSERT(minimum || op == AtomicOpType::max);
+  const auto u32 = u32_type();
+  const auto zero = uint_immediate_number(u32, 0);
+  const auto one = uint_immediate_number(u32, 1);
+  const auto invalid =
+      uint_immediate_number(u32, minimum ? 0xff800000u : 0x7f800000u);
+  const auto normal = [&](Value bits) {
+    auto magnitude = make_value(spv::OpBitwiseAnd, u32, bits,
+                                uint_immediate_number(u32, 0x7fffffffu));
+    return logical_and(ge(magnitude, uint_immediate_number(u32, 0x00800000u)),
+                       le(magnitude, uint_immediate_number(u32, 0x7f7fffffu)));
+  };
+  auto bits = make_value(spv::OpBitcast, u32, data);
+  auto input = select(normal(bits), bits, invalid);
+  auto winner = subgroup_arithmetic(
+      minimum ? spv::OpGroupNonUniformFMin : spv::OpGroupNonUniformFMax,
+      spv::GroupOperationReduce, make_value(spv::OpBitcast, data.stype, input));
+  auto candidate = make_value(spv::OpBitcast, u32, winner);
+
+  auto attempt = new_label();
+  auto join = new_label();
+  auto entry = current_label();
+  auto leader = logical_and(subgroup_elect(), ne(candidate, invalid));
+  make_inst(spv::OpSelectionMerge, join, spv::SelectionControlMaskNone);
+  make_inst(spv::OpBranchConditional, leader, attempt, join);
+  start_label(attempt);
+  auto old =
+      make_value(spv::OpAtomicLoad, u32, addr, const_i32_one_, const_i32_zero_);
+  auto valid = normal(old);
+  auto value = make_value(spv::OpBitcast, data.stype, old);
+  auto better = minimum ? lt(winner, value) : gt(winner, value);
+  // A dominated update completes at the atomic load. Only a possible
+  // improvement of a normal destination needs to contend on the CAS.
+  auto update = new_label();
+  auto resolved = new_label();
+  auto needs_update = logical_and(valid, better);
+  auto unchanged = select(valid, one, zero);
+  make_inst(spv::OpSelectionMerge, resolved, spv::SelectionControlMaskNone);
+  make_inst(spv::OpBranchConditional, needs_update, update, resolved);
+  start_label(update);
+  auto seen =
+      make_value(spv::OpAtomicCompareExchange, u32, addr, const_i32_one_,
+                 const_i32_zero_, const_i32_zero_, candidate, old);
+  auto success = select(eq(seen, old), one, zero);
+  make_inst(spv::OpBranch, resolved);
+  start_label(resolved);
+  auto result = make_phi(u32, 2);
+  result.set_incoming(0, unchanged, attempt);
+  result.set_incoming(1, success, update);
+  make_inst(spv::OpBranch, join);
+  start_label(join);
+  auto vote = make_phi(u32, 2);
+  vote.set_incoming(0, zero, entry);
+  vote.set_incoming(1, result, resolved);
+  auto committed = subgroup_arithmetic(spv::OpGroupNonUniformUMax,
+                                       spv::GroupOperationReduce, vote);
+  auto fallback = new_label();
+  auto done = new_label();
+  auto retry = eq(committed, zero);
+  make_inst(spv::OpSelectionMerge, done, spv::SelectionControlMaskNone);
+  make_inst(spv::OpBranchConditional, retry, fallback, done);
+  start_label(fallback);
+  float_atomic(op, addr, data, PrimitiveType::f32);
+  make_inst(spv::OpBranch, done);
+  start_label(done);
 }
 
 Value IRBuilder::subgroup_shuffle(spv::Op op, Value value, Value index) {

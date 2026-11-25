@@ -40,6 +40,16 @@ switch. Combined with `fast`, it retains fast LLVM levels and skips the external
 SPIR-V optimizer on Vulkan, so it is not equivalent to `balanced`. An explicit
 `advanced_optimization=False` remains effective with `balanced` or `full`.
 
+All tiers, including the default `fast`, use the device's native Vulkan buffer
+atomic min/max for `f32` when available. On devices with subgroup arithmetic
+that need a software atomic, Forge can combine updates to one scalar field
+within each subgroup. This applies to a fixed range of at least 65,536
+iterations and a workgroup of at least 32 threads, when the atomic is
+unconditional, its old value is unused, and the task has no other atomic or
+access to the target. It needs one dispatch and no temporary buffer.
+Exceptional inputs or destinations use the per-lane operation, preserving the
+device's handling of signed zeros, subnormals, infinities and NaNs.
+
 In the current CPU backend, `full` with advanced IR optimization also hoists
 top-level scalar arguments passed by value out of inner loops. This lets the
 compiler move dependent invariant expressions, such as the sine and cosine of
