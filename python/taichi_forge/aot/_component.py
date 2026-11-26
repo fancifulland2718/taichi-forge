@@ -47,10 +47,11 @@ _STATELESS_OWNER = object()
 class _DefinitionMissingResource(ValueError):
     """A package selection omits an input required on its reached branch."""
 
-    def __init__(self, name, capture):
+    def __init__(self, name, capture, *, materialized=True):
         super().__init__(f"Numerical entry requires resource {name!r}")
         self.static = dict(capture.static)
         self.objects = dict(capture.objects)
+        self.materialized = materialized
 
 
 def _digest(value):
@@ -1944,6 +1945,8 @@ class Component:
                     kernel._component_candidates.append(code)
                     index.add(code)
                     return code
+                compilation.capture_cache.reject_if_missing(
+                    compilation.capture_scope, self, owner, kernel, signature, resource_templates, layouts)
             context = _Capture(self, owner, kernel, signature, entry_path)
             # No self identity or runtime value enters the template mapper.
             key = (kernel.func, "component_" + str(len(kernel._component_candidates)), kernel.autodiff_mode)
@@ -1953,6 +1956,8 @@ class Component:
                 )
             except Exception as error:
                 if context.missing_resource is not None:
+                    if compilation is not None and compilation.capture_scope is not None:
+                        compilation.capture_cache.remember_missing(compilation.capture_scope, context)
                     raise _DefinitionMissingResource(context.missing_resource, context) from error
                 raise
             code = _ComponentCode(kernel, key, context)

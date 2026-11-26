@@ -12993,6 +12993,108 @@ class Model:
             missing.graph().bind({})
 
 
+@test_utils.test(arch=ti.cpu, offline_cache=True)
+def test_package_incremental_reuses_only_current_missing_resource(tmp_path, monkeypatch):
+    import gc
+    import weakref
+    from taichi_forge.aot._component import _DefinitionMissingResource
+    from taichi_forge.aot._package_compilation import PackageCompilation
+
+    ti.lang.impl.current_cfg().offline_cache_file_path = str(tmp_path / "native")
+    source = """import taichi_forge as ti
+@ti.data_oriented
+class Model:
+    def __init__(self, enabled: bool, passes: int):
+        self.enabled = enabled
+        self.passes = passes
+        s = ti.experimental.ResourceScope(self)
+        s.static('enabled', choices=(False, True))
+        s.static('passes', choices=(0, 1))
+        s.output = s.field(ti.i32, shape=())
+        s.workspace = s.field(ti.i32, shape=()) if self.enabled else None
+    @ti.func
+    def value(self):
+        result = 11
+        for _ in ti.static(range(self.passes)):
+            result = self.workspace[None] + 3
+        return result
+    @ti.kernel
+    def step(self):
+        self.output[None] = self.value()
+"""
+    cache = tmp_path / "cache"
+    discarded = []
+    retire = PackageCompilation.discard_capture
+
+    def record(compilation, kernel):
+        discarded.append(kernel.func.__qualname__)
+        return retire(compilation, kernel)
+
+    monkeypatch.setattr(PackageCompilation, "discard_capture", record)
+
+    def build(label, text):
+        root = tmp_path / label
+        root.mkdir()
+        package = _source_package(root, monkeypatch, text)
+        discarded.clear()
+        output = root / "sdk"
+        ti.aot.export_package(package.model, output, artifact_format="bc", build_cache=cache)
+        return output
+
+    build("seed", source)
+    assert discarded
+    index = cache / "latest.json"
+    saved = index.read_bytes()
+    restored = []
+    initialize = _DefinitionMissingResource.__init__
+    collect = gc.collect
+
+    def track(error, *args, **kwargs):
+        initialize(error, *args, **kwargs)
+        if not error.materialized:
+            restored.append(weakref.ref(error))
+
+    def check_before_collection(*args):
+        # A cached rejection must release its traceback and owner as soon as
+        # the explorer handles it, even with producer cyclic GC suspended.
+        assert all(ref() is None for ref in restored)
+        return collect(*args)
+
+    with monkeypatch.context() as capture:
+        capture.setattr(_DefinitionMissingResource, "__init__", track)
+        capture.setattr(gc, "collect", check_before_collection)
+        warm = build("warm", source)
+    assert restored and not discarded
+    with Runtime("cpu") as runtime, load_package(runtime, warm) as sdk:
+        model = sdk.host.Model(True, 1)
+        model.step()
+        assert model.output[None] == 3
+        bypassed = sdk.host.Model(False, 0)
+        bypassed.step()
+        assert bypassed.output[None] == 11
+        with pytest.raises(ValueError, match="configuration|variant|selection"):
+            sdk.host.Model(False, 1).step()
+
+    damaged = json.loads(saved)
+    for bucket in damaged["rejections"].values():
+        for receipt in bucket.values():
+            receipt["object"] = ""
+    index.write_text(json.dumps(damaged), encoding="utf8")
+    build("damaged", source)
+    assert discarded
+
+    for label, original, replacement, expected in (
+        ("helper_edit", "self.workspace[None] + 3", "7", 7),
+        ("storage_edit", " if self.enabled else None", "", 3),
+    ):
+        index.write_bytes(saved)
+        out = build(label, source.replace(original, replacement))
+        with Runtime("cpu") as runtime, load_package(runtime, out) as sdk:
+            model = sdk.host.Model(False, 1)
+            model.step()
+            assert model.output[None] == expected
+
+
 def _optional_record_source():
     source = RECORD_RESOURCES_SOURCE.replace(
         "record = scope.record('layout', layout)",

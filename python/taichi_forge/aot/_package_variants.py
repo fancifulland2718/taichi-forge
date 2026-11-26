@@ -132,7 +132,7 @@ def compile_static_variants(environment, entry, arguments, owner, schema, *, tem
                 # Do not keep the traceback/capture/IR graph while visiting
                 # neighboring selections. Only these facts affect coverage.
                 code = SimpleNamespace(static=dict(missing.static), objects=dict(missing.objects))
-                discarded = True
+                discarded = missing.materialized
                 if rejected is not None:
                     # A layout fixed by the outer explorer may be inadmissible
                     # while another layout provides this required resource.

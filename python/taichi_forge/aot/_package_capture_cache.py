@@ -4,7 +4,7 @@ import ast
 import inspect
 import json
 import sys
-from types import ModuleType
+from types import ModuleType, SimpleNamespace
 
 from taichi_forge.lang._build_cache import value_digest
 from taichi_forge.lang.matrix import MatrixType
@@ -264,32 +264,51 @@ def _source_facts(kernel, code, memo, component, owner, *, portable=False):
 
 # These maps contain strings, numbers and tuple-valued capture facts. Preserve
 # insertion order: an outer presence guard must precede a conditional member.
-_MAPS = ("used", "capture_paths", "capture_source_paths", "static", "objects", "resource_conditions",
+_MAPS = ("used", "static", "objects", "resource_conditions",
          "record_field_keys", "owner_sequence_lengths", "methods", "method_paths", "groups", "member_paths",
          "resource_templates")
 _LEXICAL_MAPS = ("functions", "constants", "struct_types")
 
 
-def freeze(code, memo, component, owner, *, portable):
+def _freeze_inputs(code, memo, component, owner, portable):
     if code.fixed_groups or code.lexical:
         raise Unavailable("physical storage or lexical binding")
-    # Portable loop widths are expressions over the captured arguments. The
-    # LLVM unit and entry contract retain them until the consumer binds them.
-    if not portable and code.contract.get("model_blocks"):
-        raise Unavailable("target-specific model block")
     maps = {name: list(getattr(code, name).items()) for name in _MAPS}
+    maps["capture_paths"] = [(name, component._paths[name]) for name in code.used]
     for name in _LEXICAL_MAPS:
         maps[name] = [(fn.__module__, fn.__qualname__, key, val)
                       for (fn, key), val in getattr(code, name).items()]
     return dict(maps=maps, sources=_source_facts(code.kernel, code, memo, component, owner, portable=portable),
-                signature=code.call_signature, dynamic=code.dynamic, entry=code.entry_definition,
+                entry=code.entry_definition,
                 equalities=sorted(code.record_equalities), templates=sorted(code.static_templates))
 
 
-def thaw(facts, kernel, key, entry):
-    code = _ComponentCode.__new__(_ComponentCode)
-    code.kernel, code.runtime, code.key = kernel, kernel.runtime, key
-    for name in _MAPS:
+def freeze(code, memo, component, owner, *, portable):
+    if not portable and code.contract.get("model_blocks"):
+        raise Unavailable("target-specific model block")
+    facts = _freeze_inputs(code, memo, component, owner, portable)
+    facts["maps"]["capture_source_paths"] = list(code.capture_source_paths.items())
+    return dict(facts, signature=code.call_signature, dynamic=code.dynamic)
+
+
+def freeze_missing(context, memo, *, portable):
+    from ._component import _used_template_signature
+
+    # The prefix has no completed kernel or workspace ABI. Only replay it when
+    # the ordinary dependency matcher covers everything observed before failure.
+    if context.workspaces or context.model_blocks or context.model_static_ranges or context.shared_arrays:
+        raise Unavailable("task-local lowering")
+    component = context.component
+    facts = _freeze_inputs(context, memo, component, context.owner, portable)
+    facts["signature"] = _used_template_signature(context.call_signature, context.static_templates)
+    contract = dict(declaration_sources={name: component._sources[name] for name in context.used
+                                         if name in component._sources}, dense_access=list(context.dense_access.items()))
+    return facts, contract
+
+
+def _restore_inputs(code, facts, kernel):
+    code.kernel = kernel
+    for name in (*_MAPS, "capture_paths"):
         setattr(code, name, {_tuples(k): _tuples(v) for k, v in facts["maps"][name]})
     def lexical_owner(module, qualified):
         if (module, qualified) == (kernel.func.__module__, kernel.func.__qualname__):
@@ -301,14 +320,28 @@ def thaw(facts, kernel, key, entry):
                              for module, qualified, k, v in facts["maps"][name]})
     code.call_signature = _tuples(facts["signature"])
     code.entry_definition = _tuples(facts["entry"])
-    code.dynamic = tuple(facts["dynamic"])
     code.record_equalities = frozenset(map(_tuples, facts["equalities"]))
     code.static_templates = frozenset(map(_tuples, facts["templates"]))
+    for name in ("fixed_groups", "fixed_dependencies", "fixed_members", "lexical"):
+        setattr(code, name, {})
+
+
+def thaw_missing(facts, kernel):
+    observed = SimpleNamespace()
+    _restore_inputs(observed, facts, kernel)
+    return observed
+
+
+def thaw(facts, kernel, key, entry):
+    code = _ComponentCode.__new__(_ComponentCode)
+    _restore_inputs(code, facts, kernel)
+    code.runtime, code.key = kernel.runtime, key
+    code.capture_source_paths = {name: _tuples(path) for name, path in facts["maps"]["capture_source_paths"]}
+    code.dynamic = tuple(facts["dynamic"])
     contract = entry["contract"]
     code.model_static_ranges = tuple(map(_tuples, contract.get("model_static_ranges", ())))
     code.workspaces = contract.get("local_tensor_workspaces", {})
-    for name in ("_function_states", "fixed_groups", "fixed_dependencies", "fixed_members", "lexical"):
-        setattr(code, name, {})
+    code._function_states = {}
     code.semantic_key = entry["semantic_key"]
     code._contract = json.dumps(contract)
     return code
@@ -326,14 +359,14 @@ def matches_variant(variant, signature, resources, layouts):
 
 def matches(code, facts, contract, memo, component, owner, signature, resources, layouts, *, portable=False,
             allocation_updates=None):
-    from ._component import _extent_invariant_compact_member, _used_template_signature
+    from ._component import _Capture, _extent_invariant_compact_member, _used_template_signature
 
     if (code.call_signature != _used_template_signature(signature, code.static_templates)
             or any(resources.get(slot) != name for slot, name in code.resource_templates.items())
             or any(component._paths.get(name) != path for name, path in code.capture_paths.items())
             or not layouts.matches_static(code)
-            or code.dependency_mismatch(component, owner, layouts=layouts,
-                                        allocation_updates=allocation_updates) is not None):
+            or _Capture.dependency_mismatch(code, component, owner, layouts=layouts,
+                                            allocation_updates=allocation_updates) is not None):
         return False
     if facts["sources"] != _source_facts(code.kernel, code, memo, component, owner, portable=portable):
         return False

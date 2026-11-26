@@ -268,6 +268,7 @@ class PackageBuildCache:
         self.modules = modules
         self.objects = {}
         self.captures = {}
+        self.rejections = {}
         self.method_inputs = {}
         self.syntax_records = {}
         self.capture_syntax = {}
@@ -432,6 +433,64 @@ class PackageBuildCache:
             scope.key, symbol, native, module._component_entries[symbol], facts)
 
     @staticmethod
+    def _variant(facts):
+        return (facts["templates"], facts["signature"], facts["maps"]["resource_templates"], facts["maps"]["static"])
+
+    def remember_missing(self, scope, context):
+        from taichi_forge.lang.exception import TaichiCompilationError
+        from ._package_capture_cache import freeze_missing
+
+        try:
+            facts, contract = freeze_missing(context, self.capture_syntax,
+                                            portable=self.build_settings["artifact_format"] == "unified-bc-library")
+            facts["field_inputs"] = scope.field_inputs(context)
+            payload = json.dumps((context.missing_resource, facts, contract), separators=(",", ":")).encode("utf8")
+            compressed = zlib.compress(payload, 1)
+        except (KeyError, AttributeError, OSError, ValueError, TypeError, TaichiCompilationError):
+            return
+        digest = _capture_digest(scope.key, "missing", compressed)
+        self.rejections.setdefault(scope.key, {})[digest] = dict(
+            object=base64.b64encode(compressed).decode("ascii"), variant=self._variant(facts))
+
+    def reject_if_missing(self, scope, component, owner, kernel, signature, resources, layouts):
+        from taichi_forge.lang.exception import TaichiCompilationError
+        from ._component import _DefinitionMissingResource
+        from ._package_capture_cache import matches, matches_variant, thaw_missing
+
+        history = self.previous.get("rejections")
+        records = history.get(scope.key) if isinstance(history, dict) else None
+        if not isinstance(records, dict):
+            return
+        for digest, record in records.items():
+            try:
+                if not matches_variant(record["variant"], signature, resources, layouts):
+                    continue
+                compressed = base64.b64decode(record["object"], validate=True)
+                if digest != _capture_digest(scope.key, "missing", compressed):
+                    continue
+                name, facts, contract = json.loads(zlib.decompress(compressed))
+                observed = thaw_missing(facts, kernel)
+                if facts["field_inputs"] != scope.field_inputs(observed) or not matches(
+                    observed, facts, contract, self.capture_syntax, component, owner, signature, resources, layouts,
+                    portable=self.build_settings["artifact_format"] == "unified-bc-library",
+                ):
+                    continue
+                # Recheck the actual reason independently of the variant hint.
+                # Conditional fields can have a non-null producer layout witness.
+                declaration = component.declarations[name]
+                if observed.objects.get(name) is not False and not any(
+                    observed.static.get(guard) == ("bool", not expected) or observed.objects.get(guard) is (not expected)
+                    for guard, expected in getattr(declaration, "conditions", ())
+                ):
+                    continue
+            except (KeyError, AttributeError, OSError, ValueError, TypeError, zlib.error, TaichiCompilationError):
+                continue
+            self.rejections.setdefault(scope.key, {})[digest] = record
+            # A local holding the raised exception would keep its own traceback
+            # and the producer owner alive while automatic GC is disabled.
+            raise _DefinitionMissingResource(name, observed, materialized=False)
+
+    @staticmethod
     def _capture_record(scope_key, symbol, native, entry, facts):
         payload = json.dumps((native, entry, facts), separators=(",", ":"))
         # Per-object compression leaves unrelated owners opaque during lookup
@@ -439,8 +498,7 @@ class PackageBuildCache:
         compressed = zlib.compress(payload.encode("utf8"), 1)
         return dict(object=base64.b64encode(compressed).decode("ascii"),
                     digest=_capture_digest(scope_key, symbol, compressed),
-                    variant=(facts["templates"], facts["signature"], facts["maps"]["resource_templates"],
-                             facts["maps"]["static"]))
+                    variant=PackageBuildCache._variant(facts))
 
     def restore_capture(self, compilation, component, owner, kernel, signature, resources, layouts):
         from taichi_forge.lang.exception import TaichiCompilationError
@@ -647,5 +705,5 @@ class PackageBuildCache:
         """Independent capture inputs. A unified projection has no standalone package."""
         return dict(version=1, key=self.identity.key if self.identity else None,
                     inputs=dict(self.identity.inputs) if self.identity else {}, toolchain_files=self.toolchain_files,
-                    objects=self.objects, captures=self.captures, method_inputs=self.method_inputs,
+                    objects=self.objects, captures=self.captures, rejections=self.rejections, method_inputs=self.method_inputs,
                     module_syntax=self.syntax_records)
