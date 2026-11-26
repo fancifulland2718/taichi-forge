@@ -18524,6 +18524,36 @@ class Model:
 """
 
 
+@test_utils.test(arch=ti.cpu, offline_cache=False)
+def test_unified_incremental_factory_rebuilds_only_edited_branch(tmp_path, monkeypatch):
+    from taichi_forge_runtime.aot import load_package
+
+    path = tmp_path / "factory_edits.py"
+    monkeypatch.syspath_prepend(str(tmp_path))
+    cache = tmp_path / "cache"
+    edited = TEMPLATE_FACTORY_SOURCE.replace("self._write(-gain)", "self._write(-2 * gain)")
+    for label, source, hits, result in (("seed", TEMPLATE_FACTORY_SOURCE, 0, -3),
+                                         ("repeat", TEMPLATE_FACTORY_SOURCE, 3, -3),
+                                         ("changed", edited, 2, -6), ("clean", edited, 0, -6)):
+        path.write_text(source, encoding="utf8")
+        module = importlib.import_module(path.stem)
+        output = tmp_path / label
+        if label == "clean":
+            cache = tmp_path / "fresh-cache"
+        try:
+            ti.aot.export_package(module, output, arch=ti.cpu, artifact_format="unified-bc-library", build_cache=cache)
+        finally:
+            sys.modules.pop(path.stem)
+        counts = json.loads((cache / "unified/latest.json").read_bytes())["produce"]
+        assert counts["unified_capture_restores"] == hits
+        with ti.aot.borrow_runtime() as runtime, load_package(runtime, output) as package:
+            model = package.host.Model(3, 0.)
+            model.negative(self=model, gain=3.)
+            np.testing.assert_array_equal(model.values.to_numpy(), np.arange(3) + result)
+    for name in ("code.tcm", "package.json"):
+        assert (tmp_path / "changed" / name).read_bytes() == (tmp_path / "clean" / name).read_bytes()
+
+
 @test_utils.test(arch=[ti.cpu, ti.cuda, ti.vulkan], offline_cache=False)
 def test_package_template_factory_keeps_shared_code_and_instance_bindings(tmp_path, monkeypatch):
     package = _source_package(tmp_path, monkeypatch, TEMPLATE_FACTORY_SOURCE)

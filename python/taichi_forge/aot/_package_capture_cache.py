@@ -218,11 +218,13 @@ def _syntax(definition, memo, portable=False):
 
 
 def _source_facts(kernel, code, memo, component, owner, *, portable=False):
-    refs = {(kernel.func.__module__, kernel.func.__qualname__)}
+    root = kernel.func.__module__, kernel.func.__qualname__
+    factory_entry = getattr(kernel, "_package_factory_entry", False)
+    refs = {root}
     refs.update(definition[:2] for definition in (*code.functions.values(), *code.methods.values()))
     for mapping in (code.functions, code.constants, code.struct_types):
         for fn, _ in mapping:
-            if _body(_callable(fn.__module__, fn.__qualname__)) is not fn:
+            if not (factory_entry and fn is kernel.func) and _body(_callable(fn.__module__, fn.__qualname__)) is not fn:
                 raise Unavailable("noncanonical lexical owner")
             refs.add((fn.__module__, fn.__qualname__))
     for name, (module, qualified, _) in code.methods.items():
@@ -233,16 +235,20 @@ def _source_facts(kernel, code, memo, component, owner, *, portable=False):
             raise Unavailable("noncanonical receiver method")
     result = []
     for module, qualified in sorted(refs):
-        obj = _callable(module, qualified)
-        fn = _body(obj)
+        local_entry = factory_entry and (module, qualified) == root
+        if local_entry:
+            fn, wrapper = kernel.func, kernel
+        else:
+            obj = _callable(module, qualified)
+            fn = _body(obj)
+            wrapper = getattr(obj, "_primal", None) or getattr(obj, "func", None)
         if (fn.__module__, fn.__qualname__) != (module, qualified):
             raise Unavailable("rebound definition")
         if module.startswith("taichi_forge."):
             continue  # Covered by the producer toolchain fingerprint.
         if fn.__closure__ or fn.__globals__ is not vars(sys.modules[module]):
             raise Unavailable("non-module lexical environment")
-        wrapper = getattr(obj, "_primal", None) or getattr(obj, "func", None)
-        if wrapper is None or wrapper._definition.compiled is not None:
+        if wrapper is None or (not local_entry and wrapper._definition.compiled is not None):
             raise Unavailable("untracked callable")
         syntax, names = _syntax(wrapper._definition, memo, portable)
         bindings = [(name, _binding(fn.__globals__[name] if name in fn.__globals__ else fn.__builtins__[name]))
@@ -285,8 +291,13 @@ def thaw(facts, kernel, key, entry):
     code.kernel, code.runtime, code.key = kernel, kernel.runtime, key
     for name in _MAPS:
         setattr(code, name, {_tuples(k): _tuples(v) for k, v in facts["maps"][name]})
+    def lexical_owner(module, qualified):
+        if (module, qualified) == (kernel.func.__module__, kernel.func.__qualname__):
+            return kernel.func
+        return _body(_callable(module, qualified))
+
     for name in _LEXICAL_MAPS:
-        setattr(code, name, {(_body(_callable(module, qualified)), k): _tuples(v)
+        setattr(code, name, {(lexical_owner(module, qualified), k): _tuples(v)
                              for module, qualified, k, v in facts["maps"][name]})
     code.call_signature = _tuples(facts["signature"])
     code.entry_definition = _tuples(facts["entry"])

@@ -44,13 +44,20 @@ def _capture_declaration(item):
     return result
 
 
-def _declaration_json(value):
+def _declaration_digest(value):
     def syntax(node):
         if isinstance(node, ast.AST):
             return ast.dump(node)
         raise TypeError("Untracked producer declaration")
 
-    return json.dumps(value, sort_keys=True, default=syntax)
+    encoded = json.dumps(value, sort_keys=True, separators=(",", ":"), default=syntax)
+    return hashlib.sha256(encoded.encode("ascii")).hexdigest()
+
+
+def _capture_digest(scope_key, symbol, compressed):
+    digest = hashlib.sha256(scope_key.encode("ascii") + symbol.encode("ascii") + b"\0")
+    digest.update(compressed)
+    return digest.hexdigest()
 
 
 class _CaptureScope:
@@ -66,7 +73,7 @@ class _CaptureScope:
         for name in names:
             item, source = self.fields[name]
             inputs[name] = (_capture_declaration(item), source)
-        return value_digest(_declaration_json(inputs))
+        return _declaration_digest(inputs)
 
 
 def _scalar_kernel_inputs(kernel, modules):
@@ -368,7 +375,7 @@ class PackageBuildCache:
                 or environment._lexical_bindings):
             return None
         try:
-            if _body(_callable(fn.__module__, fn.__qualname__)) is not fn:
+            if not getattr(kernel, "_package_factory_entry", False) and _body(_callable(fn.__module__, fn.__qualname__)) is not fn:
                 return None
             if self.object_context is None:
                 self._compiler_inputs()
@@ -394,8 +401,8 @@ class PackageBuildCache:
                     fields[name] = (item, paths.pop(name, None))
                 else:
                     domain[name] = _capture_declaration(item)
-            key = value_digest((self.object_context, fn.__module__, fn.__qualname__, kernel.opt_level,
-                                _declaration_json(domain), environment._symbolic_dimensions, paths))
+            key = _declaration_digest((self.object_context, fn.__module__, fn.__qualname__, kernel.opt_level,
+                                       domain, environment._symbolic_dimensions, paths))
             return _CaptureScope(key, fields)
         except (TypeError, ValueError, AttributeError, _UntrackedInput):
             return None
@@ -424,9 +431,9 @@ class PackageBuildCache:
         payload = json.dumps((native, module._component_entries[symbol], facts), separators=(",", ":"))
         # Per-object compression leaves unrelated owners opaque during lookup
         # and preserves the original declaration traversal order on recovery.
-        packed = base64.b64encode(zlib.compress(payload.encode("utf8"), 1)).decode("ascii")
+        compressed = zlib.compress(payload.encode("utf8"), 1)
         self.captures.setdefault(scope.key, {})[symbol] = dict(
-            object=packed, digest=value_digest((scope.key, symbol, packed)))
+            object=base64.b64encode(compressed).decode("ascii"), digest=_capture_digest(scope.key, symbol, compressed))
 
     def restore_capture(self, compilation, component, owner, kernel, signature, resources, layouts):
         from taichi_forge.lang.exception import TaichiCompilationError
@@ -442,10 +449,10 @@ class PackageBuildCache:
             if symbol in module._exported_kernels:
                 continue
             try:
-                packed = record["object"]
-                if record["digest"] != value_digest((scope.key, symbol, packed)):
+                compressed = base64.b64decode(record["object"], validate=True)
+                if record["digest"] != _capture_digest(scope.key, symbol, compressed):
                     continue
-                native, entry, facts = json.loads(zlib.decompress(base64.b64decode(packed, validate=True)))
+                native, entry, facts = json.loads(zlib.decompress(compressed))
                 key = kernel.func, "component_" + str(len(kernel._component_candidates)), kernel.autodiff_mode
                 code = thaw(facts, kernel, key, entry)
                 if facts["field_inputs"] != scope.field_inputs(code):

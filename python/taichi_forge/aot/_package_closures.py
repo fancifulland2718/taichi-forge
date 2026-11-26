@@ -378,6 +378,10 @@ def materialize(recipe, call, owner, environment, kernels):
     kernel = kernels.get(key)
     if kernel is None:
         kernel = kernels[key] = ti.kernel(numerical, **options)
+        # This factory selected and bound the entry from its parsed definition.
+        # With no lexical inputs its current kernel supplies the root directly,
+        # even though its Python qualname cannot be traversed from the module.
+        kernel._primal._package_factory_entry = not code.co_freevars
     numerical = kernel._primal.func
     environment._lexical_bindings = MappingProxyType(
         {**environment._lexical_bindings, **{(numerical, name): binding for name, binding in bindings.items()}}
