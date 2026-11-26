@@ -14,6 +14,10 @@
     CACHE_VALUE(std::string("vulkan-independent-dense-grid-v1"));
   }
   CACHE_FIELD(external_optimization_level);
+  if ((config.arch == Arch::cuda || config.arch == Arch::vulkan) &&
+      config.opt_level > 0 && config.fast_math && !config.debug) {
+    CACHE_VALUE(std::string("gpu-dense-cell-accumulator-v1"));
+  }
   CACHE_FIELD(llvm_opt_level);
   CACHE_FIELD(llvm_aot_relocatable_roots);
   if (config.llvm_aot_relocatable_roots) {

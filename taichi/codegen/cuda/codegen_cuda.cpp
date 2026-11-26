@@ -445,6 +445,17 @@ class TaskCodeGenCUDA : public TaskCodeGenLLVM {
   }
 
   void visit(InternalFuncStmt *stmt) override {
+    if (stmt->func_name == "private_atomic_add_f32") {
+      // Match global atom.add.f32 rounding and denormal handling even when
+      // the contribution is a multiply and fast math allows contraction.
+      auto *f32 = llvm::Type::getFloatTy(*llvm_context);
+      auto *type = llvm::FunctionType::get(f32, {f32, f32}, false);
+      auto *add = llvm::InlineAsm::get(type, "add.rn.ftz.f32 $0, $1, $2;",
+                                       "=f,f,f", false);
+      llvm_val[stmt] = builder->CreateCall(
+          add, {llvm_val[stmt->args[0]], llvm_val[stmt->args[1]]});
+      return;
+    }
     if (stmt->func_name == "localInvocationId") {
       llvm_val[stmt] = call("thread_idx");
       return;

@@ -4909,7 +4909,11 @@ class TaskCodegen : public IRVisitor {
   void visit(InternalFuncStmt *stmt) override {
     spirv::Value val;
 
-    if (stmt->func_name == "vulkan_ray_query_closest" ||
+    if (stmt->func_name == "private_atomic_add_f32") {
+      val = ir_->add(ir_->query_value(stmt->args[0]->raw_name()),
+                     ir_->query_value(stmt->args[1]->raw_name()));
+      ir_->decorate(spv::OpDecorate, val, spv::DecorationNoContraction);
+    } else if (stmt->func_name == "vulkan_ray_query_closest" ||
         stmt->func_name == "vulkan_ray_query_initialize") {
       std::vector<spirv::Value> args;
       args.reserve(stmt->args.size() - 1);

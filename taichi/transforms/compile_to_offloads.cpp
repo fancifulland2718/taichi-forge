@@ -16,6 +16,7 @@
 #include "taichi/transforms/cpu_workgroup.h"
 #include "taichi/transforms/make_external_shared_staged.h"
 #include "taichi/transforms/parallelize_dense_grid.h"
+#include "taichi/transforms/promote_dense_loop_accumulator.h"
 #include "taichi/util/lang_util.h"
 
 // Keep the private M0 recipe in one reviewable unit while compiling it from
@@ -1009,6 +1010,17 @@ void offload_to_executable(IRNode *ir,
 
   {
     TI_COMPILE_PROFILER("cpp.ir.exec.demote_atomics.I");
+    if ((config.arch == Arch::cuda || config.arch == Arch::vulkan) &&
+        config.opt_level > 0 && config.fast_math && !config.debug) {
+      if (auto *block = ir->cast<Block>()) {
+        for (auto &stmt : block->statements) {
+          if (auto *task = stmt->cast<OffloadedStmt>())
+            promote_dense_loop_accumulator(task);
+        }
+      } else if (auto *task = ir->cast<OffloadedStmt>()) {
+        promote_dense_loop_accumulator(task);
+      }
+    }
     irpass::demote_atomics(ir, config);
   }
   print("Atomics demoted I");
