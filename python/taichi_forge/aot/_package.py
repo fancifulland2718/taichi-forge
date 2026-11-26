@@ -57,6 +57,30 @@ def _prepared_choices(schema, name):
     return resource["choices"] if resource.get("prepare_static") else None
 
 
+class _EntryResources:
+    """Index the parts of one resolved owner schema used by entry projection."""
+
+    def __init__(self, schema):
+        self.schema = schema
+        self.owners = {}
+        self.borrowed = {}
+        self.ports = {}
+        self.version = 0
+        for key, item in schema.items():
+            if item["kind"] in ("owner", "owner_input"):
+                self.owners[key] = item
+                if item.get("dynamic_input_record"):
+                    self.version = max(93, self.version)
+            elif item["kind"] == "borrowed_field":
+                self.borrowed[key] = item
+            if (item.get("optional_input") or item.get("external") or item.get("dynamic_input_storage")
+                    or item.get("dynamic_input_record") or item.get("dynamic_storage_condition")):
+                self.ports[key] = item
+            if item.get("nested_query_input"):
+                self.version = 94
+        self.owner_paths = {tuple(item.get("path", (key,))) for key, item in self.owners.items()}
+
+
 def _fail(module, node, message):
     raise PackageExportError(f"{module}:{getattr(node, 'lineno', 1)}: {message}")
 
@@ -2035,7 +2059,7 @@ def _export_package(output, declarations, source_root, caps, artifact_format, co
     import taichi_forge as ti
     from taichi_forge.aot._component import Component
     from taichi_forge_runtime._static_values import static_key, read_static_key
-    from ._package_variants import compile_owner_variants, compile_static_variants
+    from ._package_variants import compile_owner_variants, compile_static_variants, family_domain
     from taichi_forge.aot.module import Module
     from taichi_forge.types.ndarray_type import NdarrayType
     from taichi_forge.lang.matrix import MatrixType
@@ -2759,21 +2783,20 @@ def _export_package(output, declarations, source_root, caps, artifact_format, co
             except Exception as error:
                 raise PackageExportError(f"{definition_name}: {error}") from error
             variants = []
-            family_schema, family_paths = {}, {}
+            family_contexts = []
+            resources = None
             for code, owner, environment, compilation_schema in contexts:
-                # The immutable contract is serialized on the code object.
-                # Decode once for this projection, not once per captured port.
-                contract = code.contract
+                # Each sealed module entry owns its decoded emission contract.
+                # A rebound view can have a different allocation projection.
+                contract = (code.contract if getattr(code, "_package_rebound_dense_slots", False)
+                            else module._component_entries[compilation.symbol(code)]["contract"])
                 if compilation.static_preparation is not None:
                     environment, compilation_schema, _ = compilation.static_preparation.project(
                         environment, compilation_schema, code.kernel, owner_type=owner_type)
-                if any(item["kind"] in ("owner", "owner_input") and item.get("dynamic_input_record")
-                       for item in compilation_schema.values()):
-                    # Reuses the optional typed-owner and nullable resource
-                    # contracts already understood by the version 93 consumer.
-                    manifest["version"] = max(93, manifest["version"])
-                if any(item.get('nested_query_input') for item in compilation_schema.values()):
-                    manifest['version'] = max(94, manifest['version'])
+                if resources is None or resources.schema is not compilation_schema:
+                    resources = _EntryResources(compilation_schema)
+                    manifest["version"] = max(manifest["version"], resources.version)
+                family_contexts.append((compilation_schema, environment._paths))
 
                 def presence_conditions(item):
                     if not item.get('nested_query_input'):
@@ -2800,20 +2823,6 @@ def _export_package(output, declarations, source_root, caps, artifact_format, co
                         ]
                     return result
 
-                for key, item in compilation_schema.items():
-                    previous = family_schema.get(key)
-                    if previous is not None and item["kind"] == previous["kind"] == "static":
-                        item = {
-                            **item,
-                            "choices": list({tuple(v): v for v in [*previous["choices"], *item["choices"]]}.values()),
-                            "conditions": {
-                                flag: value
-                                for flag, value in previous.get("conditions", {}).items()
-                                if item.get("conditions", {}).get(flag) is value
-                            },
-                        }
-                    family_schema[key] = item
-                family_paths.update(environment._paths)
                 condition_values = {**code.static, **{key: static_key(value) for key, value in code.objects.items()}}
                 # Sharing is decided by the compiler object/key and its actual
                 # ABI/dependency guards, never by a semantic hash alone.
@@ -2834,7 +2843,7 @@ def _export_package(output, declarations, source_root, caps, artifact_format, co
                         path=list(environment._paths[key]),
                         present=key in code.dynamic if item.get("external") else key in bound_used,
                     )
-                    for key, item in compilation_schema.items()
+                    for key, item in resources.ports.items()
                     if key in code.used and item.get("optional_input") and not item.get("external")
                 }
                 dynamic_presence = {
@@ -2843,7 +2852,7 @@ def _export_package(output, declarations, source_root, caps, artifact_format, co
                         flag_path=list(environment._paths[item["input_presence_attribute"]]),
                         **presence_conditions(item),
                     )
-                    for key, item in compilation_schema.items()
+                    for key, item in resources.ports.items()
                     if item.get("external")
                     and item.get("optional_input")
                     and (key in code.used or item["input_presence_attribute"] in code.used)
@@ -2857,7 +2866,7 @@ def _export_package(output, declarations, source_root, caps, artifact_format, co
                         **({"boolean": True} if item.get("dynamic_storage_condition") else {}),
                         **presence_conditions(item),
                     )
-                    for key, item in compilation_schema.items()
+                    for key, item in resources.ports.items()
                     if (item.get("dynamic_input_record") or item.get("dynamic_storage_condition")) and key in code.used
                 }
                 for key in input_records:
@@ -2887,7 +2896,11 @@ def _export_package(output, declarations, source_root, caps, artifact_format, co
                     manifest["version"] = max(80, manifest["version"])
                     if any(set(binding) - {"path"} for binding in guard_values.values()):
                         manifest["version"] = max(94, manifest["version"])
-                used_paths = [environment._paths[key] for key in bound_used if key in environment._paths]
+                used_prefixes = set()
+                if resources.borrowed:
+                    for key in bound_used:
+                        path = tuple(environment._paths.get(key, ()))
+                        used_prefixes.update(path[:depth] for depth in range(len(path) + 1))
                 source_bindings = {
                     key: dict(
                         path=list(environment._paths[key]),
@@ -2895,16 +2908,10 @@ def _export_package(output, declarations, source_root, caps, artifact_format, co
                         **({"presence": item["source_presence"]} if item.get("source_presence") else {}),
                         **presence_conditions(item),
                     )
-                    for key, item in compilation_schema.items()
-                    if item["kind"] == "borrowed_field"
-                    and any(
-                        tuple(path[: len(environment._paths[key])]) == tuple(environment._paths[key])
-                        for path in used_paths
-                    )
+                    for key, item in resources.borrowed.items() if tuple(environment._paths[key]) in used_prefixes
                 }
-                child_bindings = owner_bindings(environment, compilation_schema, bound_used)
-                layout_owner_paths = {tuple(item.get("path", (key,))) for key, item in compilation_schema.items()
-                                      if item["kind"] in ("owner", "owner_input")}
+                child_bindings = owner_bindings(environment, resources.owners, bound_used)
+                layout_owner_paths = resources.owner_paths
                 for key, binding in child_bindings.items():
                     binding.update(presence_conditions(compilation_schema[key]))
                 from taichi_forge_runtime._dimensions import extent_dependencies
@@ -2926,7 +2933,7 @@ def _export_package(output, declarations, source_root, caps, artifact_format, co
                         **({"input_record": item["input_record"]} if item.get("input_record") else {}),
                         **presence_conditions(item),
                     )
-                    for key, item in compilation_schema.items()
+                    for key, item in resources.ports.items()
                     if key in code.dynamic and item.get("external")
                 }
                 conditional_resources = {
@@ -2943,7 +2950,7 @@ def _export_package(output, declarations, source_root, caps, artifact_format, co
                         ),
                         **layout_owner(environment, layout_owner_paths, key),
                     )
-                    for key, item in compilation_schema.items()
+                    for key, item in resources.ports.items()
                     if key in code.dynamic and item.get("dynamic_input_storage")
                 }
                 if conditional_resources:
@@ -3167,6 +3174,7 @@ def _export_package(output, declarations, source_root, caps, artifact_format, co
                 family_identity = json.dumps([name + "." + definition["name"], variants], sort_keys=True).encode()
                 symbol = "family_" + hashlib.sha256(family_identity).hexdigest()
                 used = {key for variant in variants for key in variant["selection"]}
+                family_schema, family_paths = family_domain(used, family_contexts)
                 presence = {key for key in used if family_schema[key].get("optional")}
                 manifest["entry_families"][symbol] = dict(
                     arguments=argument_schema,

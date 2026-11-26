@@ -9,6 +9,28 @@ from ._component import _DefinitionMissingResource
 from ._package_types import producer_static
 
 
+def family_domain(used, contexts):
+    """Merge only axes that actually selected a published variant."""
+    schema, paths = {}, {}
+    for declarations, source_paths in contexts:
+        for key in used:
+            if key in source_paths:
+                paths[key] = source_paths[key]
+            if key not in declarations:
+                continue
+            item = declarations[key]
+            previous = schema.get(key)
+            if previous is not None and item["kind"] == previous["kind"] == "static":
+                item = {
+                    **item,
+                    "choices": list({tuple(v): v for v in [*previous["choices"], *item["choices"]]}.values()),
+                    "conditions": {flag: value for flag, value in previous.get("conditions", {}).items()
+                                   if item.get("conditions", {}).get(flag) is value},
+                }
+            schema[key] = item
+    return schema, paths
+
+
 def _static_reference_aliases(schema, domains):
     """Canonical axes proven by normal owner references, including layout use."""
     paths = {tuple(item.get("path", (name,))): name for name, item in schema.items()}
