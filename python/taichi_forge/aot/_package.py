@@ -2868,14 +2868,17 @@ def _export_package(output, declarations, source_root, caps, artifact_format, co
                     manifest["version"] = max(64, manifest["version"])
                 from taichi_forge_runtime._dimensions import extent_dependencies
 
-                guard_values = {
-                    key: dict(path=list(environment._paths[key]),
-                              **nullable_capture(compilation_schema[key]))
+                guard_keys = {
+                    key
                     for paths in contract.get("input_requirements", {}).values()
                     for branch in paths
                     for expression, _ in branch
                     for key in extent_dependencies(expression)
-                    if key not in dynamic_presence
+                }
+                guard_values = {
+                    key: dict(path=list(environment._paths[key]),
+                              **nullable_capture(compilation_schema[key]))
+                    for key in sorted(guard_keys - dynamic_presence.keys())
                 }
                 if guard_values:
                     manifest["version"] = max(80, manifest["version"])
