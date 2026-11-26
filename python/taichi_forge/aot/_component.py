@@ -858,18 +858,16 @@ def _capture_id(path):
     return path[0] if len(path) == 1 else "__record_" + "_".join(f"{len(part)}_{part}" for part in path)
 
 
-def _dense_group(component, owner, group, *, extent_values=None):
+def _dense_group(component, owner, group, *, extent_values=None, projections=None):
     """Project a real SNode group, using declared provenance for every axis.
 
     No byte layout is computed here. The native schema retains placements and
     calls the original SNode constructors/StructCompiler on instantiation.
     """
-    from taichi_forge._lib import core
     from taichi_forge.lang.field import Field
 
     members = {}
-    root = None
-    axes = {}
+    bindings = []
     dimensions = {}
     tensors = {}
     tensor_layouts = {}
@@ -886,7 +884,8 @@ def _dense_group(component, owner, group, *, extent_values=None):
         dimensions[extent] = dim.schema
         return _dimension_value(component, owner, extent, values=extent_values)
 
-    for name, declaration in component._dense_members.get(group, ()):
+    declarations = component._dense_members.get(group, ())
+    for name, declaration in declarations:
         field = component.read(owner, name)
         if not isinstance(field, Field):
             raise TaichiCompilationError(f"Dense resource {name!r} must be a Field")
@@ -905,6 +904,8 @@ def _dense_group(component, owner, group, *, extent_values=None):
         nodes = tuple(var.ptr.snode() for var in field._get_field_members())
         members[name] = nodes
         key = tuple(node.id for node in nodes)
+        if projections is not None:
+            bindings.append((name, declaration.shape, key))
         role = declaration.element_shape if isinstance(declaration, _ModelTensorField) else element_shape
         if tensor_roles.setdefault(key, role) != role:
             raise TaichiCompilationError(f"Aliased Dense members have conflicting tensor dimensions in group {group!r}")
@@ -922,6 +923,33 @@ def _dense_group(component, owner, group, *, extent_values=None):
                 raise TaichiCompilationError(
                     f"Conflicting tensor layout provenance in group {group!r}"
                 )
+
+    if bindings:
+        # Finalized native nodes have immutable topology. Symbolic axis names,
+        # selected lanes and model-tensor recipes also determine its projection.
+        # Current Field types, shapes and dimension values were checked above.
+        tensor_key = tuple((ids, shape, names, tensor_layouts[ids])
+                           for ids, (_, shape, names) in tensors.items())
+        cache_key = (impl.get_runtime().field_layout_lifetime(field), tuple(bindings), tensor_key)
+        cached = projections.get(cache_key)
+        if cached is not None:
+            recipe, paths, root_id = cached
+            return recipe, paths, dimensions, root_id
+
+    projected = _project_dense_topology(group, declarations, members, tensors, tensor_layouts)
+    if bindings:
+        projections[cache_key] = projected
+    recipe, paths, root_id = projected
+    return recipe, paths, dimensions, root_id
+
+
+def _project_dense_topology(group, declarations, members, tensors, tensor_layouts):
+    from taichi_forge._lib import core
+
+    root = None
+    axes = {}
+    for name, declaration in declarations:
+        nodes = members[name]
         for node in nodes:
             current_root = impl.get_runtime().prog.get_snode_root(node.get_snode_tree_id())
             if root is None:
@@ -986,12 +1014,7 @@ def _dense_group(component, owner, group, *, extent_values=None):
     else:
         schema = core.DenseSNodeSchema.capture(root, parameters)
         member_paths = {name: tuple(paths[node.id] for node in nodes) for name, nodes in members.items()}
-    return (
-        schema.to_json(),
-        member_paths,
-        dimensions,
-        root.id,
-    )
+    return schema.to_json(), member_paths, root.id
 
 
 def _source_scope_alias(declarations, paths, source_paths, name, path, source_name):
@@ -1006,13 +1029,14 @@ def _source_scope_alias(declarations, paths, source_paths, name, path, source_na
 class _DenseLayoutValidation:
     """Reuse native projections within one synchronous validation operation.
 
-    Never retained by reusable code or shared across Graph recording callbacks.
-    A lowering transaction uses a fresh validation at finish, including its
-    physical root/member/extent snapshot, before publishing any definition.
+    A lowering transaction takes a fresh binding and extent snapshot at finish.
+    A package build can reuse the immutable native topology of those bindings.
+    Ordinary components and Graph recording use operation-local projections.
     """
 
-    def __init__(self, component, owner):
+    def __init__(self, component, owner, *, compilation=None):
         self.component, self.owner = component, owner
+        self.projections = compilation.dense_projections if compilation is not None else None
         self.groups = {}
         self.extents = {}
         self.dimension_values = {}
@@ -1039,7 +1063,8 @@ class _DenseLayoutValidation:
 
     def dense(self, group):
         if group not in self.groups:
-            projection = _dense_group(self.component, self.owner, group, extent_values=self.dimension_values)
+            projection = _dense_group(self.component, self.owner, group, extent_values=self.dimension_values,
+                                      projections=self.projections)
             self.extents[group] = {name: self.dimension_values[name] for name in projection[2]}
             self.groups[group] = projection
         return self.groups[group]
@@ -1873,8 +1898,8 @@ class Component:
         runtime = impl.get_runtime()
         runtime.materialize(for_aot=True)
         with runtime._kernel_compilation_lock:
-            layouts = _DenseLayoutValidation(self, owner)
             compilation = getattr(kernel, "_package_compilation", None)
+            layouts = _DenseLayoutValidation(self, owner, compilation=compilation)
             index = compilation.candidate_indices[kernel] if compilation is not None else None
             candidates = (index.find(signature, resource_templates, layouts)
                           if index is not None else kernel._component_candidates)
@@ -2109,7 +2134,8 @@ class _Capture:
         self.fixed_dependencies = {}
         self.resource_templates = {}
         self.static_templates = set()
-        self._layouts = _DenseLayoutValidation(component, owner)
+        self._layouts = _DenseLayoutValidation(
+            component, owner, compilation=getattr(kernel, "_package_compilation", None))
         # Functions retain real call boundaries. Each callable has its own
         # parameter expressions while dependency facts remain in this capture.
         self._real_functions = {}
@@ -3000,7 +3026,8 @@ class _Capture:
 
     def finish(self):
         self.component.constraint_facts(self.owner, self.used, entry=self.entry_definition[1])
-        layouts = _DenseLayoutValidation(self.component, self.owner)
+        layouts = _DenseLayoutValidation(
+            self.component, self.owner, compilation=getattr(self.kernel, "_package_compilation", None))
         self._layouts.validate_unchanged(layouts)
         mismatch = self.dependency_mismatch(self.component, self.owner, layouts=layouts)
         if mismatch:

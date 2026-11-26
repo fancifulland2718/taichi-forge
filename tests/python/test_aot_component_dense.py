@@ -328,6 +328,64 @@ def test_group_cannot_be_split_or_infer_dimension_from_equal_values():
 
 
 @test_utils.test(arch=ti.cpu, offline_cache=False)
+def test_package_reuses_finalized_topology_and_rechecks_live_bindings(monkeypatch):
+    from collections import Counter
+    from taichi_forge.aot import _component
+    from taichi_forge.aot._package_compilation import PackageCompilation
+
+    model, env = _DenseModel(7, 7), _environment()
+    calls = Counter()
+    project = _component._project_dense_topology
+
+    def counted(group, *args):
+        calls[group] += 1
+        return project(group, *args)
+
+    monkeypatch.setattr(_component, "_project_dense_topology", counted)
+    with PackageCompilation() as compilation:
+        entry = compilation.entry(model.active_pass)
+        original = env.compile(entry)
+        env.compile(compilation.entry(model.capacity_pass))
+        assert env.compile(entry) is original
+        assert calls == {"state": 1, "work": 1}
+
+        model.capacity += 1
+        with pytest.raises(ti.TaichiCompilationError, match="shape differs"):
+            env.compile(entry)
+        model.capacity -= 1
+        model.alias_x = model.y
+        changed = env.compile(entry)
+        assert changed.contract["members"]["alias_x"] == changed.contract["members"]["y"]
+        assert changed.contract["members"]["x"] != changed.contract["members"]["y"]
+        assert calls == {"state": 2, "work": 1}
+
+        # Equal witness sizes cannot merge two distinct symbolic axes.
+        model.other_capacity = model.capacity
+        renamed = Component(**{**env.declarations, "other_capacity": Dimension(),
+                               "alias_x": DenseField(ti.f32, ("other_capacity",), "state")})
+        with pytest.raises(ti.TaichiCompilationError, match="Conflicting dimension provenance"):
+            renamed.compile(entry)
+
+        # A model tensor can change its symbolic element extent while all
+        # physical lanes and ordinary index axes are identical.
+        model.columns = model.other_columns = 3
+        recipes = []
+        for axis in ("columns", "other_columns"):
+            tensor = Component(**{**env.declarations, axis: Dimension(),
+                                  "v": _component._ModelTensorField(ti.f32, ("capacity",), "work", (axis,))})
+            layouts = _component._DenseLayoutValidation(tensor, model, compilation=compilation)
+            recipes.append(layouts.dense("work")[0])
+        assert recipes[0] != recipes[1]
+
+        replacement = _DenseModel(7, 7)
+        model.y = replacement.y
+        with pytest.raises(ti.TaichiCompilationError, match="one actual SNode root"):
+            env.compile(entry)
+        assert env.compile(compilation.entry(replacement.active_pass)) is original
+    assert not compilation.dense_projections
+
+
+@test_utils.test(arch=ti.cpu, offline_cache=False)
 def test_dense_validation_projects_groups_once_per_operation(monkeypatch):
     from collections import Counter
     from taichi_forge.aot import _component, _component_graph
