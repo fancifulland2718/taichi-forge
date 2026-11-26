@@ -10,6 +10,9 @@
   if (config.arch == Arch::cuda && config.opt_level > 0 && !config.debug) {
     CACHE_VALUE(std::string("cuda-independent-dense-grid-v1"));
   }
+  if (config.arch == Arch::vulkan && config.opt_level > 0 && !config.debug) {
+    CACHE_VALUE(std::string("vulkan-independent-dense-grid-v1"));
+  }
   CACHE_FIELD(external_optimization_level);
   CACHE_FIELD(llvm_opt_level);
   CACHE_FIELD(llvm_aot_relocatable_roots);

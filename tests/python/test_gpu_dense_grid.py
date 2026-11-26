@@ -8,7 +8,7 @@ def _extent(kernel, *args):
     return [t.constant_range_size for t in kernel.task_manifest(*args) if t.task_type == "range_for"]
 
 
-@test_utils.test(arch=ti.cuda, offline_cache=False)
+@test_utils.test(arch=[ti.cuda, ti.vulkan], offline_cache=False)
 def test_independent_time_planes_parallelize_before_autodiff():
     rows, cols = 64, 80
     field = ti.field(ti.f32, shape=(2, rows, cols), needs_grad=True)
@@ -32,7 +32,7 @@ def test_independent_time_planes_parallelize_before_autodiff():
     np.testing.assert_array_equal(field.grad.to_numpy()[0], 2 * np.roll(seeds[1], 1, axis=1))
 
 
-@test_utils.test(arch=ti.cuda, offline_cache=False)
+@test_utils.test(arch=[ti.cuda, ti.vulkan], offline_cache=False)
 def test_inner_recurrence_unknown_planes_and_launch_policy_keep_row_order():
     n = 64
     field = ti.field(ti.i32, shape=(2, n, n))

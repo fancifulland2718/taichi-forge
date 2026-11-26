@@ -802,7 +802,8 @@ void compile_to_offloads(IRNode *ir,
     TI_COMPILE_PROFILER("cpp.ir.external_ptr_boundary");
     return irpass::handle_external_ptr_boundary(ir, config);
   }();
-  if (config.arch == Arch::cuda && config.opt_level > 0 && !config.debug &&
+  if ((config.arch == Arch::cuda || config.arch == Arch::vulkan) &&
+      config.opt_level > 0 && !config.debug &&
       !task_launch_policy.active) {
     auto *root = ir->as<Block>();
     // Walk backwards: flattening inserts constant bounds before the loop.
