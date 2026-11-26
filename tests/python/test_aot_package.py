@@ -2460,6 +2460,63 @@ class Model:
             aot.step()
 
 
+@test_utils.test(arch=ti.cpu, offline_cache=True)
+def test_package_cache_rejects_static_variants_before_decode(tmp_path, monkeypatch):
+    from taichi_forge.aot import _package_capture_cache
+
+    ti.lang.impl.current_cfg().offline_cache_file_path = str(tmp_path / "native")
+    source = """import taichi_forge as ti
+@ti.data_oriented
+class Model:
+    def __init__(self, count: int):
+        self.count = count
+        ti.experimental.ResourceScope(self).static('count', choices=(1, 2, 3, 4))
+    @ti.kernel
+    def run(self, x: ti.i32) -> ti.i32:
+        value = x
+        for i in ti.static(range(self.count)):
+            value += i + 1
+        return value
+"""
+    module = _source_package(tmp_path, monkeypatch, source).model
+    cache = tmp_path / "cache"
+    ti.aot.export_package(module, tmp_path / "seed", artifact_format="bc", build_cache=cache)
+    index = cache / "latest.json"
+    seed = index.read_bytes()
+    decoded = []
+    thaw = _package_capture_cache.thaw
+
+    def track(facts, *args):
+        decoded.append(facts["maps"]["static"])
+        return thaw(facts, *args)
+
+    monkeypatch.setattr(_package_capture_cache, "thaw", track)
+    for mode in ("indexed", "permissive", "legacy"):
+        history = json.loads(seed)
+        bucket, = history["captures"].values()
+        assert len(bucket) == 4
+        # Visit the wrong branch first. A permissive or missing header must
+        # still leave the decoded object's authoritative match in force.
+        for symbol, record in reversed(list(bucket.items())):
+            if mode == "permissive":
+                record["variant"][3] = []
+            elif mode == "legacy":
+                del record["variant"]
+            bucket[symbol] = bucket.pop(symbol)
+        index.write_text(json.dumps(history), encoding="utf8")
+        Path(module.__file__).write_text(source + "\n# " + mode, encoding="utf8")
+        decoded.clear()
+        output = tmp_path / mode
+        ti.aot.export_package(module, output, artifact_format="bc", build_cache=cache)
+        if mode == "indexed":
+            assert len(decoded) == 4
+        else:
+            assert len(decoded) > 4
+        with Runtime("cpu") as runtime, load_package(runtime, output) as package:
+            for count in range(1, 5):
+                assert package.host.Model(count).run(5) == 5 + count * (count + 1) // 2
+
+
 @test_utils.test(arch=ti.cuda, offline_cache=False)
 @pytest.mark.parametrize('value_kind', ['scalar', 'vector', 'struct', 'model_tensor', 'nested_tuple'])
 def test_package_library_keeps_local_template_references_inline(tmp_path, monkeypatch, value_kind):

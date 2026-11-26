@@ -314,6 +314,16 @@ def thaw(facts, kernel, key, entry):
     return code
 
 
+def matches_variant(variant, signature, resources, layouts):
+    from ._component import _used_template_signature
+
+    templates, expected_signature, resource_slots, static = variant
+    used = frozenset(map(_tuples, templates))
+    return (_used_template_signature(signature, used) == _tuples(expected_signature)
+            and all(resources.get(_tuples(slot)) == name for slot, name in resource_slots)
+            and all(layouts.static_value(name) == _tuples(expected) for name, expected in static))
+
+
 def matches(code, facts, memo, component, owner, signature, resources, layouts, *, portable=False,
             allocation_updates=None):
     from ._component import _extent_invariant_compact_member, _used_template_signature

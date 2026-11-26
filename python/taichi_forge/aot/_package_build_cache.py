@@ -438,11 +438,13 @@ class PackageBuildCache:
         # and preserves the original declaration traversal order on recovery.
         compressed = zlib.compress(payload.encode("utf8"), 1)
         return dict(object=base64.b64encode(compressed).decode("ascii"),
-                    digest=_capture_digest(scope_key, symbol, compressed))
+                    digest=_capture_digest(scope_key, symbol, compressed),
+                    variant=(facts["templates"], facts["signature"], facts["maps"]["resource_templates"],
+                             facts["maps"]["static"]))
 
     def restore_capture(self, compilation, component, owner, kernel, signature, resources, layouts):
         from taichi_forge.lang.exception import TaichiCompilationError
-        from ._package_capture_cache import matches, thaw
+        from ._package_capture_cache import matches, matches_variant, thaw
         from ._package_compilation import definition_symbol
 
         scope = compilation.capture_scope
@@ -455,6 +457,12 @@ class PackageBuildCache:
             if symbol in module._exported_kernels:
                 continue
             try:
+                # This small header only rejects candidates. On a hit (or with
+                # an older record) the object supplies all authoritative facts.
+                if len(records) > 1 and "variant" in record and not matches_variant(
+                    record["variant"], signature, resources, layouts
+                ):
+                    continue
                 compressed = base64.b64decode(record["object"], validate=True)
                 if record["digest"] != _capture_digest(scope.key, symbol, compressed):
                     continue
