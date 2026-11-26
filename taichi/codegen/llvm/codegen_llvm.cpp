@@ -297,6 +297,23 @@ void TaskCodeGenLLVM::emit_extra_unary(UnaryOpStmt *stmt) {
   auto op = stmt->op_type;
   auto input_type = input->getType();
 
+  // Scalar launch parameters are immutable. Express their trig functions as
+  // pure LLVM operations so CSE and LICM can reuse them across CPU iterations.
+  // The C runtime wrappers otherwise carry an observable errno write in LLVM.
+  auto *arg = stmt->operand->cast<ArgLoadStmt>();
+  if (arch_is_cpu(compile_config.arch) && compile_config.fast_math &&
+      compile_config.opt_level > 0 && !compile_config.debug &&
+      (op == UnaryOpType::sin || op == UnaryOpType::cos) && arg &&
+      !arg->is_ptr && arg->create_load && arg->arg_depth == 0 &&
+      arg->arg_id.size() == 1 &&
+      (arg->ret_type == PrimitiveType::f32 ||
+       arg->ret_type == PrimitiveType::f64)) {
+    auto intrinsic =
+        op == UnaryOpType::sin ? llvm::Intrinsic::sin : llvm::Intrinsic::cos;
+    llvm_val[stmt] = builder->CreateIntrinsic(intrinsic, {input_type}, {input});
+    return;
+  }
+
 #define UNARY_STD(x)                                                    \
   else if (op == UnaryOpType::x) {                                      \
     if (input_taichi_type->is_primitive(PrimitiveTypeID::f32)) {        \
