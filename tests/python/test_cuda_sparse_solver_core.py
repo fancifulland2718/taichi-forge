@@ -102,7 +102,7 @@ def test_cuda_legacy_ldlt_is_not_silently_cholesky():
 
 
 @test_utils.test(arch=ti.cuda, offline_cache=False)
-def test_cuda_public_ldlt_uses_real_symmetric_indefinite_provider():
+def test_cuda_public_ldlt_uses_real_symmetric_indefinite_provider(monkeypatch):
     library = os.environ.get("TI_CUDSS_TEST_LIBRARY")
     if not library:
         pytest.skip("set TI_CUDSS_TEST_LIBRARY to the user-managed cuDSS 0.8.x library")
@@ -121,4 +121,30 @@ def test_cuda_public_ldlt_uses_real_symmetric_indefinite_provider():
         solution = solver.solve(rhs).to_numpy()
         np.testing.assert_allclose(solution, np.linalg.solve(dense, values), rtol=1e-5, atol=1e-6)
         np.testing.assert_allclose(dense @ solution, values, rtol=1e-5, atol=1e-6)
+
+    field = ti.field(ti.f32, shape=3, offset=-1)
+
+    def no_rhs_download():
+        pytest.fail("compact f32 RHS was copied to the host")
+
+    monkeypatch.setattr(field, "to_numpy", no_rhs_download)
+
+    @ti.kernel
+    def produce(start: ti.f32):
+        for i in field:
+            field[i] = start + i
+
+    for start in (1.0, -3.0):
+        produce(start)
+        result = solver.solve(field)
+        assert isinstance(result, np.ndarray) and result.dtype == np.float32
+        np.testing.assert_allclose(dense @ result, start + np.arange(-1, 2), atol=1e-6)
+
+    record = ti.types.struct(rhs=ti.i32, other=ti.i32).field(shape=3)
+    record.rhs.from_numpy(np.array([3, 4, 5], dtype=np.int32))
+    np.testing.assert_allclose(dense @ solver.solve(record.rhs), [3, 4, 5], atol=1e-6)
+    with pytest.raises(ti.TaichiRuntimeError, match="not supported"):
+        solver.solve(record)
+    with pytest.raises(ValueError, match="shape"):
+        solver.solve(ti.field(ti.f32, shape=4))
     solver.solver.close()

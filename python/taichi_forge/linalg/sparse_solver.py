@@ -3,7 +3,13 @@ import taichi_forge.lang
 from taichi_forge._lib import core as _ti_core
 from taichi_forge.lang._ndarray import Ndarray, ScalarNdarray
 from taichi_forge.lang.exception import TaichiRuntimeError
-from taichi_forge.lang.field import Field
+from taichi_forge.lang.field import (
+    Field,
+    ScalarField,
+    _dense_host_copy_value_type,
+    _dense_native_field_is_contiguous,
+    _dense_native_field_layout_supported,
+)
 from taichi_forge.lang.impl import get_runtime
 from taichi_forge.linalg.sparse_matrix import SparseMatrix
 from taichi_forge.linalg._sparse_solver_definition import SparseSolverDefinition
@@ -602,6 +608,25 @@ class SparseSolver:
         else:
             self._type_assert(sparse_matrix)
 
+    def _cudss_rhs_from_host_or_field(self, b):
+        shape = (self.matrix.m,)
+        rhs = ScalarNdarray._private_scratch_storage(self.dtype, shape)
+        if isinstance(b, ScalarField) and b.shape == shape and b.dtype == self.dtype:
+            value_type = _dense_host_copy_value_type(b.dtype)
+            if _dense_native_field_is_contiguous(b, value_type) and _dense_native_field_layout_supported(b):
+                runtime = get_runtime()
+                runtime.materialize()
+                runtime.prog._copy_dense_field_to_ndarray(rhs.arr, b.snode.ptr, value_type, shape[0], 1)
+                return rhs
+        if isinstance(b, Field):
+            b = b.to_numpy()
+            if not isinstance(b, np.ndarray):
+                raise TaichiRuntimeError(
+                    f"The parameter type: {type(b)} is not supported in linear solvers for now."
+                )
+        rhs.from_numpy(np.asarray(b, dtype=np.float32))
+        return rhs
+
     def solve(self, b):  # pylint: disable=R1710
         """Computes the solution of the linear systems.
         Args:
@@ -618,12 +643,9 @@ class SparseSolver:
                 x = ScalarNdarray(b.dtype, [self.matrix.m])
                 self.solver.solve(b, x)
                 return self._record_solve_dispatch(x)
-            if isinstance(b, Field):
-                b = b.to_numpy()
-            if isinstance(b, np.ndarray):
-                rhs = ScalarNdarray(self.dtype, [self.matrix.m])
-                solution = ScalarNdarray(self.dtype, [self.matrix.m])
-                rhs.from_numpy(np.asarray(b, dtype=np.float32))
+            if isinstance(b, (Field, np.ndarray)):
+                rhs = self._cudss_rhs_from_host_or_field(b)
+                solution = ScalarNdarray._private_scratch_storage(self.dtype, (self.matrix.m,))
                 self.solver.solve(rhs, solution)
                 return self._record_solve_dispatch(solution.to_numpy())
             raise TaichiRuntimeError(
