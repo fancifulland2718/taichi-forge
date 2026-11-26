@@ -363,6 +363,37 @@ def vector(x: ti.types.vector(2, ti.i32)) -> ti.i32:
 
 
 @test_utils.test(arch=ti.cpu, offline_cache=False)
+def test_unified_incremental_restores_model_workspaces(tmp_path, monkeypatch):
+    import numpy as np
+    from taichi_forge_runtime.aot import load_package
+    from tests.python.test_aot_package import MODEL_LOCAL_TENSOR_SOURCE
+
+    path = tmp_path / "workspace_model.py"
+    path.write_text(MODEL_LOCAL_TENSOR_SOURCE, encoding="utf8")
+    monkeypatch.syspath_prepend(str(tmp_path))
+    model = importlib.import_module(path.stem)
+    cache = tmp_path / "cache"
+    try:
+        for label in ("cold", "warm"):
+            output = tmp_path / label
+            ti.aot.export_package(model, output, arch=[ti.cpu], artifact_format="unified-bc-library", build_cache=cache)
+            with ti.aot.borrow_runtime() as runtime, load_package(runtime, output) as package:
+                for n, dof in ((7, 3), (9, 11)):
+                    instance = package.host.Model(n, dof)
+                    instance.step(2.0)
+                    expected = np.where(np.arange(n) % 2 == 1, (np.arange(n) + 1) * 5 * (dof + 1), 0)
+                    np.testing.assert_array_equal(instance.result.to_numpy(), expected)
+        stats = json.loads((cache / "unified/latest.json").read_bytes())["produce"]
+        with zipfile.ZipFile(tmp_path / "warm/code.tcm") as archive:
+            assert stats["unified_capture_restores"] == len(json.loads(archive.read("unified_llvm.json"))["entries"])
+        assert stats["unified_root_emissions"] == 0
+        assert (tmp_path / "cold/code.tcm").read_bytes() == (tmp_path / "warm/code.tcm").read_bytes()
+        assert (tmp_path / "cold/package.json").read_bytes() == (tmp_path / "warm/package.json").read_bytes()
+    finally:
+        sys.modules.pop(path.stem, None)
+
+
+@test_utils.test(arch=ti.cpu, offline_cache=False)
 def test_unified_incremental_capture_tracks_owner_fields_per_entry(tmp_path, monkeypatch):
     from taichi_forge_runtime.aot import load_package
 

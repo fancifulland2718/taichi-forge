@@ -47,6 +47,9 @@ class PackageCompilation(FunctionLibrary):
         self.capture_scope = None
 
     def __enter__(self):
+        from ._component import _definition_digests
+
+        self._digest_token = _definition_digests.set({})
         return self
 
     def attach(self, module, *, function_library=False):
@@ -223,9 +226,12 @@ class PackageCompilation(FunctionLibrary):
         kernel.runtime.collect_unused_kernel_definitions(force=True)
 
     def __exit__(self, *exception):
+        from ._component import _definition_digests
+
         try:
             self._release()
         finally:
+            _definition_digests.reset(self._digest_token)
             if self._automatic_gc is not None:
                 if self._automatic_gc:
                     gc.enable()

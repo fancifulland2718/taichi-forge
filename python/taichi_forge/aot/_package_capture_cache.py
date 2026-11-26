@@ -13,7 +13,8 @@ from taichi_forge.types._argument_descriptor import describe_annotation
 from taichi_forge.types.annotations import Template
 
 from ._component import _ComponentCode, _capture_id, _code_definition, _function, _static_value
-from ._package_targets import BACKEND_NAMES, target_condition
+from ._package_errors import error_interface_reference, resolves_error_interface
+from ._package_targets import BACKEND_NAMES, prepare_condition, target_condition
 
 
 class Unavailable(ValueError):
@@ -103,7 +104,9 @@ def _name_plan(nodes):
             test = node.test
             if (len(test.args) == 1 and not test.keywords
                     and isinstance(test.args[0], (ast.Compare, ast.BoolOp, ast.UnaryOp))):
-                branches.append((test, _name_plan((test,))[0], _name_plan(node.body), _name_plan(node.orelse)))
+                arms = tuple((_name_plan(stmts), error_interface_reference(stmts))
+                             for stmts in (node.body, node.orelse))
+                branches.append((test, _name_plan((test,))[0], arms))
                 continue
         elif isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
             # A nested lexical scope can shadow the enclosing globals.
@@ -113,7 +116,7 @@ def _name_plan(nodes):
     return names, branches
 
 
-def _target_guard(test, function, locals_, config):
+def _target_guard(test, function, locals_, config, portable):
     from taichi_forge._lib import core
     from taichi_forge.lang import impl
 
@@ -132,6 +135,18 @@ def _target_guard(test, function, locals_, config):
 
     if resolve(test.func) is not impl.static:
         return None
+    if portable:
+        def kind(node):
+            value = resolve(node)
+            if value is impl.current_cfg:
+                return "lang.impl.current_cfg"
+            if value is config:
+                return "cfg"
+            if type(value) is core.Arch and value.name in BACKEND_NAMES:
+                return value.name
+            return None
+
+        return prepare_condition(test.args[0], kind)
     operands = []
 
     def value(node):
@@ -151,7 +166,7 @@ def _target_guard(test, function, locals_, config):
     return None if taken is None else (taken, operands)
 
 
-def _syntax(definition, memo):
+def _syntax(definition, memo, portable=False):
     # Cache only immutable source/code analysis for this export. Live globals,
     # signatures and bound method implementations are checked for each use.
     from taichi_forge.lang.kernel_impl import _SOURCE_TEMPLATE_CACHE
@@ -173,17 +188,28 @@ def _syntax(definition, memo):
     decisions = []
 
     def visit(guards):
-        for test, test_names, body, orelse in guards:
-            decision = _target_guard(test, definition.function, locals_, config)
-            decisions.append(decision)
-            # A proven guard only reads the recorded target operands. Unknown
-            # predicates retain all lexical bindings and both arms.
+        for test, test_names, arms in guards:
+            decision = _target_guard(test, definition.function, locals_, config, portable)
+            selected = (0, 1)
             if decision is None:
                 names.update(test_names)
-                selected = body, orelse
-            else:
-                selected = (body,) if decision[0] else (orelse,)
-            for reads, children in selected:
+            elif not portable:
+                selected = (0,) if decision[0] else (1,)
+            elif decision[0] == "target_mask":
+                if decision[1] in (0, 7):
+                    selected = (0,) if decision[1] else (1,)
+                else:
+                    # Match ASTTransformer.build_If. A terminal error arm is
+                    # encoded as a device requirement. All numerical arms
+                    # that can execute at prepare still contribute bindings.
+                    for i in (1, 0):
+                        ref = arms[i][1]
+                        if ref is not None and resolves_error_interface(ref, definition.function.__globals__):
+                            selected = (1 - i,)
+                            break
+            decisions.append((decision, selected))
+            for i in selected:
+                reads, children = arms[i][0]
                 names.update(reads)
                 visit(children)
 
@@ -191,7 +217,7 @@ def _syntax(definition, memo):
     return (digest, decisions), sorted(names.difference(locals_))
 
 
-def _source_facts(kernel, code, memo, component, owner):
+def _source_facts(kernel, code, memo, component, owner, *, portable=False):
     refs = {(kernel.func.__module__, kernel.func.__qualname__)}
     refs.update(definition[:2] for definition in (*code.functions.values(), *code.methods.values()))
     for mapping in (code.functions, code.constants, code.struct_types):
@@ -218,7 +244,7 @@ def _source_facts(kernel, code, memo, component, owner):
         wrapper = getattr(obj, "_primal", None) or getattr(obj, "func", None)
         if wrapper is None or wrapper._definition.compiled is not None:
             raise Unavailable("untracked callable")
-        syntax, names = _syntax(wrapper._definition, memo)
+        syntax, names = _syntax(wrapper._definition, memo, portable)
         bindings = [(name, _binding(fn.__globals__[name] if name in fn.__globals__ else fn.__builtins__[name]))
                     for name in names if name in fn.__globals__ or name in fn.__builtins__]
         args = [_annotation(arg.annotation) for arg in wrapper.arguments]
@@ -239,8 +265,8 @@ _LEXICAL_MAPS = ("functions", "constants", "struct_types")
 
 
 def freeze(code, memo, component, owner, *, portable):
-    if code.fixed_groups or code.workspaces or code.lexical or code.model_static_ranges:
-        raise Unavailable("task-local or lexical binding")
+    if code.fixed_groups or code.lexical:
+        raise Unavailable("physical storage or lexical binding")
     # Portable loop widths are expressions over the captured arguments. The
     # LLVM unit and entry contract retain them until the consumer binds them.
     if not portable and code.contract.get("model_blocks"):
@@ -249,7 +275,7 @@ def freeze(code, memo, component, owner, *, portable):
     for name in _LEXICAL_MAPS:
         maps[name] = [(fn.__module__, fn.__qualname__, key, val)
                       for (fn, key), val in getattr(code, name).items()]
-    return dict(maps=maps, sources=_source_facts(code.kernel, code, memo, component, owner),
+    return dict(maps=maps, sources=_source_facts(code.kernel, code, memo, component, owner, portable=portable),
                 signature=code.call_signature, dynamic=code.dynamic, entry=code.entry_definition,
                 equalities=sorted(code.record_equalities), templates=sorted(code.static_templates))
 
@@ -267,15 +293,17 @@ def thaw(facts, kernel, key, entry):
     code.dynamic = tuple(facts["dynamic"])
     code.record_equalities = frozenset(map(_tuples, facts["equalities"]))
     code.static_templates = frozenset(map(_tuples, facts["templates"]))
-    code.model_static_ranges = ()
-    for name in ("_function_states", "fixed_groups", "fixed_dependencies", "fixed_members", "lexical", "workspaces"):
+    contract = entry["contract"]
+    code.model_static_ranges = tuple(map(_tuples, contract.get("model_static_ranges", ())))
+    code.workspaces = contract.get("local_tensor_workspaces", {})
+    for name in ("_function_states", "fixed_groups", "fixed_dependencies", "fixed_members", "lexical"):
         setattr(code, name, {})
     code.semantic_key = entry["semantic_key"]
-    code._contract = json.dumps(entry["contract"])
+    code._contract = json.dumps(contract)
     return code
 
 
-def matches(code, facts, memo, component, owner, signature, resources, layouts):
+def matches(code, facts, memo, component, owner, signature, resources, layouts, *, portable=False):
     from ._component import _extent_invariant_compact_member, _used_template_signature
 
     if (code.call_signature != _used_template_signature(signature, code.static_templates)
@@ -283,7 +311,7 @@ def matches(code, facts, memo, component, owner, signature, resources, layouts):
             or any(component._paths.get(name) != path for name, path in code.capture_paths.items())
             or not layouts.matches_static(code) or not code.matches(component, owner, layouts=layouts)):
         return False
-    if facts["sources"] != _source_facts(code.kernel, code, memo, component, owner):
+    if facts["sources"] != _source_facts(code.kernel, code, memo, component, owner, portable=portable):
         return False
     contract = code.contract
     if contract["declaration_sources"] != {

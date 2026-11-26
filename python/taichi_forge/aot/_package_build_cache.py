@@ -291,6 +291,11 @@ class PackageBuildCache:
             caps=sorted(caps or ()), artifact_format=artifact_format,
         )
         try:
+            if artifact_format == "unified-bc-library":
+                # Unified production restores individual captures and leaf
+                # units. No consumer of this route looks up a package key.
+                self._compiler_inputs()
+                return
             namespaces = _namespace_inputs(modules)
             self.inputs = dict(
                 **self._compiler_inputs(),
@@ -306,6 +311,8 @@ class PackageBuildCache:
                                                  {key: value_digest(value) for key, value in self.inputs.items()})
         except _UntrackedInput as error:
             self.reason = "untracked input: " + str(error)
+            if artifact_format == "unified-bc-library":
+                self.objects_enabled = False
 
     def _compiler_inputs(self):
         producer = _producer_inputs(self.previous.get("toolchain_files", {}), self.toolchain_files)
@@ -443,10 +450,24 @@ class PackageBuildCache:
                 code = thaw(facts, kernel, key, entry)
                 if facts["field_inputs"] != scope.field_inputs(code):
                     continue
-                if not matches(code, facts, self.capture_syntax, component, owner, signature, resources, layouts):
+                if not matches(code, facts, self.capture_syntax, component, owner, signature, resources, layouts,
+                               portable=compilation.portable):
                     continue
                 code.validate_bindings(component, owner)
-                code._bind_arguments(component.declarations)
+                declarations = component.declarations
+                if code.workspaces:
+                    from collections import ChainMap
+                    from ._component import Array
+                    from taichi_forge.types import primitive_types
+
+                    if code.workspaces.keys() & declarations.keys():
+                        continue
+                    # The ordinary capture creates these hidden arguments in
+                    # its private declaration map. Storage remains per call.
+                    workspace_args = {name: Array(getattr(primitive_types, spec["dtype"]), len(spec["shape"]))
+                                      for name, spec in code.workspaces.items()}
+                    declarations = ChainMap(workspace_args, declarations)
+                code._bind_arguments(declarations)
             except (KeyError, AttributeError, OSError, ValueError, TypeError, zlib.error, TaichiCompilationError):
                 continue
             if not module._aot_builder._restore_build_object(symbol, native):

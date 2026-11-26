@@ -12,6 +12,7 @@ import inspect
 import json
 import operator
 import sys
+from contextvars import ContextVar
 from dataclasses import dataclass, replace
 from math import prod
 from types import BuiltinMethodType, CodeType, MappingProxyType, MemberDescriptorType, ModuleType
@@ -121,9 +122,23 @@ def _dsl_function(value):
     )
 
 
+_definition_digests = ContextVar("forge_package_definition_digests", default=None)
+
+
 def _definition(value):
     value = _function(value)
-    return (value.__module__, value.__qualname__, _digest(_code_definition(value.__code__)))
+    code = value.__code__
+    memo = _definition_digests.get()
+    if memo is None:
+        digest = _digest(_code_definition(code))
+    else:
+        # Keep the immutable code alive for this build. Rebinding the
+        # function, its name, or its __code__ is still observed on lookup.
+        key = id(code)
+        if key not in memo:
+            memo[key] = code, _digest(_code_definition(code))
+        digest = memo[key][1]
+    return (value.__module__, value.__qualname__, digest)
 
 
 def _code_definition(code):

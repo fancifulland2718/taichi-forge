@@ -532,7 +532,23 @@ def test_package_capture_rechecks_target_bindings_and_active_resource_abi(tmp_pa
 import taichi_forge as ti
 from taichi_forge import static as guard, cpu as backend
 from taichi_forge.lang.impl import current_cfg as config
+from typing import NoReturn
 live = 2
+other = 4
+def unavailable(message) -> NoReturn:
+    raise RuntimeError(message)
+@ti.kernel
+def portable() -> ti.i32:
+    if guard(config().arch == ti.vulkan):
+        return live
+    else:
+        unavailable("Vulkan only")
+@ti.kernel
+def two_devices() -> ti.i32:
+    if guard(config().arch == ti.vulkan):
+        return live
+    else:
+        return other
 @ti.kernel
 def both(image: ti.types.rw_texture(2, fmt=ti.Format.rgba32f)) -> ti.i32:
     if guard(config().arch == backend):
@@ -550,6 +566,21 @@ def both(image: ti.types.rw_texture(2, fmt=ti.Format.rgba32f)) -> ti.i32:
 
     def facts():
         return cache._source_facts(kernel, code, memo, None, None)
+
+    def portable_facts(entry):
+        return cache._source_facts(entry._primal, code, memo, None, None, portable=True)
+
+    original = portable_facts(module.portable)
+    both = portable_facts(module.two_devices)
+    with monkeypatch.context() as patch:
+        patch.setattr(module, "other", 8)
+        assert portable_facts(module.portable) == original
+        assert portable_facts(module.two_devices) != both
+        patch.setattr(module, "live", 7)
+        assert portable_facts(module.portable) != original
+        patch.setattr(module.unavailable, "__annotations__", {})
+        with pytest.raises(cache.Unavailable, match="host callable"):
+            portable_facts(module.portable)
 
     first = facts()
     monkeypatch.setattr(module, "external", sys)
@@ -5563,14 +5594,16 @@ class Model:
         assert gc.isenabled() == automatic_gc
         assert runtime.prog._debug_snode_metadata_stats()['active_tree_count'] == baseline_trees
         assert not runtime._pending_aot_snode_trees
-        assert len(manifest['entries']) == 5  # four step variants plus the fixture's unused kernel
-        assert sum(item['definition'].endswith('.Model.step') for item in manifest['entries'].values()) == 4
+        assert len(manifest['entries']) == 2  # one step plus the fixture's unused kernel
+        steps = [item for item in manifest['entries'].values() if item['definition'].endswith('.Model.step')]
+        assert len(steps) == 1
+        assert {c['name'] for c in steps[0]['captures'] if c.get('prepare_static')} == {'first', 'second'}
         # Write facts must come from those AOT assets, without another compile
         # using the producer JIT target/options just to inspect their effects.
-        assert runtime.debug_kernel_executable_lifecycle_stats()['compiler_invocations'] <= 5
+        assert runtime.debug_kernel_executable_lifecycle_stats()['compiler_invocations'] <= 2
         if build_stats[-1]:
-            assert build_stats[-1]['compiler_invocations'] <= 5
-            assert build_stats[-1]['physical_code_entries'] == 5
+            assert build_stats[-1]['compiler_invocations'] <= 2
+            assert build_stats[-1]['physical_code_entries'] == 2
         for item in manifest['entries'].values():
             if item['definition'].endswith('.Model.step'):
                 assert item['resource_effects'] == dict(precision='compiler_proven', arguments={'1': 'write'})
@@ -5583,7 +5616,7 @@ class Model:
         captured.run(component, normal, 6)
         np.testing.assert_array_equal(normal.out.to_numpy(), 6*np.arange(5)+3)
         assert original_kernel.compiled_kernels == original_cache
-    assert len(observed) == 10
+    assert len(observed) == 4
 
     def fail_after_export(transaction, code):
         observe(transaction, code)
