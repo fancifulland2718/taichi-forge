@@ -40,8 +40,8 @@ class SNodeTree:
         # Native destruction succeeded. Publish the wrapper state before
         # clearing Python compilation caches so an exceptional cache cleanup
         # cannot leave a live-looking wrapper around a destroyed native tree.
-        runtime.retire_field_layout(dependency[0])
         self._mark_destroyed()
+        runtime.retire_field_layout(dependency[0])
 
         # Drop only specializations whose compiled dependency set references
         # this tree. Unrelated specializations remain reusable; their backend

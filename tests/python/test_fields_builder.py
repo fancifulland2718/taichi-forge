@@ -430,6 +430,10 @@ def test_snode_tree_stays_destroyed_if_cache_cleanup_fails(monkeypatch):
             raise AssertionError("successful native destroy must not roll back")
 
         @staticmethod
+        def retire_field_layout(tree_id):
+            assert tree_id == 3 and tree.destroyed
+
+        @staticmethod
         def clear_compiled_functions():
             raise RuntimeError("injected cache cleanup failure")
 
