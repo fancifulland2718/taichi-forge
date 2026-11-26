@@ -336,9 +336,9 @@ def test_dense_validation_projects_groups_once_per_operation(monkeypatch):
     projections = Counter()
     project = _component._dense_group
 
-    def counted(component, owner, group):
+    def counted(component, owner, group, **kwargs):
         projections[group] += 1
-        return project(component, owner, group)
+        return project(component, owner, group, **kwargs)
 
     monkeypatch.setattr(_component, "_dense_group", counted)
     code = env.compile(model.active_pass)

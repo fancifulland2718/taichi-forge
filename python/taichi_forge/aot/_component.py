@@ -15,7 +15,7 @@ import sys
 from contextvars import ContextVar
 from dataclasses import dataclass, replace
 from math import prod
-from types import BuiltinMethodType, CodeType, MappingProxyType, MemberDescriptorType, ModuleType
+from types import BuiltinMethodType, CodeType, MappingProxyType, MemberDescriptorType, ModuleType, SimpleNamespace
 from typing import Final, get_origin
 
 from taichi_forge.lang import impl, kernel_arguments
@@ -185,7 +185,10 @@ def _member(owner, name):
             return owner[int(name[5:])]
         except IndexError as error:
             raise TaichiCompilationError("Owner sequence composition changed; rebuild its declaration") from error
-    descriptor = inspect.getattr_static(owner, name)
+    if type(owner) is SimpleNamespace and not name.startswith("__") and name in owner.__dict__:
+        descriptor = owner.__dict__[name]
+    else:
+        descriptor = inspect.getattr_static(owner, name)
     if isinstance(descriptor, MemberDescriptorType):
         # Built-in slots read stored state; properties/custom descriptors can
         # execute arbitrary Python and remain outside the capture contract.
@@ -404,14 +407,16 @@ class _ConditionalDimension(Dimension):
     conditions: tuple = ()
 
 
-def _dimension_value(component, owner, name, visiting=()):
+def _dimension_value(component, owner, name, visiting=(), *, values=None):
+    if values is not None and name in values:
+        return values[name]
     declaration = component.declarations.get(name)
     if not isinstance(declaration, Dimension) or name in visiting:
         raise TaichiCompilationError(f"Invalid or cyclic dimension declaration {name!r}")
     value = (
         evaluate_extent(
             declaration.expression,
-            lambda dependency: _dimension_value(component, owner, dependency, (*visiting, name)),
+            lambda dependency: _dimension_value(component, owner, dependency, (*visiting, name), values=values),
         )
         if declaration.expression
         else operator.index(component.read(owner, name))
@@ -429,8 +434,10 @@ def _dimension_value(component, owner, name, visiting=()):
         capacity = component.declarations.get(declaration.capacity)
         if not isinstance(capacity, Dimension) or capacity.kind != "extent":
             raise TaichiCompilationError(f"Active dimension {name!r} requires an extent capacity")
-        if value > _dimension_value(component, owner, declaration.capacity, (*visiting, name)):
+        if value > _dimension_value(component, owner, declaration.capacity, (*visiting, name), values=values):
             raise TaichiCompilationError(f"Active dimension {name!r} exceeds capacity {declaration.capacity!r}")
+    if values is not None:
+        values[name] = value
     return value
 
 
@@ -851,7 +858,7 @@ def _capture_id(path):
     return path[0] if len(path) == 1 else "__record_" + "_".join(f"{len(part)}_{part}" for part in path)
 
 
-def _dense_group(component, owner, group):
+def _dense_group(component, owner, group, *, extent_values=None):
     """Project a real SNode group, using declared provenance for every axis.
 
     No byte layout is computed here. The native schema retains placements and
@@ -867,6 +874,8 @@ def _dense_group(component, owner, group):
     tensors = {}
     tensor_layouts = {}
     tensor_roles = {}
+    if extent_values is None:
+        extent_values = {}
 
     def resolve_extent(extent):
         if not isinstance(extent, str):
@@ -875,7 +884,7 @@ def _dense_group(component, owner, group):
         if not isinstance(dim, Dimension) or dim.kind != "extent":
             raise TaichiCompilationError(f"Dense group {group!r} requires extent declaration {extent!r}")
         dimensions[extent] = dim.schema
-        return _dimension_value(component, owner, extent)
+        return _dimension_value(component, owner, extent, values=extent_values)
 
     for name, declaration in component._dense_members.get(group, ()):
         field = component.read(owner, name)
@@ -1006,6 +1015,7 @@ class _DenseLayoutValidation:
         self.component, self.owner = component, owner
         self.groups = {}
         self.extents = {}
+        self.dimension_values = {}
         self.static_values = {}
 
     def matches_static(self, code):
@@ -1029,10 +1039,8 @@ class _DenseLayoutValidation:
 
     def dense(self, group):
         if group not in self.groups:
-            projection = _dense_group(self.component, self.owner, group)
-            self.extents[group] = {
-                name: _dimension_value(self.component, self.owner, name) for name in projection[2]
-            }
+            projection = _dense_group(self.component, self.owner, group, extent_values=self.dimension_values)
+            self.extents[group] = {name: self.dimension_values[name] for name in projection[2]}
             self.groups[group] = projection
         return self.groups[group]
 
@@ -3125,7 +3133,7 @@ class _Capture:
             if isinstance(declaration, _OwnerReference) and not declaration.matches(component, owner, name):
                 return f"owner reference {name!r}"
             if isinstance(declaration, Dimension):
-                _dimension_value(component, owner, name)
+                _dimension_value(component, owner, name, values=layouts.dimension_values)
             if isinstance(declaration, Array):
                 value = component.read(owner, name)
                 declaration.validate(value, component, owner)
@@ -3408,7 +3416,7 @@ class _ComponentCode:
 
         def dimension(name):
             declaration = component.declarations[name]
-            _dimension_value(component, owner, name)
+            _dimension_value(component, owner, name, values=layouts.dimension_values)
             if name in used:
                 return
             used[name] = declaration.schema

@@ -346,6 +346,7 @@ class _MethodInputPaths:
 def owner_bindings(environment, schema, used):
     paths = [environment._paths[key] for key in used if key in environment._paths]
     paths.extend(environment._source_scope_paths[key] for key in used if key in environment._source_scope_paths)
+    prefixes = {tuple(path[:depth]) for path in paths for depth in range(len(path) + 1)}
     return {
         key: dict(
             path=item.get("path", [key]),
@@ -355,19 +356,19 @@ def owner_bindings(environment, schema, used):
         )
         for key, item in schema.items()
         if item["kind"] in ("owner", "owner_input")
-        and any(tuple(path[: len(item.get("path", [key]))]) == tuple(item.get("path", [key])) for path in paths)
+        and tuple(item.get("path", [key])) in prefixes
     }
 
 
-def layout_owner(environment, schema, name):
+def layout_owner(environment, owner_paths, name):
     from ._component import _capture_id
 
     path = environment._source_scope_paths.get(name, environment._paths[name])
-    owners = [
-        tuple(item.get("path", [key])) for key, item in schema.items() if item["kind"] in ("owner", "owner_input")
-    ]
-    owner = max((p for p in owners if tuple(path[: len(p)]) == p), key=len, default=())
-    return dict(layout_owner_path=list(owner), layout_member=_capture_id(path[len(owner) :])) if owner else {}
+    for depth in range(len(path), 0, -1):
+        owner = tuple(path[:depth])
+        if owner in owner_paths:
+            return dict(layout_owner_path=list(owner), layout_member=_capture_id(path[depth:]))
+    return {}
 
 
 class OwnerGraph:
@@ -515,13 +516,12 @@ class OwnerGraph:
                 pending.extend((owner, prefix, member) for member in methods[path[0]])
                 continue
             absolute = prefix + path
-            children = [child for child in owners if len(child) > len(prefix)
-                        and absolute[:len(child)] == child]
-            if children:
-                child = max(children, key=len)
+            child = next((absolute[:depth] for depth in range(len(absolute), len(prefix), -1)
+                          if absolute[:depth] in owners), None)
+            if child is not None:
                 reads.add(child)
                 pending.append((owners[child], child, absolute[len(child):]))
-            elif any(absolute[:len(member)] == member for member in declared):
+            elif any(absolute[:depth] in declared for depth in range(len(absolute) + 1)):
                 reads.add(absolute)
             else:
                 # Host overrides, reflection and unresolved attributes cannot

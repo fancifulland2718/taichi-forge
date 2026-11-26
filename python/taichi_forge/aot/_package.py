@@ -2900,6 +2900,8 @@ def _export_package(output, declarations, source_root, caps, artifact_format, co
                     )
                 }
                 child_bindings = owner_bindings(environment, compilation_schema, bound_used)
+                layout_owner_paths = {tuple(item.get("path", (key,))) for key, item in compilation_schema.items()
+                                      if item["kind"] in ("owner", "owner_input")}
                 for key, binding in child_bindings.items():
                     binding.update(presence_conditions(compilation_schema[key]))
                 from taichi_forge_runtime._dimensions import extent_dependencies
@@ -2936,7 +2938,7 @@ def _export_package(output, declarations, source_root, caps, artifact_format, co
                         dimensions=dimension_relations(
                             environment, {axis for axis in item["shape"] if isinstance(axis, str)}
                         ),
-                        **layout_owner(environment, compilation_schema, key),
+                        **layout_owner(environment, layout_owner_paths, key),
                     )
                     for key, item in compilation_schema.items()
                     if key in code.dynamic and item.get("dynamic_input_storage")
@@ -3046,7 +3048,7 @@ def _export_package(output, declarations, source_root, caps, artifact_format, co
                                 environment, (n for n in shape if isinstance(n, str))
                             )
                         if item["kind"] in ("dense_field", "model_tensor_field"):
-                            item.update(layout_owner(environment, compilation_schema, item["name"]))
+                            item.update(layout_owner(environment, layout_owner_paths, item["name"]))
                         if item["kind"] in ("ndarray", "dense_field", "model_tensor_field"):
                             item.pop("dtype")
                         if item["kind"] == "dimension" and environment.declarations[item["name"]].expression:

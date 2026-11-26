@@ -385,9 +385,10 @@ def project_nested_query_records(environment, schema, uses, *, query_paths=None)
         # different receivers. For unresolved subtrees retain the existing
         # conservative closure (including computed-name patterns/reflection),
         # rather than treating the missing method proof as an empty readset.
+        read_prefixes = {path[:depth] for path in reads for depth in range(len(path) + 1)}
         required = {key for key in device_keys
-                    if any(path[:len(paths[key])] == tuple(paths[key]) for path in reads)
-                    or key in required and any(tuple(paths[key][:len(prefix)]) == prefix for prefix in unknown)}
+                    if tuple(paths[key]) in read_prefixes or key in required and
+                    any(tuple(paths[key][:depth]) in unknown for depth in range(len(paths[key]) + 1))}
     pending = list(required)
     while pending:
         item = schema[pending.pop()]
