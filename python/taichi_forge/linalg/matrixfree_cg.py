@@ -253,6 +253,17 @@ def MatrixFreeBICGSTAB(A, b, x, tol=1e-6, maxiter=5000, quiet=True):
             result += p[I] * q[I]
         return result
 
+    pair_dots = ti.lang.impl.current_cfg().arch == ti.cuda
+
+    @ti.kernel
+    def squared_norm_and_dot(v: ti.template(), w: ti.template()) -> ti.types.vector(2, solver_dtype):
+        norm_sq = solver_dtype(0.0)
+        dot = solver_dtype(0.0)
+        for I in ti.grouped(v):
+            norm_sq += v[I] * v[I]
+            dot += v[I] * w[I]
+        return ti.Vector([norm_sq, dot])
+
     @ti.kernel
     def update_p(beta: solver_dtype, omega: solver_dtype):
         for I in ti.grouped(p):
@@ -279,7 +290,10 @@ def MatrixFreeBICGSTAB(A, b, x, tol=1e-6, maxiter=5000, quiet=True):
         succeeded = True
         A._matvec(x, Ax)
         init()
-        initial_rTr = reduce(r, r)
+        if pair_dots and maxiter:
+            initial_rTr, rho = map(float, squared_norm_and_dot(r, r_tld))
+        else:
+            initial_rTr = reduce(r, r)
         initial_residual_norm = _residual_norm(initial_rTr)
         rTr = initial_rTr
         rho_1 = alpha = omega = 1.0
@@ -287,7 +301,8 @@ def MatrixFreeBICGSTAB(A, b, x, tol=1e-6, maxiter=5000, quiet=True):
             print(f">>> Initial residual = {initial_residual_norm!r}")
         if initial_residual_norm is not None and initial_residual_norm > tol:
             for i in range(maxiter):
-                rho = reduce(r, r_tld)
+                if not pair_dots:
+                    rho = reduce(r, r_tld)
                 if rho == 0.0:
                     if not quiet:
                         print(">>> BICGSTAB failed because r@r_tld = 0.")
@@ -301,12 +316,19 @@ def MatrixFreeBICGSTAB(A, b, x, tol=1e-6, maxiter=5000, quiet=True):
                 alpha = float(coefficient_type(rho / alpha_lower))
                 update_s(alpha)
                 A._matvec(s_hat, t)
-                omega_upper = reduce(t, s)
-                omega_lower = reduce(t, t)
+                if pair_dots:
+                    omega_lower, omega_upper = map(float, squared_norm_and_dot(t, s))
+                else:
+                    omega_upper = reduce(t, s)
+                    omega_lower = reduce(t, t)
                 omega = float(coefficient_type(omega_upper / (1e-16 if omega_lower == 0.0 else omega_lower)))
                 update_x(alpha, omega)
                 update_r(omega)
-                rTr = reduce(r, r)
+                rho_1 = rho
+                if pair_dots:
+                    rTr, rho = map(float, squared_norm_and_dot(r, r_tld))
+                else:
+                    rTr = reduce(r, r)
                 residual_norm = _residual_norm(rTr)
                 if not quiet:
                     print(
@@ -321,7 +343,6 @@ def MatrixFreeBICGSTAB(A, b, x, tol=1e-6, maxiter=5000, quiet=True):
                                 f"#iterations {i}"
                             )
                     break
-                rho_1 = rho
         final_residual_norm = _residual_norm(rTr)
         if final_residual_norm is None or final_residual_norm > tol:
             if not quiet:
