@@ -492,6 +492,7 @@ class Reader:
         stats = json.loads((cache / "unified/latest.json").read_bytes())["produce"]
         if label == "recovered":
             assert 2 <= stats["unified_capture_restores"] < 4
+            assert "damaged recipe" not in json.loads(history.read_bytes())["layouts"].values()
         else:
             assert stats["unified_capture_restores"] == hits
         with ti.aot.borrow_runtime() as runtime, load_package(runtime, output) as package:

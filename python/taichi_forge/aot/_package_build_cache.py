@@ -462,8 +462,10 @@ class PackageBuildCache:
         schema = self.layout_records.get(digest)
         if schema is None:
             schema = self.previous["layouts"][digest]
-            if not isinstance(schema, str) or self._store_layout(schema) != digest:
+            if not isinstance(schema, str) or hashlib.sha256(schema.encode("utf8")).hexdigest() != digest:
                 raise ValueError("Invalid cached capture layout")
+            self._layout_keys[schema] = digest
+            self.layout_records[digest] = schema
         return schema
 
     def remember_missing(self, scope, context):
