@@ -59,12 +59,13 @@ class UnifiedAotModuleBuilder final : public AotModuleBuilder {
                 "Select the unified build directory before adding entries");
     directory_ = directory;
     cache_captures_ = cache_captures;
-    std::filesystem::create_directories(directory_ / "code_units");
-    if (std::filesystem::exists(directory_ / "roots.tcb")) {
+    std::filesystem::create_directories(directory_);
+    unit_stream_.open(directory_ / "units.bin", std::ios::binary);
+    TI_ERROR_IF(!unit_stream_, "Unable to open unified LLVM unit stream");
+    if (std::filesystem::exists(directory_ / "roots.tcb"))
       read_from_binary_file(roots_, (directory_ / "roots.tcb").string());
-      if (std::filesystem::exists(directory_ / "helpers.tcb"))
-        read_from_binary_file(helpers_, (directory_ / "helpers.tcb").string());
-    }
+    if (std::filesystem::exists(directory_ / "helpers.tcb"))
+      read_from_binary_file(helpers_, (directory_ / "helpers.tcb").string());
     if (std::filesystem::is_regular_file(directory_ / "baseline-path"))
       baseline_ = io::VirtualDir::open(read_aot_artifact((directory_ / "baseline-path").string()));
   }
@@ -114,24 +115,18 @@ class UnifiedAotModuleBuilder final : public AotModuleBuilder {
     // any new bytes. An incomplete optional cache falls back to capture.
     std::map<std::string, std::string> missing;
     auto stage = [&](const std::string &digest) {
-      if (digest.size() != 64 || digest.find_first_not_of("0123456789abcdef") != std::string::npos)
-        return false;
-      const auto member = "code_units/" + digest + ".bc";
-      if (std::filesystem::is_regular_file(directory_ / member))
+      if (written_units_.count(digest) || missing.count(digest))
         return true;
-      size_t size = 0;
-      if (!baseline_ || !baseline_->get_file_size(member, size))
+      std::string bytes;
+      if (!read_baseline_unit(digest, bytes))
         return false;
-      std::string bytes(size, '\0');
-      if (baseline_->load_file(member, bytes.data(), size) != size || aot_artifact_sha256(bytes) != digest)
-        return false;
-      missing.emplace(member, std::move(bytes));
+      missing.emplace(digest, std::move(bytes));
       return true;
     };
     if (!stage(object.unit) || !std::all_of(object.imports.begin(), object.imports.end(), stage))
       return false;
-    for (const auto &[member, bytes] : missing)
-      write_file((directory_ / member).string(), bytes);
+    for (const auto &[digest, bytes] : missing)
+      write_unit(digest, bytes);
     const auto signature = aot_artifact_sha256(object.signature);
     signatures_.try_emplace(signature, std::move(object.signature));
     entry_signatures_.emplace(name, signature);
@@ -155,10 +150,20 @@ class UnifiedAotModuleBuilder final : public AotModuleBuilder {
       for (const auto &[hash, bytes] : units_)
         write_file(taichi::join_path(units, hash + ".bc"), bytes);
     } else {
-      // Only the next projection of this private, sequential transaction
-      // reads these indexes. They never enter the published library.
-      write_to_binary_file(roots_, (directory_ / "roots.tcb").string());
-      write_to_binary_file(helpers_, (directory_ / "helpers.tcb").string());
+      unit_stream_.flush();
+      TI_ERROR_IF(!unit_stream_, "Unable to flush unified LLVM unit stream");
+      std::ostringstream index;
+      for (const auto &[digest, span] : written_units_)
+        index << digest << ' ' << span.first << ' ' << span.second << '\n';
+      write_file((directory_ / "units.index").string(), index.str());
+      if (cache_captures_) {
+        write_to_binary_file(roots_, (directory_ / "roots.tcb").string());
+        std::map<std::string, std::string> live_helpers;
+        for (const auto &[key, digest] : helpers_)
+          if (written_units_.count(digest))
+            live_helpers.emplace(key, digest);
+        write_to_binary_file(live_helpers, (directory_ / "helpers.tcb").string());
+      }
     }
     write_file(taichi::join_path(dir, "unified_llvm.json"),
                print(serialize(entries_)));
@@ -212,29 +217,44 @@ class UnifiedAotModuleBuilder final : public AotModuleBuilder {
   std::unique_ptr<io::VirtualDir> baseline_;
   std::uint64_t emissions_{0}, hits_{0}, restored_{0};
   std::map<std::string, Root> roots_;
+  // Private producer staging. The final TCM retains its content-addressed
+  // members and deterministic digest order regardless of emission order.
+  mutable std::ofstream unit_stream_;
+  uint64_t unit_end_{0};
+  std::map<std::string, std::pair<uint64_t, uint64_t>> written_units_;
   std::map<int, int> tree_bindings_, node_ordinals_;
   std::map<std::string, int> named_slots_;
   std::map<std::string, std::string> schemas_;
   std::vector<std::string> layouts_;
   std::map<std::string, std::vector<int>> entry_trees_;
 
-  bool available(const Root &root) {
-    if (directory_.empty())
-      return true;
-    const auto member = "code_units/" + root.unit + ".bc";
-    const auto path = directory_ / member;
-    if (std::filesystem::exists(path))
-      return true;
-    // Historical keys are optional. Only leaf identities enter roots_, so
-    // restoring these bytes does not require replaying a helper import graph.
+  bool read_baseline_unit(const std::string &digest, std::string &bytes) const {
+    if (!baseline_ || digest.size() != 64 || digest.find_first_not_of("0123456789abcdef") != std::string::npos)
+      return false;
+    const auto member = "code_units/" + digest + ".bc";
     size_t size = 0;
-    if (!baseline_ || !baseline_->get_file_size(member, size))
+    if (!baseline_->get_file_size(member, size))
       return false;
-    std::string bytes(size, '\0');
-    if (baseline_->load_file(member, bytes.data(), size) != size ||
-        aot_artifact_sha256(bytes) != root.unit)
+    bytes.resize(size);
+    return baseline_->load_file(member, bytes.data(), size) == size &&
+           aot_artifact_sha256(bytes) == digest;
+  }
+
+  void write_unit(const std::string &digest, const std::string &bytes) {
+    if (written_units_.try_emplace(digest, unit_end_, bytes.size()).second) {
+      unit_stream_.write(bytes.data(), bytes.size());
+      TI_ERROR_IF(!unit_stream_, "Unable to stage unified LLVM unit {}", digest);
+      unit_end_ += bytes.size();
+    }
+  }
+
+  bool available(const std::string &digest) {
+    if (directory_.empty() || written_units_.count(digest))
+      return true;
+    std::string bytes;
+    if (!read_baseline_unit(digest, bytes))
       return false;
-    write_file(path.string(), bytes);
+    write_unit(digest, bytes);
     return true;
   }
 
@@ -295,7 +315,7 @@ class UnifiedAotModuleBuilder final : public AotModuleBuilder {
                    ? unified_leaf_identity(*kernel, simplify)
                    : std::string{};
     auto found = roots_.find(key);
-    if (found != roots_.end() && available(found->second)) {
+    if (found != roots_.end() && available(found->second.unit)) {
       ++hits_;
       entries_.emplace(name, found->second.unit);
       record_kernel_resource_effects(name, found->second.effects);
@@ -305,17 +325,15 @@ class UnifiedAotModuleBuilder final : public AotModuleBuilder {
     Root root;
     std::vector<std::string> imports;
     auto bytes = emit_unified_bitcode(*kernel, root.effects, units_, helpers_,
-                                      trees, node_ordinals_, simplify, cache_captures_ ? &imports : nullptr);
+                                      trees, node_ordinals_, simplify, cache_captures_ ? &imports : nullptr,
+                                      [this](const std::string &digest) { return available(digest); });
     root.unit = aot_artifact_sha256(bytes);
     if (!imports.empty())
       imports_.try_emplace(root.unit, std::move(imports));
     units_.try_emplace(root.unit, std::move(bytes));
     if (!directory_.empty()) {
-      for (const auto &[hash, body] : units_) {
-        const auto file = directory_ / "code_units" / (hash + ".bc");
-        if (!std::filesystem::exists(file))
-          write_file(file.string(), body);
-      }
+      for (const auto &[hash, body] : units_)
+        write_unit(hash, body);
       units_.clear();
     }
     entries_.emplace(name, root.unit);

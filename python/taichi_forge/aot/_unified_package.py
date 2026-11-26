@@ -1,5 +1,6 @@
 """Produce one LLVM body library from the engine's device-dependent declarations."""
 
+import errno
 import hashlib
 import json
 import os
@@ -19,8 +20,9 @@ def _bytes(value, *, sort_keys=False):
 
 
 class _Projection:
-    def __init__(self, directory):
+    def __init__(self, directory, staging):
         self.directory = directory
+        self.staging = staging
 
     def finish(self, module, manifest, payloads):
         # All targets use the same LLVM emitter. Expose loose compiler outputs
@@ -33,10 +35,12 @@ class _Projection:
                     absent_inputs.setdefault(target, {}).setdefault(symbol, []).append(index)
         if absent_inputs:
             (self.directory / "module" / "unified_absent_inputs.json").write_bytes(_bytes(absent_inputs, sort_keys=True))
-        for relative, data in payloads.items():
-            path = self.directory / relative
+        for relative in sorted(payloads, key=Path):
+            data = payloads[relative]
+            path = self.staging / relative
             path.parent.mkdir(parents=True, exist_ok=True)
             path.write_bytes(data)
+            manifest["files"][relative] = hashlib.sha256(data).hexdigest()
         (self.directory / "view.json").write_bytes(_bytes(manifest))
 
 
@@ -78,17 +82,19 @@ def _worker(request):
     if cache_dir:
         cache = PackageBuildCache(Path(cache_dir) / "portable" / "declarations", files, modules,
                                   packages, (), "unified-bc-library", discovery=discovery, assets=assets)
+        _restore_leaf_cache(Path(cache_dir) / "unified", directory.parent, cache.object_context)
     declarations = _preflight_package(roots, inputs=inputs, build_cache=cache, portable=True)
     preflight = time.perf_counter()
     del inputs, files, modules
     with PackageCompilation(portable=True) as compilation:
-        projection = _Projection(directory)
+        projection = _Projection(directory, Path(request["staging"]))
         _export_package(directory, declarations, source_root, (), "unified-bc-library", compilation,
                         cache, assets, projection=projection)
-        if cache_dir:
+        if cache is not None and cache.object_context is not None:
             counts = compilation.module._aot_builder._streaming_export_statistics()
             counts.update(preflight_seconds=preflight - start, compile_and_seal_seconds=time.perf_counter() - preflight)
-            (directory.parent / "portable-statistics.json").write_bytes(_bytes(counts))
+            (directory.parent / "portable-statistics.json").write_bytes(
+                _bytes(dict(version=3, context=cache.object_context, produce=counts)))
             (directory.parent / "portable-declarations.json").write_bytes(_bytes(cache.declaration_record()))
 
 
@@ -131,7 +137,7 @@ def _module_members(module, manifest):
             yield name, paths[name].read_bytes()
 
 
-def _collect(directory, staging, archive):
+def _collect(directory, archive):
     manifest = json.loads((directory / "view.json").read_bytes())
     module = directory / "module"
     rows = json.loads((module / "unified_llvm.json").read_bytes())
@@ -147,17 +153,18 @@ def _collect(directory, staging, archive):
         if physical not in written:
             _write_member(archive, physical, data)
             written.add(physical)
-    for path in sorted(directory.rglob("*")):
-        if not path.is_file() or path.is_relative_to(module) or path == directory / "view.json":
-            continue
-        relative = path.relative_to(directory).as_posix()
-        data = path.read_bytes()
-        digest = hashlib.sha256(data).hexdigest()
-        destination = staging / relative
-        destination.parent.mkdir(parents=True, exist_ok=True)
-        destination.write_bytes(data)
-        manifest["files"][relative] = digest
     return manifest, {"entries": roots, "members": members}
+
+
+def _write_units(archive, directory):
+    with (directory / "units.bin").open("rb") as stream, (directory / "units.index").open(encoding="ascii") as index:
+        for row in index:
+            digest, offset, size = row.split()
+            stream.seek(int(offset))
+            data = stream.read(int(size))
+            if hashlib.sha256(data).hexdigest() != digest or not data.startswith(b"BC\xc0\xde"):
+                raise ValueError(f"Invalid unified LLVM unit: {digest}")
+            _write_member(archive, "code_units/" + digest + ".bc", data)
 
 
 def _init_options():
@@ -177,74 +184,75 @@ def _init_options():
     return options
 
 
-class _LeafCache:
-    """Reuse typed, tree-independent bodies even when the application changes."""
-
-    def __init__(self, directory, workspace):
-        from taichi_forge.lang._build_cache import value_digest
-        from ._package_build_cache import _producer_inputs, _UntrackedInput
-
-        self.directory = Path(directory) / "unified"
-        self.toolchain = None
-        self.files = {}
-        try:
-            previous = json.loads((self.directory / "latest.json").read_bytes())
-        except (OSError, ValueError):
-            previous = {}
-        try:
-            self.toolchain = value_digest(_producer_inputs(previous.get("toolchain_files", {}), self.files))
-            if previous.get("toolchain") != self.toolchain or previous.get("version") != 2:
-                return
-            digest = previous["catalog"]
-            if len(digest) != 64 or any(c not in "0123456789abcdef" for c in digest):
-                return
-            catalog = (self.directory / (digest + ".tcb")).read_bytes()
-            archive = Path(previous["output"]) / "code.tcm"
-            if hashlib.sha256(catalog).hexdigest() != digest or not zipfile.is_zipfile(archive):
-                return
-            bodies = workspace / "bodies"
-            bodies.mkdir()
-            (bodies / "roots.tcb").write_bytes(catalog)
-            # The worker hashes individual referenced bodies while reading the
-            # previous archive. Missing or altered optional bodies recompile.
-            (bodies / "baseline-path").write_bytes(os.fsencode(archive))
-        except (_UntrackedInput, OSError, ValueError, TypeError, KeyError):
+def _restore_leaf_cache(directory, workspace, context):
+    if context is None:
+        return
+    try:
+        record = json.loads((directory / "latest.json").read_bytes())
+        if not isinstance(record, dict) or record.get("version") != 3 or record.get("context") != context:
             return
-
-    def record(self, workspace, output):
-        if self.toolchain is None:
+        archive = Path(record["output"]) / "code.tcm"
+        if not zipfile.is_zipfile(archive):
             return
-        try:
-            self.directory.mkdir(parents=True, exist_ok=True)
-            catalog = (workspace / "bodies" / "roots.tcb").read_bytes()
-            digest = hashlib.sha256(catalog).hexdigest()
-            stats = json.loads((workspace / "portable-statistics.json").read_bytes())
-            record = dict(version=2, toolchain=self.toolchain, toolchain_files=self.files,
-                          catalog=digest, output=str(output), produce=stats)
-            declarations = workspace / "portable-declarations.json"
-            target_cache = self.directory.parent / "portable" / "declarations"
-            target_cache.mkdir(parents=True, exist_ok=True)
-            with tempfile.NamedTemporaryFile(dir=target_cache, delete=False) as stream:
-                temp = Path(stream.name)
-                try:
-                    with declarations.open("rb") as reader:
-                        shutil.copyfileobj(reader, stream)
-                    stream.close()
-                    os.replace(temp, target_cache / "latest.json")
-                finally:
-                    temp.unlink(missing_ok=True)
-            for name, payload in ((digest + ".tcb", catalog), ("latest.json", _bytes(record))):
-                with tempfile.NamedTemporaryFile(dir=self.directory, delete=False) as stream:
-                    temp = Path(stream.name)
-                    try:
-                        stream.write(payload)
-                        stream.close()
-                        os.replace(temp, self.directory / name)
-                    finally:
-                        temp.unlink(missing_ok=True)
-        except OSError as error:
-            warnings.warn(f"Unified package published; optional producer cache update failed: {error}",
-                          RuntimeWarning, stacklevel=2)
+        bodies = workspace / "bodies"
+        bodies.mkdir()
+        for field, filename in (("catalog", "roots.tcb"), ("helpers", "helpers.tcb")):
+            digest = record.get(field)
+            if not isinstance(digest, str) or len(digest) != 64 or any(c not in "0123456789abcdef" for c in digest):
+                continue
+            try:
+                catalog = (directory / (digest + ".tcb")).read_bytes()
+            except OSError:
+                continue
+            if hashlib.sha256(catalog).hexdigest() == digest:
+                (bodies / filename).write_bytes(catalog)
+        (bodies / "baseline-path").write_bytes(os.fsencode(archive))
+    except (OSError, ValueError, TypeError, KeyError):
+        return
+
+
+def _publish_cache_file(source, target):
+    # Most local builds can commit a completed file with a single rename.
+    # A cache on another volume still requires a private copy before replace.
+    try:
+        os.replace(source, target)
+    except OSError as error:
+        if error.errno != errno.EXDEV and getattr(error, "winerror", None) != 17:
+            raise
+        with tempfile.NamedTemporaryFile(dir=target.parent, delete=False) as stream:
+            temp = Path(stream.name)
+            try:
+                with source.open("rb") as reader:
+                    shutil.copyfileobj(reader, stream)
+                stream.close()
+                os.replace(temp, target)
+            finally:
+                stream.close()
+                temp.unlink(missing_ok=True)
+
+
+def _record_leaf_cache(cache_dir, workspace, output):
+    directory = Path(cache_dir) / "unified"
+    receipt = workspace / "portable-statistics.json"
+    if not receipt.is_file():
+        return
+    try:
+        record = json.loads(receipt.read_bytes())
+        record["output"] = str(output)
+        directory.mkdir(parents=True, exist_ok=True)
+        for field, filename in (("catalog", "roots.tcb"), ("helpers", "helpers.tcb")):
+            source = workspace / "bodies" / filename
+            digest = hashlib.sha256(source.read_bytes()).hexdigest()
+            _publish_cache_file(source, directory / (digest + ".tcb"))
+            record[field] = digest
+        declarations = directory.parent / "portable" / "declarations"
+        declarations.mkdir(parents=True, exist_ok=True)
+        _publish_cache_file(workspace / "portable-declarations.json", declarations / "latest.json")
+        receipt.write_bytes(_bytes(record))
+        _publish_cache_file(receipt, directory / "latest.json")
+    except OSError as error:
+        warnings.warn(f"Unified package published; optional producer cache update failed: {error}",
+                      RuntimeWarning, stacklevel=2)
 
 
 def export_library(package, output, arch, caps, source_root, build_cache):
@@ -266,13 +274,11 @@ def export_library(package, output, arch, caps, source_root, build_cache):
     output.parent.mkdir(parents=True, exist_ok=True)
     with tempfile.TemporaryDirectory(prefix=".forge-unified-build-", dir=output.parent) as temporary:
         workspace = Path(temporary)
-        cache = _LeafCache(build_cache, workspace) if build_cache is not None else None
         request = dict(directory=str(workspace), compiler=core.__file__, options=_init_options(),
                        roots=[(root.__name__, str(Path(root.__file__).resolve())) for root in roots],
                        source_root=str(Path(source_root).resolve()) if source_root else None,
                        cache=str(Path(build_cache).resolve()) if build_cache is not None else None)
         request_path = workspace / "request.json"
-        request_path.write_bytes(_bytes(request))
         env = os.environ.copy()
         env["PYTHONPATH"] = os.pathsep.join(str(Path(path or ".").resolve()) for path in sys.path)
         # A Program owns the frontend's field trees, kernel factories and target
@@ -283,6 +289,8 @@ def export_library(package, output, arch, caps, source_root, build_cache):
         staging = Path(tempfile.mkdtemp(prefix=".forge-package-", dir=output.parent))
         complete = False
         try:
+            request["staging"] = str(staging)
+            request_path.write_bytes(_bytes(request))
             result = subprocess.run([sys.executable, "-c", worker, str(request_path)], env=env)
             if result.returncode:
                 error_path = workspace / "export-error.txt"
@@ -290,13 +298,9 @@ def export_library(package, output, arch, caps, source_root, build_cache):
                     raise PackageExportError(error_path.read_text(encoding="utf8"))
                 result.check_returncode()
             with zipfile.ZipFile(staging / "code.tcm", "w") as archive:
-                base, index = _collect(workspace / "portable", staging, archive)
+                base, index = _collect(workspace / "portable", archive)
                 del base["frontend_target"]
-                for unit in sorted((workspace / "bodies" / "code_units").glob("*.bc")):
-                    data = unit.read_bytes()
-                    if hashlib.sha256(data).hexdigest() != unit.stem or not data.startswith(b"BC\xc0\xde"):
-                        raise ValueError(f"Invalid unified LLVM unit: {unit.name}")
-                    _write_member(archive, "code_units/" + unit.name, data)
+                _write_units(archive, workspace / "bodies")
                 _write_member(archive, "unified_llvm.json", _bytes(dict(version=2, **index)))
             digest = hashlib.sha256((staging / "code.tcm").read_bytes()).hexdigest()
             document = dict(kind="forge_unified_definition_library", version=2, base=encode_manifest(base),
@@ -304,8 +308,8 @@ def export_library(package, output, arch, caps, source_root, build_cache):
             (staging / "package.json").write_bytes(_bytes(document))
             complete = True
             _publish_package(staging, output)
-            if cache is not None:
-                cache.record(workspace, output)
+            if build_cache is not None:
+                _record_leaf_cache(build_cache, workspace, output)
             return document
         finally:
             if not complete:

@@ -1,5 +1,6 @@
 #pragma once
 
+#include <functional>
 #include <string>
 #include <map>
 #include <vector>
@@ -24,7 +25,8 @@ TI_DLL_EXPORT std::string emit_unified_bitcode(
     const std::vector<int> &tree_ids,
     const std::map<int, int> &node_ordinals,
     bool simplify,
-    std::vector<std::string> *imports = nullptr);
+    std::vector<std::string> *imports = nullptr,
+    const std::function<bool(const std::string &)> &restore_unit = {});
 
 }  // namespace LLVM
 }  // namespace taichi::lang

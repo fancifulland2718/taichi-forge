@@ -154,6 +154,7 @@ class UnitWriter final : public IRVisitor {
              const std::map<int, int> &node_ordinals,
              LocalFunctions &functions,
              bool simplify,
+             const std::function<bool(const std::string &)> &restore_unit,
              Function *callee = nullptr)
       : module_(module),
         ctx_(module.getContext()),
@@ -163,6 +164,7 @@ class UnitWriter final : public IRVisitor {
         tree_ids_(tree_ids),
         node_ordinals_(node_ordinals),
         functions_(functions),
+        restore_unit_(restore_unit),
         callee_(callee),
         simplify_(simplify) {
     allow_undefined_visitor = true;
@@ -192,6 +194,7 @@ class UnitWriter final : public IRVisitor {
   const std::vector<int> &tree_ids_;
   const std::map<int, int> &node_ordinals_;
   LocalFunctions &functions_;
+  const std::function<bool(const std::string &)> &restore_unit_;
   Function *callee_;
   bool simplify_;
   llvm::Function *entry_;
@@ -521,20 +524,21 @@ class UnitWriter final : public IRVisitor {
       key = "helper:" + key;
     auto found = identities_.find(key);
     std::string digest;
-    if (!key.empty() && found != identities_.end()) {
+    if (found != identities_.end() &&
+        (helpers_.count(found->second) || (restore_unit_ && restore_unit_(found->second)))) {
       digest = found->second;
     } else {
       llvm::LLVMContext context;
       llvm::Module unit("forge.unified.helper", context);
       auto ir = lower_body(fn, fn.ir_stage() == Function::IRStage::AST);
       UnitWriter(unit, helpers_, identities_, tree_ids_, node_ordinals_,
-                 functions_, simplify_, &fn)
+                 functions_, simplify_, restore_unit_, &fn)
           .write(*ir->as<Block>());
       auto bytes = serialize(unit, simplify_);
       digest = aot_artifact_sha256(bytes);
       helpers_.try_emplace(digest, std::move(bytes));
       if (!key.empty())
-        identities_.emplace(key, digest);
+        identities_.insert_or_assign(key, digest);
     }
     functions_.at(&fn) = digest;
     return digest;
@@ -980,7 +984,8 @@ std::string emit_unified_bitcode(Kernel &kernel,
                                  const std::vector<int> &tree_ids,
                                  const std::map<int, int> &node_ordinals,
                                  bool simplify,
-                                 std::vector<std::string> *imports) {
+                                 std::vector<std::string> *imports,
+                                 const std::function<bool(const std::string &)> &restore_unit) {
   TI_ERROR_IF(!kernel.ir || !kernel.ir_is_ast(),
               "Unified LLVM requires live frontend IR");
   auto root = lower_body(kernel, true);
@@ -988,7 +993,7 @@ std::string emit_unified_bitcode(Kernel &kernel,
   llvm::LLVMContext context;
   llvm::Module module("forge.unified", context);
   LocalFunctions functions;
-  UnitWriter(module, helpers, identities, tree_ids, node_ordinals, functions, simplify)
+  UnitWriter(module, helpers, identities, tree_ids, node_ordinals, functions, simplify, restore_unit)
       .write(*root->as<Block>());
   if (imports) {
     for (const auto &[function, digest] : functions)

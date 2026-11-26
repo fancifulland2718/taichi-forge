@@ -340,9 +340,22 @@ def vector(x: ti.types.vector(2, ti.i32)) -> ti.i32:
     return x[0] - x[1]
 """
     cache = tmp_path / "cache"
-    for name, text, multiplier in (("cold", original, 2), ("warm", original, 2),
-                                   ("edited", original.replace("2 * value", "11 * value"), 11)):
+    caller_edit = original.replace("return forward(x)", "return forward(x) + 3")
+    helper_edit = caller_edit.replace("2 * value", "11 * value")
+    for name, text, expected in (("cold", original, 14), ("warm", original, 14),
+                                 ("caller", caller_edit, 17), ("edited", helper_edit, 80),
+                                 ("repaired", helper_edit, 80), ("fresh", helper_edit, 80)):
         ti.reset()
+        if name == "fresh":
+            cache = tmp_path / "fresh-cache"
+        if name == "repaired":
+            baseline = tmp_path / "edited/code.tcm"
+            with zipfile.ZipFile(baseline) as source, zipfile.ZipFile(tmp_path / "incomplete.tcm", "w") as target:
+                roots = set(json.loads(source.read("unified_llvm.json"))["entries"].values())
+                for item in source.infolist():
+                    if not item.filename.startswith("code_units/") or item.filename[11:-3] in roots:
+                        target.writestr(item, source.read(item))
+            (tmp_path / "incomplete.tcm").replace(baseline)
         path.write_text(text, encoding="utf8")
         module = importlib.import_module(path.stem)
         try:
@@ -351,15 +364,21 @@ def vector(x: ti.types.vector(2, ti.i32)) -> ti.i32:
                                   build_cache=cache)
         finally:
             sys.modules.pop(path.stem, None)
-        stats = json.loads((cache / "unified/latest.json").read_bytes())["produce"]
-        assert stats["unified_capture_restores"] >= {"cold": 0, "warm": 2, "edited": 1}[name]
+        record = json.loads((cache / "unified/latest.json").read_bytes())
+        assert (cache / "unified" / (record["helpers"] + ".tcb")).is_file()
+        assert record["produce"]["unified_capture_restores"] == (
+            0 if name in ("cold", "fresh") else 2 if name == "warm" else 1)
         for target in targets:
             ti.init(arch=target, enable_fallback=False)
             with ti.aot.borrow_runtime() as runtime, load_package(runtime, output) as pkg:
-                assert pkg.host.apply(7) == multiplier * 7
+                assert pkg.host.apply(7) == expected
                 assert pkg.host.vector([9, 4]) == 5
         if name == "warm":
             assert (tmp_path / "cold/code.tcm").read_bytes() == (output / "code.tcm").read_bytes()
+            assert (tmp_path / "cold/package.json").read_bytes() == (output / "package.json").read_bytes()
+        if name == "fresh":
+            assert (tmp_path / "repaired/code.tcm").read_bytes() == (output / "code.tcm").read_bytes()
+            assert (tmp_path / "repaired/package.json").read_bytes() == (output / "package.json").read_bytes()
 
 
 @test_utils.test(arch=ti.cpu, offline_cache=False)
