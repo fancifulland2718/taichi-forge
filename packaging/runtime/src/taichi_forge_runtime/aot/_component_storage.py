@@ -84,12 +84,10 @@ def _entry_records(entry):
 
 def encode_entry_documents(entries):
     """Share exact group and preparation records, preserving every ABI field."""
-    groups = _encode_documents(entries, _entry_group_records, _ENTRY_FORMAT, "entry_contract", "component_contracts",
-                               record_type=str)
-    sections = _encode_documents(entries, _entry_records, _ENTRY_SECTIONS_FORMAT, "entry_contract",
-                                 "component_contracts", record_type=(str, dict, list))
-    return min((groups, sections), key=lambda documents: sum(
-        _zip_cost(name, value) for name, value in documents.items()))
+    return _smallest_documents(entries, "entry_contract", "component_contracts", (
+        (_entry_group_records, _ENTRY_FORMAT, str),
+        (_entry_records, _ENTRY_SECTIONS_FORMAT, (str, dict, list)),
+    ))
 
 
 def _entry_record_type(path):
@@ -139,44 +137,69 @@ def encode_contract_documents(contracts):
     The comparison uses Module.archive's deflate level and includes extra file
     headers. Small contracts may intentionally retain the original representation.
     """
-    legacy = _encode_documents(contracts, _records, _FORMAT, "contract", "component_contracts")
-    layouts = _encode_documents(contracts, _layout_records, _LAYOUT_FORMAT, "contract", "component_contracts")
-    combined = _encode_documents(contracts, _all_records, _LAYOUT_FORMAT, "contract", "component_contracts")
-    # Sharing small sections can lose more ZIP locality/headers than it saves.
-    # Retain v1 (or ordinary documents) unless the complete v2 output is smaller.
-    # Small call-record fragments must not hide gains from the large sections.
-    return min((legacy, layouts, combined), key=lambda documents: sum(
-        _zip_cost(name, value) for name, value in documents.items()))
+    return _smallest_documents(contracts, "contract", "component_contracts", (
+        (_records, _FORMAT, dict), (_layout_records, _LAYOUT_FORMAT, dict), (_all_records, _LAYOUT_FORMAT, dict),
+    ))
 
 
 def _encode_documents(contracts, records, storage_format, content_key, directory, *, record_type=dict):
+    return _smallest_documents(contracts, content_key, directory, ((records, storage_format, record_type),))
+
+
+def _smallest_documents(contracts, content_key, directory, alternatives):
     original = {name: _json_bytes(contract) for name, contract in contracts.items()}
+    best, best_size = original, None
+    strings = {}
+    for records, storage_format, record_type in alternatives:
+        candidate = _shared_documents(contracts, original, records, storage_format, content_key, directory,
+                                      record_type, strings)
+        if candidate is None:
+            continue
+        if best_size is None:
+            best_size = sum(_zip_cost(name, data) for name, data in original.items())
+        size = sum(_zip_cost(name, data) for name, data in candidate.items())
+        if size < best_size:
+            best, best_size = candidate, size
+    return best
+
+
+def _shared_documents(contracts, original, records, storage_format, content_key, directory, record_type, strings):
     counts, payloads, locations = Counter(), {}, {}
     for name, contract in contracts.items():
+        paths = locations[name] = {}
         for path, record in records(contract):
             if not isinstance(record, record_type):
                 continue
-            payload = _json_bytes(record)
-            digest = sha256(payload).hexdigest()
-            if digest in payloads and payloads[digest] != payload:
+            cached = strings.get(record) if isinstance(record, str) else None
+            if cached is None:
+                payload = _json_bytes(record)
+                digest = sha256(payload).hexdigest()
+                if isinstance(record, str):
+                    strings[record] = digest, payload
+            else:
+                digest, payload = cached
+            if payloads.setdefault(digest, payload) != payload:
                 raise ValueError("Component record digest collision")
-            payloads[digest] = payload
             counts[digest] += 1
-            locations[name, path] = digest
+            paths[path] = digest
     shared = {digest for digest, count in counts.items() if count > 1}
     if not shared:
-        return original
+        return None
 
     documents, used = {}, set()
     for name, contract in contracts.items():
         references = []
+        paths = {path: digest for path, digest in locations[name].items() if digest in shared}
+        parents = {path[:depth] for path in paths for depth in range(len(path))}
 
         def replace(value, path=()):
-            digest = locations.get((name, path))
-            if digest in shared:
+            digest = paths.get(path)
+            if digest is not None:
                 references.append([list(path), digest])
                 used.add(digest)
                 return None
+            if path not in parents:
+                return value
             if isinstance(value, dict):
                 return {key: replace(child, path + (key,)) for key, child in value.items()}
             if isinstance(value, list):
@@ -191,10 +214,6 @@ def _encode_documents(contracts, records, storage_format, content_key, directory
             "references": references,
         }) if references else original[name]
     documents.update((_record_file(digest, directory), payloads[digest]) for digest in sorted(used))
-    if sum(_zip_cost(name, payload) for name, payload in documents.items()) >= sum(
-        _zip_cost(name, payload) for name, payload in original.items()
-    ):
-        return original
     return documents
 
 
