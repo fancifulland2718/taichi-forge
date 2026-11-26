@@ -343,7 +343,8 @@ def thaw(facts, kernel, key, entry):
     code.workspaces = contract.get("local_tensor_workspaces", {})
     code._function_states = {}
     code.semantic_key = entry["semantic_key"]
-    code._contract = json.dumps(contract)
+    # The producer already owns this decoded contract in its sealed entry.
+    code._contract = contract
     return code
 
 

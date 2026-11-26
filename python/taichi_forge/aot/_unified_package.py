@@ -4,6 +4,8 @@ import errno
 import hashlib
 import json
 import os
+from contextlib import nullcontext
+from copy import copy
 from pathlib import Path
 import shutil
 import subprocess
@@ -24,39 +26,36 @@ def _ordered_entries(manifest):
     return sorted(entries, key=lambda name: (entries[name]["definition"], name))
 
 
+def _signature_references(module_dir):
+    index = module_dir.parent.parent / "bodies" / "signatures.index"
+    if not index.is_file():
+        return {}
+    return {"signatures/" + digest + ".json": digest for digest in index.read_text(encoding="ascii").splitlines()}
+
+
 def _link_inputs(directory, module, manifest):
     # These are the linker's actual inputs after native emission/restoration.
     # Unit offsets describe scratch storage; the archive uses digest order.
     native = {path.relative_to(directory).as_posix(): hashlib.sha256(path.read_bytes()).hexdigest()
-              for path in sorted(directory.rglob("*")) if path.is_file()}
+              for path in directory.rglob("*") if path.is_file()}
+    native.update(_signature_references(directory))
     with (directory.parent.parent / "bodies" / "units.index").open(encoding="ascii") as index:
         units = [line.split()[0] for line in index]
     # Preserve order inside each contract: it determines the ordered list of
     # shared references written by the entry encoder.
     entries = [(name, hashlib.sha256(_bytes(contract)).hexdigest())
                for name, contract in sorted(module._component_entries.items())]
-    return hashlib.sha256(_bytes([native, units, entries, _ordered_entries(manifest)])).hexdigest()
+    return hashlib.sha256(_bytes([sorted(native.items()), units, entries, _ordered_entries(manifest)])).hexdigest()
 
 
-def _reuse_archive(record, inputs, destination):
-    if not record or not inputs:
+def _reuse_archive(record, inputs, snapshot, destination):
+    if not record or not inputs or not snapshot.is_file():
         return False
-    try:
-        expected, blocks = record["tcm_sha256"], record["entry_blocks"]
-        if record["link"] != hashlib.sha256(_bytes([inputs, expected, blocks])).hexdigest():
-            return False
-        source = Path(record["output"]) / "code.tcm"
-        digest = hashlib.sha256()
-        with source.open("rb") as reader, destination.open("wb") as writer:
-            for chunk in iter(lambda: reader.read(1024 * 1024), b""):
-                digest.update(chunk)
-                writer.write(chunk)
-        if digest.hexdigest() == expected:
-            return True
-    except (KeyError, OSError, TypeError, ValueError):
-        pass
-    destination.unlink(missing_ok=True)
-    return False
+    receipt = [inputs, record.get("tcm_sha256"), record.get("entry_blocks")]
+    if record.get("link") != hashlib.sha256(_bytes(receipt)).hexdigest():
+        return False
+    snapshot.replace(destination)
+    return True
 
 
 class _Projection:
@@ -85,7 +84,8 @@ class _Projection:
             (self.directory / "module" / "unified_absent_inputs.json").write_bytes(_bytes(absent_inputs, sort_keys=True))
         if defer_entries:
             self.link_inputs = _link_inputs(directory, module, manifest)
-            self.reused = _reuse_archive(self.previous, self.link_inputs, self.staging / "code.tcm")
+            self.reused = _reuse_archive(self.previous, self.link_inputs, self.directory.parent / "baseline.tcm",
+                                         self.staging / "code.tcm")
             if not self.reused:
                 module._save_component_entries(directory, shared=True)
             elif self.previous["entry_blocks"]:
@@ -190,9 +190,10 @@ def _module_members(module, manifest):
         yield name, data
     if has_blocks:
         _require_entry_blocks(manifest)
-    for name in sorted(paths):
+    references = _signature_references(module)
+    for name in sorted(paths.keys() | references.keys()):
         if name != "unified_llvm.json":
-            yield name, paths[name].read_bytes()
+            yield name, None if name in references else paths[name].read_bytes()
 
 
 def _require_entry_blocks(manifest):
@@ -201,7 +202,42 @@ def _require_entry_blocks(manifest):
     manifest["runtime_requirements"] = sorted(set(manifest.get("runtime_requirements", ())) | {RUNTIME_REQUIREMENT})
 
 
-def _collect(directory, archive):
+class _CompressedMembers:
+    """Transfer local ZIP records from a verified Forge archive, in new link order."""
+
+    def __init__(self, baseline):
+        self.source = baseline
+        self.spans = {}
+        if baseline is not None:
+            end = baseline.start_dir
+            for info in sorted(baseline.infolist(), key=lambda item: item.header_offset, reverse=True):
+                self.spans[info.filename] = (info, end - info.header_offset)
+                end = info.header_offset
+
+    def copy_to(self, target, name):
+        member = self.spans.get(name)
+        if member is None:
+            return False
+        info, remaining = member
+        self.source.fp.seek(info.header_offset)
+        # zipfile has no public precompressed-member writer. Keep its central
+        # directory and ZIP64 bookkeeping; only the local record is identical.
+        moved = copy(info)
+        moved.header_offset = target.start_dir
+        target.fp.seek(target.start_dir)
+        while remaining:
+            chunk = self.source.fp.read(min(remaining, 1024 * 1024))
+            if not chunk:
+                raise EOFError(f"Incomplete cached ZIP member {name}")
+            target.fp.write(chunk)
+            remaining -= len(chunk)
+        target.start_dir = target.fp.tell()
+        target.filelist.append(moved)
+        target.NameToInfo[name] = moved
+        return True
+
+
+def _collect(directory, archive, baseline):
     manifest = json.loads((directory / "view.json").read_bytes())
     module = directory / "module"
     rows = json.loads((module / "unified_llvm.json").read_bytes())
@@ -211,24 +247,33 @@ def _collect(directory, archive):
     members = {}
     written = set()
     for relative, data in _module_members(module, manifest):
-        digest = hashlib.sha256(data).hexdigest()
+        digest = Path(relative).stem if data is None else hashlib.sha256(data).hexdigest()
         physical = "records/" + digest
         members[relative] = physical
         if physical not in written:
-            _write_member(archive, physical, data)
+            if not baseline.copy_to(archive, physical):
+                if data is None:
+                    raise ValueError(f"Missing referenced unified LLVM signature: {digest}")
+                _write_member(archive, physical, data)
             written.add(physical)
     return manifest, {"entries": roots, "members": members}
 
 
-def _write_units(archive, directory):
+def _write_units(archive, directory, baseline):
     with (directory / "units.bin").open("rb") as stream, (directory / "units.index").open(encoding="ascii") as index:
         for row in index:
-            digest, offset, size = row.split()
+            digest, *span = row.split()
+            member = "code_units/" + digest + ".bc"
+            if span == ["baseline"]:
+                if not baseline.copy_to(archive, member):
+                    raise ValueError(f"Missing referenced unified LLVM unit: {digest}")
+                continue
+            offset, size = span
             stream.seek(int(offset))
             data = stream.read(int(size))
             if hashlib.sha256(data).hexdigest() != digest or not data.startswith(b"BC\xc0\xde"):
                 raise ValueError(f"Invalid unified LLVM unit: {digest}")
-            _write_member(archive, "code_units/" + digest + ".bc", data)
+            _write_member(archive, member, data)
 
 
 def _init_options():
@@ -246,6 +291,28 @@ def _init_options():
         options[name] = str(value) if name.startswith("default_") else value
     options["short_circuit_operators"] = runtime.short_circuit_operators
     return options
+
+
+def _pin_baseline(archive, expected, workspace):
+    if not isinstance(expected, str):
+        return False
+    snapshot = workspace / "baseline.tcm"
+    try:
+        digest = hashlib.sha256()
+        with archive.open("rb") as source, snapshot.open("wb") as target:
+            for chunk in iter(lambda: source.read(1024 * 1024), b""):
+                digest.update(chunk)
+                target.write(chunk)
+        if digest.hexdigest() == expected:
+            with zipfile.ZipFile(snapshot) as previous:
+                members = [name for name in previous.namelist() if name.startswith(("code_units/", "records/"))]
+            (workspace / "bodies" / "baseline-members.index").write_text("\n".join(members), encoding="ascii")
+            return True
+    except (OSError, zipfile.BadZipFile):
+        pass
+    (workspace / "bodies" / "baseline-members.index").unlink(missing_ok=True)
+    snapshot.unlink(missing_ok=True)
+    return False
 
 
 def _restore_leaf_cache(directory, workspace, context):
@@ -270,7 +337,8 @@ def _restore_leaf_cache(directory, workspace, context):
                 continue
             if hashlib.sha256(catalog).hexdigest() == digest:
                 (bodies / filename).write_bytes(catalog)
-        (bodies / "baseline-path").write_bytes(os.fsencode(archive))
+        if not _pin_baseline(archive, record.get("tcm_sha256"), workspace):
+            (bodies / "baseline-path").write_bytes(os.fsencode(archive))
         return record
     except (OSError, ValueError, TypeError, KeyError):
         return
@@ -374,9 +442,12 @@ def export_library(package, output, arch, caps, source_root, build_cache):
             else:
                 from taichi_forge_runtime.aot._entry_blocks import BLOCK_PREFIX
 
-                with zipfile.ZipFile(staging / "code.tcm", "w") as archive:
-                    base, index = _collect(workspace / "portable", archive)
-                    _write_units(archive, workspace / "bodies")
+                snapshot = workspace / "baseline.tcm"
+                prior = zipfile.ZipFile(snapshot) if snapshot.is_file() else nullcontext(None)
+                with prior as source, zipfile.ZipFile(staging / "code.tcm", "w") as archive:
+                    baseline = _CompressedMembers(source)
+                    base, index = _collect(workspace / "portable", archive, baseline)
+                    _write_units(archive, workspace / "bodies", baseline)
                     _write_member(archive, "unified_llvm.json", _bytes(dict(version=2, **index)))
                 entry_blocks = any(name.startswith(BLOCK_PREFIX) for name in index["members"])
             del base["frontend_target"]

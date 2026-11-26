@@ -2,6 +2,7 @@
 
 #include <fstream>
 #include <filesystem>
+#include <unordered_set>
 
 #include "taichi/aot/module_builder.h"
 #include "taichi/common/virtual_dir.h"
@@ -66,12 +67,18 @@ class UnifiedAotModuleBuilder final : public AotModuleBuilder {
       read_from_binary_file(roots_, (directory_ / "roots.tcb").string());
     if (std::filesystem::exists(directory_ / "helpers.tcb"))
       read_from_binary_file(helpers_, (directory_ / "helpers.tcb").string());
-    if (std::filesystem::is_regular_file(directory_ / "baseline-path"))
+    if (std::ifstream index{directory_ / "baseline-members.index"}; index) {
+      // The producer has pinned and hashed this archive for the entire link.
+      // No consumer or LLVM pass needs the contents of restored units here.
+      for (std::string member; index >> member;)
+        baseline_members_.insert(std::move(member));
+    } else if (std::filesystem::is_regular_file(directory_ / "baseline-path")) {
       baseline_ = io::VirtualDir::open(read_aot_artifact((directory_ / "baseline-path").string()));
+    }
   }
   std::map<std::string, std::uint64_t> streaming_export_statistics() override {
     return {{"unified_root_emissions", emissions_}, {"unified_root_reuses", hits_},
-            {"unified_capture_restores", restored_}};
+            {"unified_capture_restores", restored_}, {"unified_referenced_units", referenced_units_}};
   }
   std::string build_object(const std::string &name) const {
     if (!cache_captures_ || !kernel_snode_tree_ids(name).empty())
@@ -81,7 +88,7 @@ class UnifiedAotModuleBuilder final : public AotModuleBuilder {
     object.unit = entries_.at(name);
     if (auto it = imports_.find(object.unit); it != imports_.end())
       object.imports = it->second;
-    object.signature = signatures_.at(entry_signatures_.at(name));
+    object.signature = entry_signatures_.at(name);
     object.effects = kernel_resource_effects(name);
     if (auto it = value_parameters_.find(name); it != value_parameters_.end())
       object.values = print(serialize(aot::make_value_parameter_artifact({*it})));
@@ -117,6 +124,8 @@ class UnifiedAotModuleBuilder final : public AotModuleBuilder {
     auto stage = [&](const std::string &digest) {
       if (written_units_.count(digest) || missing.count(digest))
         return true;
+      if (baseline_members_.count("code_units/" + digest + ".bc"))
+        return true;
       std::string bytes;
       if (!read_baseline_unit(digest, bytes))
         return false;
@@ -125,11 +134,21 @@ class UnifiedAotModuleBuilder final : public AotModuleBuilder {
     };
     if (!stage(object.unit) || !std::all_of(object.imports.begin(), object.imports.end(), stage))
       return false;
+    // An intact archive already owns the signature as records/<SHA>. An
+    // optional damaged baseline can still salvage individually valid objects.
+    if (!signatures_.count(object.signature)) {
+      std::string bytes;
+      const auto member = "records/" + object.signature;
+      if (!baseline_members_.count(member) && !read_baseline_member(member, object.signature, bytes))
+        return false;
+      signatures_.emplace(object.signature, std::move(bytes));
+    }
     for (const auto &[digest, bytes] : missing)
       write_unit(digest, bytes);
-    const auto signature = aot_artifact_sha256(object.signature);
-    signatures_.try_emplace(signature, std::move(object.signature));
-    entry_signatures_.emplace(name, signature);
+    reference_baseline(object.unit);
+    for (const auto &digest : object.imports)
+      reference_baseline(digest);
+    entry_signatures_.emplace(name, std::move(object.signature));
     if (!object.imports.empty())
       imports_.try_emplace(object.unit, std::move(object.imports));
     entries_.emplace(name, std::move(object.unit));
@@ -153,8 +172,12 @@ class UnifiedAotModuleBuilder final : public AotModuleBuilder {
       unit_stream_.flush();
       TI_ERROR_IF(!unit_stream_, "Unable to flush unified LLVM unit stream");
       std::ostringstream index;
-      for (const auto &[digest, span] : written_units_)
-        index << digest << ' ' << span.first << ' ' << span.second << '\n';
+      for (const auto &[digest, span] : written_units_) {
+        if (span.second == 0)
+          index << digest << " baseline\n";
+        else
+          index << digest << ' ' << span.first << ' ' << span.second << '\n';
+      }
       write_file((directory_ / "units.index").string(), index.str());
       if (cache_captures_) {
         write_to_binary_file(roots_, (directory_ / "roots.tcb").string());
@@ -169,8 +192,15 @@ class UnifiedAotModuleBuilder final : public AotModuleBuilder {
                print(serialize(entries_)));
     const auto signatures = taichi::join_path(dir, "signatures");
     taichi::create_directories(signatures);
-    for (const auto &[hash, description] : signatures_)
-      write_file(taichi::join_path(signatures, hash + ".json"), description);
+    std::ostringstream referenced_signatures;
+    for (const auto &[hash, description] : signatures_) {
+      if (description.empty())
+        referenced_signatures << hash << '\n';
+      else
+        write_file(taichi::join_path(signatures, hash + ".json"), description);
+    }
+    if (referenced_signatures.tellp() > 0)
+      write_file((directory_ / "signatures.index").string(), referenced_signatures.str());
     write_file(taichi::join_path(dir, "unified_abi.json"),
                print(serialize(entry_signatures_)));
     if (!layouts_.empty()) {
@@ -215,6 +245,8 @@ class UnifiedAotModuleBuilder final : public AotModuleBuilder {
   };
   std::filesystem::path directory_;
   std::unique_ptr<io::VirtualDir> baseline_;
+  std::unordered_set<std::string> baseline_members_;
+  std::uint64_t referenced_units_{0};
   std::uint64_t emissions_{0}, hits_{0}, restored_{0};
   std::map<std::string, Root> roots_;
   // Private producer staging. The final TCM retains its content-addressed
@@ -228,10 +260,9 @@ class UnifiedAotModuleBuilder final : public AotModuleBuilder {
   std::vector<std::string> layouts_;
   std::map<std::string, std::vector<int>> entry_trees_;
 
-  bool read_baseline_unit(const std::string &digest, std::string &bytes) const {
+  bool read_baseline_member(const std::string &member, const std::string &digest, std::string &bytes) const {
     if (!baseline_ || digest.size() != 64 || digest.find_first_not_of("0123456789abcdef") != std::string::npos)
       return false;
-    const auto member = "code_units/" + digest + ".bc";
     size_t size = 0;
     if (!baseline_->get_file_size(member, size))
       return false;
@@ -240,7 +271,22 @@ class UnifiedAotModuleBuilder final : public AotModuleBuilder {
            aot_artifact_sha256(bytes) == digest;
   }
 
+  bool read_baseline_unit(const std::string &digest, std::string &bytes) const {
+    return read_baseline_member("code_units/" + digest + ".bc", digest, bytes);
+  }
+
+  bool reference_baseline(const std::string &digest) {
+    if (!baseline_members_.count("code_units/" + digest + ".bc"))
+      return false;
+    // A bitcode body is never empty. A zero span denotes a link reference.
+    if (written_units_.try_emplace(digest, 0, 0).second)
+      ++referenced_units_;
+    return true;
+  }
+
   void write_unit(const std::string &digest, const std::string &bytes) {
+    if (reference_baseline(digest))
+      return;
     if (written_units_.try_emplace(digest, unit_end_, bytes.size()).second) {
       unit_stream_.write(bytes.data(), bytes.size());
       TI_ERROR_IF(!unit_stream_, "Unable to stage unified LLVM unit {}", digest);
@@ -249,7 +295,7 @@ class UnifiedAotModuleBuilder final : public AotModuleBuilder {
   }
 
   bool available(const std::string &digest) {
-    if (directory_.empty() || written_units_.count(digest))
+    if (directory_.empty() || written_units_.count(digest) || reference_baseline(digest))
       return true;
     std::string bytes;
     if (!read_baseline_unit(digest, bytes))

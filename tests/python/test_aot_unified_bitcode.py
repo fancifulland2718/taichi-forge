@@ -369,6 +369,15 @@ def vector(x: ti.types.vector(2, ti.i32)) -> ti.i32:
         assert record["produce"]["unified_capture_restores"] == (
             0 if name in ("cold", "fresh") else 2 if name == "warm" else 1)
         assert record["produce"]["unified_archive_reuses"] == int(name == "warm")
+        with zipfile.ZipFile(output / "code.tcm") as archive:
+            unit_count = sum(key.startswith("code_units/") for key in archive.namelist())
+        referenced = record["produce"]["unified_referenced_units"]
+        if name == "warm":
+            assert referenced == unit_count
+        elif name in ("caller", "edited"):
+            assert 0 < referenced < unit_count
+        else:
+            assert referenced == 0
         for target in targets:
             ti.init(arch=target, enable_fallback=False)
             with ti.aot.borrow_runtime() as runtime, load_package(runtime, output) as pkg:
@@ -379,7 +388,11 @@ def vector(x: ti.types.vector(2, ti.i32)) -> ti.i32:
             assert (tmp_path / "cold/package.json").read_bytes() == (output / "package.json").read_bytes()
         if name == "fresh":
             assert (tmp_path / "repaired/code.tcm").read_bytes() == (output / "code.tcm").read_bytes()
+            # The partially relinked archive has since been deliberately damaged.
+            assert record["tcm_sha256"] == edited_digest
             assert (tmp_path / "repaired/package.json").read_bytes() == (output / "package.json").read_bytes()
+        if name == "edited":
+            edited_digest = record["tcm_sha256"]
 
 
 @test_utils.test(arch=ti.cpu, offline_cache=False)
@@ -456,7 +469,8 @@ class Reader:
     def double(self, x: ti.i32) -> ti.i32:
         return x * 2
 """
-    for label, text, hits, expected in (("seed", original, 0, 65535), ("added", added, 4, 65535),
+    for label, text, hits, expected in (("seed", original, 0, 65535), ("recovered", original, None, 65535),
+                                       ("added", added, 4, 65535),
                                        ("colocated", colocated, 4, 65535),
                                        ("cold-colocated", colocated, 0, 65535),
                                        ("edited", edited, 2, -1), ("cold", edited, 0, -1)):
@@ -464,13 +478,22 @@ class Reader:
         module = importlib.import_module(source.stem)
         output = tmp_path / label
         cache = tmp_path / (label + "-cache" if label.startswith("cold") else "cache")
+        if label == "recovered":
+            history = cache / "portable/declarations/latest.json"
+            previous = json.loads(history.read_bytes())
+            assert previous["layouts"]
+            previous["layouts"] = dict.fromkeys(previous["layouts"], "damaged recipe")
+            history.write_text(json.dumps(previous), encoding="utf8")
         try:
             ti.aot.export_package(module, output, arch=[ti.cpu], artifact_format="unified-bc-library",
                                   build_cache=cache)
         finally:
             sys.modules.pop(source.stem)
         stats = json.loads((cache / "unified/latest.json").read_bytes())["produce"]
-        assert stats["unified_capture_restores"] == hits
+        if label == "recovered":
+            assert 2 <= stats["unified_capture_restores"] < 4
+        else:
+            assert stats["unified_capture_restores"] == hits
         with ti.aot.borrow_runtime() as runtime, load_package(runtime, output) as package:
             model = package.host.Model()
             assert model.write(65535) == expected
@@ -478,7 +501,7 @@ class Reader:
             view = package.host.Reader(model)
             assert view.nested_write(65535) == expected
             assert view.double(3) == 6
-    for incremental, clean in (("colocated", "cold-colocated"), ("edited", "cold")):
+    for incremental, clean in (("seed", "recovered"), ("colocated", "cold-colocated"), ("edited", "cold")):
         for name in ("code.tcm", "package.json"):
             assert (tmp_path / incremental / name).read_bytes() == (tmp_path / clean / name).read_bytes()
 

@@ -3428,6 +3428,10 @@ class _ComponentCode:
 
     @property
     def contract(self):
+        if isinstance(self._contract, dict):
+            # A restored producer entry only needs a private mutable copy if
+            # it is rebound (or its ordinary Component accessor is invoked).
+            self._contract = json.dumps(self._contract)
         return json.loads(self._contract)
 
     def validate_bindings(self, component, owner):

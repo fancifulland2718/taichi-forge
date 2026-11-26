@@ -60,6 +60,18 @@ def _capture_digest(scope_key, symbol, compressed):
     return digest.hexdigest()
 
 
+def _map_layout_facts(facts, convert):
+    maps = facts["maps"]
+    groups = [(name, convert(layout)) for name, layout in maps["groups"]]
+    return {**facts, "maps": {**maps, "groups": groups}}
+
+
+def _map_entry_layouts(entry, convert):
+    contract = entry["contract"]
+    groups = {name: convert(layout) for name, layout in contract["groups"].items()}
+    return {**entry, "contract": {**contract, "groups": groups}}
+
+
 class _CaptureScope:
     def __init__(self, key, fields):
         self.key = key
@@ -269,6 +281,8 @@ class PackageBuildCache:
         self.objects = {}
         self.captures = {}
         self.rejections = {}
+        self.layout_records = {}
+        self._layout_keys = {}
         self.method_inputs = {}
         self.syntax_records = {}
         self.capture_syntax = {}
@@ -436,6 +450,22 @@ class PackageBuildCache:
     def _variant(facts):
         return (facts["templates"], facts["signature"], facts["maps"]["resource_templates"], facts["maps"]["static"])
 
+    def _store_layout(self, schema):
+        digest = self._layout_keys.get(schema)
+        if digest is None:
+            digest = hashlib.sha256(schema.encode("utf8")).hexdigest()
+            self._layout_keys[schema] = digest
+            self.layout_records[digest] = schema
+        return digest
+
+    def _load_layout(self, digest):
+        schema = self.layout_records.get(digest)
+        if schema is None:
+            schema = self.previous["layouts"][digest]
+            if not isinstance(schema, str) or self._store_layout(schema) != digest:
+                raise ValueError("Invalid cached capture layout")
+        return schema
+
     def remember_missing(self, scope, context):
         from taichi_forge.lang.exception import TaichiCompilationError
         from ._package_capture_cache import freeze_missing
@@ -444,6 +474,7 @@ class PackageBuildCache:
             facts, contract = freeze_missing(context, self.capture_syntax,
                                             portable=self.build_settings["artifact_format"] == "unified-bc-library")
             facts["field_inputs"] = scope.field_inputs(context)
+            facts = _map_layout_facts(facts, self._store_layout)
             payload = json.dumps((context.missing_resource, facts, contract), separators=(",", ":")).encode("utf8")
             compressed = zlib.compress(payload, 1)
         except (KeyError, AttributeError, OSError, ValueError, TypeError, TaichiCompilationError):
@@ -469,6 +500,7 @@ class PackageBuildCache:
                 if digest != _capture_digest(scope.key, "missing", compressed):
                     continue
                 name, facts, contract = json.loads(zlib.decompress(compressed))
+                facts = _map_layout_facts(facts, self._load_layout)
                 observed = thaw_missing(facts, kernel)
                 if facts["field_inputs"] != scope.field_inputs(observed) or not matches(
                     observed, facts, contract, self.capture_syntax, component, owner, signature, resources, layouts,
@@ -490,8 +522,11 @@ class PackageBuildCache:
             # and the producer owner alive while automatic GC is disabled.
             raise _DefinitionMissingResource(name, observed, materialized=False)
 
-    @staticmethod
-    def _capture_record(scope_key, symbol, native, entry, facts):
+    def _capture_record(self, scope_key, symbol, native, entry, facts):
+        # A shared native layout can be much larger than the capture itself.
+        # Keep one verified recipe in the producer index across all entries.
+        facts = _map_layout_facts(facts, self._store_layout)
+        entry = _map_entry_layouts(entry, self._store_layout)
         payload = json.dumps((native, entry, facts), separators=(",", ":"))
         # Per-object compression leaves unrelated owners opaque during lookup
         # and preserves the original declaration traversal order on recovery.
@@ -525,6 +560,8 @@ class PackageBuildCache:
                 if record["digest"] != _capture_digest(scope.key, symbol, compressed):
                     continue
                 native, entry, facts = json.loads(zlib.decompress(compressed))
+                entry = _map_entry_layouts(entry, self._load_layout)
+                facts = _map_layout_facts(facts, self._load_layout)
                 key = kernel.func, "component_" + str(len(kernel._component_candidates)), kernel.autodiff_mode
                 code = thaw(facts, kernel, key, entry)
                 if facts["field_inputs"] != scope.field_inputs(code):
@@ -555,7 +592,7 @@ class PackageBuildCache:
                     # the new allocation recipe under its ordinary cold symbol.
                     code.groups.update(allocation_updates)
                     entry["contract"]["groups"] = code.groups
-                    code._contract = json.dumps(entry["contract"])
+                    code._contract = entry["contract"]
                     code.semantic_key = entry["semantic_key"] = code.contract_key(entry["contract"])
                     symbol = entry["entry"] = definition_symbol(code)
                     if symbol in module._exported_kernels:
@@ -706,4 +743,4 @@ class PackageBuildCache:
         return dict(version=1, key=self.identity.key if self.identity else None,
                     inputs=dict(self.identity.inputs) if self.identity else {}, toolchain_files=self.toolchain_files,
                     objects=self.objects, captures=self.captures, rejections=self.rejections, method_inputs=self.method_inputs,
-                    module_syntax=self.syntax_records)
+                    module_syntax=self.syntax_records, layouts=self.layout_records)
