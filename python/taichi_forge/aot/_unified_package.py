@@ -72,8 +72,8 @@ def _worker(request):
         roots.append(module)
     source_root = request["source_root"]
     inputs = _package_source_inputs(roots, ti.cpu, source_root)
-    files, _, discovery, _, modules, _, packages = inputs
-    assets = shader_assets(files, modules)
+    files, _, discovery, _, modules, _, packages, syntax = inputs
+    assets = shader_assets(files, modules, syntax)
     cache = None
     if cache_dir:
         cache = PackageBuildCache(Path(cache_dir) / "portable" / "declarations", files, modules,

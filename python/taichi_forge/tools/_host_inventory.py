@@ -6,11 +6,14 @@ review candidates, not a proof of dynamic reachability or an automatic manifest.
 
 import argparse
 import ast
+import codecs
 from collections import deque
 import hashlib
 import importlib.util
+from io import BytesIO
 import json
 from pathlib import Path
+from tokenize import detect_encoding
 
 if __package__:
     from ._host_build import read_spec
@@ -139,7 +142,8 @@ def _lazy_facade_body(tree):
     return {node for statement in getter.body for node in ast.walk(statement)} if getter else set()
 
 
-def audit_source_imports(available, *, roots=(), selected=None, aliases=None, include_type_checking=True):
+def audit_source_imports(available, *, roots=(), selected=None, aliases=None, include_type_checking=True,
+                         source_snapshots=None):
     """Shared static dependency walk for audits and definition package exports."""
     selected, aliases = selected or {}, aliases or {}
     local_roots = {name.split(".")[0] for name in available} | {name.split(".")[0] for name in aliases}
@@ -197,6 +201,13 @@ def audit_source_imports(available, *, roots=(), selected=None, aliases=None, in
             parent = parent.rpartition(".")[0]
         package = name if item["package"] else name.rpartition(".")[0]
         tree = ast.parse(data, filename=item["source"])
+        if source_snapshots is not None:
+            # The package compiler reads UTF-8 with universal newlines. A
+            # Python encoding cookie can select another codec for the import
+            # walk; in that case the compiler must parse its own text.
+            encoding, _ = detect_encoding(BytesIO(data).readline)
+            text = data.decode("utf8").replace("\r\n", "\n").replace("\r", "\n")
+            source_snapshots[name] = text, tree if codecs.lookup(encoding).name in ("utf-8", "utf-8-sig") else None
         # Loading p.child initializes p, but does not call p.__getattr__.
         # A later explicit import of p must include those exports, even if
         # p was first visited only as a parent. Keep eager imports and the

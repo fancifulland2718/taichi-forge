@@ -439,8 +439,9 @@ def _module_syntax(module, tree, kind):
     return nested, target_reference
 
 
-def _analyze(module, source, namespace, target, *, defer_owners=False, build_cache=None):
-    tree = ast.parse(source.removeprefix("\ufeff"))
+def _analyze(module, source, namespace, target, *, defer_owners=False, build_cache=None, tree=None):
+    if tree is None:
+        tree = ast.parse(source.removeprefix("\ufeff"))
     kind = decorator_resolver(tree)
     if build_cache is None:
         nested, target_reference = _module_syntax(module, tree, kind)
@@ -1750,16 +1751,20 @@ def _package_source_inputs(package, arch, source_root):
                 "Package arch differs from the live JIT Runtime; initialize the chosen backend in a fresh process"
             )
 
-    paths, namespaces, dependency_report = collect_sources(packages, source_root)
+    snapshots = {}
+    paths, namespaces, dependency_report = collect_sources(packages, source_root, source_snapshots=snapshots)
     program = ti.lang.impl.get_runtime().prog
     if program is None:
         raise PackageExportError("Initialize the Runtime or select an export backend")
     target_arch = ti.lang.impl.current_cfg().arch
     application_modules = set(paths) | set(namespaces) if source_root is not None else None
-    source_files, imported_modules = [], {}
+    source_files, imported_modules, syntax = [], {}, {}
     selected_modules = {item.__name__: item for item in packages}
     for name, (path, relative) in paths.items():
-        text = path.read_text(encoding="utf8")
+        if name in snapshots:
+            text, syntax[name] = snapshots.pop(name)
+        else:
+            text = path.read_text(encoding="utf8")
         imported = selected_modules[name] if name in selected_modules else importlib.import_module(name)
         if ti.lang.impl.get_runtime().prog is not program or ti.lang.impl.current_cfg().arch != target_arch:
             raise PackageExportError(f"Module import changed the selected export Runtime: {name}")
@@ -1767,14 +1772,14 @@ def _package_source_inputs(package, arch, source_root):
             raise PackageExportError(f"Module origin differs from scanned source: {name}")
         imported_modules[name] = imported
         source_files.append((name, path, relative, text))
-    return source_files, namespaces, dependency_report, application_modules, imported_modules, target_arch, packages
+    return source_files, namespaces, dependency_report, application_modules, imported_modules, target_arch, packages, syntax
 
 
 @reuse_factory_sources()
 @reuse_declaration_syntax()
 def _preflight_package(package, *, arch=None, source_root=None, inputs=None, build_cache=None, portable=False):
     """Resolve declarations once the current sources and imported bindings are known."""
-    source_files, namespaces, dependency_report, application_modules, imported_modules, target_arch, packages = (
+    source_files, namespaces, dependency_report, application_modules, imported_modules, target_arch, packages, syntax = (
         inputs if inputs is not None else _package_source_inputs(package, arch, source_root)
     )
     sources, failures = [], []
@@ -1782,7 +1787,8 @@ def _preflight_package(package, *, arch=None, source_root=None, inputs=None, bui
         imported = imported_modules[name]
         try:
             tree, kind, owners, definitions = _analyze(name, text, vars(imported), None if portable else target_arch.name,
-                                                      defer_owners=True, build_cache=build_cache)
+                                                      defer_owners=True, build_cache=build_cache,
+                                                      tree=syntax.pop(name, None))
         except PackageExportError as error:
             failures.append(str(error))
             continue
@@ -2004,10 +2010,10 @@ def export_package(package, output, *, arch=None, caps=None, source_root=None, a
 
         return export_library(package, output, arch, caps, source_root, build_cache)
     inputs = _package_source_inputs(package, arch, source_root)
-    source_files, _, dependencies, _, imported_modules, target_arch, packages = inputs
+    source_files, _, dependencies, _, imported_modules, target_arch, packages, syntax = inputs
     if artifact_format is None and target_arch.name == "x64":
         artifact_format = "bc-library"
-    assets = shader_assets(source_files, imported_modules) if target_arch.name == "vulkan" else {}
+    assets = shader_assets(source_files, imported_modules, syntax) if target_arch.name == "vulkan" else {}
     cache = None
     if build_cache is not None:
         from ._package_build_cache import PackageBuildCache
