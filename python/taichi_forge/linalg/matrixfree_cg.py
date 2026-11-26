@@ -5,7 +5,13 @@ from threading import Lock
 from taichi_forge._lib import core as _ti_core
 from taichi_forge.lang.exception import TaichiRuntimeError, TaichiTypeError
 from taichi_forge.lang.util import to_numpy_type
-from taichi_forge.linalg._field_krylov_kernels import bicgstab_kernels, cg_kernels, clear_scratch, dot_kernel
+from taichi_forge.linalg._field_krylov_kernels import (
+    bicgstab_kernels,
+    bicgstab_solution_kernel,
+    cg_kernels,
+    clear_scratch,
+    dot_kernel,
+)
 
 import taichi_forge as ti
 
@@ -95,13 +101,21 @@ class _PreparedFieldSolve:
         self.close()
 
 
-def _with_sparse_reset(x, scratch, solve):
-    # Dense init writes every cell. A sparse x may lose active cells between
-    # solves, leaving old residuals in the dense reduction domain.
-    node = x.snode.ptr.parent
+def _solution_domains(x):
+    # The workspace is dense and zero-based. Only a matching x domain can
+    # share its traversal without activating sparse cells or shifting indices.
+    place = x.snode.ptr
+    node = place.parent
     while node.type == _ti_core.SNodeType.dense:
         node = node.parent
-    if node.type == _ti_core.SNodeType.root:
+    dense_x = node.type == _ti_core.SNodeType.root
+    return dense_x, dense_x and not any(place.offset)
+
+
+def _with_sparse_reset(dense_x, scratch, solve):
+    # Dense init writes every cell. A sparse x may lose active cells between
+    # solves, leaving old residuals in the dense reduction domain.
+    if dense_x:
         return solve
 
     fresh = True
@@ -171,7 +185,8 @@ def prepare_matrix_free_cg(A, b, x, tol=1e-6, maxiter=5000, quiet=True):
     vector_fields_builder.dense(axes, b.shape).place(p, r, Ap, Ax)
 
     reduce = dot_kernel(solver_dtype)
-    init, update_x, update_r, update_p = cg_kernels(solver_dtype)
+    init, update_solution, update_p = cg_kernels(solver_dtype)
+    dense_x, same_domain = _solution_domains(x)
 
     def solve():
         succeeded = True
@@ -189,9 +204,7 @@ def prepare_matrix_free_cg(A, b, x, tol=1e-6, maxiter=5000, quiet=True):
                 A._matvec(p, Ap)  # compute Ap = A x p
                 pAp = reduce(p, Ap)
                 alpha = old_rTr / pAp
-                update_x(x, p, alpha)
-                update_r(r, Ap, alpha)
-                new_rTr = reduce(r, r)
+                new_rTr = update_solution(x, p, r, Ap, alpha, same_domain)
                 new_residual_norm = _residual_norm(new_rTr)
                 if new_residual_norm is None or new_residual_norm <= tol:
                     if not quiet:
@@ -217,7 +230,7 @@ def prepare_matrix_free_cg(A, b, x, tol=1e-6, maxiter=5000, quiet=True):
             succeeded = False
         return succeeded
 
-    return _PreparedFieldSolve(vector_fields_builder, _with_sparse_reset(x, (p, r, Ap, Ax), solve), lifetimes)
+    return _PreparedFieldSolve(vector_fields_builder, _with_sparse_reset(dense_x, (p, r, Ap, Ax), solve), lifetimes)
 
 
 def MatrixFreeBICGSTAB(A, b, x, tol=1e-6, maxiter=5000, quiet=True):
@@ -261,8 +274,10 @@ def prepare_matrix_free_bicgstab(A, b, x, tol=1e-6, maxiter=5000, quiet=True):
     coefficient_type = to_numpy_type(solver_dtype)
 
     reduce = dot_kernel(solver_dtype)
-    init, update_p, update_s, update_x, update_r, squared_norm_and_dot = bicgstab_kernels(solver_dtype)
+    init, update_p, update_s, squared_norm_and_dot = bicgstab_kernels(solver_dtype)
     pair_dots = ti.lang.impl.current_cfg().arch == ti.cuda
+    update_solution = bicgstab_solution_kernel(solver_dtype, pair_dots)
+    dense_x, same_domain = _solution_domains(x)
 
     def solve():
         succeeded = True
@@ -300,13 +315,12 @@ def prepare_matrix_free_bicgstab(A, b, x, tol=1e-6, maxiter=5000, quiet=True):
                     omega_upper = reduce(t, s)
                     omega_lower = reduce(t, t)
                 omega = float(coefficient_type(omega_upper / (1e-16 if omega_lower == 0.0 else omega_lower)))
-                update_x(x, p_hat, s_hat, alpha, omega)
-                update_r(r, s, t, omega)
+                residual = update_solution(x, p_hat, s_hat, r, s, t, r_tld, alpha, omega, same_domain)
                 rho_1 = rho
                 if pair_dots:
-                    rTr, rho = map(float, squared_norm_and_dot(r, r_tld))
+                    rTr, rho = map(float, residual)
                 else:
-                    rTr = reduce(r, r)
+                    rTr = residual
                 residual_norm = _residual_norm(rTr)
                 if not quiet:
                     print(
@@ -332,4 +346,4 @@ def prepare_matrix_free_bicgstab(A, b, x, tol=1e-6, maxiter=5000, quiet=True):
         return succeeded
 
     scratch = (p, p_hat, r, r_tld, s, s_hat, t, Ap, Ax)
-    return _PreparedFieldSolve(vector_fields_builder, _with_sparse_reset(x, scratch, solve), lifetimes)
+    return _PreparedFieldSolve(vector_fields_builder, _with_sparse_reset(dense_x, scratch, solve), lifetimes)

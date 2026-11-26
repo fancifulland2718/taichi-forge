@@ -104,3 +104,30 @@ def test_retiring_one_workspace_keeps_other_bindings_live_until_reset():
         ti.reset()
         with pytest.raises(RuntimeError, match="retired"):
             second.solve()
+
+
+@pytest.mark.parametrize("prepare", [ti.linalg.prepare_matrix_free_cg, ti.linalg.prepare_matrix_free_bicgstab])
+@test_utils.test(arch=[ti.cpu, ti.cuda], offline_cache=False)
+def test_solution_update_preserves_sparse_iteration_domain(prepare):
+    x = ti.field(ti.f32)
+    ti.root.pointer(ti.i, 2).dense(ti.i, 4).place(x)
+    b = ti.field(ti.f32, shape=8)
+
+    @ti.kernel
+    def apply(src: ti.template(), dst: ti.template()):
+        for i in dst:
+            dst[i] = (1 + i % 2) * src[i]
+
+    @ti.kernel
+    def active_cells() -> ti.i32:
+        count = 0
+        for i in x:
+            count += 1
+        return count
+
+    x[0] = 1
+    b.from_numpy(np.array([1, 2, 3, 4, 0, 0, 0, 0], dtype=np.float32))
+    with prepare(ti.linalg.FieldLinearOperator(apply), b, x, tol=1e-5) as plan:
+        assert plan.solve()
+    assert active_cells() == 4
+    np.testing.assert_allclose(x.to_numpy(), [1, 1, 3, 2, 0, 0, 0, 0], atol=1e-5)

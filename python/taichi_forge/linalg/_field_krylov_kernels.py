@@ -1,7 +1,7 @@
 """Field-explicit kernels shared by the one-shot and prepared Krylov solvers.
 
-Only scalar precision belongs to these definitions. Concrete field templates
-are supplied by the caller and can also be bound by an AOT module.
+Fields and loop-domain choices are explicit templates. AOT callers can bind
+them at compilation just as prepared solves do.
 """
 
 from functools import lru_cache
@@ -41,21 +41,28 @@ def cg_kernels(solver_dtype):
             Ap[I] = 0.0
 
     @ti.kernel
-    def update_x(x: ti.template(), p: ti.template(), alpha: solver_dtype):
-        for I in ti.grouped(x):
-            x[I] += alpha * p[I]
-
-    @ti.kernel
-    def update_r(r: ti.template(), Ap: ti.template(), alpha: solver_dtype):
+    def update_solution(
+        x: ti.template(), p: ti.template(), r: ti.template(), Ap: ti.template(),
+        alpha: solver_dtype, same_domain: ti.template(),
+    ) -> solver_dtype:
+        norm_sq = solver_dtype(0.0)
+        if ti.static(not same_domain):
+            for I in ti.grouped(x):
+                x[I] += alpha * p[I]
         for I in ti.grouped(r):
-            r[I] -= alpha * Ap[I]
+            if ti.static(same_domain):
+                x[I] += alpha * p[I]
+            value = r[I] - alpha * Ap[I]
+            r[I] = value
+            norm_sq += value * value
+        return norm_sq
 
     @ti.kernel
     def update_p(p: ti.template(), r: ti.template(), beta: solver_dtype):
         for I in ti.grouped(p):
             p[I] = r[I] + beta * p[I]
 
-    return init, update_x, update_r, update_p
+    return init, update_solution, update_p
 
 
 @lru_cache(maxsize=2)
@@ -103,16 +110,35 @@ def bicgstab_kernels(solver_dtype):
             s[I] = r[I] - alpha * Ap[I]
             s_hat[I] = s[I]
 
-    @ti.kernel
-    def update_x(
-        x: ti.template(), p_hat: ti.template(), s_hat: ti.template(), alpha: solver_dtype, omega: solver_dtype
-    ):
-        for I in ti.grouped(x):
-            x[I] += alpha * p_hat[I] + omega * s_hat[I]
+    return init, update_p, update_s, squared_norm_and_dot
+
+
+@lru_cache(maxsize=4)
+def bicgstab_solution_kernel(solver_dtype, pair_dots):
+    result_type = ti.types.vector(2, solver_dtype) if pair_dots else solver_dtype
 
     @ti.kernel
-    def update_r(r: ti.template(), s: ti.template(), t: ti.template(), omega: solver_dtype):
+    def update_solution(
+        x: ti.template(), p_hat: ti.template(), s_hat: ti.template(), r: ti.template(),
+        s: ti.template(), t: ti.template(), shadow: ti.template(), alpha: solver_dtype,
+        omega: solver_dtype, same_domain: ti.template(),
+    ) -> result_type:
+        norm_sq = solver_dtype(0.0)
+        dot = solver_dtype(0.0)
+        if ti.static(not same_domain):
+            for I in ti.grouped(x):
+                x[I] += alpha * p_hat[I] + omega * s_hat[I]
         for I in ti.grouped(r):
-            r[I] = s[I] - omega * t[I]
+            if ti.static(same_domain):
+                x[I] += alpha * p_hat[I] + omega * s_hat[I]
+            value = s[I] - omega * t[I]
+            r[I] = value
+            norm_sq += value * value
+            if ti.static(pair_dots):
+                dot += value * shadow[I]
+        if ti.static(pair_dots):
+            return ti.Vector([norm_sq, dot])
+        else:
+            return norm_sq
 
-    return init, update_p, update_s, update_x, update_r, squared_norm_and_dot
+    return update_solution
