@@ -73,7 +73,7 @@ class _Projection:
         directory = self.directory / "module"
         # Component roots can share a physical contract directory with entries.
         # Preserve their ordinary writer order for modules containing both.
-        defer_entries = self.cache_links and not module._component_roots
+        defer_entries = not module._component_roots
         module._save(directory, shared_component_contracts=True, defer_entries=defer_entries)
         absent_inputs = {}
         for symbol, entry in manifest["entries"].items():
@@ -82,13 +82,11 @@ class _Projection:
                     absent_inputs.setdefault(target, {}).setdefault(symbol, []).append(index)
         if absent_inputs:
             (self.directory / "module" / "unified_absent_inputs.json").write_bytes(_bytes(absent_inputs, sort_keys=True))
-        if defer_entries:
+        if defer_entries and self.cache_links:
             self.link_inputs = _link_inputs(directory, module, manifest)
             self.reused = _reuse_archive(self.previous, self.link_inputs, self.directory.parent / "baseline.tcm",
                                          self.staging / "code.tcm")
-            if not self.reused:
-                module._save_component_entries(directory, shared=True)
-            elif self.previous["entry_blocks"]:
+            if self.reused and self.previous["entry_blocks"]:
                 _require_entry_blocks(manifest)
         for relative in sorted(payloads, key=Path):
             data = payloads[relative]
@@ -96,7 +94,8 @@ class _Projection:
             path.parent.mkdir(parents=True, exist_ok=True)
             path.write_bytes(data)
             manifest["files"][relative] = hashlib.sha256(data).hexdigest()
-        (self.directory / "view.json").write_bytes(_bytes(manifest))
+        documents = module._encode_component_entries(shared=True) if defer_entries and not self.reused else {}
+        return manifest, documents
 
 
 def _worker(request):
@@ -145,16 +144,30 @@ def _worker(request):
         projection = _Projection(directory, Path(request["staging"]),
                                  cache_links=cache is not None and cache.object_context is not None,
                                  previous=previous)
-        _export_package(directory, declarations, source_root, (), "unified-bc-library", compilation,
-                        cache, assets, projection=projection)
+        manifest, documents = _export_package(directory, declarations, source_root, (), "unified-bc-library", compilation,
+                                              cache, assets, projection=projection)
         if cache is not None and cache.object_context is not None:
             counts = compilation.module._aot_builder._streaming_export_statistics()
             counts.update(preflight_seconds=preflight - start, compile_and_seal_seconds=time.perf_counter() - preflight)
             counts["unified_archive_reuses"] = int(projection.reused)
-            (directory.parent / "portable-statistics.json").write_bytes(_bytes(dict(
-                version=3, context=cache.object_context, produce=counts, link_inputs=projection.link_inputs,
-                entry_blocks=previous["entry_blocks"] if projection.reused else False)))
             (directory.parent / "portable-declarations.json").write_bytes(_bytes(cache.declaration_record()))
+    # Link the encoded documents directly after retiring the compiler. Passing
+    # them through individual scratch files would require a second lookup and
+    # read per entry even for a two-root incremental rebuild.
+    if not projection.reused:
+        snapshot = directory.parent / "baseline.tcm"
+        prior = zipfile.ZipFile(snapshot) if snapshot.is_file() else nullcontext(None)
+        with prior as source, zipfile.ZipFile(projection.staging / "code.tcm", "w") as archive:
+            baseline = _CompressedMembers(source)
+            index = _collect(directory / "module", archive, baseline, manifest, documents)
+            _write_units(archive, directory.parent / "bodies", baseline)
+            _write_member(archive, "unified_llvm.json", _bytes(dict(version=2, **index)))
+    if cache is not None and cache.object_context is not None:
+        from taichi_forge_runtime.aot._entry_blocks import RUNTIME_REQUIREMENT
+        (directory.parent / "portable-statistics.json").write_bytes(_bytes(dict(
+            version=3, context=cache.object_context, produce=counts, link_inputs=projection.link_inputs,
+            entry_blocks=RUNTIME_REQUIREMENT in manifest.get("runtime_requirements", ()))))
+    (directory / "view.json").write_bytes(_bytes(manifest))
 
 
 def _run_worker(request_path):
@@ -175,7 +188,7 @@ def _write_member(archive, name, data):
     archive.writestr(info, data, compress_type=zipfile.ZIP_DEFLATED, compresslevel=_COMPRESSION_LEVEL)
 
 
-def _module_members(module, manifest):
+def _module_members(module, manifest, documents):
     from taichi_forge_runtime.aot._entry_blocks import (
         BLOCK_PREFIX, ENTRY_PREFIX, pack_entry_blocks,
     )
@@ -183,17 +196,22 @@ def _module_members(module, manifest):
     names = [ENTRY_PREFIX + quote(name, safe="-_.") + ".json"
              for name in _ordered_entries(manifest)]
     paths = {path.relative_to(module).as_posix(): path for path in module.rglob("*") if path.is_file()}
-    ordered = [name for name in names if name in paths]
+    def read(name):
+        if name in documents:
+            return documents.pop(name)
+        return paths.pop(name).read_bytes()
+
+    ordered = [name for name in names if name in documents or name in paths]
     has_blocks = False
-    for name, data in pack_entry_blocks(ordered, lambda key: paths.pop(key).read_bytes(), level=_COMPRESSION_LEVEL):
+    for name, data in pack_entry_blocks(ordered, read, level=_COMPRESSION_LEVEL):
         has_blocks |= name.startswith(BLOCK_PREFIX)
         yield name, data
     if has_blocks:
         _require_entry_blocks(manifest)
     references = _signature_references(module)
-    for name in sorted(paths.keys() | references.keys()):
+    for name in sorted(paths.keys() | documents.keys() | references.keys()):
         if name != "unified_llvm.json":
-            yield name, None if name in references else paths[name].read_bytes()
+            yield name, None if name in references else read(name)
 
 
 def _require_entry_blocks(manifest):
@@ -237,16 +255,14 @@ class _CompressedMembers:
         return True
 
 
-def _collect(directory, archive, baseline):
-    manifest = json.loads((directory / "view.json").read_bytes())
-    module = directory / "module"
+def _collect(module, archive, baseline, manifest, documents):
     rows = json.loads((module / "unified_llvm.json").read_bytes())
     roots = {row["key"]: row["value"] for row in rows}
     if not roots or len(roots) != len(rows):
         raise ValueError("Invalid unified LLVM entry table")
     members = {}
     written = set()
-    for relative, data in _module_members(module, manifest):
+    for relative, data in _module_members(module, manifest, documents):
         digest = Path(relative).stem if data is None else hashlib.sha256(data).hexdigest()
         physical = "records/" + digest
         members[relative] = physical
@@ -256,7 +272,7 @@ def _collect(directory, archive, baseline):
                     raise ValueError(f"Missing referenced unified LLVM signature: {digest}")
                 _write_member(archive, physical, data)
             written.add(physical)
-    return manifest, {"entries": roots, "members": members}
+    return {"entries": roots, "members": members}
 
 
 def _write_units(archive, directory, baseline):
@@ -364,7 +380,7 @@ def _publish_cache_file(source, target):
                 temp.unlink(missing_ok=True)
 
 
-def _record_leaf_cache(cache_dir, workspace, output, archive_digest, entry_blocks):
+def _record_leaf_cache(cache_dir, workspace, output, archive_digest):
     directory = Path(cache_dir) / "unified"
     receipt = workspace / "portable-statistics.json"
     if not receipt.is_file():
@@ -374,8 +390,6 @@ def _record_leaf_cache(cache_dir, workspace, output, archive_digest, entry_block
         record["output"] = str(output)
         inputs = record.pop("link_inputs", None)
         if inputs is not None:
-            if entry_blocks is not None:
-                record["entry_blocks"] = entry_blocks
             record["tcm_sha256"] = archive_digest
             record["link"] = hashlib.sha256(_bytes([inputs, archive_digest, record["entry_blocks"]])).hexdigest()
         directory.mkdir(parents=True, exist_ok=True)
@@ -436,20 +450,7 @@ def export_library(package, output, arch, caps, source_root, build_cache):
                 if error_path.is_file():
                     raise PackageExportError(error_path.read_text(encoding="utf8"))
                 result.check_returncode()
-            entry_blocks = None
-            if (staging / "code.tcm").is_file():
-                base = json.loads((workspace / "portable" / "view.json").read_bytes())
-            else:
-                from taichi_forge_runtime.aot._entry_blocks import BLOCK_PREFIX
-
-                snapshot = workspace / "baseline.tcm"
-                prior = zipfile.ZipFile(snapshot) if snapshot.is_file() else nullcontext(None)
-                with prior as source, zipfile.ZipFile(staging / "code.tcm", "w") as archive:
-                    baseline = _CompressedMembers(source)
-                    base, index = _collect(workspace / "portable", archive, baseline)
-                    _write_units(archive, workspace / "bodies", baseline)
-                    _write_member(archive, "unified_llvm.json", _bytes(dict(version=2, **index)))
-                entry_blocks = any(name.startswith(BLOCK_PREFIX) for name in index["members"])
+            base = json.loads((workspace / "portable" / "view.json").read_bytes())
             del base["frontend_target"]
             digest = hashlib.sha256((staging / "code.tcm").read_bytes()).hexdigest()
             document = dict(kind="forge_unified_definition_library", version=2, base=encode_manifest(base),
@@ -458,7 +459,7 @@ def export_library(package, output, arch, caps, source_root, build_cache):
             complete = True
             _publish_package(staging, output)
             if build_cache is not None:
-                _record_leaf_cache(build_cache, workspace, output, digest, entry_blocks)
+                _record_leaf_cache(build_cache, workspace, output, digest)
             return document
         finally:
             if not complete:

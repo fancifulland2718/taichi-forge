@@ -908,21 +908,20 @@ class Module:
             f.write(".".join(str(x) for x in taichi_forge.__version__))
 
     def _save_component_entries(self, directory, shared):
-        if not self._component_entries:
-            return
+        for relative, payload in self._encode_component_entries(shared).items():
+            target = directory / relative
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_bytes(payload)
+
+    def _encode_component_entries(self, shared):
         contracts = {"component_entries/" + quote(name, safe="-_.") + ".json": contract
                      for name, contract in self._component_entries.items()}
         if shared:
             from taichi_forge_runtime.aot._component_storage import encode_entry_documents
 
-            documents = encode_entry_documents(contracts)
-        else:
-            documents = {name: json.dumps(contract, sort_keys=True, separators=(",", ":")).encode("utf8")
-                         for name, contract in contracts.items()}
-        for relative, payload in documents.items():
-            target = directory / relative
-            target.parent.mkdir(parents=True, exist_ok=True)
-            target.write_bytes(payload)
+            return encode_entry_documents(contracts)
+        return {name: json.dumps(contract, sort_keys=True, separators=(",", ":")).encode("utf8")
+                for name, contract in contracts.items()}
 
     def archive(self, filepath: str, *, include_debug_metadata: bool = False, shared_component_contracts=False,
                 shared_execution_plans=False, _pack_shader_members=False, _entry_block_order=None):
