@@ -275,7 +275,7 @@ def prepare_matrix_free_bicgstab(A, b, x, tol=1e-6, maxiter=5000, quiet=True):
 
     reduce = dot_kernel(solver_dtype)
     init, update_p, update_s, squared_norm_and_dot = bicgstab_kernels(solver_dtype)
-    pair_dots = ti.lang.impl.current_cfg().arch == ti.cuda
+    pair_dots = ti.lang.impl.current_cfg().arch in (ti.cuda, ti.vulkan)
     update_solution = bicgstab_solution_kernel(solver_dtype, pair_dots)
     dense_x, same_domain = _solution_domains(x)
 

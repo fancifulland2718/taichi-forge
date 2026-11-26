@@ -89,6 +89,29 @@ def test_matrixfree_bicgstab_uses_absolute_residual_norm_at_zero_iterations(
     )
 
 
+@test_utils.test(arch=[ti.cuda, ti.vulkan], exclude=[vk_on_mac])
+def test_bicgstab_stops_on_zero_shadow_dot_with_nonzero_residual():
+    x = ti.field(ti.f32, shape=2)
+    b = ti.field(ti.f32, shape=2)
+    b[0] = x[0] = 1.0
+    x[1] = 2.0
+    calls = 0
+
+    @ti.kernel
+    def identity(src: ti.template(), dst: ti.template()):
+        for i in src:
+            dst[i] = src[i]
+
+    def apply(src, dst):
+        nonlocal calls
+        calls += 1
+        identity(src, dst)
+
+    assert not MatrixFreeBICGSTAB(FieldLinearOperator(apply), b, x)
+    assert calls == 1
+    assert (x[0], x[1]) == (1.0, 2.0)
+
+
 @pytest.mark.parametrize(
     ("tol", "maxiter", "message"),
     [
