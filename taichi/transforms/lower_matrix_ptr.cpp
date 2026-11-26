@@ -440,6 +440,7 @@ class ScalarizeMatrixPtr : public BasicStmtVisitor {
 
         auto atomic_stmt = std::make_unique<AtomicOpStmt>(
             stmt->op_type, global_ptr_stmt.get(), load_stmt.get());
+        atomic_stmt->grouped_field_op = stmt->grouped_field_op;
         atomic_stmt->ret_type = primitive_type;
 
         matrix_init_values.push_back(atomic_stmt.get());
@@ -489,6 +490,7 @@ class ScalarizeMatrixPtr : public BasicStmtVisitor {
         auto atomic_stmt = std::make_unique<AtomicOpStmt>(
             stmt->op_type, matrix_of_matrix_ptr_stmt->stmts[i],
             load_stmt.get());
+        atomic_stmt->grouped_field_op = stmt->grouped_field_op;
         atomic_stmt->ret_type = primitive_type;
 
         matrix_init_values.push_back(atomic_stmt.get());

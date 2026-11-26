@@ -761,6 +761,7 @@ class IndexExpression : public Expression {
   std::vector<ExprGroup> indices_group;
   std::vector<int> ret_shape;
   bool preserve_component_indices{false};
+  bool scalarized_field_coordinates{false};
 
   IndexExpression(const Expr &var,
                   const ExprGroup &indices,

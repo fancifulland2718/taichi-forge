@@ -3,6 +3,7 @@
 #include "taichi/ir/statements.h"
 #include "taichi/ir/transforms.h"
 #include "taichi/ir/visitors.h"
+#include "taichi/program/compile_config.h"
 #include "taichi/system/profiler.h"
 #include "taichi/transforms/batch_stmt_replacer.h"
 
@@ -13,6 +14,7 @@ namespace taichi::lang {
 
 class DemoteAtomics : public BasicStmtVisitor {
  private:
+  const CompileConfig &config_;
   std::unordered_map<const SNode *, GlobalPtrStmt *> loop_unique_ptr_;
   std::unordered_map<std::vector<int>,
                      ExternalPtrStmt *,
@@ -26,7 +28,8 @@ class DemoteAtomics : public BasicStmtVisitor {
   OffloadedStmt *current_offloaded;
   BatchStmtReplacer modifier;
 
-  explicit DemoteAtomics(IRNode *root) : modifier(root) {
+  DemoteAtomics(IRNode *root, const CompileConfig &config)
+      : config_(config), modifier(root) {
     current_offloaded = nullptr;
   }
 
@@ -170,8 +173,26 @@ class DemoteAtomics : public BasicStmtVisitor {
         auto bin = new_stmts.push_back<BinaryOpStmt>(bin_type, load, val);
         new_stmts.push_back<LocalStoreStmt>(ptr, bin);
       } else {
+        using GroupedOp = AtomicOpStmt::GroupedFieldOp;
+        // A newly exposed address can prove ownership, but f32 min/max and
+        // subtraction still have backend-specific NaN and signed-zero results.
+        if (stmt->grouped_field_op == GroupedOp::retain_atomic)
+          return;
+        const bool private_f32_add = stmt->grouped_field_op == GroupedOp::f32_add;
+        if (private_f32_add &&
+            ((config_.arch != Arch::x64 && config_.arch != Arch::cuda &&
+              config_.arch != Arch::vulkan) ||
+             (stmt->ret_type->is<TensorType>() && !config_.real_matrix_scalarize)))
+          return;
         load = new_stmts.push_back<GlobalLoadStmt>(ptr);
-        auto bin = new_stmts.push_back<BinaryOpStmt>(bin_type, load, val);
+        Stmt *bin;
+        if (private_f32_add) {
+          bin = new_stmts.push_back<InternalFuncStmt>(
+              "private_atomic_add_f32", std::vector<Stmt *>{load, val},
+              stmt->ret_type, false);
+        } else {
+          bin = new_stmts.push_back<BinaryOpStmt>(bin_type, load, val);
+        }
         new_stmts.push_back<GlobalStoreStmt>(ptr, bin);
       }
       // For a taichi program like `c = ti.atomic_add(a, b)`, the IR looks
@@ -217,10 +238,10 @@ class DemoteAtomics : public BasicStmtVisitor {
     current_offloaded = nullptr;
   }
 
-  static bool run(IRNode *node) {
+  static bool run(IRNode *node, const CompileConfig &config) {
     bool modified = false;
     while (true) {
-      DemoteAtomics demoter(node);
+      DemoteAtomics demoter(node, config);
       node->accept(&demoter);
       if (demoter.modifier.apply()) {
         modified = true;
@@ -236,7 +257,7 @@ namespace irpass {
 
 bool demote_atomics(IRNode *root, const CompileConfig &config) {
   TI_AUTO_PROF;
-  bool modified = DemoteAtomics::run(root);
+  bool modified = DemoteAtomics::run(root, config);
   type_check(root, config);
   return modified;
 }

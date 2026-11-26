@@ -1,3 +1,5 @@
+import numpy as np
+
 import taichi_forge as ti
 from tests import test_utils
 
@@ -49,6 +51,46 @@ def test_grouped():
         for j in range(m):
             for k in range(p):
                 assert val[i, j, k] == i + j * 2 + k * 3
+
+
+@test_utils.test()
+def test_grouped_atomic_addresses_and_return_values():
+    rows, cols = 17, 19
+    cells = ti.field(ti.i32, shape=(rows, cols))
+    tickets = ti.Vector.field(2, ti.i32, shape=(rows, cols))
+    buckets = ti.field(ti.i32, shape=(rows, 1))
+
+    @ti.kernel
+    def update(shared_col: ti.i32):
+        for I in ti.grouped(cells):
+            previous = ti.atomic_add(cells[I], 3)
+            row, col = I[0], shared_col
+            ticket = ti.atomic_add(buckets[ti.Vector([row, col])], 1)
+            tickets[I] += ti.Vector([previous, ticket])
+
+    cells.fill(7)
+    update(0)
+    values = tickets.to_numpy()
+    assert np.all(cells.to_numpy() == 10)
+    assert np.all(values[:, :, 0] == 7)
+    assert np.all(buckets.to_numpy() == cols)
+    assert np.all(np.sort(values[:, :, 1], axis=1) == np.arange(cols))
+
+
+@test_utils.test()
+def test_vector_field_index_captures_mutable_coordinates():
+    cells = ti.field(ti.i32, shape=(3, 4))
+
+    @ti.kernel
+    def update():
+        row, col = 1, 2
+        ti.atomic_add(cells[ti.Vector([row, col])], ti.atomic_add(row, 1))
+        cells[row, col] += 4
+
+    update()
+    expected = np.zeros((3, 4), dtype=np.int32)
+    expected[1, 2], expected[2, 2] = 1, 4
+    np.testing.assert_array_equal(cells.to_numpy(), expected)
 
 
 @test_utils.test()

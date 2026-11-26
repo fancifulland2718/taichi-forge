@@ -1214,22 +1214,38 @@ void AtomicOpExpression::type_check(const CompileConfig *config) {
 
 void AtomicOpExpression::flatten(FlattenContext *ctx) {
   TI_ASSERT(dest.expr->is_lvalue());
+  auto lowered_op = op_type;
+  auto rhs = val;
   // replace atomic sub with negative atomic add
   if (op_type == AtomicOpType::sub) {
-    if (val->ret_type != ret_type) {
-      val.set(Expr::make<UnaryOpExpression>(UnaryOpType::cast_value, val,
-                                            ret_type, val->dbg_info));
+    if (rhs->ret_type != ret_type) {
+      rhs.set(Expr::make<UnaryOpExpression>(UnaryOpType::cast_value, rhs,
+                                            ret_type, rhs->dbg_info));
     }
 
-    val.set(
-        Expr::make<UnaryOpExpression>(UnaryOpType::neg, val, val->dbg_info));
-    op_type = AtomicOpType::add;
+    rhs.set(
+        Expr::make<UnaryOpExpression>(UnaryOpType::neg, rhs, rhs->dbg_info));
+    lowered_op = AtomicOpType::add;
   }
   // expand rhs
-  auto val_stmt = flatten_rvalue(val, ctx);
+  auto val_stmt = flatten_rvalue(rhs, ctx);
   auto dest_stmt = flatten_lvalue(dest, ctx);
-  stmt = ctx->push_back<AtomicOpStmt>(op_type, dest_stmt, val_stmt, dbg_info);
-  stmt->ret_type = stmt->as<AtomicOpStmt>()->dest->ret_type;
+  auto *atomic =
+      ctx->push_back<AtomicOpStmt>(lowered_op, dest_stmt, val_stmt, dbg_info);
+  atomic->ret_type = dest_stmt->ret_type;
+  if (ret_type.get_element_type() == PrimitiveType::f32) {
+    for (auto index = dest.cast<IndexExpression>(); index;
+         index = index->var.cast<IndexExpression>()) {
+      if (index->scalarized_field_coordinates) {
+        atomic->grouped_field_op =
+            op_type == AtomicOpType::add
+                ? AtomicOpStmt::GroupedFieldOp::f32_add
+                : AtomicOpStmt::GroupedFieldOp::retain_atomic;
+        break;
+      }
+    }
+  }
+  stmt = atomic;
 }
 
 SNodeOpExpression::SNodeOpExpression(SNode *snode,
@@ -1914,9 +1930,38 @@ Expr ASTBuilder::expr_subscript(const Expr &expr,
   // axis. For example, mat[3, 4] has indices_group={[3, 4]}, where [3, 4]
   // corresponds to "n"-axis and "m"-axis of the matrix. Therefore we expand
   // indices_group={[3, 4]} into {3, 4} to avoid TensorType in indices.
-  std::vector<Expr> expanded_indices = this->expand_exprs(indices.exprs);
-  auto expanded_expr_group = ExprGroup();
-  expanded_expr_group.exprs = expanded_indices;
+  ExprGroup expanded_expr_group;
+  if (auto coords =
+          indices.size() == 1 ? indices[0].cast<MatrixExpression>() : nullptr) {
+    const auto plain_field = [](const Expr &field) {
+      auto f = field.cast<FieldExpression>();
+      return f && f->dt->is<PrimitiveType>() &&
+             (is_integral(f->dt) || f->dt == PrimitiveType::f32);
+    };
+    const auto matrix_field = expr.cast<MatrixFieldExpression>();
+    if ((plain_field(expr) ||
+         (matrix_field &&
+          std::all_of(matrix_field->fields.begin(), matrix_field->fields.end(),
+                      plain_field))) &&
+        coords->dt.get_shape().size() == 1 && coords->elements.size() >= 2 &&
+        coords->dt.get_element_type() == PrimitiveType::i32 &&
+        std::all_of(coords->elements.begin(), coords->elements.end(),
+                    [](const Expr &e) {
+                      return e.is<IdExpression>() &&
+                             e.get_rvalue_type() == PrimitiveType::i32;
+                    })) {
+      // Snapshot each coordinate at the same point as the vector temporary.
+      // Immutable scalar forwarding can then expose the original loop indices
+      // to the ordinary uniqueness analysis without running a CFG pass.
+      for (const auto &axis : coords->elements)
+        expanded_expr_group.push_back(make_var(axis, coords->dbg_info));
+      auto indexed =
+          Expr::make<IndexExpression>(expr, expanded_expr_group, dbg_info);
+      indexed.cast<IndexExpression>()->scalarized_field_coordinates = true;
+      return indexed;
+    }
+  }
+  expanded_expr_group.exprs = expand_exprs(indices.exprs);
 
   return Expr::make<IndexExpression>(expr, expanded_expr_group, dbg_info);
 }

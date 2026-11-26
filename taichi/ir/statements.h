@@ -343,6 +343,8 @@ class AtomicOpStmt : public Stmt,
                      public ir_traits::Store,
                      public ir_traits::Load {
  public:
+  enum class GroupedFieldOp { none, f32_add, retain_atomic };
+  GroupedFieldOp grouped_field_op{GroupedFieldOp::none};
   AtomicOpType op_type;
   Stmt *dest, *val;
   bool is_reduction;
@@ -381,7 +383,7 @@ class AtomicOpStmt : public Stmt,
     return dest;
   }
 
-  TI_STMT_DEF_FIELDS(ret_type, op_type, dest, val);
+  TI_STMT_DEF_FIELDS(ret_type, op_type, dest, val, grouped_field_op);
   TI_DEFINE_ACCEPT_AND_CLONE
 };
 

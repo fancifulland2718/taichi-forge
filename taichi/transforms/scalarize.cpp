@@ -296,6 +296,28 @@ class Scalarize : public BasicStmtVisitor {
     }
   }
 
+  void visit(InternalFuncStmt *stmt) override {
+    if (!stmt->ret_type->is<TensorType>() ||
+        stmt->func_name != "private_atomic_add_f32")
+      return;
+    const auto &lhs = stmt->args[0]->as<MatrixInitStmt>()->values;
+    const auto &rhs = stmt->args[1]->as<MatrixInitStmt>()->values;
+    TI_ASSERT(lhs.size() == rhs.size());
+    std::vector<Stmt *> lanes;
+    for (size_t i = 0; i < lhs.size(); ++i) {
+      auto next = Stmt::make<InternalFuncStmt>(
+          stmt->func_name, std::vector<Stmt *>{lhs[i], rhs[i]},
+          PrimitiveType::f32, false);
+      lanes.push_back(next.get());
+      delayed_modifier_.insert_before(stmt, std::move(next));
+    }
+    auto result = Stmt::make<MatrixInitStmt>(lanes);
+    result->ret_type = stmt->ret_type;
+    immediate_modifier_.replace_usages_with(stmt, result.get());
+    delayed_modifier_.insert_before(stmt, std::move(result));
+    delayed_modifier_.erase(stmt);
+  }
+
   void visit(PrintStmt *stmt) override {
     auto const &contents = stmt->contents;
     auto const &formats = stmt->formats;
@@ -460,6 +482,7 @@ class Scalarize : public BasicStmtVisitor {
       */
       auto atomic_stmt =
           std::make_unique<AtomicOpStmt>(stmt->op_type, stmt->dest, stmt->val);
+      atomic_stmt->grouped_field_op = stmt->grouped_field_op;
       atomic_stmt->ret_type = stmt->ret_type;
 
       auto alloca_stmt = std::make_unique<AllocaStmt>(dest_dtype);
@@ -563,6 +586,7 @@ class Scalarize : public BasicStmtVisitor {
         // assemble to scalarized atomic_op
         auto atomic_stmt = std::make_unique<AtomicOpStmt>(
             stmt->op_type, matrix_ptr_stmt.get(), val_stmt);
+        atomic_stmt->grouped_field_op = stmt->grouped_field_op;
         atomic_stmt->ret_type = primitive_type;
 
         matrix_init_values.push_back(atomic_stmt.get());

@@ -21,6 +21,7 @@ enum class ExprOpCode : std::uint8_t {
 #include "taichi/inc/expressions.inc.h"
 #undef PER_EXPRESSION
   RepeatedMatrixOperand,
+  ScalarizedFieldIndex,
 };
 
 enum class StmtOpCode : std::uint8_t {
@@ -196,7 +197,8 @@ class ASTSerializer : public IRVisitor, public ExpressionVisitor {
   }
 
   void visit(IndexExpression *expr) override {
-    emit(ExprOpCode::IndexExpression);
+    emit(expr->scalarized_field_coordinates ? ExprOpCode::ScalarizedFieldIndex
+                                            : ExprOpCode::IndexExpression);
     emit(expr->var);
     for (auto &indices : expr->indices_group) {
       emit(indices.exprs);

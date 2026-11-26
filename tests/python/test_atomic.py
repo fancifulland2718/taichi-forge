@@ -1,3 +1,4 @@
+import numpy as np
 import pytest
 
 import taichi_forge as ti
@@ -101,6 +102,69 @@ def test_atomic_add_expr_evaled():
     func()
 
     assert c[None] == n * step
+
+
+@test_utils.test(arch=[ti.cuda, ti.vulkan])
+def test_grouped_field_atomic_add_preserves_rounding():
+    shape = (17, 19)
+    scalar = ti.field(ti.f32, shape=shape)
+    vector = ti.Vector.field(2, ti.f32, shape=shape)
+    terms = ti.field(ti.f32, shape=shape)
+    reference = ti.field(ti.f32, shape=shape[0])
+
+    @ti.kernel
+    def update(scale: ti.f32):
+        for I in ti.grouped(scalar):
+            term = terms[I] * scale
+            scalar[I] += term
+            vector[I] += ti.Vector([term, term])
+
+    @ti.kernel
+    def update_reference(scale: ti.f32):
+        for I in ti.grouped(terms):
+            if I[1] == 0:
+                reference[I[0]] += terms[I] * scale
+
+    # The squared value rounds before addition. Fusion would produce 1.
+    for initial, value, scale in ((-16785408, 4097, 4097), (0, 2**-127, 1)):
+        scalar.fill(initial)
+        vector.fill(initial)
+        reference.fill(initial)
+        terms.from_numpy(np.full(shape, value, dtype=np.float32))
+        update(scale)
+        update_reference(scale)
+        expected = reference.to_numpy().view(np.uint32)
+        assert np.all(scalar.to_numpy().view(np.uint32) == expected[:, None])
+        assert np.all(vector.to_numpy().view(np.uint32) == expected[:, None, None])
+
+
+@test_utils.test(arch=[ti.cpu, ti.cuda, ti.vulkan])
+def test_grouped_field_atomics_special_values():
+    bits = np.array([0, 0x80000000, 0x7FC12345, 1, 0x3F800000], dtype=np.uint32)
+    n = len(bits)
+    source = np.repeat(bits, n).reshape(n, n).view(np.float32)
+    target = ti.field(ti.f32, shape=(n, n))
+    reference = ti.field(ti.f32, shape=(n, n))
+    terms = ti.field(ti.f32, shape=(n, n))
+    terms.from_numpy(np.tile(bits, n).reshape(n, n).view(np.float32))
+
+    @ti.func
+    def add_negative(dst: ti.template(), x):
+        return ti.atomic_add(dst, -x)
+
+    @ti.kernel
+    def update(op: ti.template(), planes: ti.i32):
+        for I in ti.grouped(target):
+            op(target[I], terms[I])
+        for i, j, k in ti.ndrange(n, n, planes):
+            if k == 0:
+                op(reference[i, j], terms[i, j])
+
+    for op in (ti.atomic_add, add_negative, ti.atomic_sub, ti.atomic_min, ti.atomic_max):
+        target.from_numpy(source)
+        reference.from_numpy(source)
+        update(op, 2)
+        np.testing.assert_array_equal(target.to_numpy().view(np.uint32), reference.to_numpy().view(np.uint32))
 
 
 @test_utils.test()

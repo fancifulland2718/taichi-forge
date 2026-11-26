@@ -18,6 +18,7 @@
 #include "llvm/TargetParser/Host.h"
 #include "llvm/MC/TargetRegistry.h"
 #include "llvm/IR/LegacyPassManager.h"
+#include "llvm/IR/InlineAsm.h"
 #include "llvm/Transforms/IPO.h"
 // PassManagerBuilder was removed in LLVM 17. See
 // taichi/runtime/llvm/llvm_opt_pipeline.h for the New-PM replacement.
@@ -372,6 +373,19 @@ class TaskCodeGenCPU : public TaskCodeGenLLVM {
     offloaded_tasks.push_back(*current_task);
     current_task = nullptr;
     current_offload = nullptr;
+  }
+
+  void visit(InternalFuncStmt *stmt) override {
+    if (stmt->func_name == "private_atomic_add_f32") {
+      // Keep fadd(x, -y) distinct from fsub(x, y), including the NaN sign.
+      auto *f32 = builder->getFloatTy();
+      auto *type = llvm::FunctionType::get(f32, {f32, f32}, false);
+      auto *add = llvm::InlineAsm::get(type, "addss $2, $0", "=x,0,x", false);
+      llvm_val[stmt] = builder->CreateCall(
+          add, {llvm_val[stmt->args[0]], llvm_val[stmt->args[1]]});
+      return;
+    }
+    TaskCodeGenLLVM::visit(stmt);
   }
 
   void visit(ExternalFuncCallStmt *stmt) override {
