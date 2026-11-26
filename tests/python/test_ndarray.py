@@ -2166,6 +2166,47 @@ def test_ordinary_launch_plan_excludes_snode_dependent_kernel():
     assert field[None] == 9
 
 
+@test_utils.test(arch=[ti.cuda, ti.vulkan], offline_cache=False)
+def test_ordinary_field_templates_reuse_identity_and_validate_captured_tree():
+    def allocate():
+        value = ti.field(ti.i32)
+        builder = ti.FieldsBuilder()
+        builder.dense(ti.i, 8).place(value)
+        return value, builder.finalize()
+
+    a, a_tree = allocate()
+    b, b_tree = allocate()
+    bias, bias_tree = allocate()
+    bias.fill(3)
+    a.fill(1)
+
+    @ti.kernel
+    def step(src: ti.template(), dst: ti.template()):
+        for i in range(8):
+            dst[i] = src[i] + bias[i]
+
+    step(a, b)
+    first_plan = step._primal._ordinary_launch_plan
+    assert first_plan.guard_context_lifecycle
+    step(b, a)
+    assert step._primal._ordinary_launch_plan is not first_plan
+    step(a, b)
+    assert step._primal._ordinary_launch_plan is first_plan
+    np.testing.assert_array_equal(b.to_numpy(), np.full(8, 10))
+    bias_tree_id = bias_tree.id
+    bias_tree.destroy()
+    with pytest.raises(RuntimeError, match="destroyed SNodeTree"):
+        step(a, b)
+    replacement, replacement_tree = allocate()
+    assert replacement_tree.id == bias_tree_id
+    with pytest.raises(RuntimeError, match="stale SNodeTree"):
+        step(a, b)
+    assert replacement[0] == 0
+    replacement_tree.destroy()
+    a_tree.destroy()
+    b_tree.destroy()
+
+
 @test_utils.test(arch=[ti.cpu, ti.cuda, ti.vulkan])
 def test_ordinary_launch_plan_negative_caches_stable_snode_admission(monkeypatch):
     field = ti.field(ti.i32, shape=())

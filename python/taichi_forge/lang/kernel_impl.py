@@ -1387,6 +1387,20 @@ class _OrdinaryLaunchPlan:
         return True
 
 
+class _FieldTemplateLaunchPlan(_OrdinaryLaunchPlan):
+    """All arguments select a compiled field specialization, with no ABI slots."""
+
+    __slots__ = ("field_refs",)
+
+    def is_live(self, runtime):
+        return self.runtime is runtime and all(ref() is not None for ref in self.field_refs)
+
+    def matches(self, runtime, args):
+        if self.runtime is not runtime or len(args) != len(self.field_refs):
+            return False
+        return all(arg is not None and ref() is arg for ref, arg in zip(self.field_refs, args))
+
+
 class Kernel:
     counter = 0
 
@@ -2477,13 +2491,30 @@ class Kernel:
     ):
         """Return ``(plan, stable_failure)`` for one compiled specialization."""
 
-        if self.autodiff_mode != AutodiffMode.NONE or self.template_slot_locations:
+        if self.autodiff_mode != AutodiffMode.NONE:
             return None, True
         if len(args) > 64:
             return None, True
+        field_refs = ()
+        if self.template_slot_locations:
+            # Field templates specialize by object identity and supply no ABI
+            # arguments. Keep policy-bound and mixed signatures on their
+            # existing path. Native registration captures all referenced trees,
+            # including fields captured by the body.
+            from taichi_forge.lang.field import ScalarField
+
+            if (
+                allow_snode_tree_dependencies
+                or len(self.template_slot_locations) != len(args)
+                or self.runtime.prog.config().arch not in (_ti_core.Arch.cuda, _ti_core.Arch.vulkan)
+                or any(type(arg) is not ScalarField for arg in args)
+            ):
+                return None, True
+            field_refs = tuple(weakref.ref(arg) for arg in args)
         bindings = []
         resource_guards = []
-        for index, (argument, value) in enumerate(zip(self.arguments, args)):
+        runtime_args = () if field_refs else args
+        for index, (argument, value) in enumerate(zip(self.arguments, runtime_args)):
             annotation = argument.annotation
             if id(annotation) in primitive_types.real_type_ids:
                 bindings.append((index, "real", annotation))
@@ -2517,7 +2548,7 @@ class Kernel:
             prog.config(),
             prog.get_device_caps(),
             self.compiled_kernels[key],
-            allow_snode_tree_dependencies,
+            allow_snode_tree_dependencies or bool(field_refs),
         )
         if native_plan is None:
             # Registration depends on the compiled executable (for example,
@@ -2555,21 +2586,22 @@ class Kernel:
                     for binding in scalar_bindings
                 ),
             )
-        return (
-            _OrdinaryLaunchPlan(
-                self.runtime,
-                key,
-                self.compiled_kernels[key],
-                native_plan,
-                tuple(bindings),
-                scalar_bindings,
-                scalar_patch_plan,
-                tuple(resource_guards),
-                launch_ctx,
-                native_plan.has_snode_tree_dependencies,
-            ),
-            False,
+        plan_type = _FieldTemplateLaunchPlan if field_refs else _OrdinaryLaunchPlan
+        plan = plan_type(
+            self.runtime,
+            key,
+            self.compiled_kernels[key],
+            native_plan,
+            tuple(bindings),
+            scalar_bindings,
+            scalar_patch_plan,
+            tuple(resource_guards),
+            launch_ctx,
+            native_plan.has_snode_tree_dependencies,
         )
+        if field_refs:
+            plan.field_refs = field_refs
+        return plan, False
 
     def _find_ordinary_launch_plan_after_mru_miss(self, args):
         """Search secondary slots after ``__call__`` rejects the MRU alias."""
