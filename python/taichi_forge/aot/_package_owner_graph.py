@@ -494,7 +494,8 @@ class OwnerGraph:
         that unmentioned members are unused. The result only narrows query
         projection; it never changes an owner's allocation contract.
         """
-        if method not in self._device_methods.get(identity, {}):
+        if (method not in self._device_methods.get(identity, {})
+                or not any(item['kind'] == 'owner_input' for item in schema.values())):
             return None
         owners = {tuple(paths[key]): item['owner_type'] for key, item in schema.items()
                   if item['kind'] in ('owner', 'owner_input')}

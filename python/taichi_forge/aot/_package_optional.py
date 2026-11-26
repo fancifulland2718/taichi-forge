@@ -179,7 +179,7 @@ def project_owned_records(environment, schema, *, borrowed=False, uses=()):
     from ._component import Array, DenseField, _ConditionalDenseField, _InputPresence, _InputRecord
     from taichi_forge_runtime._dimensions import extent_dependencies
 
-    declarations = dict(environment.declarations)
+    declarations = environment.declarations
     query_paths = [tuple(item.get("path", (key,))) for key, item in schema.items()
                    if item["kind"] == "owner_input"] if borrowed else []
     for name, record in schema.items():
@@ -263,6 +263,8 @@ def project_owned_records(environment, schema, *, borrowed=False, uses=()):
             predicate["prepare_static"] = True
         record.update(dynamic_input_record=True, input_presence_attribute=flag)
         predicate.update(dynamic_storage_condition=True, input_presence_attribute=flag)
+        if declarations is environment.declarations:
+            declarations = dict(declarations)
         declarations[name] = _InputRecord(flag)
         declarations[flag] = _InputPresence(primitive_types.i32)
         for key, item in members.items():
@@ -282,7 +284,8 @@ def project_owned_records(environment, schema, *, borrowed=False, uses=()):
                 # it is not an allocation owned by the query's caller.
                 value = declarations[key]
                 declarations[key] = Array(value.dtype, value.ndim, value.shape, value.resource_id)
-    environment._set_declarations(declarations)
+    if declarations is not environment.declarations:
+        environment._set_declarations(declarations)
 
 
 def project_query_groups(environment, schema, uses):
@@ -296,7 +299,7 @@ def project_query_groups(environment, schema, uses):
     from taichi_forge_runtime._dimensions import extent_dependencies
     from ._component import DenseField, _ConditionalDenseField, _ConditionalDimension, _InputPresence
 
-    declarations = dict(environment.declarations)
+    declarations = environment.declarations
     inputs = [tuple(item.get("path", (key,))) for key, item in schema.items() if item["kind"] == "owner_input"]
     for flag, predicate in list(schema.items()):
         if predicate["kind"] != "static":
@@ -329,6 +332,8 @@ def project_query_groups(environment, schema, uses):
             continue
         schema[flag] = {**predicate, "dynamic_storage_condition": True,
                         "input_presence_attribute": flag, "prepare_static": True}
+        if declarations is environment.declarations:
+            declarations = dict(declarations)
         declarations[flag] = _InputPresence(primitive_types.i32)
         for key, original in members.items():
             item = schema[key] = {**original, "input_record": flag}
@@ -338,7 +343,8 @@ def project_query_groups(environment, schema, uses):
                 item.update(dynamic_input_storage=True, shape=list(value.shape))
             else:
                 declarations[key] = _ConditionalDimension(value.kind, value.capacity, value.expression, ((flag, True),))
-    environment._set_declarations(declarations)
+    if declarations is not environment.declarations:
+        environment._set_declarations(declarations)
 
 
 def ordered_presence_conditions(schema, paths, conditions):

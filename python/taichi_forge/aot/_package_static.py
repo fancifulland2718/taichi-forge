@@ -768,19 +768,21 @@ class StaticPreparation:
             owners[()] = owner_type
         uses = self.schema_uses(environment._paths, identity, owners=owners)
         facts = self.classify(schema, environment._paths, identity, uses=uses)
-        declarations, projected = dict(environment.declarations), dict(schema)
+        updates, projected = {}, dict(schema)
         for name, reason in facts.items():
             if reason == "prepare_condition":
-                declarations[name] = RuntimeValue(primitive_types.i32, affects_plan=True)
+                updates[name] = RuntimeValue(primitive_types.i32, affects_plan=True)
                 projected[name] = {**schema[name], "prepare_static": True}
         result = copy.copy(environment)
-        result._set_declarations(declarations)
+        if updates:
+            result._set_declarations({**environment.declarations, **updates})
         from ._package_optional import project_owned_records, project_query_groups, project_nested_query_records
 
         # Query input eligibility depends on this entry's numeric predicates.
         # Producer-only configuration must not force query presence variants.
-        project_query_groups(result, projected, uses)
-        project_owned_records(result, projected, borrowed=True, uses=uses)
-        project_nested_query_records(result, projected, uses, query_paths=query_paths)
+        if any(item["kind"] == "owner_input" for item in schema.values()):
+            project_query_groups(result, projected, uses)
+            project_owned_records(result, projected, borrowed=True, uses=uses)
+            project_nested_query_records(result, projected, uses, query_paths=query_paths)
         self._contexts[key] = result, projected, facts
         return result, projected, facts
