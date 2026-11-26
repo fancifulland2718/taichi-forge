@@ -4,6 +4,26 @@ import taichi_forge as ti
 from tests import test_utils
 
 
+@test_utils.test(arch=ti.vulkan, offline_cache=False)
+def test_oversized_dense_root_rejected_before_allocation():
+    survivor = ti.field(ti.i32, shape=2)
+    survivor[1] = 13
+    large = ti.field(ti.f32)
+    fields = ti.FieldsBuilder()
+    fields.dense(ti.i, 65536).dense(ti.j, 16385).place(large)
+    with pytest.raises(RuntimeError, match=r"Vulkan SNode root requires 4295229440 bytes"):
+        fields.finalize()
+
+    replacement = ti.field(ti.i32)
+    fields = ti.FieldsBuilder()
+    fields.dense(ti.i, 2).place(replacement)
+    tree = fields.finalize()
+    replacement[0] = 7
+    assert replacement[0] == 7
+    assert survivor[1] == 13
+    tree.destroy()
+
+
 @pytest.mark.parametrize("pool", ["inline", "independent", "chunked"])
 @test_utils.test(arch=ti.vulkan, offline_cache=False)
 def test_sparse_tree_resources_retire_without_affecting_other_trees(pool):

@@ -8646,6 +8646,17 @@ void GfxRuntime::add_root_buffer(int root_id, size_t root_buffer_size) {
   if (root_buffer_size == 0) {
     root_buffer_size = 4;  // there might be empty roots
   }
+  if (device_->arch() == Arch::vulkan) {
+    // Roots are bound as whole storage buffers and SPIR-V uses u32 byte offsets.
+    const auto max_bytes = std::min<uint64_t>(
+        device_->get_storage_buffer_binding_limits().max_range,
+        uint64_t{1} << 32);
+    TI_ERROR_IF(root_buffer_size > max_bytes,
+                "Vulkan SNode root requires {} bytes, exceeding the single "
+                "storage buffer limit of {} bytes. Place independent fields "
+                "in separate FieldsBuilder trees.",
+                root_buffer_size, max_bytes);
+  }
   auto [new_buffer, res_buffer] = device_->allocate_memory_unique(
       {root_buffer_size,
        /*host_write=*/false, /*host_read=*/false,
