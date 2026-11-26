@@ -58,7 +58,7 @@ def _native_bulk_copy_needs_sync():
 
 
 _STRUCT_MEMBER_NATIVE_HOST_COPY_MIN_PAYLOAD_BYTES = 1 << 20
-_STRUCT_CUDA_SPAN_UPLOAD_MIN_BYTES = 128 << 10
+_STRUCT_GPU_SPAN_UPLOAD_MIN_BYTES = 128 << 10
 _STRUCT_MEMBER_NATIVE_HOST_COPY_DTYPES = (
     primitive_types.u32,
     primitive_types.i32,
@@ -949,6 +949,13 @@ class StructNdarray(Ndarray):
         nelement = int(np.prod(arr_shape, dtype=np.int64))
         byte_size = nelement * _ti_core.data_type_size(self.dtype)
         self._host_copy_bytes = byte_size
+        self._packed_host_scratch = None
+        # Only retain scratch for the intermediate upload range. Large,
+        # occasionally updated records need not retain a second allocation.
+        self._packed_host_scratch_lock = (
+            threading.Lock() if _STRUCT_GPU_SPAN_UPLOAD_MIN_BYTES <= byte_size
+            < _STRUCT_MEMBER_NATIVE_HOST_COPY_MIN_PAYLOAD_BYTES else None
+        )
         zero_fill_on_create = byte_size % 4 == 0
         self.arr = impl.get_runtime().prog.create_ndarray(
             self.dtype,
@@ -1058,9 +1065,9 @@ class StructNdarray(Ndarray):
 
     def _packed_host_field_layout(self, paths, *, upload):
         min_bytes = _STRUCT_MEMBER_NATIVE_HOST_COPY_MIN_PAYLOAD_BYTES
-        if (upload and _STRUCT_CUDA_SPAN_UPLOAD_MIN_BYTES <= self._host_copy_bytes < min_bytes
-                and impl.current_cfg().arch == _ti_core.Arch.cuda):
-            min_bytes = _STRUCT_CUDA_SPAN_UPLOAD_MIN_BYTES
+        if (upload and _STRUCT_GPU_SPAN_UPLOAD_MIN_BYTES <= self._host_copy_bytes < min_bytes
+                and impl.current_cfg().arch in (_ti_core.Arch.cuda, _ti_core.Arch.vulkan)):
+            min_bytes = _STRUCT_GPU_SPAN_UPLOAD_MIN_BYTES
         if len(paths) < len(self.struct_type.members) and self._host_copy_bytes < min_bytes:
             # Each path can cover at most one top-level member. A strict subset
             # this small will use the ordinary read-modify-write path.
@@ -1096,7 +1103,7 @@ class StructNdarray(Ndarray):
                 return None
         return np.dtype([(name, dtype) for _, name, dtype in fields]), runs, transfer
 
-    def _copy_packed_host_fields(self, packed, runs, transfer, *, upload, scratch=None):
+    def _copy_packed_host_fields(self, packed, runs, transfer, *, upload, scratch=None, scratch_idle=False):
         # Unsigned identity transfers preserve every bit, including floating
         # point payloads. Only this call has access to scratch until completion.
         from taichi_forge.algorithms._primitive_definitions import NATIVE_VALUE_TYPE
@@ -1109,7 +1116,11 @@ class StructNdarray(Ndarray):
             scratch = ScalarNdarray._private_scratch_storage(record, self.shape)
         runtime = impl.get_runtime()
         device = _native_bulk_copy_needs_sync()
-        if device:
+        if upload and scratch_idle and impl.current_cfg().arch == _ti_core.Arch.vulkan:
+            # Only the private idle scratch is touched by the host upload.
+            # Destination writes are ordered by the subsequent compute dispatch.
+            runtime.prog._synchronize_execution_domains()
+        elif device:
             runtime.sync()
         if upload:
             runtime.prog.copy_ndarray_from_host(scratch.arr, packed)
@@ -1196,7 +1207,17 @@ class StructNdarray(Ndarray):
                 )
             target[...] = value
         if layout is not None and layout[2] is not None:
-            self._copy_packed_host_fields(struct_arr, layout[1], layout[2], upload=True)
+            if self._packed_host_scratch_lock is None:
+                self._copy_packed_host_fields(struct_arr, layout[1], layout[2], upload=True)
+            else:
+                with self._packed_host_scratch_lock:
+                    scratch = self._packed_host_scratch
+                    self._packed_host_scratch = None
+                    if scratch is not None and scratch._get_element_size() != struct_arr.dtype.itemsize:
+                        scratch = None
+                    self._packed_host_scratch = self._copy_packed_host_fields(
+                        struct_arr, layout[1], layout[2], upload=True, scratch=scratch, scratch_idle=True
+                    )
         else:
             if layout is not None and not self._sync_pending_device_write() and _native_bulk_copy_needs_sync():
                 # A full overwrite skips the readback that used to flush

@@ -484,6 +484,26 @@ def test_struct_host_full_overwrite_follows_pending_kernel():
     np.testing.assert_array_equal(result["y"], -x)
 
 
+@test_utils.test(arch=ti.vulkan, offline_cache=False)
+def test_struct_partial_upload_preserves_pending_writes_with_reused_scratch():
+    record = ti.types.struct(a=ti.i32, b=ti.i32, c=ti.i32, d=ti.i32)
+    n = 8192
+    data = ti.ndarray(record, n)
+
+    @ti.kernel
+    def produce(dst: ti.types.ndarray(dtype=record, ndim=1), step: ti.i32):
+        for i in dst:
+            dst[i].a, dst[i].c, dst[i].d = -1, step + i, -i
+
+    index = np.arange(n, dtype=np.int32)
+    for step in (3, 7):
+        produce(data, step)
+        data.from_numpy_fields(a=index, b=index + step)
+        got = data.to_numpy()
+        for column, expected in zip("abcd", (index, index + step, index + step, -index)):
+            np.testing.assert_array_equal(got[column], expected)
+
+
 @test_utils.test(arch=get_host_arch_list())
 def test_struct_ndarray_scalar_member_view_rejections():
     inner = ti.types.struct(a=ti.i32)
