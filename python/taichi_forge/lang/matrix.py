@@ -1278,13 +1278,29 @@ class MatrixField(Field):
                 yield i, j
 
     def _native_dense_packed_plan(self, as_vector=None):
-        if not _dense_native_bulk_arch_enabled():
-            return None
-        value_type = _dense_host_copy_value_type(self.dtype)
-        if value_type is None:
-            return None
-        components = tuple(self.get_scalar_field(i, j) for i, j in self._native_dense_component_indices(as_vector))
-        return _dense_native_packed_plan(components, value_type)
+        # Factory matrix fields have immutable component expressions. A projected
+        # column of a multi-column field and manually supplied lists are not cached.
+        if as_vector is None:
+            as_vector = self.ndim == 1
+        full = not as_vector or self.m == 1
+        cacheable = full and isinstance(self.vars, tuple)
+        if cacheable:
+            cached = getattr(self, "_packed_component_cache", None)
+            if cached is not None and cached[0] is self.vars and cached[1:4] == (self.n, self.m, self.ndim):
+                if cached[4].live:
+                    return cached[5]
+        plan = None
+        if _dense_native_bulk_arch_enabled():
+            dtype = self.dtype
+            value_type = _dense_host_copy_value_type(dtype)
+            if value_type is not None:
+                components = tuple(self.get_scalar_field(i, j) for i, j in self._native_dense_component_indices(as_vector))
+                if all(component.dtype == dtype for component in components):
+                    plan = _dense_native_packed_plan(components, value_type)
+        if cacheable:
+            lifetime = impl.get_runtime().field_layout_lifetime(self)
+            self._packed_component_cache = (self.vars, self.n, self.m, self.ndim, lifetime, plan)
+        return plan
 
     def _try_native_dense_packed_fill(self, val):
         plan = self._native_dense_packed_plan()
@@ -1359,12 +1375,6 @@ class MatrixField(Field):
         )
 
     def _try_native_dense_packed_copy_from(self, other):
-        if type(self) is not type(other):
-            return False
-        if self.n != other.n or self.m != other.m or self.ndim != other.ndim:
-            return False
-        if self.dtype != other.dtype or self.shape != other.shape:
-            return False
         plan = self._native_dense_packed_plan()
         other_plan = other._native_dense_packed_plan()
         if plan is None or other_plan is None or plan[1:] != other_plan[1:]:
@@ -1383,18 +1393,19 @@ class MatrixField(Field):
     def _try_native_dense_copy_from(self, other):
         if type(self) is not type(other):
             return False
-        if len(self.shape) == 0:
+        rank = len(self.shape)
+        if rank == 0:
             return False
         if self.n != other.n or self.m != other.m or self.ndim != other.ndim:
             return False
-        if self.dtype != other.dtype:
-            return False
-        packed_candidate = len(self.shape) == 1 and self.n * self.m > 1 and not (
+        packed_candidate = rank == 1 and self.n * self.m > 1 and not (
             getattr(self, "_aot_tensor_soa", False) or getattr(other, "_aot_tensor_soa", False)
         )
         if packed_candidate or _dense_native_copy_ad_required(other, self):
             if self._try_native_dense_packed_copy_from(other):
                 return True
+        if self.dtype != other.dtype:
+            return False
         components = []
         for i in range(self.n):
             js = (0,) if self.ndim == 1 else range(self.m)

@@ -148,6 +148,55 @@ def test_packed_scalar_struct_bulk_operations():
         dst.copy_from(grid)
 
 
+@test_utils.test(arch=[ti.cpu, ti.cuda, ti.vulkan])
+def test_reused_packed_layout_and_member_rebinding(monkeypatch):
+    import importlib
+
+    record = ti.types.struct(x=ti.f32, y=ti.f32)
+    src, dst = (record.field(shape=37) for _ in range(2))
+    src.fill(3)
+    dst.copy_from(src)
+    a, b = (ti.Matrix.field(2, 2, ti.f32, shape=37) for _ in range(2))
+    a.fill(4)
+    b.copy_from(a)
+    replacement = ti.field(ti.f32, shape=37)
+
+    def unexpected(*args):
+        pytest.fail("a warm Field operation traversed its layout again")
+
+    for module in ("struct", "matrix"):
+        monkeypatch.setattr(importlib.import_module(f"taichi_forge.lang.{module}"), "_dense_native_packed_plan", unexpected)
+    for _ in range(3):
+        src.fill(7)
+        dst.copy_from(src)
+        b.copy_from(a)
+    np.testing.assert_array_equal(b.to_numpy(), np.full((37, 2, 2), 4))
+    original = dst.y
+    dst.field_dict.update(y=replacement)
+    dst.fill(9)
+    np.testing.assert_array_equal(original.to_numpy(), np.full(37, 7))
+    np.testing.assert_array_equal(replacement.to_numpy(), np.full(37, 9))
+
+
+@test_utils.test(arch=[ti.cpu, ti.cuda, ti.vulkan])
+def test_matrix_layout_rechecked_after_tree_replacement():
+    x = ti.Vector.field(2, ti.i32)
+    builder = ti.FieldsBuilder()
+    builder.dense(ti.i, 16).place(x)
+    tree = builder.finalize()
+    x.fill(7)
+    assert x._native_dense_packed_plan() is not None
+    tree.destroy()
+
+    separate = ti.FieldsBuilder()
+    for lane in range(2):
+        separate.dense(ti.i, 7).place(x.get_scalar_field(lane))
+    separate.finalize()
+    assert x._native_dense_packed_plan() is None
+    x.fill(3)
+    np.testing.assert_array_equal(x.to_numpy(), np.full((7, 2), 3))
+
+
 @test_utils.test()
 def test_matrix_type():
     n = 32

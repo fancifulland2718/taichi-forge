@@ -517,6 +517,10 @@ class SrcInfoGuard:
         self.info_stack.pop()
 
 
+class _FieldLayoutLifetime:
+    live = True
+
+
 class PyTaichi:
     def __init__(self, kernels=None):
         self.materialized = False
@@ -532,6 +536,7 @@ class PyTaichi:
         self._materialize_fast_path = True
         self._materialize_dirty = True
         self._pending_aot_snode_trees = deque()
+        self._field_layout_lifetimes = {}
         self.prog = None
         self.src_info_stack = []
         self.inside_kernel = False
@@ -712,6 +717,18 @@ class PyTaichi:
     def clear_runtime_submission_owners(self):
         with self._runtime_submission_owner_lock:
             self._runtime_submission_owners.clear()
+
+    def field_layout_lifetime(self, field):
+        tree_id = field.snode._snode_tree_id
+        lifetime = self._field_layout_lifetimes.get(tree_id)
+        if lifetime is None:
+            lifetime = self._field_layout_lifetimes[tree_id] = _FieldLayoutLifetime()
+        return lifetime
+
+    def retire_field_layout(self, tree_id):
+        lifetime = self._field_layout_lifetimes.pop(tree_id, None)
+        if lifetime is not None:
+            lifetime.live = False
 
     def begin_snode_tree_destroy(self, dependency):
         notified = []
@@ -1059,6 +1076,9 @@ class PyTaichi:
             self.prog.synchronize()
         if has_submission_owners:
             self.clear_runtime_submission_owners()
+        for lifetime in self._field_layout_lifetimes.values():
+            lifetime.live = False
+        self._field_layout_lifetimes.clear()
         self.invalidate_runtime_objects()
         self._graph_execution_runtime = None
         self._pending_aot_snode_trees.clear()

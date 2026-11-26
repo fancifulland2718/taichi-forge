@@ -335,8 +335,6 @@ _
             if layout == Layout.SOA:
                 for e in field_dict.values():
                     impl.root.dense(impl.index_nd(dim), shape).place(e, offset=offset)
-                    if isinstance(e, ScalarField):
-                        e._separate_struct_member = True
                 if needs_grad:
                     for e in field_dict.values():
                         impl.root.dense(impl.index_nd(dim), shape).place(e.grad, offset=offset)
@@ -353,6 +351,16 @@ _
                     duals = tuple(e.dual for e in field_dict.values())
                     impl.root.dense(impl.index_nd(dim), shape).place(*duals, offset=offset)
 
+        if shape is not None and layout == Layout.AOS and len(field_dict) > 1:
+            if all(isinstance(field, ScalarField) for field in field_dict.values()):
+                dtypes = tuple(cook_dtype(dtype) for dtype in members.values())
+                value_type = _dense_host_copy_value_type(dtypes[0])
+                if value_type is not None and all(dtype == dtypes[0] for dtype in dtypes):
+                    field_dict = _PackedStructMembers(field_dict)
+                    field_dict.value_type = value_type
+                    field_dict.dtype = dtypes[0]
+                    field_dict.copy_layout = (tuple(members), tuple(shape), value_type) if len(shape) == 1 else None
+                    field_dict.plan = _UNRESOLVED_PACKED_LAYOUT
         return StructField(field_dict, methods, name=name)
 
 
@@ -373,22 +381,48 @@ class _IntermediateStruct(Struct):
         self._register_members()
 
 
-def _struct_dense_packed_plan(field):
-    members = field._members
-    if len(members) < 2 or getattr(members[0], "_separate_struct_member", False) is True:
-        return None
+_UNRESOLVED_PACKED_LAYOUT = object()
+
+
+def _discard_declared_layout(mutator):
+    def mutate(members, *args, **kwargs):
+        members.plan = None
+        return mutator(members, *args, **kwargs)
+
+    return mutate
+
+
+class _PackedStructMembers(dict):
+    """Factory-owned AOS members. Rebinding any member drops the declaration proof."""
+
+    copy_layout = None
+    __init__ = _discard_declared_layout(dict.__init__)
+    __setitem__ = _discard_declared_layout(dict.__setitem__)
+    __delitem__ = _discard_declared_layout(dict.__delitem__)
+    __ior__ = _discard_declared_layout(dict.__ior__)
+    update = _discard_declared_layout(dict.update)
+    clear = _discard_declared_layout(dict.clear)
+    pop = _discard_declared_layout(dict.pop)
+    popitem = _discard_declared_layout(dict.popitem)
+    setdefault = _discard_declared_layout(dict.setdefault)
+
+    def resolve(self):
+        if self.plan is _UNRESOLVED_PACKED_LAYOUT:
+            plan = None
+            if _dense_native_bulk_arch_enabled():
+                plan = _dense_native_packed_plan(tuple(self.values()), self.value_type)
+            if self.plan is _UNRESOLVED_PACKED_LAYOUT:
+                if plan is not None:
+                    self.lifetime = impl.get_runtime().field_layout_lifetime(plan[0])
+                self.plan = plan
+        elif self.plan is not None and not self.lifetime.live:
+            self.plan = None
+        return self.plan
+
+
+def _struct_bulk_allowed():
     runtime = impl.get_runtime()
-    if runtime.target_tape is not None or runtime.fwd_mode_manager is not None:
-        return None
-    if not _dense_native_bulk_arch_enabled():
-        return None
-    if not all(isinstance(member, ScalarField) for member in members):
-        return None
-    dtype = members[0].dtype
-    value_type = _dense_host_copy_value_type(dtype)
-    if value_type is None or any(member.dtype != dtype for member in members[1:]):
-        return None
-    return _dense_native_packed_plan(members, value_type)
+    return runtime.target_tape is None and runtime.fwd_mode_manager is None
 
 
 class StructField(Field):
@@ -504,18 +538,17 @@ class StructField(Field):
             other (Field): The source field.
         """
         assert isinstance(other, Field)
-        assert set(self.keys) == set(other.keys)
-        # A physical copy must preserve the correspondence between member names.
-        if isinstance(other, StructField) and len(self.field_dict) > 1 and self.keys == other.keys:
-            plan = _struct_dense_packed_plan(self)
-            if plan is not None and len(self.shape) == 1 and other.shape == self.shape:
-                other_plan = _struct_dense_packed_plan(other)
-                if (
-                    other_plan is not None
-                    and plan[1:] == other_plan[1:]
-                    and _try_copy_dense_packed(plan, other_plan)
-                ):
+        dst = self.field_dict
+        src = getattr(other, "field_dict", None)
+        if isinstance(dst, _PackedStructMembers) and isinstance(src, _PackedStructMembers) and _struct_bulk_allowed():
+            # Share the immutable signature after the first compatible binding.
+            if dst.copy_layout is not None and (dst.copy_layout is src.copy_layout or dst.copy_layout == src.copy_layout):
+                src.copy_layout = dst.copy_layout
+                plan = dst.resolve()
+                other_plan = src.resolve()
+                if plan is not None and other_plan is not None and _try_copy_dense_packed(plan, other_plan):
                     return
+        assert set(self.keys) == set(other.keys)
         for k in self.keys:
             self.field_dict[k].copy_from(other.get_member_field(k))
 
@@ -526,11 +559,13 @@ class StructField(Field):
         Args:
             val (Union[int, float]): Value to fill.
         """
-        plan = _struct_dense_packed_plan(self)
-        if plan is not None:
-            bits = _dense_fill_value_bits(plan[0].dtype, val)
-            if bits is not None and _try_fill_dense_packed(plan, bits):
-                return
+        members = self.field_dict
+        if isinstance(members, _PackedStructMembers) and _struct_bulk_allowed():
+            plan = members.resolve()
+            if plan is not None:
+                bits = _dense_fill_value_bits(members.dtype, val)
+                if bits is not None and _try_fill_dense_packed(plan, bits):
+                    return
         for v in self._members:
             v.fill(val)
 
