@@ -3081,7 +3081,7 @@ class _Capture:
     def matches(self, component, owner, *, layouts=None):
         return self.dependency_mismatch(component, owner, layouts=layouts) is None
 
-    def dependency_mismatch(self, component, owner, *, layouts=None):
+    def dependency_mismatch(self, component, owner, *, layouts=None, allocation_updates=None):
         from ._component_lexical import mismatch
 
         lexical_mismatch = mismatch(self, component)
@@ -3158,7 +3158,9 @@ class _Capture:
                 raise TaichiCompilationError("Distinct component groups cannot split the same SNode root")
             roots.add(root_id)
             if actual != schema:
-                return f"layout of group {group!r}"
+                if allocation_updates is None:
+                    return f"layout of group {group!r}"
+                allocation_updates[group] = actual
             for name, (member_group, paths) in self.member_paths.items():
                 if member_group == group and members.get(name) != paths:
                     return f"member {name!r} in group {group!r}"
@@ -3278,15 +3280,17 @@ class _FunctionDependencies:
 
 
 class _ComponentCode:
+    @staticmethod
+    def contract_key(contract):
+        return _digest({key: value for key, value in contract.items() if key != "declaration_sources"})
+
     def __init__(self, kernel, key, context):
         self.kernel = kernel
         self.key = key
         self.call_signature = context.call_signature
         self.runtime = kernel.runtime
         self._function_states = dict(context._real_functions) if getattr(kernel, "_package_compilation", None) else {}
-        self.semantic_key = _digest(
-            {key: value for key, value in context.contract.items() if key != "declaration_sources"}
-        )
+        self.semantic_key = self.contract_key(context.contract)
         # Copy plain dependency facts, never the lowering context/owner/Exprs.
         self.entry_definition = context.entry_definition
         self.used = dict(context.used)

@@ -456,12 +456,13 @@ class Reader:
         return x * 2
 """
     for label, text, hits, expected in (("seed", original, 0, 65535), ("added", added, 4, 65535),
-                                       ("colocated", colocated, 2, 65535),
+                                       ("colocated", colocated, 4, 65535),
+                                       ("cold-colocated", colocated, 0, 65535),
                                        ("edited", edited, 2, -1), ("cold", edited, 0, -1)):
         source.write_text(text + reader, encoding="utf8")
         module = importlib.import_module(source.stem)
         output = tmp_path / label
-        cache = tmp_path / ("fresh-cache" if label == "cold" else "cache")
+        cache = tmp_path / (label + "-cache" if label.startswith("cold") else "cache")
         try:
             ti.aot.export_package(module, output, arch=[ti.cpu], artifact_format="unified-bc-library",
                                   build_cache=cache)
@@ -476,9 +477,49 @@ class Reader:
             view = package.host.Reader(model)
             assert view.nested_write(65535) == expected
             assert view.double(3) == 6
-    with zipfile.ZipFile(tmp_path / "edited/code.tcm") as warm, zipfile.ZipFile(tmp_path / "cold/code.tcm") as cold:
-        assert set(warm.namelist()) == set(cold.namelist())
-        assert all(warm.read(name) == cold.read(name) for name in warm.namelist())
+    for incremental, clean in (("colocated", "cold-colocated"), ("edited", "cold")):
+        for name in ("code.tcm", "package.json"):
+            assert (tmp_path / incremental / name).read_bytes() == (tmp_path / clean / name).read_bytes()
+
+
+@test_utils.test(arch=ti.cpu, offline_cache=False)
+def test_unified_incremental_recompiles_after_cell_stride_changes(tmp_path, monkeypatch):
+    from taichi_forge_runtime.aot import load_package
+
+    source = tmp_path / "cell_stride.py"
+    monkeypatch.syspath_prepend(str(tmp_path))
+    original = """import taichi_forge as ti
+@ti.data_oriented
+class Grid:
+    def __init__(self):
+        builder = ti.FieldsBuilder()
+        scope = ti.experimental.ResourceScope(self, builder=builder)
+        cell = scope.dense(ti.i, 3)
+        scope.value = scope.field(ti.i32, shape=3, placement=cell, initialization='zero')
+        self.tree = builder.finalize()
+    @ti.kernel
+    def write(self, x: ti.i32):
+        self.value[2] = x
+"""
+    sibling = "        scope.pad = scope.field(ti.i32, shape=3, placement=cell, initialization='zero')\n"
+    interleaved = original.replace("        self.tree", sibling + "        self.tree")
+    cache = tmp_path / "cache"
+    for label, body, hits in (("packed", original, 0), ("strided", interleaved, 0), ("again", interleaved, 1)):
+        source.write_text(body, encoding="utf8")
+        module = importlib.import_module(source.stem)
+        try:
+            ti.aot.export_package(module, tmp_path / label, arch=[ti.cpu], artifact_format="unified-bc-library",
+                                  build_cache=cache)
+        finally:
+            sys.modules.pop(source.stem)
+        stats = json.loads((cache / "unified/latest.json").read_bytes())["produce"]
+        assert stats["unified_capture_restores"] == hits
+        with ti.aot.borrow_runtime() as runtime, load_package(runtime, tmp_path / label) as package:
+            grid = package.host.Grid()
+            grid.write(73)
+            assert grid.value.to_numpy().tolist() == [0, 0, 73]
+            if label != "packed":
+                assert grid.pad.to_numpy().tolist() == [0, 0, 0]
 
 
 @test_utils.test(arch=ti.cpu, offline_cache=False)

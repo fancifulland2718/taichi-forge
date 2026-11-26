@@ -428,16 +428,22 @@ class PackageBuildCache:
         native = module._aot_builder._build_object_key(symbol, code.kernel.compiled_kernels[code.key])
         if not native:
             return
-        payload = json.dumps((native, module._component_entries[symbol], facts), separators=(",", ":"))
+        self.captures.setdefault(scope.key, {})[symbol] = self._capture_record(
+            scope.key, symbol, native, module._component_entries[symbol], facts)
+
+    @staticmethod
+    def _capture_record(scope_key, symbol, native, entry, facts):
+        payload = json.dumps((native, entry, facts), separators=(",", ":"))
         # Per-object compression leaves unrelated owners opaque during lookup
         # and preserves the original declaration traversal order on recovery.
         compressed = zlib.compress(payload.encode("utf8"), 1)
-        self.captures.setdefault(scope.key, {})[symbol] = dict(
-            object=base64.b64encode(compressed).decode("ascii"), digest=_capture_digest(scope.key, symbol, compressed))
+        return dict(object=base64.b64encode(compressed).decode("ascii"),
+                    digest=_capture_digest(scope_key, symbol, compressed))
 
     def restore_capture(self, compilation, component, owner, kernel, signature, resources, layouts):
         from taichi_forge.lang.exception import TaichiCompilationError
         from ._package_capture_cache import matches, thaw
+        from ._package_compilation import definition_symbol
 
         scope = compilation.capture_scope
         history = self.previous.get("captures")
@@ -457,8 +463,9 @@ class PackageBuildCache:
                 code = thaw(facts, kernel, key, entry)
                 if facts["field_inputs"] != scope.field_inputs(code):
                     continue
+                allocation_updates = {} if compilation.portable else None
                 if not matches(code, facts, self.capture_syntax, component, owner, signature, resources, layouts,
-                               portable=compilation.portable):
+                               portable=compilation.portable, allocation_updates=allocation_updates):
                     continue
                 code.validate_bindings(component, owner)
                 declarations = component.declarations
@@ -475,6 +482,19 @@ class PackageBuildCache:
                                       for name, spec in code.workspaces.items()}
                     declarations = ChainMap(workspace_args, declarations)
                 code._bind_arguments(declarations)
+                if allocation_updates:
+                    # Only descriptor-backed unified objects reach this point.
+                    # The member selectors and access ABI still match. Publish
+                    # the new allocation recipe under its ordinary cold symbol.
+                    code.groups.update(allocation_updates)
+                    entry["contract"]["groups"] = code.groups
+                    code._contract = json.dumps(entry["contract"])
+                    code.semantic_key = entry["semantic_key"] = code.contract_key(entry["contract"])
+                    symbol = entry["entry"] = definition_symbol(code)
+                    if symbol in module._exported_kernels:
+                        continue
+                    facts["maps"]["groups"] = list(code.groups.items())
+                    record = self._capture_record(scope.key, symbol, native, entry, facts)
             except (KeyError, AttributeError, OSError, ValueError, TypeError, zlib.error, TaichiCompilationError):
                 continue
             if not module._aot_builder._restore_build_object(symbol, native):

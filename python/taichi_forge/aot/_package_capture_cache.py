@@ -314,13 +314,16 @@ def thaw(facts, kernel, key, entry):
     return code
 
 
-def matches(code, facts, memo, component, owner, signature, resources, layouts, *, portable=False):
+def matches(code, facts, memo, component, owner, signature, resources, layouts, *, portable=False,
+            allocation_updates=None):
     from ._component import _extent_invariant_compact_member, _used_template_signature
 
     if (code.call_signature != _used_template_signature(signature, code.static_templates)
             or any(resources.get(slot) != name for slot, name in code.resource_templates.items())
             or any(component._paths.get(name) != path for name, path in code.capture_paths.items())
-            or not layouts.matches_static(code) or not code.matches(component, owner, layouts=layouts)):
+            or not layouts.matches_static(code)
+            or code.dependency_mismatch(component, owner, layouts=layouts,
+                                        allocation_updates=allocation_updates) is not None):
         return False
     if facts["sources"] != _source_facts(code.kernel, code, memo, component, owner, portable=portable):
         return False
@@ -329,10 +332,11 @@ def matches(code, facts, memo, component, owner, signature, resources, layouts, 
         name: component._sources[name] for name in code.used if name in component._sources
     }:
         return False
+    groups = code.groups | allocation_updates if allocation_updates else code.groups
     for name, access in contract.get("dense_access", ()):
         field = component.read(owner, name)
         declaration = component.declarations[name]
-        schema = json.loads(code.groups[declaration.group])
+        schema = json.loads(groups[declaration.group])
         compact = schema["version"] == 1 and _extent_invariant_compact_member(field, declaration.validate(field))
         if compact != (access == "compact"):
             return False
