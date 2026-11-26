@@ -1,4 +1,6 @@
 #include "taichi/codegen/spirv/kernel_compiler.h"
+#include <algorithm>
+#include <unordered_set>
 #include "taichi/analysis/gather_snode_tree_dependencies.h"
 #include "taichi/system/profiler.h"
 
@@ -11,6 +13,68 @@
 
 namespace taichi::lang {
 namespace spirv {
+
+namespace {
+
+// Offloading gives loop-carried scalar returns private byte ranges in the
+// global temporary buffer. Inspect only statically large straight-line tasks.
+// Every temporary access must be a single, unobserved f32/f64 add to its own
+// aligned slot. Field atomics, including indexed scatters, keep their semantics.
+void group_temporary_sums(OffloadedStmt *task) {
+  if (task->task_type != OffloadedTaskType::range_for || !task->const_begin ||
+      !task->const_end || int64_t(task->end_value) - task->begin_value < 32768 ||
+      task->block_dim < 32 || !task->body)
+    return;
+  const auto &stmts = task->body->statements;
+  if (std::none_of(stmts.begin(), stmts.end(), [](const auto &entry) {
+        return entry->template is<GlobalTemporaryStmt>();
+      }))
+    return;
+  std::vector<AtomicOpStmt *> sums;
+  std::unordered_set<std::size_t> words;
+  for (const auto &stmt : stmts) {
+    if (stmt->is_container_statement() || stmt->is<FuncCallStmt>() ||
+        stmt->is<ExternalFuncCallStmt>())
+      return;
+    auto *add = stmt->cast<AtomicOpStmt>();
+    for (int i = 0; i < stmt->num_operands(); ++i) {
+      auto *operand = stmt->operand(i);
+      if (!operand)
+        continue;
+      if (auto *previous = operand->cast<AtomicOpStmt>();
+          previous && previous->dest->is<GlobalTemporaryStmt>())
+        return;
+      auto *slot = operand->cast<GlobalTemporaryStmt>();
+      if (!slot)
+        continue;
+      if (!add || add->op_type != AtomicOpType::add || add->dest != slot ||
+          (add->ret_type != PrimitiveType::f32 &&
+           add->ret_type != PrimitiveType::f64))
+        return;
+      const auto bytes = data_type_size(add->ret_type);
+      if (slot->offset % bytes != 0)
+        return;
+      for (int b = 0; b < bytes; b += 4)
+        if (!words.insert(slot->offset + b).second)
+          return;
+      sums.push_back(add);
+    }
+  }
+  for (auto *add : sums) {
+    auto *sum = add->insert_before_me(Stmt::make<InternalFuncStmt>(
+        "subgroupAdd", std::vector<Stmt *>{add->val}, add->ret_type, false));
+    auto *leader = add->insert_before_me(Stmt::make<InternalFuncStmt>(
+        "subgroupElect", std::vector<Stmt *>{}, PrimitiveType::i32, false));
+    auto branch = Stmt::make<IfStmt>(leader);
+    auto body = std::make_unique<Block>();
+    auto *write = body->push_back<AtomicOpStmt>(add->op_type, add->dest, sum);
+    write->ret_type = add->ret_type;
+    branch->as<IfStmt>()->set_true_statements(std::move(body));
+    add->replace_with(std::move(branch), /*replace_usages=*/false);
+  }
+}
+
+}  // namespace
 
 KernelCompiler::KernelCompiler(Config config) : config_(std::move(config)) {
 }
@@ -62,6 +126,20 @@ KernelCompiler::IRNodePtr KernelCompiler::compile(
       if (!changed)
         break;
     } while (has_negative_array_index());
+  }
+  const auto &caps = request.device_caps();
+  if (compile_config.arch == Arch::vulkan && compile_config.fast_math &&
+      compile_config.opt_level > 0 && !compile_config.debug &&
+      caps.get(DeviceCapability::spirv_version) >= 0x10300 &&
+      caps.get(DeviceCapability::spirv_has_subgroup_basic) &&
+      caps.get(DeviceCapability::spirv_has_subgroup_arithmetic)) {
+    if (auto *block = ir->cast<Block>()) {
+      for (const auto &stmt : block->statements)
+        if (auto *task = stmt->cast<OffloadedStmt>())
+          group_temporary_sums(task);
+    } else if (auto *task = ir->cast<OffloadedStmt>()) {
+      group_temporary_sums(task);
+    }
   }
   return ir;
 }

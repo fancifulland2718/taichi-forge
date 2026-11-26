@@ -19,6 +19,10 @@
     CACHE_VALUE(std::string("gpu-dense-cell-accumulator-v1"));
   }
   CACHE_FIELD(llvm_opt_level);
+  if (config.arch == Arch::vulkan && config.fast_math && config.opt_level > 0 &&
+      !config.debug) {
+    CACHE_VALUE(std::string("vulkan-temporary-subgroup-sum-v1"));
+  }
   CACHE_FIELD(llvm_aot_relocatable_roots);
   if (config.llvm_aot_relocatable_roots) {
     // Sparse traversal and GC now relocate their packed tree/local keys too.
