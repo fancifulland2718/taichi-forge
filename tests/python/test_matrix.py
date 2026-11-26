@@ -1331,6 +1331,18 @@ def test_matrix_from_numpy_with_offset(dtype, shape, offset, m, n):
     func()
 
 
+@test_utils.test(arch=[ti.cuda, ti.vulkan], offline_cache=False)
+def test_soa_matrix_readback_keeps_plane_order_and_bits():
+    n = 513
+    field = ti.Matrix.field(2, 3, ti.f32, shape=n, offset=-7, layout=ti.Layout.SOA)
+    bits = np.arange(n * 6, dtype=np.uint32).reshape(n, 2, 3)
+    bits[0, 0] = [0x80000000, 0x7fc01234, 0xffc00002]
+    field.from_numpy(bits.view(np.float32))
+    actual = field.to_numpy()
+    assert actual.flags.c_contiguous
+    np.testing.assert_array_equal(actual.view(np.uint32), bits)
+
+
 @pytest.mark.parametrize("dtype", [ti.i32, ti.f32, ti.i64, ti.f64])
 @pytest.mark.parametrize("shape", [(8,), (6, 12)])
 @pytest.mark.parametrize("offset", [0, -4, 4])

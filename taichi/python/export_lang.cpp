@@ -5121,6 +5121,23 @@ void export_lang(py::module &m) {
           },
           py::arg("src"), py::arg("dst"), py::arg("value_type"), py::arg("n"))
       .def(
+          "_try_copy_dense_field_planes_to_host",
+          [](Program &program, const std::vector<SNode *> &planes,
+             py::array dst, std::size_t n) {
+            const char kind = dst.dtype().kind();
+            if (!dst.writeable() || !(dst.flags() & py::array::c_style) ||
+                (kind != 'i' && kind != 'u' && kind != 'f')) {
+              throw py::value_error(
+                  "Dense field readback requires a writable contiguous numeric array");
+            }
+            auto info = dst.request();
+            const auto bytes = checked_buffer_nbytes(info, "Invalid dense field buffer",
+                                                     "Oversized dense field buffer");
+            py::gil_scoped_release release;
+            return program.try_copy_dense_field_planes_to_host(
+                planes, reinterpret_cast<std::uintptr_t>(info.ptr), bytes, n);
+          })
+      .def(
           "copy_dense_field_packed_to_host",
           [](Program &program, SNode *src, py::buffer dst, int value_type,
              std::size_t n, int lane_count) {

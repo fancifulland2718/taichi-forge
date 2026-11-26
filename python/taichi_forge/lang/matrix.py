@@ -1513,6 +1513,8 @@ class MatrixField(Field):
             return False
         if self._try_native_dense_packed_to_numpy(arr, as_vector):
             return True
+        if self._try_native_soa_to_numpy(arr, as_vector):
+            return True
         tmp = np.empty(self.shape, dtype=arr.dtype)
         for lane, (i, j) in enumerate(self._native_dense_component_indices(as_vector)):
             # The first component waits for the producer. Each native host read
@@ -1523,6 +1525,31 @@ class MatrixField(Field):
                 arr[..., i] = tmp
             else:
                 arr[..., i, j] = tmp
+        return True
+
+    def _try_native_soa_to_numpy(self, arr, as_vector):
+        if (len(self.shape) != 1 or self.n * self.m <= 1 or not getattr(self, "_aot_tensor_soa", False)
+                or not _dense_native_bulk_host_copy_needs_sync() or not arr.flags.c_contiguous
+                or _dense_host_copy_value_type(self.dtype) is None):
+            return False
+        # Vulkan retains its staging allocation. Batch short planes where
+        # submission dominates, and keep large reads within one plane of scratch.
+        if impl.current_cfg().arch == ti_python_core.Arch.vulkan and arr.nbytes > 1 << 20:
+            return False
+        runtime = impl.get_runtime()
+        method = _dense_native_method_descriptor(runtime.prog, "_try_copy_dense_field_planes_to_host")
+        if method is None:
+            return False
+        runtime.materialize()
+        components = [self.get_scalar_field(i, j) for i, j in self._native_dense_component_indices(as_vector)]
+        if not all(_dense_native_field_layout_supported(field) for field in components):
+            return False
+        planes = np.empty((len(components), self.shape[0]), dtype=arr.dtype)
+        if not method(runtime.prog, [field.snode.ptr for field in components], planes, self.shape[0]):
+            return False
+        output = arr.reshape(self.shape[0], -1)
+        for lane, plane in enumerate(planes):
+            output[:, lane] = plane
         return True
 
     def _try_native_dense_packed_to_numpy(self, arr, as_vector):

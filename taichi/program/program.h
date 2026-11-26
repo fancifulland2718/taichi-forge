@@ -2802,6 +2802,11 @@ class TI_DLL_EXPORT Program {
                                 int value_type,
                                 std::size_t n);
 
+  bool try_copy_dense_field_planes_to_host(const std::vector<SNode *> &planes,
+                                           std::uintptr_t dst,
+                                           std::size_t dst_bytes,
+                                           std::size_t n);
+
   void copy_dense_field_packed_to_host(SNode *src,
                                        std::uintptr_t dst,
                                        std::size_t dst_bytes,
@@ -4567,6 +4572,9 @@ class TI_DLL_EXPORT Program {
       ExternalDenseStorageHandle handle);
   ExternalDenseStorageHandle external_dense_storage_handle(
       const storage::StorageOwnerRef &owner) const noexcept;
+  void read_dense_device_span_to_host(DevicePtr src,
+                                      std::uintptr_t dst,
+                                      std::size_t dst_bytes);
   DenseFieldHostCopyStagingResource &dense_field_staging_resource();
   void close_dense_field_staging_resource();
   std::shared_ptr<RuntimeCompletionResourceBatch>

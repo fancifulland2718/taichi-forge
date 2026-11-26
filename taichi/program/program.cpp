@@ -17166,6 +17166,91 @@ void Program::copy_dense_field_packed_from_host(SNode *dst,
   std::memcpy(dst_ptr, reinterpret_cast<const void *>(src), src_bytes);
 }
 
+void Program::read_dense_device_span_to_host(DevicePtr src_ptr,
+                                             std::uintptr_t dst,
+                                             std::size_t dst_bytes) {
+  Device *device = program_impl_->get_compute_device();
+  TI_ERROR_IF(!device || src_ptr.device != device,
+              "Native dense field host readback received invalid device "
+              "storage.");
+  if (compile_config().arch == Arch::vulkan) {
+    auto &staging = dense_field_staging_resource();
+    std::lock_guard<std::mutex> lock(staging.mutex);
+    if (auto new_staging = ensure_vulkan_dense_host_staging(
+            device, staging.readback, staging.readback_capacity, dst_bytes,
+            /*host_write=*/false, /*host_read=*/true, AllocUsage::None)) {
+      staging.readback = std::move(new_staging);
+    }
+    Stream *stream = device->get_compute_stream();
+    auto [cmdlist, cmd_res] = stream->new_command_list_unique();
+    TI_ERROR_IF(cmd_res != RhiResult::success,
+                "Native dense field host readback failed to create command "
+                "list: {}",
+                cmd_res);
+    cmdlist->buffer_copy(
+        staging.readback->get_ptr(0), src_ptr, dst_bytes);
+    stream->submit_synced(cmdlist.get());
+    void *mapped{nullptr};
+    RhiResult res = device->map(*staging.readback, &mapped);
+    TI_ERROR_IF(res != RhiResult::success || !mapped,
+                "Native dense field host readback failed to map staging "
+                "buffer: {}",
+                res);
+    std::memcpy(reinterpret_cast<void *>(dst), mapped, dst_bytes);
+    device->unmap(*staging.readback);
+    return;
+  }
+  void *dst_ptr = reinterpret_cast<void *>(dst);
+  std::size_t size = dst_bytes;
+  const RhiResult res = device->readback_data(&src_ptr, &dst_ptr, &size, 1);
+  TI_ERROR_IF(res != RhiResult::success,
+              "Native dense field host readback failed: {}", res);
+}
+
+bool Program::try_copy_dense_field_planes_to_host(
+    const std::vector<SNode *> &planes,
+    std::uintptr_t dst,
+    std::size_t dst_bytes,
+    std::size_t n) {
+  const auto arch = compile_config().arch;
+  if ((arch != Arch::cuda && arch != Arch::vulkan) || planes.empty() ||
+      !dst || n == 0 || dst_bytes % planes.size() != 0) {
+    return false;
+  }
+  synchronize();
+  auto guard = acquire_runtime_resource_submission_guard();
+  const auto plane_bytes = dst_bytes / planes.size();
+  DevicePtr first{};
+  for (std::size_t i = 0; i < planes.size(); ++i) {
+    SNode *leaf = planes[i];
+    if (!leaf || leaf->type != SNodeType::place || !leaf->parent ||
+        leaf->parent->type != SNodeType::dense || !leaf->parent->parent ||
+        leaf->parent->parent->type != SNodeType::root ||
+        leaf->num_active_indices != 1 || !leaf->dt->is<PrimitiveType>() ||
+        leaf->is_bit_level || leaf->dt != planes[0]->dt ||
+        leaf->get_total_num_elements_towards_root() != n) {
+      return false;
+    }
+    const std::size_t item_bytes = data_type_size(leaf->dt);
+    if (item_bytes < 4 || plane_bytes % item_bytes ||
+        plane_bytes / item_bytes != n ||
+        get_dense_field_stride(leaf, item_bytes) != item_bytes) {
+      return false;
+    }
+    const DevicePtr ptr = get_dense_field_device_ptr(leaf);
+    if (i == 0) {
+      first = ptr;
+    } else if (ptr.device != first.device || ptr.alloc_id != first.alloc_id ||
+               ptr.offset < first.offset || ptr.offset - first.offset != i * plane_bytes) {
+      return false;
+    }
+  }
+  ScopedRuntimeTransferStatistics transfer_statistics(
+      this, RuntimeTransferKind::kDeviceToHost, dst_bytes);
+  read_dense_device_span_to_host(first, dst, dst_bytes);
+  return true;
+}
+
 void Program::copy_dense_field_to_host(SNode *src,
                                        std::uintptr_t dst,
                                        std::size_t dst_bytes,
@@ -17205,42 +17290,7 @@ void Program::copy_dense_field_to_host(SNode *src,
                 "Native dense field path currently supports device host "
                 "readback only for contiguous dense fields.");
     DevicePtr src_ptr = get_dense_field_device_ptr(src);
-    Device *device = program_impl_->get_compute_device();
-    TI_ERROR_IF(!device || src_ptr.device != device,
-                "Native dense field host readback received invalid device "
-                "storage.");
-    if (arch == Arch::vulkan) {
-      auto &staging = dense_field_staging_resource();
-      std::lock_guard<std::mutex> lock(staging.mutex);
-      if (auto new_staging = ensure_vulkan_dense_host_staging(
-              device, staging.readback, staging.readback_capacity, dst_bytes,
-              /*host_write=*/false, /*host_read=*/true, AllocUsage::None)) {
-        staging.readback = std::move(new_staging);
-      }
-      Stream *stream = device->get_compute_stream();
-      auto [cmdlist, cmd_res] = stream->new_command_list_unique();
-      TI_ERROR_IF(cmd_res != RhiResult::success,
-                  "Native dense field host readback failed to create command "
-                  "list: {}",
-                  cmd_res);
-      cmdlist->buffer_copy(
-          staging.readback->get_ptr(0), src_ptr, dst_bytes);
-      stream->submit_synced(cmdlist.get());
-      void *mapped{nullptr};
-      RhiResult res = device->map(*staging.readback, &mapped);
-      TI_ERROR_IF(res != RhiResult::success || !mapped,
-                  "Native dense field host readback failed to map staging "
-                  "buffer: {}",
-                  res);
-      std::memcpy(reinterpret_cast<void *>(dst), mapped, dst_bytes);
-      device->unmap(*staging.readback);
-      return;
-    }
-    void *dst_ptr = reinterpret_cast<void *>(dst);
-    std::size_t size = dst_bytes;
-    const RhiResult res = device->readback_data(&src_ptr, &dst_ptr, &size, 1);
-    TI_ERROR_IF(res != RhiResult::success,
-                "Native dense field host readback failed: {}", res);
+    read_dense_device_span_to_host(src_ptr, dst, dst_bytes);
     return;
   }
   std::size_t src_stride = 0;
