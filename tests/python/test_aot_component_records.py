@@ -11,6 +11,40 @@ from taichi_forge_runtime.aot import Runtime
 from tests import test_utils
 
 
+def test_component_member_reads_follow_current_inherited_storage():
+    from taichi_forge.aot._component import _member
+
+    class Base:
+        __slots__ = ("slot", "__dict__")
+
+    class Owner(Base):
+        def __getattribute__(self, name):
+            raise AssertionError("capture must not run the owner's attribute hooks")
+
+    owner = Owner()
+    owner.slot = 3
+    owner.value = 7
+    assert _member(owner, "slot") == 3
+    assert _member(owner, "value") == 7
+    owner.value = 11
+    assert _member(owner, "value") == 11
+    Base.value = property(lambda self: pytest.fail("must not execute a descriptor"))
+    with pytest.raises(ti.TaichiCompilationError, match="descriptor"):
+        _member(owner, "value")
+    del Base.value
+    assert _member(owner, "value") == 11
+
+    class Shadow(Base):
+        @property
+        def __dict__(self):
+            pytest.fail("must not execute a shadowed dictionary getter")
+
+    hidden = Shadow()
+    hidden.value = 17
+    with pytest.raises(AttributeError):
+        _member(hidden, "value")
+
+
 @dataclass(frozen=True, slots=True)
 class _Buffers:
     capacity: int

@@ -15,7 +15,7 @@ import sys
 from contextvars import ContextVar
 from dataclasses import dataclass, replace
 from math import prod
-from types import BuiltinMethodType, CodeType, MappingProxyType, MemberDescriptorType, ModuleType, SimpleNamespace
+from types import BuiltinMethodType, CodeType, GetSetDescriptorType, MappingProxyType, MemberDescriptorType, ModuleType, SimpleNamespace
 from typing import Final, get_origin
 
 from taichi_forge.lang import impl, kernel_arguments
@@ -178,6 +178,34 @@ def _code_definition(code):
     )
 
 
+_NO_MEMBER = object()
+
+
+def _stored_member(owner, name):
+    # A package owner can inherit many mixins. For an ordinary instance-only
+    # name, inspect.getattr_static repeatedly scans each base's metaclass.
+    # Read current class dictionaries once, without invoking a descriptor.
+    cls = type(owner)
+    if type(cls) is type and not issubclass(cls, type) and not name.startswith("__"):
+        backing = None
+        for base in cls.__mro__:
+            namespace = base.__dict__
+            if name in namespace:
+                break
+            slot = namespace.get("__dict__", _NO_MEMBER)
+            if slot is not _NO_MEMBER:
+                if type(slot) is not GetSetDescriptorType or slot.__objclass__ is not base or slot.__name__ != "__dict__":
+                    break
+                if backing is None:
+                    backing = slot
+        else:
+            if backing is not None:
+                value = dict.get(backing.__get__(owner), name, _NO_MEMBER)
+                if value is not _NO_MEMBER:
+                    return value
+    return inspect.getattr_static(owner, name)
+
+
 def _member(owner, name):
     # Deployment compilation must not execute arbitrary properties/descriptors.
     if type(owner) in (list, tuple):
@@ -190,7 +218,7 @@ def _member(owner, name):
     if type(owner) is SimpleNamespace and not name.startswith("__") and name in owner.__dict__:
         descriptor = owner.__dict__[name]
     else:
-        descriptor = inspect.getattr_static(owner, name)
+        descriptor = _stored_member(owner, name)
     if isinstance(descriptor, MemberDescriptorType):
         # Built-in slots read stored state; properties/custom descriptors can
         # execute arbitrary Python and remain outside the capture contract.
