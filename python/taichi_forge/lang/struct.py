@@ -335,6 +335,8 @@ _
             if layout == Layout.SOA:
                 for e in field_dict.values():
                     impl.root.dense(impl.index_nd(dim), shape).place(e, offset=offset)
+                    if isinstance(e, ScalarField):
+                        e._separate_struct_member = True
                 if needs_grad:
                     for e in field_dict.values():
                         impl.root.dense(impl.index_nd(dim), shape).place(e.grad, offset=offset)
@@ -369,6 +371,24 @@ class _IntermediateStruct(Struct):
         self._register_methods()
         self._Struct__entries = entries
         self._register_members()
+
+
+def _struct_dense_packed_plan(field):
+    members = field._members
+    if len(members) < 2 or getattr(members[0], "_separate_struct_member", False) is True:
+        return None
+    runtime = impl.get_runtime()
+    if runtime.target_tape is not None or runtime.fwd_mode_manager is not None:
+        return None
+    if not _dense_native_bulk_arch_enabled():
+        return None
+    if not all(isinstance(member, ScalarField) for member in members):
+        return None
+    dtype = members[0].dtype
+    value_type = _dense_host_copy_value_type(dtype)
+    if value_type is None or any(member.dtype != dtype for member in members[1:]):
+        return None
+    return _dense_native_packed_plan(members, value_type)
 
 
 class StructField(Field):
@@ -474,21 +494,6 @@ class StructField(Field):
         """
         return self._members[0]._loop_range()
 
-    def _native_dense_packed_plan(self):
-        runtime = impl.get_runtime()
-        if runtime.target_tape is not None or runtime.fwd_mode_manager is not None:
-            return None
-        members = self._members
-        if len(members) < 2 or not _dense_native_bulk_arch_enabled():
-            return None
-        if not all(isinstance(member, ScalarField) for member in members):
-            return None
-        dtype = members[0].dtype
-        value_type = _dense_host_copy_value_type(dtype)
-        if value_type is None or any(member.dtype != dtype for member in members[1:]):
-            return None
-        return _dense_native_packed_plan(members, value_type)
-
     @python_scope
     def copy_from(self, other):
         """Copies all elements from another field.
@@ -502,9 +507,9 @@ class StructField(Field):
         assert set(self.keys) == set(other.keys)
         # A physical copy must preserve the correspondence between member names.
         if isinstance(other, StructField) and len(self.field_dict) > 1 and self.keys == other.keys:
-            plan = self._native_dense_packed_plan()
+            plan = _struct_dense_packed_plan(self)
             if plan is not None and len(self.shape) == 1 and other.shape == self.shape:
-                other_plan = other._native_dense_packed_plan()
+                other_plan = _struct_dense_packed_plan(other)
                 if (
                     other_plan is not None
                     and plan[1:] == other_plan[1:]
@@ -521,7 +526,7 @@ class StructField(Field):
         Args:
             val (Union[int, float]): Value to fill.
         """
-        plan = self._native_dense_packed_plan()
+        plan = _struct_dense_packed_plan(self)
         if plan is not None:
             bits = _dense_fill_value_bits(plan[0].dtype, val)
             if bits is not None and _try_fill_dense_packed(plan, bits):
