@@ -324,7 +324,7 @@ def matches_variant(variant, signature, resources, layouts):
             and all(layouts.static_value(name) == _tuples(expected) for name, expected in static))
 
 
-def matches(code, facts, memo, component, owner, signature, resources, layouts, *, portable=False,
+def matches(code, facts, contract, memo, component, owner, signature, resources, layouts, *, portable=False,
             allocation_updates=None):
     from ._component import _extent_invariant_compact_member, _used_template_signature
 
@@ -337,17 +337,15 @@ def matches(code, facts, memo, component, owner, signature, resources, layouts, 
         return False
     if facts["sources"] != _source_facts(code.kernel, code, memo, component, owner, portable=portable):
         return False
-    contract = code.contract
     if contract["declaration_sources"] != {
         name: component._sources[name] for name in code.used if name in component._sources
     }:
         return False
-    groups = code.groups | allocation_updates if allocation_updates else code.groups
     for name, access in contract.get("dense_access", ()):
         field = component.read(owner, name)
         declaration = component.declarations[name]
-        schema = json.loads(groups[declaration.group])
-        compact = schema["version"] == 1 and _extent_invariant_compact_member(field, declaration.validate(field))
+        compact = (layouts.allows_compact_access(declaration.group)
+                   and _extent_invariant_compact_member(field, declaration.validate(field)))
         if compact != (access == "compact"):
             return False
     return True

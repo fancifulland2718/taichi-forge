@@ -472,7 +472,8 @@ class PackageBuildCache:
                 if facts["field_inputs"] != scope.field_inputs(code):
                     continue
                 allocation_updates = {} if compilation.portable else None
-                if not matches(code, facts, self.capture_syntax, component, owner, signature, resources, layouts,
+                if not matches(code, facts, entry["contract"], self.capture_syntax, component, owner,
+                               signature, resources, layouts,
                                portable=compilation.portable, allocation_updates=allocation_updates):
                     continue
                 code.validate_bindings(component, owner)

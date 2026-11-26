@@ -1041,6 +1041,7 @@ class _DenseLayoutValidation:
         self.extents = {}
         self.dimension_values = {}
         self.static_values = {}
+        self.compact_groups = {}
 
     def matches_static(self, code):
         """Discard different algorithms before their complete ABI/layout check.
@@ -1068,6 +1069,11 @@ class _DenseLayoutValidation:
             self.extents[group] = {name: self.dimension_values[name] for name in projection[2]}
             self.groups[group] = projection
         return self.groups[group]
+
+    def allows_compact_access(self, group):
+        if group not in self.compact_groups:
+            self.compact_groups[group] = json.loads(self.dense(group)[0])["version"] == 1
+        return self.compact_groups[group]
 
     def validate_unchanged(self, current):
         for group, previous in self.groups.items():
@@ -2653,7 +2659,8 @@ class _Capture:
             if isinstance(declaration, DenseField):
                 # A model tensor can change the cell stride of fixed siblings
                 # too. No member of that group may retain a producer stride.
-                compact = json.loads(schema)["version"] == 1 and _extent_invariant_compact_member(value, dense_description)
+                compact = (self._layouts.allows_compact_access(declaration.group)
+                           and _extent_invariant_compact_member(value, dense_description))
                 self.dense_access[name] = "compact" if compact else "affine"
                 self.expressions[name] = declaration.declare("__capture_" + name, runtime_affine=not compact)
             else:
@@ -3299,8 +3306,8 @@ class _FunctionDependencies:
             declaration = context.declarations[name]
             value = context.component.read(context.owner, name)
             description = declaration.validate(value)
-            schema = context._layouts.dense(declaration.group)[0]
-            compact = json.loads(schema)["version"] == 1 and _extent_invariant_compact_member(value, description)
+            compact = (context._layouts.allows_compact_access(declaration.group)
+                       and _extent_invariant_compact_member(value, description))
             if access != ("compact" if compact else "affine"):
                 return False
         return True
@@ -3468,7 +3475,8 @@ class _ComponentCode:
                 if isinstance(axis, str):
                     dimension(axis)
             if name in self.dynamic:
-                compact = json.loads(schema)["version"] == 1 and _extent_invariant_compact_member(value, description)
+                compact = (layouts.allows_compact_access(declaration.group)
+                           and _extent_invariant_compact_member(value, description))
                 if access.get(name) != ("compact" if compact else "affine"):
                     return None
         # Multiple names may have lowered to one argument. Keep both equality
