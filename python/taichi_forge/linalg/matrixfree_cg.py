@@ -1,8 +1,11 @@
 import math
 import operator
+from threading import Lock
 
+from taichi_forge._lib import core as _ti_core
 from taichi_forge.lang.exception import TaichiRuntimeError, TaichiTypeError
 from taichi_forge.lang.util import to_numpy_type
+from taichi_forge.linalg._field_krylov_kernels import bicgstab_kernels, cg_kernels, clear_scratch, dot_kernel
 
 import taichi_forge as ti
 
@@ -56,6 +59,80 @@ class FieldLinearOperator:
         self._matvec(x, Ax)
 
 
+class _PreparedFieldSolve:
+    def __init__(self, builder, solve, lifetimes):
+        self._lock = Lock()
+        self._solve = solve
+        self._rhs_lifetime, self._x_lifetime = lifetimes
+        self._tree = builder.finalize()
+
+    def solve(self):
+        """Solve with the current contents of the bound rhs and initial guess."""
+        if not self._lock.acquire(blocking=False):
+            raise TaichiRuntimeError("Matrix-free workspace is already in use")
+        try:
+            if self._tree.destroyed or not self._rhs_lifetime.live or not self._x_lifetime.live:
+                raise TaichiRuntimeError("Matrix-free workspace or bound field has been retired")
+            return self._solve()
+        finally:
+            self._lock.release()
+
+    def close(self):
+        """Release the scratch fields and their kernel specializations."""
+        if not self._lock.acquire(blocking=False):
+            raise TaichiRuntimeError("Matrix-free workspace is already in use")
+        try:
+            if not self._tree.destroyed:
+                self._tree.destroy()
+            self._solve = None
+        finally:
+            self._lock.release()
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *_):
+        self.close()
+
+
+def _with_sparse_reset(x, scratch, solve):
+    # Dense init writes every cell. A sparse x may lose active cells between
+    # solves, leaving old residuals in the dense reduction domain.
+    node = x.snode.ptr.parent
+    while node.type == _ti_core.SNodeType.dense:
+        node = node.parent
+    if node.type == _ti_core.SNodeType.root:
+        return solve
+
+    fresh = True
+
+    def sparse_solve():
+        nonlocal fresh
+        if not fresh:
+            clear_scratch(scratch)
+        fresh = False
+        return solve()
+
+    return sparse_solve
+
+
+def _workspace_layout(name, b, x):
+    if b.dtype != x.dtype:
+        raise TaichiTypeError(f"Dtype mismatch b.dtype({b.dtype}) != x.dtype({x.dtype}).")
+    if b.dtype not in (ti.f32, ti.f64):
+        raise TaichiTypeError(f"Not supported dtype: {b.dtype}")
+    if b.shape != x.shape:
+        raise TaichiRuntimeError(f"Dimension mismatch b.shape{b.shape} != x.shape{x.shape}.")
+    rank = len(b.shape)
+    if not 1 <= rank <= 3:
+        raise TaichiRuntimeError(f"{name} only supports 1D, 2D, 3D inputs; your input is {rank}-D.")
+    runtime = ti.lang.impl.get_runtime()
+    runtime.materialize()
+    axes = (ti.i, ti.ij, ti.ijk)[rank - 1]
+    scalar_type = ti.f32 if b.dtype == ti.f32 else ti.f64
+    return axes, scalar_type, (runtime.field_layout_lifetime(b), runtime.field_layout_lifetime(x))
+
+
 def MatrixFreeCG(A, b, x, tol=1e-6, maxiter=5000, quiet=True):
     """Matrix-free conjugate-gradient solver.
 
@@ -73,69 +150,33 @@ def MatrixFreeCG(A, b, x, tol=1e-6, maxiter=5000, quiet=True):
         quiet (bool): Switch to turn on/off iteration log.
     """
 
+    with prepare_matrix_free_cg(A, b, x, tol, maxiter, quiet) as plan:
+        return plan.solve()
+
+
+def prepare_matrix_free_cg(A, b, x, tol=1e-6, maxiter=5000, quiet=True):
+    """Prepare repeated CG solves for fixed fields and a symmetric positive-definite operator.
+
+    Update the contents of `b` and `x` before each `plan.solve()`. The operator
+    must overwrite its output. Use the plan as a context manager or call
+    `close()` to release its private workspace. Each solve returns a convergence boolean.
+    """
     tol, maxiter = _validate_solver_controls("MatrixFreeCG", tol, maxiter)
-
-    if b.dtype != x.dtype:
-        raise TaichiTypeError(f"Dtype mismatch b.dtype({b.dtype}) != x.dtype({x.dtype}).")
-    if str(b.dtype) == "f32":
-        solver_dtype = ti.f32
-    elif str(b.dtype) == "f64":
-        solver_dtype = ti.f64
-    else:
-        raise TaichiTypeError(f"Not supported dtype: {b.dtype}")
-    if b.shape != x.shape:
-        raise TaichiRuntimeError(f"Dimension mismatch b.shape{b.shape} != x.shape{x.shape}.")
-
-    size = b.shape
+    axes, solver_dtype, lifetimes = _workspace_layout("MatrixFreeCG", b, x)
     vector_fields_builder = ti.FieldsBuilder()
     p = ti.field(dtype=solver_dtype)
     r = ti.field(dtype=solver_dtype)
     Ap = ti.field(dtype=solver_dtype)
     Ax = ti.field(dtype=solver_dtype)
-    if len(size) == 1:
-        axes = ti.i
-    elif len(size) == 2:
-        axes = ti.ij
-    elif len(size) == 3:
-        axes = ti.ijk
-    else:
-        raise TaichiRuntimeError(f"MatrixFreeCG only support 1D, 2D, 3D inputs; your inputs is {len(size)}-D.")
-    vector_fields_builder.dense(axes, size).place(p, r, Ap, Ax)
-    vector_fields_snode_tree = vector_fields_builder.finalize()
+    vector_fields_builder.dense(axes, b.shape).place(p, r, Ap, Ax)
 
-    @ti.kernel
-    def init():
-        for I in ti.grouped(x):
-            r[I] = b[I] - Ax[I]
-            p[I] = r[I]
-            Ap[I] = 0.0
-
-    @ti.kernel
-    def reduce(p: ti.template(), q: ti.template()) -> solver_dtype:
-        result = solver_dtype(0.0)
-        for I in ti.grouped(p):
-            result += p[I] * q[I]
-        return result
-
-    @ti.kernel
-    def update_x(alpha: solver_dtype):
-        for I in ti.grouped(x):
-            x[I] += alpha * p[I]
-
-    @ti.kernel
-    def update_r(alpha: solver_dtype):
-        for I in ti.grouped(r):
-            r[I] -= alpha * Ap[I]
-
-    @ti.kernel
-    def update_p(beta: solver_dtype):
-        for I in ti.grouped(p):
-            p[I] = r[I] + beta * p[I]
+    reduce = dot_kernel(solver_dtype)
+    init, update_x, update_r, update_p = cg_kernels(solver_dtype)
 
     def solve():
         succeeded = True
         A._matvec(x, Ax)
-        init()
+        init(x, b, Ax, r, p, Ap)
         initial_rTr = reduce(r, r)
         initial_residual_norm = _residual_norm(initial_rTr)
         if not quiet:
@@ -148,8 +189,8 @@ def MatrixFreeCG(A, b, x, tol=1e-6, maxiter=5000, quiet=True):
                 A._matvec(p, Ap)  # compute Ap = A x p
                 pAp = reduce(p, Ap)
                 alpha = old_rTr / pAp
-                update_x(alpha)
-                update_r(alpha)
+                update_x(x, p, alpha)
+                update_r(r, Ap, alpha)
                 new_rTr = reduce(r, r)
                 new_residual_norm = _residual_norm(new_rTr)
                 if new_residual_norm is None or new_residual_norm <= tol:
@@ -158,7 +199,7 @@ def MatrixFreeCG(A, b, x, tol=1e-6, maxiter=5000, quiet=True):
                             print(">>> Conjugate Gradient method converged.")
                             print(f">>> #iterations {i}")
                     break
-                update_p(new_rTr / old_rTr)
+                update_p(p, r, new_rTr / old_rTr)
                 old_rTr = new_rTr
                 if not quiet:
                     print(
@@ -176,10 +217,7 @@ def MatrixFreeCG(A, b, x, tol=1e-6, maxiter=5000, quiet=True):
             succeeded = False
         return succeeded
 
-    try:
-        return solve()
-    finally:
-        vector_fields_snode_tree.destroy()
+    return _PreparedFieldSolve(vector_fields_builder, _with_sparse_reset(x, (p, r, Ap, Ax), solve), lifetimes)
 
 
 def MatrixFreeBICGSTAB(A, b, x, tol=1e-6, maxiter=5000, quiet=True):
@@ -198,22 +236,17 @@ def MatrixFreeBICGSTAB(A, b, x, tol=1e-6, maxiter=5000, quiet=True):
         quiet (bool): Switch to turn on/off iteration log.
     """
 
+    with prepare_matrix_free_bicgstab(A, b, x, tol, maxiter, quiet) as plan:
+        return plan.solve()
+
+
+def prepare_matrix_free_bicgstab(A, b, x, tol=1e-6, maxiter=5000, quiet=True):
+    """Prepare repeated BiCGSTAB solves with the same field and lifetime contract as prepare_matrix_free_cg."""
     tol, maxiter = _validate_solver_controls(
         "MatrixFreeBICGSTAB", tol, maxiter
     )
 
-    if b.dtype != x.dtype:
-        raise TaichiTypeError(f"Dtype mismatch b.dtype({b.dtype}) != x.dtype({x.dtype}).")
-    if str(b.dtype) == "f32":
-        solver_dtype = ti.f32
-    elif str(b.dtype) == "f64":
-        solver_dtype = ti.f64
-    else:
-        raise TaichiTypeError(f"Not supported dtype: {b.dtype}")
-    if b.shape != x.shape:
-        raise TaichiRuntimeError(f"Dimension mismatch b.shape{b.shape} != x.shape{x.shape}.")
-
-    size = b.shape
+    axes, solver_dtype, lifetimes = _workspace_layout("MatrixFreeBICGSTAB", b, x)
     vector_fields_builder = ti.FieldsBuilder()
     p = ti.field(dtype=solver_dtype)
     p_hat = ti.field(dtype=solver_dtype)
@@ -224,72 +257,17 @@ def MatrixFreeBICGSTAB(A, b, x, tol=1e-6, maxiter=5000, quiet=True):
     t = ti.field(dtype=solver_dtype)
     Ap = ti.field(dtype=solver_dtype)
     Ax = ti.field(dtype=solver_dtype)
-    if len(size) == 1:
-        axes = ti.i
-    elif len(size) == 2:
-        axes = ti.ij
-    elif len(size) == 3:
-        axes = ti.ijk
-    else:
-        raise TaichiRuntimeError(f"MatrixFreeBICGSTAB only support 1D, 2D, 3D inputs; your inputs is {len(size)}-D.")
-    vector_fields_builder.dense(axes, size).place(p, p_hat, r, r_tld, s, s_hat, t, Ap, Ax)
-    vector_fields_snode_tree = vector_fields_builder.finalize()
+    vector_fields_builder.dense(axes, b.shape).place(p, p_hat, r, r_tld, s, s_hat, t, Ap, Ax)
     coefficient_type = to_numpy_type(solver_dtype)
 
-    @ti.kernel
-    def init():
-        for I in ti.grouped(x):
-            r[I] = b[I] - Ax[I]
-            r_tld[I] = b[I]
-            p[I] = r[I]
-            p_hat[I] = p[I]
-            Ap[I] = 0.0
-            t[I] = 0.0
-
-    @ti.kernel
-    def reduce(p: ti.template(), q: ti.template()) -> solver_dtype:
-        result = solver_dtype(0.0)
-        for I in ti.grouped(p):
-            result += p[I] * q[I]
-        return result
-
+    reduce = dot_kernel(solver_dtype)
+    init, update_p, update_s, update_x, update_r, squared_norm_and_dot = bicgstab_kernels(solver_dtype)
     pair_dots = ti.lang.impl.current_cfg().arch == ti.cuda
-
-    @ti.kernel
-    def squared_norm_and_dot(v: ti.template(), w: ti.template()) -> ti.types.vector(2, solver_dtype):
-        norm_sq = solver_dtype(0.0)
-        dot = solver_dtype(0.0)
-        for I in ti.grouped(v):
-            norm_sq += v[I] * v[I]
-            dot += v[I] * w[I]
-        return ti.Vector([norm_sq, dot])
-
-    @ti.kernel
-    def update_p(beta: solver_dtype, omega: solver_dtype):
-        for I in ti.grouped(p):
-            p[I] = r[I] + beta * (p[I] - omega * Ap[I])
-            p_hat[I] = p[I]
-
-    @ti.kernel
-    def update_s(alpha: solver_dtype):
-        for I in ti.grouped(s):
-            s[I] = r[I] - alpha * Ap[I]
-            s_hat[I] = s[I]
-
-    @ti.kernel
-    def update_x(alpha: solver_dtype, omega: solver_dtype):
-        for I in ti.grouped(x):
-            x[I] += alpha * p_hat[I] + omega * s_hat[I]
-
-    @ti.kernel
-    def update_r(omega: solver_dtype):
-        for I in ti.grouped(r):
-            r[I] = s[I] - omega * t[I]
 
     def solve():
         succeeded = True
         A._matvec(x, Ax)
-        init()
+        init(x, b, Ax, r, r_tld, p, p_hat, Ap, t)
         if pair_dots and maxiter:
             initial_rTr, rho = map(float, squared_norm_and_dot(r, r_tld))
         else:
@@ -309,12 +287,12 @@ def MatrixFreeBICGSTAB(A, b, x, tol=1e-6, maxiter=5000, quiet=True):
                     succeeded = False
                     break
                 if i:
-                    update_p((rho / rho_1) * (alpha / omega), omega)
+                    update_p(p, r, Ap, p_hat, (rho / rho_1) * (alpha / omega), omega)
                 A._matvec(p, Ap)
                 alpha_lower = reduce(r_tld, Ap)
                 # Preserve coefficient storage precision before the next host recurrence.
                 alpha = float(coefficient_type(rho / alpha_lower))
-                update_s(alpha)
+                update_s(s, r, Ap, s_hat, alpha)
                 A._matvec(s_hat, t)
                 if pair_dots:
                     omega_lower, omega_upper = map(float, squared_norm_and_dot(t, s))
@@ -322,8 +300,8 @@ def MatrixFreeBICGSTAB(A, b, x, tol=1e-6, maxiter=5000, quiet=True):
                     omega_upper = reduce(t, s)
                     omega_lower = reduce(t, t)
                 omega = float(coefficient_type(omega_upper / (1e-16 if omega_lower == 0.0 else omega_lower)))
-                update_x(alpha, omega)
-                update_r(omega)
+                update_x(x, p_hat, s_hat, alpha, omega)
+                update_r(r, s, t, omega)
                 rho_1 = rho
                 if pair_dots:
                     rTr, rho = map(float, squared_norm_and_dot(r, r_tld))
@@ -353,7 +331,5 @@ def MatrixFreeBICGSTAB(A, b, x, tol=1e-6, maxiter=5000, quiet=True):
             succeeded = False
         return succeeded
 
-    try:
-        return solve()
-    finally:
-        vector_fields_snode_tree.destroy()
+    scratch = (p, p_hat, r, r_tld, s, s_hat, t, Ap, Ax)
+    return _PreparedFieldSolve(vector_fields_builder, _with_sparse_reset(x, scratch, solve), lifetimes)
