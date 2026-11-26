@@ -1,6 +1,7 @@
 """Legacy CUDA factor state and reused solve storage through public entry points."""
 
 import gc
+import importlib
 import os
 
 import numpy as np
@@ -139,6 +140,18 @@ def test_cuda_public_ldlt_uses_real_symmetric_indefinite_provider(monkeypatch):
         result = solver.solve(field)
         assert isinstance(result, np.ndarray) and result.dtype == np.float32
         np.testing.assert_allclose(dense @ result, start + np.arange(-1, 2), atol=1e-6)
+
+    second = ti.field(ti.f32, shape=3)
+    second.fill(4)
+    solver.solve(second)
+    with monkeypatch.context() as patch:
+        def unexpected(*args):
+            pytest.fail("the cuDSS binding repeated a physical layout check")
+
+        module = importlib.import_module("taichi_forge.linalg.sparse_solver")
+        patch.setattr(module, "_dense_native_field_is_contiguous", unexpected)
+        for rhs, expected in ((field, [-4, -3, -2]), (second, [4, 4, 4])):
+            np.testing.assert_allclose(dense @ solver.solve(rhs), expected, atol=1e-6)
 
     record = ti.types.struct(rhs=ti.i32, other=ti.i32).field(shape=3)
     record.rhs.from_numpy(np.array([3, 4, 5], dtype=np.int32))

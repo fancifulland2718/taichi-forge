@@ -1,3 +1,5 @@
+import weakref
+
 import numpy as np
 import taichi_forge.lang
 from taichi_forge._lib import core as _ti_core
@@ -64,6 +66,7 @@ class SparseSolver:
         self._solve_dispatches_since_factorization = 0
         self._factorization_generation = 0
         self._factorization_active = False
+        self._cudss_rhs_bindings = None
         solver_type_list = ["LLT", "LDLT", "LU"]
         solver_ordering = ["AMD", "COLAMD"]
         provider_list = ["auto", "cudss", "cusolver_sp"]
@@ -608,12 +611,26 @@ class SparseSolver:
         else:
             self._type_assert(sparse_matrix)
 
+    def _cudss_field_value_type(self, field, shape):
+        if self._cudss_rhs_bindings is None:
+            self._cudss_rhs_bindings = weakref.WeakKeyDictionary()
+        binding = self._cudss_rhs_bindings.get(field)
+        if binding is None or not binding[2].live:
+            dtype = field.dtype
+            value_type = _dense_host_copy_value_type(dtype)
+            if (dtype != self.dtype or not _dense_native_field_is_contiguous(field, value_type)
+                    or not _dense_native_field_layout_supported(field)):
+                value_type = None
+            binding = (field.shape, value_type, get_runtime().field_layout_lifetime(field))
+            self._cudss_rhs_bindings[field] = binding
+        return binding[1] if binding[0] == shape else None
+
     def _cudss_rhs_from_host_or_field(self, b):
         shape = (self.matrix.m,)
         rhs = ScalarNdarray._private_scratch_storage(self.dtype, shape)
-        if isinstance(b, ScalarField) and b.shape == shape and b.dtype == self.dtype:
-            value_type = _dense_host_copy_value_type(b.dtype)
-            if _dense_native_field_is_contiguous(b, value_type) and _dense_native_field_layout_supported(b):
+        if isinstance(b, ScalarField):
+            value_type = self._cudss_field_value_type(b, shape)
+            if value_type is not None:
                 runtime = get_runtime()
                 runtime.materialize()
                 runtime.prog._copy_dense_field_to_ndarray(rhs.arr, b.snode.ptr, value_type, shape[0], 1)
