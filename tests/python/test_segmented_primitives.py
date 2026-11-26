@@ -54,6 +54,10 @@ def test_segmented_layout_validates_and_normalizes_both_encodings():
     assert layout.num_segments == 6
     assert layout.max_segment_length == 9
     assert layout.topology_bytes == (32 + 7) * 4
+    offsets.fill(0)
+    np.testing.assert_array_equal(layout._offsets_host, _offsets())
+    with pytest.raises(ValueError):
+        layout._offsets_host.setflags(write=True)
 
     ids = np.array([0, 0, 2, 2, 4, 4, 4, 5], dtype=np.int64)
     from_ids = ti.algorithms.SegmentedLayout.from_segment_ids(

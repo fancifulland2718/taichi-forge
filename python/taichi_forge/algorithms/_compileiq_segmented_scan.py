@@ -106,7 +106,7 @@ def _topology_fingerprint(layout):
         "forge-segmented-layout-v1:",
         {
             "encoding": layout._encoding,
-            "offsets": tuple(layout._offsets_host),
+            "offsets": layout._offsets_host.tolist(),
             "capacity": layout.capacity,
             "num_items": layout.num_items,
         },

@@ -106,17 +106,11 @@ def _source_lock():
     )
 
 
-def _topology_fingerprint(layout):
-    offsets = getattr(layout, "_offsets_host", None)
-    if offsets is None:
-        raise TaichiRuntimeError(
-            "Graph-native segmented scan currently requires a host-published "
-            "immutable SegmentedLayout topology"
-        )
+def _topology_fingerprint(layout, offsets):
     return "segmented-layout:" + _canonical_hash(
         {
             "encoding": layout._encoding,
-            "offsets": tuple(int(value) for value in offsets),
+            "offsets": offsets,
             "capacity": int(layout.capacity),
             "num_items": int(layout.num_items),
         }
@@ -500,8 +494,10 @@ class _GraphSegmentedScanRecipeSource:
         self.output = output
         self.inclusive = inclusive
         self.operation = operation
-        self.offsets = tuple(int(value) for value in layout._offsets_host)
-        self.topology_fingerprint = _topology_fingerprint(layout)
+        if layout._offsets_host is None:
+            raise TaichiRuntimeError("Graph-native segmented scan requires host-published immutable offsets")
+        self.offsets = tuple(layout._offsets_host.tolist())
+        self.topology_fingerprint = _topology_fingerprint(layout, self.offsets)
         self.baseline_strategy = (
             _GLOBAL_STRATEGY
             if layout.num_items >= _SEGMENTED_SCAN_CUDA_GLOBAL_MIN_ITEMS

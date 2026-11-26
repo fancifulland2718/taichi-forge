@@ -4918,7 +4918,9 @@ class SegmentedLayout:
         self._max_segment_length = int(
             np.max(np.diff(offsets_host), initial=0)
         )
-        self._offsets_host = tuple(offsets_host.tolist())
+        # Graph fingerprints and AOT share this immutable snapshot. Keep its
+        # packed representation even if the caller supplied a mutable array.
+        self._offsets_host = np.frombuffer(np.asarray(offsets_host, dtype=np.int32).tobytes(), dtype=np.int32)
         self._offsets = _owned_offsets
         if self._offsets is None:
             self._offsets = ScalarNdarray._private_scratch_storage(i32, (self._num_segments + 1,))

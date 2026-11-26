@@ -243,7 +243,7 @@ class _SegmentedReductionSource:
                 "Graph segmented reduction requires host-published immutable segment offsets"
             )
         self.values, self.layout, self.output = values, layout, output
-        self.offsets = tuple(int(value) for value in layout._offsets_host)
+        self.offsets = tuple(layout._offsets_host.tolist())
         self.baseline_strategy = _SERIAL
         self.selected_recipe_id = self.selected_strategy = ""
         # Expand only when a segment actually spans multiple chunks. Small
