@@ -13,6 +13,27 @@ from taichi_forge.lang.matrix import MatrixNdarray, VectorNdarray
 from ._primitive_definitions import IndexedCopyDefinition, TransformDefinition
 
 
+def export_descending_integer_sort(keys, values, context):
+    from taichi_forge._kernels import complement_sort_keys
+    from taichi_forge.graph._graph import Arg, ArgKind
+
+    original = context.retained_arrays.require(keys)
+    scratch = context._resource(object(), dict(kind="ndarray", dtype=str(keys.dtype), shape=list(keys.shape)))
+    operation = dict(kind="sort", keys=scratch)
+    if values is not None:
+        payload = context.retained_arrays.require(values)
+        context.binding_constraints.append(dict(kind="disjoint", left=original, right=payload))
+        operation["values"] = payload
+    kernel = complement_sort_keys._primal
+    specialization = kernel.ensure_compiled(keys, keys, _for_aot=True)
+    compiled = kernel.compiled_kernels[specialization]
+    source = Arg(ArgKind.NDARRAY, original, keys.dtype, ndim=1)
+    temporary = Arg(ArgKind.NDARRAY, scratch, keys.dtype, ndim=1)
+    context.kernel(compiled, (source, temporary))
+    context.operations.append(operation)
+    context.kernel(compiled, (temporary, source))
+
+
 def export_key_parts(call, context):
     from taichi_forge.aot._graph_storage_bindings import packed_description
     from taichi_forge.graph._graph import Arg, ArgKind

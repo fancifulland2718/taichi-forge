@@ -629,13 +629,20 @@ def _sort(call, context):
         or method is None
         or options.get("method") not in ("auto", method)
         or options.get("stable") is not True
-        or options.get("descending") is not False
         or options.get("precision") != "exact"
         or options.get("nan_policy") != "last"
     ):
         raise TaichiRuntimeError("AOT sequence sort requires its stable ascending native strategy with NaNs last")
     if set(options) != {"method", "stable", "descending", "precision", "nan_policy", "workspace"}:
         raise TaichiRuntimeError("AOT sequence sort has an unknown execution option")
+    if options["descending"] is not False:
+        if (options["descending"] is not True or options["method"] != "auto"
+                or not algorithms._device_descending_sort_supported(keys, values, options["nan_policy"])):
+            raise TaichiRuntimeError("AOT sequence sort cannot reproduce this descending strategy")
+        from ._sort_export import export_descending_integer_sort
+
+        algorithms._check_sort_request(keys, values, True, True, "auto", "exact", call.workspace, "last")
+        return export_descending_integer_sort(keys, values, context)
     # This is the same native-first route used by public auto sort for compact
     # scalar keys and packed ndarray records. Never execute/prewarm to discover
     # it or silently replace an explicit CUB, shader or host strategy.

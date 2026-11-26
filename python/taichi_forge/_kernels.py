@@ -22,6 +22,12 @@ _field_compact_static_kernel_cache = {}
 
 
 @kernel
+def complement_sort_keys(src: ndarray_type.ndarray(ndim=1), dst: ndarray_type.ndarray(ndim=1)):
+    for i in range(src.shape[0]):
+        dst[i] = ~src[i]
+
+
+@kernel
 def field_write_coordinates(field: template(), indices: ndarray_type.ndarray(dtype=i32, ndim=2),
                             values: ndarray_type.ndarray()):
     rank = static(len(field.shape))

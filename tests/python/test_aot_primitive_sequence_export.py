@@ -106,6 +106,42 @@ def test_primitive_sequence_sort_graph_export(tmp_path):
         assert "cleanup failed" not in result.stdout + result.stderr
 
 
+@pytest.mark.parametrize("dtype,np_dtype", [(ti.i32, np.int32), (ti.u32, np.uint32)])
+@test_utils.test(arch=[ti.cuda, ti.vulkan], offline_cache=False)
+def test_descending_integer_sort_execution_plan(tmp_path, dtype, np_dtype):
+    n = 16384
+    keys, ids = ti.ndarray(dtype, n), ti.ndarray(ti.i32, n)
+    limits = np.iinfo(np_dtype)
+    host = np.resize(np.array([limits.max, limits.min, 3, 0, limits.min, 8], dtype=np_dtype), n)
+    indices = np.arange(n, dtype=np.int32)
+    keys.from_numpy(host)
+    ids.from_numpy(indices)
+    ti.algorithms.sort(keys, ids, descending=True)
+    order = np.argsort(~host, kind="stable")
+    np.testing.assert_array_equal(keys.to_numpy(), host[order])
+    np.testing.assert_array_equal(ids.to_numpy(), indices[order])
+
+    builder = ti.graph.GraphBuilder()
+    builder.append_native(ti.algorithms.primitive_sequence().sort(keys, ids, descending=True))
+    graph = builder.compile()
+    module = ti.aot.Module()
+    module.add_execution_plan("sort", graph, source_bindings=dict(keys=keys, ids=ids))
+    artifact = tmp_path / "descending.tcm"
+    module.archive(str(artifact))
+    graph.close()
+    with ti.aot.borrow_runtime() as runtime:
+        loaded = runtime.load_module(str(artifact))
+        key_buffer, payload = runtime.ndarray(str(dtype), n), runtime.ndarray("i32", n)
+        with loaded.prepare_execution("sort", dict(keys=key_buffer, ids=payload)) as sort:
+            for source in (host, host[::-1].copy()):
+                key_buffer.write(source.tobytes())
+                payload.write(indices.tobytes())
+                sort()
+                order = np.argsort(~source, kind="stable")
+                assert key_buffer.read() == source[order].tobytes()
+                assert payload.read() == indices[order].tobytes()
+
+
 @test_utils.test(arch=ti.cpu, offline_cache=False)
 def test_primitive_sequence_export_preflight_and_binding_identity():
     keys, order = ti.ndarray(ti.f32, 3), ti.ndarray(ti.i32, 3)
@@ -127,8 +163,8 @@ def test_primitive_sequence_export_preflight_and_binding_identity():
     with pytest.raises(ti.TaichiRuntimeError, match="strategy"):
         module.add_execution_plan("bad", graph, source_bindings=dict(keys=keys, order=order))
     sequence._calls[0].kwargs["descending"] = False
-    sequence.count_if(order)
-    with pytest.raises(ti.TaichiRuntimeError, match="'check'"):
+    sequence.sort(keys, order, method="host_stable")
+    with pytest.raises(ti.TaichiRuntimeError, match="strategy"):
         module.add_execution_plan("bad", graph, source_bindings=dict(keys=keys, order=order))
     assert not module._content and not module._exported_kernels
     sequence._calls.pop()

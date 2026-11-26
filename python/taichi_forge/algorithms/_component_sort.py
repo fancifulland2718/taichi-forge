@@ -30,6 +30,10 @@ def capture_calls(calls, capture):
             "Component native capture currently qualifies single-key sort and compact sequences"
         )
     for call in calls:
+        if call.kind == "sort" and call.kwargs.get("descending"):
+            raise TaichiCompilationError(
+                "Component native capture requires the ascending single-operation sort strategy"
+            )
         if (
             call.kind == "sort_by_key"
             and isinstance(call.args[0], (list, tuple))

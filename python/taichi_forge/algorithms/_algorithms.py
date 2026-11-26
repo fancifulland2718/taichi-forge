@@ -72,6 +72,7 @@ from taichi_forge._kernels import (
     compact_scatter_field,
     compact_stable_serial_field_static_n,
     compact_single_item_field,
+    complement_sort_keys,
     ext_arr_to_tensor,
     fill_i32_arange_ndarray,
     gather_f32_field,
@@ -9442,6 +9443,24 @@ def _native_stable_sort_by_key_parts(parts, values, *, method, workspace):
     return workspace
 
 
+def _device_descending_sort_supported(keys, values, nan_policy):
+    arch = current_cfg().arch
+    if arch not in (cuda, vulkan) or nan_policy != "last":
+        return False
+    if type(keys) is not ScalarNdarray or keys.dtype not in (i32, u32):
+        return False
+    if values is not None and (
+        type(values) is not ScalarNdarray or values.dtype not in _SORT_VALUE_DTYPES or keys.arr is values.arr
+    ):
+        return False
+    # Below the measured crossover, staging and starting the radix pipeline
+    # cost more than the short host sort. Keep small first uses lightweight.
+    if keys.shape[0] < (16384 if arch == cuda else 8192):
+        return False
+    capability = "cuda_device_radix_sort_available" if arch == cuda else "vulkan_radix_sort_available"
+    return _prog_available(get_runtime().prog, capability)
+
+
 def _auto_sort(keys, values=None, workspace=None, nan_policy="last", descending=False):
     arch = current_cfg().arch
 
@@ -9492,6 +9511,15 @@ def _auto_sort(keys, values=None, workspace=None, nan_policy="last", descending=
             return
 
     if descending:
+        if _device_descending_sort_supported(keys, values, nan_policy):
+            # Complement reverses integer order including both extrema. Sort
+            # private keys so equal-key payloads retain their original order.
+            encoded = ScalarNdarray._private_scratch_storage(keys.dtype, keys.shape)
+            complement_sort_keys(keys, encoded)
+            sort_native = _cuda_device_sort_native if arch == cuda else _vulkan_native_radix_sort_u32
+            sort_native(encoded, values, workspace=workspace)
+            complement_sort_keys(encoded, keys)
+            return
         _host_stable_sort(keys, values, descending=True, nan_policy=nan_policy)
         return
 
