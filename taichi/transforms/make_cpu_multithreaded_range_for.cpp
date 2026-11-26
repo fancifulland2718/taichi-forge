@@ -1,4 +1,5 @@
 #include "taichi/codegen/cpu/range_partition.h"
+#include "taichi/ir/analysis.h"
 #include "taichi/ir/ir.h"
 #include "taichi/ir/statements.h"
 #include "taichi/ir/transforms.h"
@@ -35,8 +36,8 @@ using TaskType = OffloadedStmt::TaskType;
  *       for i in range(block_begin, block_end):
  *           a[i] = i
  *
- * for a CPU configuration with 8 threads. The existing minimum chunk size
- * is 512. Statically empty trailing chunks need not reach the scheduler.
+ * for a CPU configuration with 8 threads. Flat loops use a minimum chunk
+ * of 512. Statically empty trailing chunks need not reach the scheduler.
  *
  * This pass is only applied to range-for loops that are offloaded to
  * CPUs. The number of threads is determined by the config option
@@ -48,19 +49,70 @@ using TaskType = OffloadedStmt::TaskType;
  * memcpy and vecadd, even when the loop bounds are determined at runtime.
  */
 
-int static_chunk_count(const OffloadedStmt *task, int num_threads) {
+struct CpuChunks {
+  int count;
+  int min_size;
+};
+
+CpuChunks partition(const OffloadedStmt *task, const CompileConfig &config) {
+  const int num_threads = config.cpu_max_num_threads;
   if (!task->const_begin || !task->const_end || num_threads <= 0) {
-    return num_threads;
+    return {num_threads, kCpuMinChunkSize};
   }
   // An empty body iteration does not imply an empty auxiliary block. Preserve
   // independently supplied xlogues (normal TLS lowering happens after us).
   for (const auto *block : {task->tls_prologue.get(), task->tls_epilogue.get(),
                             task->bls_prologue.get(), task->bls_epilogue.get()}) {
     if (block && block->size() != 0) {
-      return num_threads;
+      return {num_threads, kCpuMinChunkSize};
     }
   }
-  return cpu_range_chunk_count(task->begin_value, task->end_value, num_threads);
+  const auto count = [&](int grain) {
+    return cpu_range_chunk_count(task->begin_value, task->end_value,
+                                 num_threads, grain);
+  };
+  const CpuChunks flat{count(kCpuMinChunkSize), kCpuMinChunkSize};
+  if (flat.count <= 0 || flat.count >= num_threads ||
+      task->num_cpu_threads != num_threads || task->source_block_dim_explicit ||
+      config.opt_level <= 0 || config.debug || !task->body)
+    return flat;
+
+  // A long inner loop alone can be a cheap, vectorized stencil. Account for
+  // its trip count only when its body computes square roots or inverse roots.
+  constexpr int64_t min_inner_iterations = 16384;
+  int grain = kCpuMinChunkSize;
+  for (const auto &stmt : task->body->statements) {
+    auto *loop = stmt->cast<RangeForStmt>();
+    if (!loop)
+      continue;
+    auto *lo = loop->begin->cast<ConstStmt>();
+    auto *hi = loop->end->cast<ConstStmt>();
+    if (!lo || !hi || lo->ret_type != PrimitiveType::i32 ||
+        hi->ret_type != PrimitiveType::i32)
+      continue;
+    const int64_t trip = int64_t(hi->val.val_int32()) - lo->val.val_int32();
+    if (trip <= 0)
+      continue;
+    const int nested_grain = int((min_inner_iterations + trip - 1) / trip);
+    if (nested_grain < grain && count(nested_grain) > flat.count &&
+        irpass::analysis::any_statement(loop->body.get(), [](Stmt *s) {
+          auto *op = s->cast<UnaryOpStmt>();
+          return op && (op->op_type == UnaryOpType::sqrt ||
+                        op->op_type == UnaryOpType::rsqrt);
+        }))
+      grain = nested_grain;
+  }
+  if (grain == kCpuMinChunkSize)
+    return flat;
+  // Preserve the grouping of shared reductions and worker-sensitive effects.
+  if (irpass::analysis::any_statement(task->body.get(), [](Stmt *s) {
+        return s->is<AtomicOpStmt>() || s->is<RandStmt>() ||
+               s->is<GlobalThreadIndexStmt>() || s->is<PrintStmt>() ||
+               s->is<InternalFuncStmt>() || s->is<FuncCallStmt>() ||
+               s->is<ExternalFuncCallStmt>();
+      }))
+    return flat;
+  return {count(grain), grain};
 }
 
 class MakeCPUMultithreadedRangeFor : public BasicStmtVisitor {
@@ -88,14 +140,13 @@ class MakeCPUMultithreadedRangeFor : public BasicStmtVisitor {
       return;
     }
 
-    const int num_chunks =
-        static_chunk_count(offloaded, config.cpu_max_num_threads);
+    const auto chunks = partition(offloaded, config);
     auto offloaded_body = std::make_unique<Block>();
     auto one = offloaded_body->insert(
         Stmt::make_typed<ConstStmt>(TypedConstant(PrimitiveType::i32, 1)));
     auto minimal_block_range =
         offloaded_body->insert(Stmt::make_typed<ConstStmt>(
-            TypedConstant(PrimitiveType::i32, kCpuMinChunkSize)));
+            TypedConstant(PrimitiveType::i32, chunks.min_size)));
     auto num_threads = offloaded_body->insert(Stmt::make_typed<ConstStmt>(
         TypedConstant(PrimitiveType::i32, config.cpu_max_num_threads)));
     auto thread_index =
@@ -161,13 +212,11 @@ class MakeCPUMultithreadedRangeFor : public BasicStmtVisitor {
     irpass::replace_all_usages_with(inner_loop, offloaded, inner_loop);
 
     // Update the offloaded stmt.
-    // Keep the original productive partition and worker request. Only the
-    // number of chunks changes when trailing chunks are provably empty.
-    // Therefore it has constant begin and end values.
+    // Submit the productive chunks with the original worker request.
     offloaded->const_begin = true;
     offloaded->const_end = true;
     offloaded->begin_value = 0;
-    offloaded->end_value = num_chunks;
+    offloaded->end_value = chunks.count;
     offloaded->body = std::move(offloaded_body);
     offloaded->body->set_parent_stmt(offloaded);
     offloaded->block_dim = 1;

@@ -19,6 +19,10 @@
     CACHE_VALUE(std::string("gpu-dense-cell-accumulator-v1"));
   }
   CACHE_FIELD(llvm_opt_level);
+  if (arch_is_cpu(config.arch) && config.make_cpu_multithreading_loop &&
+      config.opt_level > 0 && !config.debug) {
+    CACHE_VALUE(std::string("cpu-static-nested-range-partition-v1"));
+  }
   if (config.arch == Arch::vulkan && config.fast_math && config.opt_level > 0 &&
       !config.debug) {
     CACHE_VALUE(std::string("vulkan-temporary-subgroup-sum-v1"));

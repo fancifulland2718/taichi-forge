@@ -1,6 +1,7 @@
 """Static CPU partitions eliminate empty work without specializing call values."""
 
 import numpy as np
+import pytest
 import taichi_forge as ti
 from tests import test_utils
 
@@ -61,6 +62,40 @@ def test_static_chunks_preserve_parallelize_and_dynamic_calls():
         reference = np.full(1025, -91, dtype=np.int32)
         reference[:end + 17] = expected[:end + 17]
         np.testing.assert_array_equal(output.to_numpy(), reference)
+
+
+@pytest.mark.parametrize("use_sqrt,shared,expected_tasks", [(True, False, 8), (False, False, 1), (True, True, 1)])
+@test_utils.test(arch=ti.cpu, cpu_max_num_threads=8, offline_cache=False)
+def test_partition_static_nested_math(use_sqrt, shared, expected_tasks):
+    output = ti.field(ti.f32, shape=257)
+    total = ti.field(ti.i32, shape=())
+
+    @ti.kernel
+    def evaluate():
+        for i in range(-5, 252):
+            value = 0.0
+            for j in range(512):
+                x = ti.cast(j + 1 + (i + 5) % 7, ti.f32)
+                if ti.static(use_sqrt):
+                    x = ti.sqrt(x)
+                value += x
+            output[i + 5] = value
+            if ti.static(shared):
+                total[None] += 1
+
+    evaluate()
+    total.fill(0)
+    ti.profiler.set_cpu_scheduler_telemetry(True, reset=True)
+    try:
+        evaluate()
+        stats = ti.profiler.query_cpu_scheduler_telemetry()
+        assert stats["tasks_requested"] == stats["tasks_completed"] == expected_tasks
+    finally:
+        ti.profiler.set_cpu_scheduler_telemetry(False)
+    x = np.arange(1, 513, dtype=np.float32) + (np.arange(257) % 7).astype(np.float32)[:, None]
+    expected = (np.sqrt(x) if use_sqrt else x).sum(axis=1)
+    np.testing.assert_allclose(output.to_numpy(), expected, rtol=2e-6)
+    assert total[None] == (257 if shared else 0)
 
 
 @test_utils.test(arch=ti.cpu, cpu_max_num_threads=16, offline_cache=False)
