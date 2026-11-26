@@ -1,3 +1,5 @@
+import math
+
 import taichi_forge.lang
 from taichi_forge._lib import core as _ti_core
 from taichi_forge._logging import warn
@@ -162,6 +164,95 @@ def _dense_native_field_is_contiguous(field, value_type):
     if grandparent is None or grandparent.ptr.type != _ti_core.SNodeType.root:
         return False
     return parent._cell_size_bytes == item_bytes
+
+
+def _dense_native_packed_plan(components, value_type):
+    """Validate that the scalar fields cover every byte of one dense record."""
+    lane_count = len(components)
+    value_size = _dense_value_type_size(value_type)
+    if not lane_count or not value_size:
+        return None
+    expected_stride = lane_count * value_size
+    snodes = tuple(component.snode for component in components)
+    first_parent = snodes[0].parent()
+    if (
+        first_parent is None
+        or first_parent.ptr.type != _ti_core.SNodeType.dense
+        or snodes[0].parent(2) is not impl.root
+        or first_parent._cell_size_bytes != expected_stride
+        or snodes[0]._offset_bytes_in_parent_cell != 0
+    ):
+        return None
+    if not _dense_native_field_layout_supported(components[0]):
+        return None
+    parent_key = (first_parent._snode_tree_id, first_parent._id)
+    for lane, snode in enumerate(snodes[1:], start=1):
+        parent = snode.parent()
+        if (
+            parent is None
+            or (parent._snode_tree_id, parent._id) != parent_key
+            or snode._offset_bytes_in_parent_cell != lane * value_size
+        ):
+            return None
+    n = math.prod(components[0].shape)
+    return components[0], value_type, n, lane_count
+
+
+def _try_fill_dense_packed(plan, value_bits):
+    first_component, value_type, n, lane_count = plan
+    from taichi_forge.lang.misc import cuda, vulkan  # pylint: disable=C0415
+
+    if value_bits != 0 and value_type > 2 and impl.current_cfg().arch in (cuda, vulkan):
+        return False
+    prog = impl.get_runtime().prog
+    method = _dense_native_method_descriptor(prog, "fill_dense_field_packed")
+    if method is None:
+        return False
+    impl.get_runtime().materialize()
+    try:
+        method(
+            prog,
+            first_component.snode.ptr,
+            value_type,
+            value_bits,
+            n,
+            lane_count,
+        )
+    except RuntimeError as exc:
+        message = str(exc)
+        if (
+            "Native packed dense field fill" not in message
+            and "Native dense field path" not in message
+        ):
+            raise
+        return False
+    return True
+
+
+def _try_copy_dense_packed(plan, other_plan):
+    prog = impl.get_runtime().prog
+    method = _dense_native_method_descriptor(prog, "copy_dense_field_packed")
+    if method is None:
+        return False
+    impl.get_runtime().materialize()
+    try:
+        method(
+            prog,
+            plan[0].snode.ptr,
+            other_plan[0].snode.ptr,
+            plan[1],
+            plan[2],
+            plan[3],
+        )
+    except RuntimeError as exc:
+        message = str(exc)
+        if (
+            "Native packed dense field copy" not in message
+            and "Native dense field path" not in message
+        ):
+            raise
+        return False
+    return True
 
 
 def _dense_native_copy_ad_required(src, dst):

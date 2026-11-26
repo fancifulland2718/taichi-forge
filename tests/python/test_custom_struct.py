@@ -1,4 +1,5 @@
 import numpy as np
+import pytest
 from pytest import approx
 from taichi_forge.lang.misc import get_host_arch_list
 
@@ -110,6 +111,41 @@ def test_struct_fill():
     for i in range(n):
         assert x[i].a == i + 0.5
         assert np.allclose(x[i].b.to_numpy(), int(x[i].a))
+
+
+@test_utils.test()
+def test_packed_scalar_struct_bulk_operations():
+    record = ti.types.struct(x=ti.f32, y=ti.f32)
+    src = record.field(shape=15, offset=-4)
+    dst = record.field(shape=15, offset=7)
+    reversed_keys = ti.types.struct(y=ti.f32, x=ti.f32).field(shape=15)
+    grid = record.field(shape=(3, 5))
+    partial = record.field()
+    sentinel = ti.field(ti.f32)
+    ti.root.dense(ti.i, 15).place(partial.x, sentinel, partial.y)
+
+    src.fill(-0.0)
+    for arr in src.to_numpy().values():
+        np.testing.assert_array_equal(arr.view(np.uint32), np.full(15, 0x80000000, np.uint32))
+
+    values = np.arange(15, dtype=np.float32)
+    src.from_numpy({"x": values, "y": values + 30})
+    dst.copy_from(src)
+    dst.copy_from(dst)
+    reversed_keys.copy_from(dst)
+    for result in (dst, reversed_keys):
+        np.testing.assert_array_equal(result.x.to_numpy(), values)
+        np.testing.assert_array_equal(result.y.to_numpy(), values + 30)
+
+    sentinel.fill(19)
+    partial.fill(3)
+    partial.copy_from(dst)
+    np.testing.assert_array_equal(sentinel.to_numpy(), np.full(15, 19))
+    np.testing.assert_array_equal(partial.y.to_numpy(), values + 30)
+    grid.fill(5)
+    np.testing.assert_array_equal(grid.y.to_numpy(), np.full((3, 5), 5))
+    with pytest.raises(ValueError, match="shape"):
+        dst.copy_from(grid)
 
 
 @test_utils.test()

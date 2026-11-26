@@ -11,7 +11,17 @@ from taichi_forge.lang.exception import (
     TaichiTypeError,
 )
 from taichi_forge.lang.expr import Expr
-from taichi_forge.lang.field import Field, ScalarField, SNodeHostAccess
+from taichi_forge.lang.field import (
+    Field,
+    ScalarField,
+    SNodeHostAccess,
+    _dense_fill_value_bits,
+    _dense_host_copy_value_type,
+    _dense_native_bulk_arch_enabled,
+    _dense_native_packed_plan,
+    _try_copy_dense_packed,
+    _try_fill_dense_packed,
+)
 from taichi_forge.lang.matrix import Matrix, MatrixType
 from taichi_forge.lang.util import cook_dtype, in_python_scope, python_scope, taichi_scope
 from taichi_forge.types import primitive_types
@@ -464,6 +474,21 @@ class StructField(Field):
         """
         return self._members[0]._loop_range()
 
+    def _native_dense_packed_plan(self):
+        runtime = impl.get_runtime()
+        if runtime.target_tape is not None or runtime.fwd_mode_manager is not None:
+            return None
+        members = self._members
+        if len(members) < 2 or not _dense_native_bulk_arch_enabled():
+            return None
+        if not all(isinstance(member, ScalarField) for member in members):
+            return None
+        dtype = members[0].dtype
+        value_type = _dense_host_copy_value_type(dtype)
+        if value_type is None or any(member.dtype != dtype for member in members[1:]):
+            return None
+        return _dense_native_packed_plan(members, value_type)
+
     @python_scope
     def copy_from(self, other):
         """Copies all elements from another field.
@@ -475,6 +500,17 @@ class StructField(Field):
         """
         assert isinstance(other, Field)
         assert set(self.keys) == set(other.keys)
+        # A physical copy must preserve the correspondence between member names.
+        if isinstance(other, StructField) and len(self.field_dict) > 1 and self.keys == other.keys:
+            plan = self._native_dense_packed_plan()
+            if plan is not None and len(self.shape) == 1 and other.shape == self.shape:
+                other_plan = other._native_dense_packed_plan()
+                if (
+                    other_plan is not None
+                    and plan[1:] == other_plan[1:]
+                    and _try_copy_dense_packed(plan, other_plan)
+                ):
+                    return
         for k in self.keys:
             self.field_dict[k].copy_from(other.get_member_field(k))
 
@@ -485,6 +521,11 @@ class StructField(Field):
         Args:
             val (Union[int, float]): Value to fill.
         """
+        plan = self._native_dense_packed_plan()
+        if plan is not None:
+            bits = _dense_fill_value_bits(plan[0].dtype, val)
+            if bits is not None and _try_fill_dense_packed(plan, bits):
+                return
         for v in self._members:
             v.fill(val)
 
