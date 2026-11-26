@@ -826,12 +826,17 @@ class Module:
           shared_execution_plans (bool): share exact kernel call records in
             plans, requiring a Runtime with execution plan storage v1.
         """
+        self._save(filepath, shared_component_contracts=shared_component_contracts,
+                   shared_execution_plans=shared_execution_plans, share_kernel_rows=_share_kernel_rows)
+
+    def _save(self, filepath, *, shared_component_contracts, shared_execution_plans=False,
+              share_kernel_rows=False, defer_entries=False):
         if self._graph_export_failed:
             raise TaichiRuntimeError("A Graph kernel export failed; create a new AOT module")
         output_dir = Path(filepath)
         output_dir.mkdir(parents=True, exist_ok=True)
         filepath = output_dir.as_posix()
-        if _share_kernel_rows:
+        if share_kernel_rows:
             self._aot_builder._dump_vulkan_package(filepath)
         else:
             self._aot_builder.dump(filepath, "")
@@ -859,20 +864,8 @@ class Module:
             else:
                 for name, plan in self._execution_plans.items():
                     plan.save(directory / (quote(name, safe="-_.") + ".json"))
-        if self._component_entries:
-            contracts = {"component_entries/" + quote(name, safe="-_.") + ".json": contract
-                         for name, contract in self._component_entries.items()}
-            if shared_component_contracts:
-                from taichi_forge_runtime.aot._component_storage import encode_entry_documents
-
-                documents = encode_entry_documents(contracts)
-            else:
-                documents = {name: json.dumps(contract, sort_keys=True, separators=(",", ":")).encode("utf8")
-                             for name, contract in contracts.items()}
-            for relative, payload in documents.items():
-                target = output_dir / relative
-                target.parent.mkdir(parents=True, exist_ok=True)
-                target.write_bytes(payload)
+        if not defer_entries:
+            self._save_component_entries(output_dir, shared_component_contracts)
         if self._component_roots:
             directory = output_dir / "components"
             directory.mkdir(exist_ok=True)
@@ -913,6 +906,23 @@ class Module:
                 f.write("\n".join(self._content))
         with open(f"{filepath}/__version__", "w") as f:
             f.write(".".join(str(x) for x in taichi_forge.__version__))
+
+    def _save_component_entries(self, directory, shared):
+        if not self._component_entries:
+            return
+        contracts = {"component_entries/" + quote(name, safe="-_.") + ".json": contract
+                     for name, contract in self._component_entries.items()}
+        if shared:
+            from taichi_forge_runtime.aot._component_storage import encode_entry_documents
+
+            documents = encode_entry_documents(contracts)
+        else:
+            documents = {name: json.dumps(contract, sort_keys=True, separators=(",", ":")).encode("utf8")
+                         for name, contract in contracts.items()}
+        for relative, payload in documents.items():
+            target = directory / relative
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_bytes(payload)
 
     def archive(self, filepath: str, *, include_debug_metadata: bool = False, shared_component_contracts=False,
                 shared_execution_plans=False, _pack_shader_members=False, _entry_block_order=None):

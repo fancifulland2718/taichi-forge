@@ -19,15 +19,63 @@ def _bytes(value, *, sort_keys=False):
     return json.dumps(value, separators=(",", ":"), ensure_ascii=True, sort_keys=sort_keys).encode()
 
 
+def _ordered_entries(manifest):
+    entries = manifest["entries"]
+    return sorted(entries, key=lambda name: (entries[name]["definition"], name))
+
+
+def _link_inputs(directory, module, manifest):
+    # These are the linker's actual inputs after native emission/restoration.
+    # Unit offsets describe scratch storage; the archive uses digest order.
+    native = {path.relative_to(directory).as_posix(): hashlib.sha256(path.read_bytes()).hexdigest()
+              for path in sorted(directory.rglob("*")) if path.is_file()}
+    with (directory.parent.parent / "bodies" / "units.index").open(encoding="ascii") as index:
+        units = [line.split()[0] for line in index]
+    # Preserve order inside each contract: it determines the ordered list of
+    # shared references written by the entry encoder.
+    entries = [(name, hashlib.sha256(_bytes(contract)).hexdigest())
+               for name, contract in sorted(module._component_entries.items())]
+    return hashlib.sha256(_bytes([native, units, entries, _ordered_entries(manifest)])).hexdigest()
+
+
+def _reuse_archive(record, inputs, destination):
+    if not record or not inputs:
+        return False
+    try:
+        expected, blocks = record["tcm_sha256"], record["entry_blocks"]
+        if record["link"] != hashlib.sha256(_bytes([inputs, expected, blocks])).hexdigest():
+            return False
+        source = Path(record["output"]) / "code.tcm"
+        digest = hashlib.sha256()
+        with source.open("rb") as reader, destination.open("wb") as writer:
+            for chunk in iter(lambda: reader.read(1024 * 1024), b""):
+                digest.update(chunk)
+                writer.write(chunk)
+        if digest.hexdigest() == expected:
+            return True
+    except (KeyError, OSError, TypeError, ValueError):
+        pass
+    destination.unlink(missing_ok=True)
+    return False
+
+
 class _Projection:
-    def __init__(self, directory, staging):
+    def __init__(self, directory, staging, *, cache_links=False, previous=None):
         self.directory = directory
         self.staging = staging
+        self.cache_links = cache_links
+        self.previous = previous
+        self.link_inputs = None
+        self.reused = False
 
     def finish(self, module, manifest, payloads):
         # All targets use the same LLVM emitter. Expose loose compiler outputs
         # to the single library transaction; there is no target archive here.
-        module.save(str(self.directory / "module"), shared_component_contracts=True)
+        directory = self.directory / "module"
+        # Component roots can share a physical contract directory with entries.
+        # Preserve their ordinary writer order for modules containing both.
+        defer_entries = self.cache_links and not module._component_roots
+        module._save(directory, shared_component_contracts=True, defer_entries=defer_entries)
         absent_inputs = {}
         for symbol, entry in manifest["entries"].items():
             for index, spec in enumerate(entry["captures"], start=len(entry["arguments"])):
@@ -35,6 +83,13 @@ class _Projection:
                     absent_inputs.setdefault(target, {}).setdefault(symbol, []).append(index)
         if absent_inputs:
             (self.directory / "module" / "unified_absent_inputs.json").write_bytes(_bytes(absent_inputs, sort_keys=True))
+        if defer_entries:
+            self.link_inputs = _link_inputs(directory, module, manifest)
+            self.reused = _reuse_archive(self.previous, self.link_inputs, self.staging / "code.tcm")
+            if not self.reused:
+                module._save_component_entries(directory, shared=True)
+            elif self.previous["entry_blocks"]:
+                _require_entry_blocks(manifest)
         for relative in sorted(payloads, key=Path):
             data = payloads[relative]
             path = self.staging / relative
@@ -78,23 +133,27 @@ def _worker(request):
     inputs = _package_source_inputs(roots, ti.cpu, source_root)
     files, _, discovery, _, modules, _, packages, syntax = inputs
     assets = shader_assets(files, modules, syntax)
-    cache = None
+    cache = previous = None
     if cache_dir:
         cache = PackageBuildCache(Path(cache_dir) / "portable" / "declarations", files, modules,
                                   packages, (), "unified-bc-library", discovery=discovery, assets=assets)
-        _restore_leaf_cache(Path(cache_dir) / "unified", directory.parent, cache.object_context)
+        previous = _restore_leaf_cache(Path(cache_dir) / "unified", directory.parent, cache.object_context)
     declarations = _preflight_package(roots, inputs=inputs, build_cache=cache, portable=True)
     preflight = time.perf_counter()
     del inputs, files, modules
     with PackageCompilation(portable=True) as compilation:
-        projection = _Projection(directory, Path(request["staging"]))
+        projection = _Projection(directory, Path(request["staging"]),
+                                 cache_links=cache is not None and cache.object_context is not None,
+                                 previous=previous)
         _export_package(directory, declarations, source_root, (), "unified-bc-library", compilation,
                         cache, assets, projection=projection)
         if cache is not None and cache.object_context is not None:
             counts = compilation.module._aot_builder._streaming_export_statistics()
             counts.update(preflight_seconds=preflight - start, compile_and_seal_seconds=time.perf_counter() - preflight)
-            (directory.parent / "portable-statistics.json").write_bytes(
-                _bytes(dict(version=3, context=cache.object_context, produce=counts)))
+            counts["unified_archive_reuses"] = int(projection.reused)
+            (directory.parent / "portable-statistics.json").write_bytes(_bytes(dict(
+                version=3, context=cache.object_context, produce=counts, link_inputs=projection.link_inputs,
+                entry_blocks=previous["entry_blocks"] if projection.reused else False)))
             (directory.parent / "portable-declarations.json").write_bytes(_bytes(cache.declaration_record()))
 
 
@@ -118,12 +177,11 @@ def _write_member(archive, name, data):
 
 def _module_members(module, manifest):
     from taichi_forge_runtime.aot._entry_blocks import (
-        BLOCK_PREFIX, ENTRY_PREFIX, RUNTIME_REQUIREMENT, pack_entry_blocks,
+        BLOCK_PREFIX, ENTRY_PREFIX, pack_entry_blocks,
     )
 
-    entries = manifest["entries"]
     names = [ENTRY_PREFIX + quote(name, safe="-_.") + ".json"
-             for name in sorted(entries, key=lambda name: (entries[name]["definition"], name))]
+             for name in _ordered_entries(manifest)]
     paths = {path.relative_to(module).as_posix(): path for path in module.rglob("*") if path.is_file()}
     ordered = [name for name in names if name in paths]
     has_blocks = False
@@ -131,10 +189,16 @@ def _module_members(module, manifest):
         has_blocks |= name.startswith(BLOCK_PREFIX)
         yield name, data
     if has_blocks:
-        manifest["runtime_requirements"] = sorted(set(manifest.get("runtime_requirements", ())) | {RUNTIME_REQUIREMENT})
+        _require_entry_blocks(manifest)
     for name in sorted(paths):
         if name != "unified_llvm.json":
             yield name, paths[name].read_bytes()
+
+
+def _require_entry_blocks(manifest):
+    from taichi_forge_runtime.aot._entry_blocks import RUNTIME_REQUIREMENT
+
+    manifest["runtime_requirements"] = sorted(set(manifest.get("runtime_requirements", ())) | {RUNTIME_REQUIREMENT})
 
 
 def _collect(directory, archive):
@@ -207,6 +271,7 @@ def _restore_leaf_cache(directory, workspace, context):
             if hashlib.sha256(catalog).hexdigest() == digest:
                 (bodies / filename).write_bytes(catalog)
         (bodies / "baseline-path").write_bytes(os.fsencode(archive))
+        return record
     except (OSError, ValueError, TypeError, KeyError):
         return
 
@@ -231,7 +296,7 @@ def _publish_cache_file(source, target):
                 temp.unlink(missing_ok=True)
 
 
-def _record_leaf_cache(cache_dir, workspace, output):
+def _record_leaf_cache(cache_dir, workspace, output, archive_digest, entry_blocks):
     directory = Path(cache_dir) / "unified"
     receipt = workspace / "portable-statistics.json"
     if not receipt.is_file():
@@ -239,6 +304,12 @@ def _record_leaf_cache(cache_dir, workspace, output):
     try:
         record = json.loads(receipt.read_bytes())
         record["output"] = str(output)
+        inputs = record.pop("link_inputs", None)
+        if inputs is not None:
+            if entry_blocks is not None:
+                record["entry_blocks"] = entry_blocks
+            record["tcm_sha256"] = archive_digest
+            record["link"] = hashlib.sha256(_bytes([inputs, archive_digest, record["entry_blocks"]])).hexdigest()
         directory.mkdir(parents=True, exist_ok=True)
         for field, filename in (("catalog", "roots.tcb"), ("helpers", "helpers.tcb")):
             source = workspace / "bodies" / filename
@@ -297,11 +368,18 @@ def export_library(package, output, arch, caps, source_root, build_cache):
                 if error_path.is_file():
                     raise PackageExportError(error_path.read_text(encoding="utf8"))
                 result.check_returncode()
-            with zipfile.ZipFile(staging / "code.tcm", "w") as archive:
-                base, index = _collect(workspace / "portable", archive)
-                del base["frontend_target"]
-                _write_units(archive, workspace / "bodies")
-                _write_member(archive, "unified_llvm.json", _bytes(dict(version=2, **index)))
+            entry_blocks = None
+            if (staging / "code.tcm").is_file():
+                base = json.loads((workspace / "portable" / "view.json").read_bytes())
+            else:
+                from taichi_forge_runtime.aot._entry_blocks import BLOCK_PREFIX
+
+                with zipfile.ZipFile(staging / "code.tcm", "w") as archive:
+                    base, index = _collect(workspace / "portable", archive)
+                    _write_units(archive, workspace / "bodies")
+                    _write_member(archive, "unified_llvm.json", _bytes(dict(version=2, **index)))
+                entry_blocks = any(name.startswith(BLOCK_PREFIX) for name in index["members"])
+            del base["frontend_target"]
             digest = hashlib.sha256((staging / "code.tcm").read_bytes()).hexdigest()
             document = dict(kind="forge_unified_definition_library", version=2, base=encode_manifest(base),
                             targets=targets, target_capabilities=capability_sets, tcm_sha256=digest)
@@ -309,7 +387,7 @@ def export_library(package, output, arch, caps, source_root, build_cache):
             complete = True
             _publish_package(staging, output)
             if build_cache is not None:
-                _record_leaf_cache(build_cache, workspace, output)
+                _record_leaf_cache(build_cache, workspace, output, digest, entry_blocks)
             return document
         finally:
             if not complete:

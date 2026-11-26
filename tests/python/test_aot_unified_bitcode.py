@@ -368,6 +368,7 @@ def vector(x: ti.types.vector(2, ti.i32)) -> ti.i32:
         assert (cache / "unified" / (record["helpers"] + ".tcb")).is_file()
         assert record["produce"]["unified_capture_restores"] == (
             0 if name in ("cold", "fresh") else 2 if name == "warm" else 1)
+        assert record["produce"]["unified_archive_reuses"] == int(name == "warm")
         for target in targets:
             ti.init(arch=target, enable_fallback=False)
             with ti.aot.borrow_runtime() as runtime, load_package(runtime, output) as pkg:
@@ -545,7 +546,12 @@ class Model:
     moved = original.replace("self.host_value = 2", "# Updated Host default\n        self.host_value = 17")
     expanded = moved.replace("choices=(3,)", "choices=(3, 9)")
     cache = tmp_path / "cache"
-    for label, source in (("initial", original), ("moved", moved), ("expanded", expanded)):
+    for label, source in (("initial", original), ("moved", moved), ("repaired", moved), ("expanded", expanded)):
+        if label == "repaired":
+            # The individual numerical objects still restore. An invalid
+            # previous archive must nevertheless be linked again.
+            with zipfile.ZipFile(tmp_path / "moved/code.tcm", "a") as archive:
+                archive.writestr("unexpected", b"corrupt link output")
         path.write_text(source, encoding="utf8")
         module = importlib.import_module(path.stem)
         output = tmp_path / label
@@ -555,7 +561,10 @@ class Model:
         finally:
             sys.modules.pop(path.stem, None)
         stats = json.loads((cache / "unified/latest.json").read_bytes())["produce"]
-        assert stats["unified_capture_restores"] == (1 if label == "moved" else 0)
+        assert stats["unified_capture_restores"] == int(label in ("moved", "repaired"))
+        assert stats["unified_archive_reuses"] == int(label == "moved")
+        if label == "repaired":
+            assert (output / "code.tcm").read_bytes() == (tmp_path / "initial/code.tcm").read_bytes()
         with ti.aot.borrow_runtime() as runtime, load_package(runtime, output) as package:
             for bias in ((3, 9) if label == "expanded" else (3,)):
                 model = package.host.Model(bias)
