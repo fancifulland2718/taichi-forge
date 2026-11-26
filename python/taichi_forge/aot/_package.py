@@ -2418,7 +2418,10 @@ def _export_package(output, declarations, source_root, caps, artifact_format, co
                 for group in sorted(
                     {item.get("group", "fields") for item in schema.values() if item["kind"] == "dense_field" and not item.get("storage_nodes")}
                 ):
-                    layout, members, dimensions, _ = _dense_group(environment, owner, group)
+                    layout, members, dimensions, _ = _dense_group(
+                        environment, owner, group, projections=compilation.dense_projections,
+                        placements=compilation.dense_placements,
+                    )
                     if any(paths[0] == "schema_nodes" for paths in members.values()):
                         manifest["version"] = max(26, manifest["version"])
                     key = owner_key if group == "fields" else owner_key + ":" + group

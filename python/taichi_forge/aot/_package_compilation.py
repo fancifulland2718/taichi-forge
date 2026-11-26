@@ -32,6 +32,7 @@ class PackageCompilation(FunctionLibrary):
         self.kernels = {}
         self.candidate_indices = {}
         self.dense_projections = {}
+        self.dense_placements = {}
         self.exported = {}
         self.resource_effects = {}
         self.retired_function_definitions = 0
@@ -246,6 +247,7 @@ class PackageCompilation(FunctionLibrary):
             return
         self.candidate_indices.clear()
         self.dense_projections.clear()
+        self.dense_placements.clear()
         # Also release incomplete definitions after a failed build. This never
         # clears user caches or touches submitted executable handles.
         for kernel in self.kernels.values():

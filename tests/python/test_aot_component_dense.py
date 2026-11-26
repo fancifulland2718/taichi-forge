@@ -349,6 +349,20 @@ def test_package_reuses_finalized_topology_and_rechecks_live_bindings(monkeypatc
         assert env.compile(entry) is original
         assert calls == {"state": 1, "work": 1}
 
+        # An alias still uses the same native placement when wrapped in a
+        # different Field. Replacing the wrapper's member must change the path.
+        from taichi_forge.lang.field import ScalarField
+
+        alias = ScalarField(model.x.vars[0])
+        model.alias_x = alias
+        assert env.compile(entry) is original
+        placements = len(compilation.dense_placements)
+        alias.vars[0] = model.y.vars[0]
+        changed = env.compile(entry)
+        assert changed.contract["members"]["alias_x"] == changed.contract["members"]["y"]
+        assert len(compilation.dense_placements) == placements
+        model.alias_x = model.x
+
         model.capacity += 1
         with pytest.raises(ti.TaichiCompilationError, match="shape differs"):
             env.compile(entry)
@@ -382,7 +396,11 @@ def test_package_reuses_finalized_topology_and_rechecks_live_bindings(monkeypatc
         with pytest.raises(ti.TaichiCompilationError, match="one actual SNode root"):
             env.compile(entry)
         assert env.compile(compilation.entry(replacement.active_pass)) is original
+        replacement.first.destroy()
+        with pytest.raises(RuntimeError, match="SNodeTree has been destroyed"):
+            _component._DenseLayoutValidation(env, replacement, compilation=compilation).dense("state")
     assert not compilation.dense_projections
+    assert not compilation.dense_placements
 
 
 @test_utils.test(arch=ti.cpu, offline_cache=False)

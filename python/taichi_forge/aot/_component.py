@@ -28,7 +28,8 @@ from taichi_forge.lang._resource_declaration import (
     validate_extent,
 )
 from taichi_forge.lang.exception import TaichiCompilationError
-from taichi_forge.lang.matrix import Matrix, MatrixType, Vector
+from taichi_forge.lang.field import Field, ScalarField
+from taichi_forge.lang.matrix import Matrix, MatrixField, MatrixType, Vector
 from taichi_forge.lang.struct import StructType
 from taichi_forge.lang.util import cook_dtype
 from taichi_forge.types import primitive_types
@@ -859,14 +860,29 @@ def _capture_id(path):
     return path[0] if len(path) == 1 else "__record_" + "_".join(f"{len(part)}_{part}" for part in path)
 
 
-def _dense_group(component, owner, group, *, extent_values=None, projections=None):
+def _dense_field_placement(field, placements):
+    # Native expression identity preserves lane order and aliases, including a
+    # wrapper whose list of field members was rebound between captures.
+    expressions = tuple(member.ptr for member in field._get_field_members())
+    previous = placements.get(expressions)
+    if previous is not None and previous[0].live:
+        return previous
+    nodes = tuple(expr.snode() for expr in expressions)
+    lifetime = impl.get_runtime().field_layout_lifetime(field)
+    placement = lifetime, field.dtype, field.shape, nodes, tuple(node.id for node in nodes)
+    # A manually assembled matrix may span trees. Let the topology check
+    # handle it without caching a placement under another tree's lifetime.
+    if len(nodes) == 1 or len({node.get_snode_tree_id() for node in nodes}) == 1:
+        placements[expressions] = placement
+    return placement
+
+
+def _dense_group(component, owner, group, *, extent_values=None, projections=None, placements=None):
     """Project a real SNode group, using declared provenance for every axis.
 
     No byte layout is computed here. The native schema retains placements and
     calls the original SNode constructors/StructCompiler on instantiation.
     """
-    from taichi_forge.lang.field import Field
-
     members = {}
     bindings = []
     dimensions = {}
@@ -897,14 +913,19 @@ def _dense_group(component, owner, group, *, extent_values=None, projections=Non
         if isinstance(declaration, _ModelTensorField):
             element_shape = tuple(resolve_extent(extent) for extent in declaration.element_shape)
         actual_element = ((field.n,) if field.ndim == 1 else (field.n, field.m)) if hasattr(field, "n") else ()
-        if field.dtype != scalar_dtype or actual_element != element_shape:
+        if placements is not None and type(field) in (ScalarField, MatrixField):
+            lifetime, dtype, shape, nodes, key = _dense_field_placement(field, placements)
+        else:
+            lifetime = None
+            dtype, shape = field.dtype, field.shape
+            nodes = tuple(var.ptr.snode() for var in field._get_field_members())
+            key = tuple(node.id for node in nodes)
+        if dtype != scalar_dtype or actual_element != element_shape:
             raise TaichiCompilationError(f"Dense resource {name!r} element type differs from its declaration")
         expected_shape = [resolve_extent(extent) for extent in declaration.shape]
-        if tuple(field.shape) != tuple(expected_shape):
+        if tuple(shape) != tuple(expected_shape):
             raise TaichiCompilationError(f"Dense resource {name!r} shape differs from its declared extent relation")
-        nodes = tuple(var.ptr.snode() for var in field._get_field_members())
         members[name] = nodes
-        key = tuple(node.id for node in nodes)
         if projections is not None:
             bindings.append((name, declaration.shape, key))
         role = declaration.element_shape if isinstance(declaration, _ModelTensorField) else element_shape
@@ -931,7 +952,7 @@ def _dense_group(component, owner, group, *, extent_values=None, projections=Non
         # Current Field types, shapes and dimension values were checked above.
         tensor_key = tuple((ids, shape, names, tensor_layouts[ids])
                            for ids, (_, shape, names) in tensors.items())
-        cache_key = (impl.get_runtime().field_layout_lifetime(field), tuple(bindings), tensor_key)
+        cache_key = (lifetime or impl.get_runtime().field_layout_lifetime(field), tuple(bindings), tensor_key)
         cached = projections.get(cache_key)
         if cached is not None:
             recipe, paths, root_id = cached
@@ -1038,6 +1059,7 @@ class _DenseLayoutValidation:
     def __init__(self, component, owner, *, compilation=None):
         self.component, self.owner = component, owner
         self.projections = compilation.dense_projections if compilation is not None else None
+        self.placements = compilation.dense_placements if compilation is not None else None
         self.groups = {}
         self.extents = {}
         self.dimension_values = {}
@@ -1066,7 +1088,7 @@ class _DenseLayoutValidation:
     def dense(self, group):
         if group not in self.groups:
             projection = _dense_group(self.component, self.owner, group, extent_values=self.dimension_values,
-                                      projections=self.projections)
+                                      projections=self.projections, placements=self.placements)
             self.extents[group] = {name: self.dimension_values[name] for name in projection[2]}
             self.groups[group] = projection
         return self.groups[group]
