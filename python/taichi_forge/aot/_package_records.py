@@ -75,11 +75,11 @@ def dimension_relations(environment, names):
         relations[name] = dict(
             path=list(environment._paths[name]), kind=declaration.kind, expression=declaration.expression
         )
-        for child in extent_dependencies(declaration.expression) if declaration.expression else ():
+        for child in sorted(extent_dependencies(declaration.expression)) if declaration.expression else ():
             visit(child)
 
     try:
-        for name in names:
+        for name in sorted(names):
             visit(name)
         return relations
     finally:

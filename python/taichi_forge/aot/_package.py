@@ -3163,7 +3163,7 @@ def _export_package(output, declarations, source_root, caps, artifact_format, co
                     },
                     **({"record_presence": sorted(presence)} if presence else {}),
                     **(
-                        {"paths": {key: list(family_paths[key]) for key in used}}
+                        {"paths": {key: list(family_paths[key]) for key in sorted(used)}}
                         if any(len(family_paths[key]) > 1 for key in used)
                         else {}
                     ),
@@ -3173,9 +3173,9 @@ def _export_package(output, declarations, source_root, caps, artifact_format, co
                     for key in sorted(used)
                     if family_schema[key].get("conditions")
                 }
-                for key in used:
+                for key in sorted(used):
                     path = family_paths[key]
-                    for parent in presence:
+                    for parent in sorted(presence):
                         prefix = family_paths[parent]
                         if len(prefix) < len(path) and path[: len(prefix)] == prefix:
                             conditions.setdefault(key, {})[parent] = True

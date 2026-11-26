@@ -156,7 +156,9 @@ def compile_static_variants(environment, entry, arguments, owner, schema, *, tem
             reads = {aliases.get(name, name) for name in code.static}
             reads.update(name for name in code.objects if name in records)
             selected = synchronize({**initial, **{name: selection[name] for name in reads}})
-            for name in reads:
+            # This order determines the family table and its public symbol.
+            # Make discovery independent of the worker's Python hash seed.
+            for name in sorted(reads):
                 for value in domains.get(name, (True, False)):
                     if static_key(value) != keys[name]:
                         candidate = synchronize({**selected, name: value})
