@@ -15,6 +15,7 @@
 #include "taichi/program/kernel.h"
 #include "taichi/transforms/cpu_workgroup.h"
 #include "taichi/transforms/make_external_shared_staged.h"
+#include "taichi/transforms/parallelize_dense_grid.h"
 #include "taichi/util/lang_util.h"
 
 // Keep the private M0 recipe in one reviewable unit while compiling it from
@@ -801,6 +802,19 @@ void compile_to_offloads(IRNode *ir,
     TI_COMPILE_PROFILER("cpp.ir.external_ptr_boundary");
     return irpass::handle_external_ptr_boundary(ir, config);
   }();
+  if (config.arch == Arch::cuda && config.opt_level > 0 && !config.debug &&
+      !task_launch_policy.active) {
+    auto *root = ir->as<Block>();
+    // Walk backwards: flattening inserts constant bounds before the loop.
+    for (int i = int(root->size()) - 1; i >= 0; --i) {
+      if (auto *loop = (*root)[i]->cast<RangeForStmt>()) {
+        if (dense_grid::parallelize(loop)) {
+          dirty_since_simplify_i = true;
+          print("Parallelized dense grid");
+        }
+      }
+    }
+  }
   print("External ptr boundary processed");
 
   if (is_extension_supported(config.arch, Extension::mesh)) {

@@ -7,6 +7,9 @@
   CACHE_FIELD(cfg_optimization);
   CACHE_FIELD(check_out_of_bound);
   CACHE_FIELD(opt_level);
+  if (config.arch == Arch::cuda && config.opt_level > 0 && !config.debug) {
+    CACHE_VALUE(std::string("cuda-independent-dense-grid-v1"));
+  }
   CACHE_FIELD(external_optimization_level);
   CACHE_FIELD(llvm_opt_level);
   CACHE_FIELD(llvm_aot_relocatable_roots);
