@@ -371,7 +371,8 @@ def project_nested_query_records(environment, schema, uses, *, query_paths=None)
     from dataclasses import replace
     from taichi_forge.types import primitive_types
     from ._component import (Array, DenseField, Dimension, _ConditionalDenseField, _ConditionalRecord,
-                             _ConditionalDimension, _InputPresence, _InputRecord, _OptionalArray, _OwnerReference)
+                             _ConditionalDimension, _InputPresence, _InputRecord, _LayoutArray, _OptionalArray,
+                             _OwnerReference)
 
     paths = environment._paths
     inputs = [paths[key] for key, item in schema.items() if item['kind'] == 'owner_input']
@@ -520,8 +521,11 @@ def project_nested_query_records(environment, schema, uses, *, query_paths=None)
                                                        tuple((flag, True) for flag in guards))
         elif isinstance(declarations[key], Array):
             value = declarations[key]
-            declarations[key] = (replace(value, conditions=()) if isinstance(value, _OptionalArray)
-                                 else Array(value.dtype, value.ndim, value.shape, value.resource_id))
+            records_required = tuple(dict.fromkeys((*guards, item['input_record'])))
+            declarations[key] = (replace(value, conditions=(), input_records=records_required)
+                                 if isinstance(value, _OptionalArray) else
+                                 _LayoutArray(value.dtype, value.ndim, value.shape, value.resource_id,
+                                              input_records=records_required))
     environment._set_declarations(declarations)
 
 

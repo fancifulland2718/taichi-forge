@@ -13,7 +13,7 @@ import json
 import operator
 import sys
 from contextvars import ContextVar
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 from math import prod
 from types import BuiltinMethodType, CodeType, GetSetDescriptorType, MappingProxyType, MemberDescriptorType, ModuleType, SimpleNamespace
 from typing import Final, get_origin
@@ -319,9 +319,15 @@ class _InputPresence(RuntimeValue):
 
 @dataclass(frozen=True)
 class _LayoutArray(Array):
-    """Array whose element type or rank depends on static layout facts."""
+    """Array with static layout conditions or binding-time presence requirements."""
 
     conditions: tuple = ()
+    input_records: tuple = field(default=(), kw_only=True)
+
+    @property
+    def schema(self):
+        schema = super().schema
+        return (*schema, self.input_records) if self.input_records else schema
 
 
 @dataclass(frozen=True)
@@ -2566,6 +2572,11 @@ class _Capture:
                 return _OptionalArrayReference(path)
             if not _argument_binding:
                 self.input_requirements.setdefault(name, set()).add(tuple(self.input_guards))
+        if isinstance(declaration, _LayoutArray) and not _argument_binding:
+            # A borrowed array can depend on a sibling's presence without
+            # reading that predicate as a numerical kernel argument.
+            for record in declaration.input_records:
+                self.input_requirements.setdefault(record, set()).add(tuple(self.input_guards))
         # Allocation-conditioned declarations retain their existing static
         # layout contract. Typed optional inputs above use invocation presence.
         conditional_array = isinstance(declaration, _ConditionalArray) and (ctx is None or ctx.is_in_static_scope())

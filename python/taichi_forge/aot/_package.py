@@ -2859,15 +2859,24 @@ def _export_package(output, declarations, source_root, caps, artifact_format, co
                 }
                 if dynamic_presence:
                     manifest["version"] = max(63, manifest["version"])
+                requirements = contract.get("input_requirements", {})
+                record_names = code.used.keys() | requirements.keys()
+                # Admission also references predicates through resources and
+                # constraints; they need bindings even when absent from the ABI.
+                for key in (*code.dynamic, *(spec["when"] for spec in constraints.values())):
+                    item = compilation_schema.get(key, {})
+                    if item.get("input_record"):
+                        record_names.add(item["input_record"])
+                        record_names.update(item.get("input_conditions", ()))
                 input_records = {
                     key: dict(
                         path=list(environment._paths[key]),
-                        required_when=contract.get("input_requirements", {}).get(key, []),
+                        required_when=requirements.get(key, []),
                         **({"boolean": True} if item.get("dynamic_storage_condition") else {}),
                         **presence_conditions(item),
                     )
                     for key, item in resources.ports.items()
-                    if (item.get("dynamic_input_record") or item.get("dynamic_storage_condition")) and key in code.used
+                    if key in record_names and (item.get("dynamic_input_record") or item.get("dynamic_storage_condition"))
                 }
                 for key in input_records:
                     flag = compilation_schema[key]["input_presence_attribute"]
@@ -2882,7 +2891,7 @@ def _export_package(output, declarations, source_root, caps, artifact_format, co
 
                 guard_keys = {
                     key
-                    for paths in contract.get("input_requirements", {}).values()
+                    for paths in requirements.values()
                     for branch in paths
                     for expression, _ in branch
                     for key in extent_dependencies(expression)
@@ -2926,7 +2935,7 @@ def _export_package(output, declarations, source_root, caps, artifact_format, co
                             {dim for axis in item["shape_expressions"] for dim in extent_dependencies(axis)},
                         ),
                         **(
-                            {"required_when": contract.get("input_requirements", {}).get(key, [[]])}
+                            {"required_when": requirements.get(key, [[]])}
                             if item.get("optional_input")
                             else {}
                         ),
@@ -2955,7 +2964,6 @@ def _export_package(output, declarations, source_root, caps, artifact_format, co
                 }
                 if conditional_resources:
                     manifest["version"] = max(65, manifest["version"])
-                    requirements = contract.get("input_requirements", {})
                     for key, resource in conditional_resources.items():
                         member_reads = requirements.get(key, [[]])
                         if member_reads != requirements.get(resource["input_record"], [[]]):

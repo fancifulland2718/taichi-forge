@@ -810,6 +810,61 @@ class Model:
     assert 'SHARED_QUERY_SOURCE_FREE_OK' in result.stdout
 
 
+@test_utils.test(arch=ti.cpu, offline_cache=False)
+def test_package_conditional_borrow_keeps_unread_presence_predicate(tmp_path, monkeypatch):
+    source = '''
+import taichi_forge as ti
+@ti.data_oriented
+class Reader:
+    def __init__(self):
+        scope = ti.experimental.ResourceScope(self)
+        scope.result = scope.field(ti.f32, shape=())
+    @ti.kernel
+    def copy(self, model: ti.template()):
+        self.result[None] = model.borrowed[0]
+    @ti.kernel
+    def copy_present(self, model: ti.template()):
+        if ti.static(model.enabled):
+            self.result[None] = model.borrowed[0]
+    def read(self, model: "Model"):
+        self.copy(model)
+    def read_present(self, model: "Model"):
+        self.copy_present(model)
+@ti.data_oriented
+class Model:
+    def __init__(self, n: int, enabled: bool):
+        self.n = n
+        self.enabled = enabled
+        scope = ti.experimental.ResourceScope(self)
+        scope.static("enabled", choices=(False, True))
+        scope.values = scope.field(ti.f32, shape=scope.dim("n"))
+        if self.enabled:
+            scope.borrow("borrowed", self.values, source_scope=True, dtype=ti.f32, shape=scope.dim("n"))
+            scope.reader = Reader()
+    def read(self):
+        if self.enabled:
+            self.reader.read(self)
+'''
+    package = _source_package(tmp_path, monkeypatch, source)
+    output = tmp_path / "sdk"
+    ti.aot.export_package(package, output, arch=(ti.x64,), artifact_format="unified-bc-library")
+    ti.reset()
+    with Runtime("x64") as runtime, load_package(runtime, output) as code:
+        model = code.host.Model(3, True)
+        model.values.from_numpy(np.array([7, 5, 3], np.float32))
+        model.read()
+        assert model.reader.result[None] == 7
+        disabled = code.host.Model(2, False)
+        disabled.read()
+        model.reader.read_present(disabled)
+        assert model.reader.result[None] == 7
+        with pytest.raises(ValueError, match="presence is required"):
+            model.reader.read(disabled)
+        model.values[0] = 4
+        model.read()
+        assert model.reader.result[None] == 4
+
+
 @test_utils.test(arch=ti.cuda, offline_cache=False)
 def test_package_nested_external_query_preserves_parent_guard(tmp_path, monkeypatch):
     source = '''
@@ -18328,11 +18383,12 @@ class Model:
         )
     package = _source_package(tmp_path, monkeypatch, source)
     manifest = ti.aot.export_package(package, tmp_path / "sdk")
-    # Only the explicit algorithm option remains static; two record-presence
-    # axes share each implementation and required reads are checked at bind.
-    # Record-member guards retain the nullable scalar capture ABI in format 94.
-    assert manifest["version"] == (94 if guard == "record_value" else 64)
-    assert sorted(len(entry["variants"]) for entry in manifest["entry_families"].values()) == [2]
+    # The whole entry is shared. Binding selects the allowed "empty" value
+    # and checks record presence on the reached execution branch.
+    assert manifest["version"] == (94 if guard == "record_value" else 81)
+    step, = (entry for entry in manifest["entries"].values() if entry["definition"].endswith(".Model.step"))
+    empty, = (capture for capture in step["captures"] if capture["name"] == "empty")
+    assert {tuple(value) for value in empty["prepare_static"]} == {("bool", False), ("bool", True)}
     for name in tuple(sys.modules):
         if name == "definition_fixture" or name.startswith("definition_fixture."):
             monkeypatch.delitem(sys.modules, name)
