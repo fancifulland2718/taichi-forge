@@ -14851,9 +14851,24 @@ def test_package_execution_independent_roots_share_only_namespace(tmp_path, monk
         import namespace_fixture
 
         assert namespace_fixture.__path__ == []
+        assert session.module("namespace_fixture") is namespace_fixture
+        assert namespace_fixture.__all__ == ["renderer", "solver"]
+        assert {"renderer", "solver"} <= set(dir(namespace_fixture))
+        with pytest.raises(AttributeError):
+            _ = namespace_fixture.unknown
         assert session.runtime is None
         assert session._resolve("namespace_fixture.solver") == tmp_path / "solver"
         assert session._resolve("namespace_fixture.renderer") == tmp_path / "renderer"
+        # A normal attribute import exposes the public facade exactly once.
+        # These synthetic manifests have no device code to load.
+        from types import ModuleType
+        projected = ModuleType("private_fixture_solver")
+        projected.__file__ = "solver.py"
+        projected.answer = 42
+        session._modules["namespace_fixture.solver"] = projected
+        assert namespace_fixture.solver.answer == 42
+        assert importlib.import_module("namespace_fixture.solver") is namespace_fixture.solver
+        assert "namespace_fixture.renderer" not in sys.modules
         with pytest.raises(RuntimeError, match="already active"):
             with ExecutionSession(mode="aot", arch="cuda", package_paths=tmp_path):
                 pass
@@ -14861,6 +14876,7 @@ def test_package_execution_independent_roots_share_only_namespace(tmp_path, monk
             with ExecutionSession(mode="jit", arch="cuda"):
                 pass
     assert "namespace_fixture" not in sys.modules
+    assert "namespace_fixture.solver" not in sys.modules
 
 
 @pytest.mark.parametrize("configuration", ("keyword", "environment"))

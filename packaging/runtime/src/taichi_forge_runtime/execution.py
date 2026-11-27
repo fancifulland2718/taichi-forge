@@ -50,7 +50,23 @@ class _PackageImports(importlib.abc.MetaPathFinder, importlib.abc.Loader):
 
     def exec_module(self, module):
         name = module.__name__
-        projected = self.session._import_projection(name)
+        children = self.session._namespace_children.get(name)
+        if children:
+            # Independent SDKs can publish siblings without any single Host
+            # __init__ owning their shared parent. Resolve only exported paths.
+            def get_child(key):
+                if key not in children:
+                    raise AttributeError(f"module {name!r} has no attribute {key!r}")
+                if self.session._closed:
+                    raise RuntimeError("The AOT import session is closed")
+                return importlib.import_module(f"{name}.{key}")
+
+            module.__all__ = sorted(children)
+            module.__getattr__ = get_child
+            module.__dir__ = lambda: sorted(set(vars(module)).union(children))
+            self.modules[name] = module
+            return
+        projected = self.session.module(name)
         if projected is not None:
             # Functions/classes retain their private package globals and owner.
             # Never mutate the loaded projection's __name__/spec/import boundary.
@@ -173,6 +189,7 @@ class ExecutionSession:
         self._discovered_projection = None
         self._roots = set()
         self._module_names = set()
+        self._namespace_children = {}
         self._jit_dependencies = set()
         self._active = self._closed = False
 
@@ -339,6 +356,23 @@ class ExecutionSession:
                 self._discovered_projection = None
         self._index = tuple(index)
         self._jit_dependencies = jit_dependencies - package_owned
+        # Index only parents of public roots, once during discovery. A real
+        # module under an exported root keeps its own Host namespace.
+        parents = {}
+        local = [item for item in index if item[1] == self.arch]
+        for directory, _, roots, _, _ in local:
+            for root in roots:
+                parent, _, child = root.rpartition(".")
+                while parent:
+                    parents.setdefault(parent, {}).setdefault(directory, set()).add(child)
+                    parent, _, child = parent.rpartition(".")
+        for name, by_package in parents.items():
+            matches = [item for item in local if name in item[3]]
+            if matches and (len(by_package) == 1 or any(
+                name == root or name.startswith(root + ".") for item in matches for root in item[2]
+            )):
+                continue
+            self._namespace_children[name] = frozenset().union(*by_package.values())
 
     def _is_package(self, name):
         return any(name in item[4] or any(m.startswith(name + ".") for m in item[3]) for item in self._index)
@@ -354,19 +388,6 @@ class ExecutionSession:
                 if value.__name__.startswith(prefix):
                     return value.__name__[len(prefix) :]
         return None
-
-    def _import_projection(self, name):
-        matches = [item for item in self._index if name in item[3] and item[1] == self.arch]
-        # Shared ancestor namespaces can contain independent library roots.
-        # Do not pick one library's __init__ as authority for the others.
-        prefix = name + "."
-        descendants = [item for item in self._index
-                       if item[1] == self.arch and any(root.startswith(prefix) for root in item[2])]
-        if len(descendants) > 1 and not any(name in item[2] for item in matches):
-            return None
-        if not matches and descendants:
-            return None
-        return self.module(name)
 
     def _resolve(self, name):
         if self._index is None:
@@ -395,6 +416,8 @@ class ExecutionSession:
         """Return the normal module interface, with numerical code selected by mode."""
         if not isinstance(name, str) or not name or not all(part.isidentifier() for part in name.split(".")):
             raise ValueError("Expected an absolute Python module name")
+        if self._active and not self._closed and name in self._namespace_children:
+            return importlib.import_module(name)
         with self._lock:
             if not self._active or self._closed:
                 raise RuntimeError("Enter an active execution session before resolving modules")
