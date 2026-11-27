@@ -243,7 +243,7 @@ def _namespace_inputs(modules):
             for name, module in modules.items()}
 
 
-def _producer_inputs(previous, current):
+def _producer_inputs(previous, current, *, unified):
     import taichi_forge
     import taichi_forge_runtime
     from taichi_forge._lib import core, utils
@@ -251,8 +251,15 @@ def _producer_inputs(previous, current):
     result = {}
     for module in (taichi_forge, taichi_forge_runtime):
         root = Path(module.__file__).resolve().parent
-        result[module.__name__] = value_digest({path.relative_to(root).as_posix(): unchanged_file_digest(path, previous, current)
-                                               for path in sorted(root.rglob("*.py"))})
+        files = {}
+        for path in root.rglob("*.py"):
+            name = path.relative_to(root).as_posix()
+            # Unified production emits a bind_module import into projected Host
+            # code. These two binding implementations execute only on consumption.
+            if unified and module is taichi_forge_runtime and name in {"aot/_package.py", "aot/_package_closures.py"}:
+                continue
+            files[name] = unchanged_file_digest(path, previous, current)
+        result[module.__name__] = value_digest(files)
     native = getattr(utils, "_loaded_native_runtime_path", None)
     if not native:
         # Some checkout launchers preload the same explicit split runtime.
@@ -337,7 +344,10 @@ class PackageBuildCache:
                 self.objects_enabled = False
 
     def _compiler_inputs(self):
-        producer = _producer_inputs(self.previous.get("toolchain_files", {}), self.toolchain_files)
+        producer = _producer_inputs(
+            self.previous.get("toolchain_files", {}), self.toolchain_files,
+            unified=self.build_settings["artifact_format"] == "unified-bc-library",
+        )
         context = dict(producer=producer, **self.build_settings)
         self.object_context = value_digest(context)
         return context

@@ -607,6 +607,32 @@ def both(image: ti.types.rw_texture(2, fmt=ti.Format.rgba32f)) -> ti.i32:
     assert cache._annotation(ti.types.acceleration_structure()) == cache._annotation(annotations[0])
 
 
+def test_unified_producer_identity_tracks_shared_runtime_code(tmp_path, monkeypatch):
+    import taichi_forge_runtime
+    from taichi_forge.aot._package_build_cache import _producer_inputs
+
+    runtime = tmp_path / "runtime"
+    (runtime / "aot").mkdir(parents=True)
+    monkeypatch.setattr(taichi_forge_runtime, "__file__", str(runtime / "__init__.py"))
+    bindings = [runtime / "aot" / name for name in ("_package.py", "_package_closures.py")]
+    encoder = runtime / "aot" / "_package_manifest.py"
+    for source in [*bindings, encoder]:
+        source.write_text("# original\n")
+    memo = {}
+
+    def identity(unified):
+        return _producer_inputs(memo, memo, unified=unified)["taichi_forge_runtime"]
+
+    before = identity(True)
+    dedicated = identity(False)
+    for source in bindings:
+        source.write_text("# updated consumer binding\n")
+    assert identity(True) == before
+    assert identity(False) != dedicated
+    encoder.write_text("# updated shared encoder\n")
+    assert identity(True) != before
+
+
 def test_build_cache_toolchain_digest_reuses_only_unchanged_files(tmp_path, monkeypatch):
     from taichi_forge.lang import _build_cache
 
