@@ -645,6 +645,7 @@ def discover(sources, imported, *, preparation_receivers=None, preparation_guard
                 input_families[identity, name] = tuple(class_contexts[kinds[0]])
 
     pending = deque()
+    host_array_inputs = {}
     annotation_namespaces = {}
     module_nodes = {module: tree for module, _, _, _, tree, _, _, _ in sources}
     def annotation_fact(annotation, function, identity, name, parameter):
@@ -713,6 +714,8 @@ def discover(sources, imported, *, preparation_receivers=None, preparation_guard
                             fact = annotation_fact(parameter.annotation, function, identity, name, parameter.arg)
                             if fact is not None:
                                 inputs[parameter.arg] = fact
+                                if isinstance(fact, _FieldABI):
+                                    host_array_inputs.setdefault(function, {})[parameter.arg] = fact
                         if preparation_receivers is None:
                             for parameter in parameters[1:]:
                                 inputs.setdefault(parameter, _UnboundInput((identity, name, parameter)))
@@ -1394,12 +1397,22 @@ def discover(sources, imported, *, preparation_receivers=None, preparation_guard
                             except IndexError:
                                 return None
                     if isinstance(expression, ast.Dict):
-                        if all(isinstance(key, ast.Constant) and isinstance(key.value, str) for key in expression.keys):
-                            names = [key.value for key in expression.keys]
-                            if len(names) == len(set(names)):
-                                return _Mapping(
-                                    tuple((key.value, child(item)) for key, item in zip(expression.keys, expression.values))
-                                )
+                        entries = {}
+                        for key, item in zip(expression.keys, expression.values):
+                            if key is None:
+                                expanded = child(item)
+                                if not isinstance(expanded, _Mapping):
+                                    return None
+                                pairs = expanded.items
+                            elif isinstance(key, ast.Constant) and isinstance(key.value, str):
+                                pairs = ((key.value, child(item)),)
+                            else:
+                                return None
+                            for name, fact in pairs:
+                                if name in entries:
+                                    return None
+                                entries[name] = fact
+                        return _Mapping(tuple(entries.items()))
                     if isinstance(expression, ast.DictComp) and len(expression.generators) == 1:
                         generator = expression.generators[0]
                         sequence = child(generator.iter)
@@ -1711,7 +1724,7 @@ def discover(sources, imported, *, preparation_receivers=None, preparation_guard
                         if isinstance(right, _Literal) and right.value is None:
                             if isinstance(left, _Literal):
                                 absent = left.value is None
-                            elif isinstance(left, (_Owner, _Graph, _Host, _Kernel, _Record, _FieldABI)) or isinstance(left, _Resource) and not left.optional:
+                            elif isinstance(left, (_Owner, _Graph, _Host, _Kernel, _Record, _Mapping, _FieldABI)) or isinstance(left, _Resource) and not left.optional:
                                 absent = False
                             else:
                                 return None
@@ -1966,6 +1979,12 @@ def discover(sources, imported, *, preparation_receivers=None, preparation_guard
                             for key, item in bound.arguments.items()
                             if item is not None
                         }
+                        # A Host selector can supply a live array without exposing
+                        # its allocation to the producer. Use only the declared
+                        # port ABI here. Concrete resources retain their provenance.
+                        for name, abi in host_array_inputs.get(callee, {}).items():
+                            if name in bound.arguments and bound.arguments[name] is None:
+                                inputs[name] = abi
                         # Host recipes retain choices until the selected operation is
                         # used. Expanding every element of a forwarded sequence here
                         # creates a Cartesian product of unrelated stages. Actual

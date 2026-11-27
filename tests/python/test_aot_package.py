@@ -30339,6 +30339,9 @@ def test_package_public_typed_host_inputs_use_existing_array_ports(tmp_path, mon
     def external(self, source: 'Model | Alternate', field: Input, gain):
         combine(self, source, field, gain)
 
+    def external_selected(self, source: 'Model | Alternate', fields, index, gain):
+        self.external(source, fields[index], gain)
+
 class Alternate(Model):
     pass
 '''
@@ -30373,12 +30376,12 @@ class Alternate(Model):
             output.external(source_model, field, 2)
             np.testing.assert_array_equal(output.values.to_numpy(), expected)
         field.write(np.full(4, 9, dtype=np.float32))
-        output.external(source_model, field, 2)
+        output.external_selected(source_model, [field], 0, 2)
         np.testing.assert_array_equal(output.values.to_numpy(), np.full(7, 19))
         with pytest.raises(ValueError, match='compatible definition|input'):
             output.external(source_model, runtime.ndarray('f32', (2, 2)), 2)
         with pytest.raises(ValueError, match='compatible definition|input'):
-            output.external(source_model, runtime.ndarray('i32', (4,)), 2)
+            output.external_selected(source_model, [runtime.ndarray('i32', (4,))], 0, 2)
 
 
 @test_utils.test(arch=[ti.cpu, ti.cuda], offline_cache=False)
@@ -30958,10 +30961,12 @@ def test_package_public_typed_graph_receiver(tmp_path, monkeypatch, change):
             np.testing.assert_array_equal(loaded.values.to_numpy(), gain * (np.arange(n) + n))
 
 
-@pytest.mark.parametrize("mapping", ["direct", "filtered"])
+@pytest.mark.parametrize("mapping", ["direct", "filtered", "unpacked"])
 @test_utils.test(arch=[ti.cpu, ti.cuda], offline_cache=False)
 def test_package_graph_only_free_receiver_is_discovered_without_recording(tmp_path, monkeypatch, mapping):
     source = FREE_GRAPH_RECEIVER_SOURCE
+    if mapping == "unpacked":
+        source = source.replace("template_args=inputs)", "template_args={**inputs})")
     if mapping == "filtered":
         source = source.replace(
             "def forward(builder, kernel, inputs, *arguments):\n    builder.dispatch(kernel, *arguments, template_args=inputs)",
