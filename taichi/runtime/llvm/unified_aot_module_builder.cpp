@@ -326,13 +326,23 @@ class UnifiedAotModuleBuilder final : public AotModuleBuilder {
         config_, caps_, kernel->get_compile_tier_override(),
         CompilePurpose::aot, compile_options_);
     const auto &cc = request.config();
-    auto signature = print(JsonValue(JsonObject{
+    JsonObject description{
         {"arguments", serialize(kernel->parameter_list)},
         {"nested", serialize(nested)}, {"returns", serialize(kernel->rets)},
         {"fast_math", serialize(cc.fast_math)}, {"debug", serialize(cc.debug)},
         {"advanced_optimization", serialize(cc.advanced_optimization)},
         {"llvm_opt_level", serialize(cc.llvm_opt_level)},
-        {"external_optimization_level", serialize(cc.external_optimization_level)}}));
+        {"external_optimization_level", serialize(cc.external_optimization_level)}};
+    // Python's implicit fast tier is an edit/run budget. Standalone prepare
+    // keeps its deployment default unless the producer requested a tier.
+    const bool inherit_tier =
+        cc.option_source(CompileOption::compile_tier) != CompileOptionSource::frontend_default;
+    if (inherit_tier)
+      description.inner.emplace("compile_tier", serialize(cc.compile_tier));
+    if (inherit_tier || cc.option_source(CompileOption::full_simplify_global_iter_cap) !=
+                            CompileOptionSource::unspecified)
+      description.inner.emplace("full_simplify_global_iter_cap", serialize(cc.full_simplify_global_iter_cap));
+    auto signature = print(JsonValue(std::move(description)));
     auto signature_hash = aot_artifact_sha256(signature);
     signatures_.try_emplace(signature_hash, std::move(signature));
     entry_signatures_.emplace(name, std::move(signature_hash));
@@ -349,9 +359,8 @@ class UnifiedAotModuleBuilder final : public AotModuleBuilder {
       }
       entry_trees_.emplace(name, trees);
     }
-    // The default Python fast tier limits target compilation at prepare.
     // Compacting a private, target-neutral archive unit is independent of
-    // that budget. Honor explicit optimization settings in either phase.
+    // the default Python edit/run budget. Honor explicit optimization settings.
     const bool frontend_fast_default =
         cc.option_source(CompileOption::compile_tier) == CompileOptionSource::frontend_default &&
         cc.option_source(CompileOption::advanced_optimization) == CompileOptionSource::derived;

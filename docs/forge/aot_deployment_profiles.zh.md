@@ -119,3 +119,6 @@ renderer 组合或其他部署设备均已通过。
 
 格式选择不修改全局 JIT 默认。如果同时调整 `compile_options`，需在目标后端
 独立验证这项变化；省略的导出选项沿用现有 Program/kernel 设置。
+对于 `unified-bc-library`，独立 Runtime 在 prepare 时默认使用 `balanced` 档位。
+在 `ti.init`、Kernel 或导出时显式指定档位可以覆盖该默认值。包按入口保存解析后的
+档位和简化迭代预算，包括显式指定只迭代一次的情况。

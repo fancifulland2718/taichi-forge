@@ -10,6 +10,54 @@ import taichi_forge as ti
 from tests import test_utils
 
 
+@test_utils.test(arch=ti.vulkan, offline_cache=False)
+def test_unified_preserves_per_kernel_prepare_budget(tmp_path):
+    from array import array
+    from contextlib import closing
+    from taichi_forge_runtime.aot import Runtime, Scalar
+
+    @ti.kernel(opt_level="fast")
+    def fast(data: ti.types.ndarray(ti.i32, 1), n: ti.i32):
+        for i in range(n):
+            data[i] = 2 * i
+
+    @ti.kernel(opt_level="full")
+    def full(data: ti.types.ndarray(ti.i32, 1), n: ti.i32):
+        for i in range(n):
+            data[i] += 1
+
+    @ti.kernel
+    def default(data: ti.types.ndarray(ti.i32, 1), n: ti.i32):
+        for i in range(n):
+            data[i] += 2
+
+    package = ti.aot.Module(artifact_format="unified-bc-library",
+                            compile_options={"full_simplify_global_iter_cap": 1})
+    package.add_kernel(fast)
+    package.add_kernel(full)
+    package.add_kernel(default)
+    path = tmp_path / "budgets.tcm"
+    package.archive(str(path))
+    with zipfile.ZipFile(path) as archive:
+        budgets = {}
+        for entry in json.loads(archive.read("unified_abi.json")):
+            signature = json.loads(archive.read(f'signatures/{entry["value"]}.json'))
+            budgets[entry["key"]] = (signature.get("compile_tier"), signature["full_simplify_global_iter_cap"])
+        assert budgets == {"fast": ("fast", 1), "full": ("full", 1), "default": (None, 1)}
+    ti.reset()
+    with Runtime("vulkan") as runtime, runtime.load_module(path) as library, closing(runtime.ndarray("i32", (4,))) as output:
+        for name in ("fast", "full", "default"):
+            with ti.compile_profile() as profile:
+                bound = library.kernel(name).bind(output, Scalar("i32", 4))
+                with bound.prepare(specialize=True, constant_args=(1,)) as prepared:
+                    prepared.submit().wait()
+            trace = tmp_path / f"{name}.json"
+            assert profile.dump_chrome_trace(trace)
+            stages = {event["name"] for event in json.loads(trace.read_bytes())}
+            assert ("cpp.compile.spirv.optimize_task" in stages) == (name != "fast")
+        assert array("i", output.read()).tolist() == [3, 5, 7, 9]
+
+
 @test_utils.test(arch=[ti.cpu, ti.cuda, ti.vulkan], offline_cache=False)
 def test_unified_native_sparse_iteration_and_instance_isolation(tmp_path):
     from array import array

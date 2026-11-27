@@ -623,6 +623,15 @@ class UnifiedModule final : public aot::Module {
     cfg.advanced_optimization = bool(options["advanced_optimization"]);
     cfg.llvm_opt_level = int(options["llvm_opt_level"]);
     cfg.external_optimization_level = int(options["external_optimization_level"]);
+    // Older signatures precede per-entry target compilation budgets.
+    if (options.obj.inner.count("compile_tier"))
+      cfg.compile_tier = string_value(options["compile_tier"]);
+    if (options.obj.inner.count("full_simplify_global_iter_cap")) {
+      cfg.full_simplify_global_iter_cap = int(options["full_simplify_global_iter_cap"]);
+      // Produce already resolved the cap. A full-tier cap of one can be explicit.
+      cfg.set_option_source(CompileOption::full_simplify_global_iter_cap,
+                            CompileOptionSource::export_override);
+    }
     const auto &caps = runtime_.get().get_caps();
     bool needs_bound_device = false;
     const bool unbound = facts.empty() && layout.empty();

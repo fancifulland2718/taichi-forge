@@ -148,3 +148,7 @@ all solver/material/renderer combinations or other deployment devices.
 Format selection does not change global JIT defaults. If you also tune
 `compile_options`, qualify that change independently on the intended backend;
 omitted export options inherit the existing Program/kernel settings.
+For `unified-bc-library`, standalone prepare uses the `balanced` compilation
+tier by default. An explicit tier from `ti.init`, the kernel or the export
+overrides that default. The package records the resolved tier and simplification
+budget per entry, including an explicit iteration cap of one.
