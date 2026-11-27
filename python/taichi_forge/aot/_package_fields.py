@@ -557,21 +557,25 @@ def construct_fields(
                 if item.get("struct_field")
                 else field_declaration(dtype, item["element"])
             )
-        owner._forge_package_field_trees = [tree for _, tree in reused.values()]
+        new_trees = {}
         for group, builder in builders.items():
             tree = builder._finalize_for_aot()
             # Record each successful allocation immediately, including a prefix
             # whose later group or owner construction fails.
             field_trees.append(tree)
-            if group in storage:
-                from ._package_native_storage import register_tree
+            new_trees[group] = tree
+        # Registering sparse clear and transfer kernels materializes the program.
+        # Every sibling builder must already have finalized its placements.
+        for group, construction in storage.items():
+            from ._package_native_storage import register_tree
 
-                item = next(item for item in fields.values() if item.get("group") == group)
-                register_tree(module, builder, item["storage_nodes"], storage[group], witness_scope, group,
-                              item.get("storage_guards", {}), values[group])
-            owner._forge_package_field_trees.append(tree)
-            if witnesses is not None:
-                witnesses[keys[group]] = values[group], tree
+            item = next(item for item in fields.values() if item.get("group") == group)
+            register_tree(module, builders[group], item["storage_nodes"], construction, witness_scope,
+                          group, item.get("storage_guards", {}), values[group])
+        owner._forge_package_field_trees = [tree for _, tree in reused.values()]
+        owner._forge_package_field_trees.extend(new_trees.values())
+        if witnesses is not None:
+            witnesses.update((keys[group], (values[group], tree)) for group, tree in new_trees.items())
         return declarations
     finally:
         _declaration_traceback.reset(traceback_token)

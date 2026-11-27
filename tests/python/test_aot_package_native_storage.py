@@ -31,11 +31,13 @@ class Model:
                                         shape=shape, placement=self.cells)
         if self.diagnostics:
             scope.extra = scope.field(ti.f32, shape=shape, placement=self.cells)
+        scope.last_value = scope.field(ti.f32, shape=(), initialization="zero")
 
     @ti.kernel
     def write(self, i: ti.i32, j: ti.i32, value: ti.f32):
         self.grid[i, j].mass += value
         self.grid[i, j].vel = ti.Vector([value, -value])
+        self.last_value[None] = value
 
     @ti.kernel
     def report(self, i: ti.i32, j: ti.i32, value: ti.f32):
@@ -90,6 +92,7 @@ def test_pointer_bitmasked_groups_preserve_optional_placement_and_field_io(tmp_p
             i, j = rows * width - 1, cols * width - 1
             obj.write(i=i, j=j, value=8.)
             obj.report(i, j, 2.)
+            assert obj.last_value[None] == 8.
             np.testing.assert_array_equal(obj.grid.mass.to_numpy(), expected[0])
             np.testing.assert_array_equal(obj.grid.vel.to_numpy(), expected[1])
             assert obj.sum_active() == expected[2] == (10 if enabled else 8)
