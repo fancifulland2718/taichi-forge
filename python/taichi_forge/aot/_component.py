@@ -50,6 +50,7 @@ class _DefinitionMissingResource(ValueError):
 
     def __init__(self, name, capture, *, materialized=True):
         super().__init__(f"Numerical entry requires resource {name!r}")
+        self.name = name
         self.static = dict(capture.static)
         self.objects = dict(capture.objects)
         self.materialized = materialized

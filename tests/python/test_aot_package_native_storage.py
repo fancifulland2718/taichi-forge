@@ -45,6 +45,10 @@ class Model:
             self.extra[i, j] = value
 
     @ti.kernel
+    def read_extra(self, i: ti.i32, j: ti.i32) -> ti.f32:
+        return self.extra[i, j]
+
+    @ti.kernel
     def sum_active(self) -> ti.f32:
         total = 0.0
         for i, j in self.grid.mass:
@@ -93,6 +97,11 @@ def test_pointer_bitmasked_groups_preserve_optional_placement_and_field_io(tmp_p
             obj.write(i=i, j=j, value=8.)
             obj.report(i, j, 2.)
             assert obj.last_value[None] == 8.
+            if enabled:
+                assert obj.read_extra(i, j) == 2.
+            else:
+                with pytest.raises(ValueError):
+                    obj.read_extra(i, j)
             np.testing.assert_array_equal(obj.grid.mass.to_numpy(), expected[0])
             np.testing.assert_array_equal(obj.grid.vel.to_numpy(), expected[1])
             assert obj.sum_active() == expected[2] == (10 if enabled else 8)

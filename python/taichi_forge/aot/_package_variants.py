@@ -159,7 +159,15 @@ def compile_static_variants(environment, entry, arguments, owner, schema, *, tem
                     # A layout fixed by the outer explorer may be inadmissible
                     # while another layout provides this required resource.
                     # Keep dependency facts only, never traceback/compiler state.
-                    rejected.append(dict(missing.static))
+                    guards = dict(missing.static)
+                    # A missing sparse field has no placement to capture. Its
+                    # allocation condition still identifies a reachable layout.
+                    resource = schema.get(missing.name, {})
+                    layout = resource.get("storage_guards", {})
+                    for flag, expected in resource.get("conditions", {}).items():
+                        if flag in layout and layout[flag] is not expected:
+                            guards[flag] = static_key(layout[flag])
+                    rejected.append(guards)
             else:
                 export_capture(code)
                 codes.append(code)
