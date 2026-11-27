@@ -127,6 +127,43 @@ def test_unified_native_sparse_iteration_and_instance_isolation(tmp_path):
             assert active(second) == [1, 140]
 
 
+@test_utils.test(arch=ti.cpu, offline_cache=False)
+def test_unified_cpu_reuses_varying_dispatch_extents(tmp_path):
+    from array import array
+    from contextlib import closing
+
+    @ti.kernel
+    def dispatch_only(data: ti.types.ndarray(ti.i32, 1)):
+        for i in range(data.shape[0]):
+            data[i] = i + 1
+
+    @ti.kernel
+    def also_used_in_body(data: ti.types.ndarray(ti.i32, 1)):
+        for i in range(data.shape[0]):
+            data[i] = i + data.shape[0]
+
+    producer = ti.aot.Module(artifact_format="unified-bc-library")
+    producer.add_kernel(dispatch_only)
+    producer.add_kernel(also_used_in_body)
+    path = tmp_path / "dispatch.tcm"
+    producer.archive(str(path))
+
+    with ti.aot.borrow_runtime() as runtime, runtime.load_module(path) as module:
+        for name in ("dispatch_only", "also_used_in_body"):
+            kernel = module.kernel(name)
+            for size in (4, 11, 23, 4):
+                with closing(runtime.ndarray("i32", (size,))) as data:
+                    bound = kernel.bind(data)
+                    with ti.compile_profile() as profile, bound.prepare(specialize=True) as call:
+                        call.submit().wait()
+                    offset = 1 if name == "dispatch_only" else size
+                    assert array("i", data.read()).tolist() == [i + offset for i in range(size)]
+                    if size == 23:
+                        materialized = any("cpp.unified.prepare.compile" in row["path"]
+                                           for row in profile.records(include_python=False))
+                        assert materialized == (name == "also_used_in_body")
+
+
 @test_utils.test(arch=ti.vulkan, offline_cache=False)
 def test_unified_vulkan_reuses_specialization_in_new_process(tmp_path, monkeypatch):
     import pytest

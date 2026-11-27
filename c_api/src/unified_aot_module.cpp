@@ -1,5 +1,6 @@
 #include "unified_aot_module.h"
 
+#include <optional>
 #include <set>
 
 #include "taichi_core_impl.h"
@@ -8,6 +9,7 @@
 #include "taichi/codegen/llvm/unified_kernel_reader.h"
 #include "taichi/ir/analysis.h"
 #include "taichi/ir/statements.h"
+#include "taichi/ir/stmt_use_index.h"
 #include "taichi/program/kernel.h"
 #include "taichi/program/program.h"
 #include "taichi/runtime/llvm/aot_artifact_integrity.h"
@@ -209,6 +211,29 @@ class SelectedDirectory final : public VirtualDir {
 
 using Facts = std::map<std::vector<int>, int>;
 using LayoutWords = std::map<uint32_t, uint32_t>;
+
+// Only an outer parallel loop with a single use of the descriptor extent can
+// share code across work counts. Other uses (inner loops, indexing, device
+// configuration or control flow) still participate in specialization.
+std::set<Stmt *> cpu_dispatch_extents(Block *root) {
+  std::set<Stmt *> extents;
+  StmtUseIndex uses;
+  for (const auto &stmt : root->statements) {
+    auto *loop = stmt->cast<RangeForStmt>();
+    if (!loop || loop->strictly_serialized || loop->model_block_dim ||
+        !loop->device_options.empty())
+      continue;
+    auto *extent = loop->end->cast<ExternalTensorShapeAlongAxisStmt>();
+    if (!extent || extent->axis != 0 || extent->parent != root || loop->begin == extent)
+      continue;
+    if (!uses.valid())
+      uses.rebuild(root, root);
+    const auto &users = uses.users(extent);
+    if (users.size() == 1 && users.count(loop))
+      extents.insert(extent);
+  }
+  return extents;
+}
 using Dimensions = std::map<std::string, int>;
 using TreeDimensions = std::map<int, Dimensions>;
 
@@ -390,6 +415,19 @@ class UnifiedModule final : public aot::Module {
       for (int axis = 0; axis < int(arg.total_dim - arg.element_shape.size()); ++axis) {
         member.back() = axis;
         bind(member);
+      }
+    }
+    if (auto found = first_dispatch_counts_.find(kernel.name); found != first_dispatch_counts_.end()) {
+      // Keep the first fixed launch just as before. When the caller also uses
+      // other lengths, one dynamic CPU loop serves all of those bindings.
+      for (auto &[path, first] : found->second) {
+        auto value = facts.find(path);
+        if (value == facts.end())
+          continue;
+        if (!first)
+          first = value->second;
+        else if (*first != value->second)
+          facts.erase(value);
       }
     }
     if (facts.empty() && layout.empty())
@@ -659,6 +697,10 @@ class UnifiedModule final : public aot::Module {
       // read by this body or an imported helper can change the selected code.
       auto &reads = specialization_reads_[name];
       auto &layout_reads = layout_reads_[name];
+      const auto dispatch_extents = arch_is_cpu(arch()) && !needs_bound_device && absent.empty()
+                                        ? cpu_dispatch_extents(kernel->ir->as<Block>())
+                                        : std::set<Stmt *>{};
+      std::set<std::vector<int>> dispatch_paths, other_extents;
       const bool descriptor_offsets = arch() == Arch::vulkan &&
           !caps.get(DeviceCapability::spirv_has_physical_storage_buffer);
       auto note_descriptor = [&](const std::vector<int> &path, bool gradient) {
@@ -673,12 +715,17 @@ class UnifiedModule final : public aot::Module {
       };
       irpass::analysis::gather_statements(kernel->ir.get(), [&](Stmt *stmt) {
         if (auto *arg = stmt->cast<ArgLoadStmt>()) {
-          if (!arg->is_ptr && arg->ret_type == PrimitiveType::i32)
+          if (!arg->is_ptr && arg->ret_type == PrimitiveType::i32) {
             reads.insert(arg->arg_id);
+            if (!dispatch_extents.empty() && arg->arg_id.size() > 1)
+              other_extents.insert(arg->arg_id);
+          }
         } else if (auto *extent = stmt->cast<ExternalTensorShapeAlongAxisStmt>()) {
           auto path = extent->arg_id;
           path.push_back(TypeFactory::SHAPE_POS_IN_NDARRAY);
           path.push_back(extent->axis);
+          if (!dispatch_extents.empty())
+            (dispatch_extents.count(stmt) ? dispatch_paths : other_extents).insert(path);
           reads.insert(std::move(path));
         } else if (auto *ptr = stmt->cast<ExternalPtrStmt>(); ptr && arch() == Arch::vulkan) {
           // Array addressing introduces descriptor loads in target codegen,
@@ -708,6 +755,9 @@ class UnifiedModule final : public aot::Module {
         }
         return false;
       });
+      for (const auto &path : dispatch_paths)
+        if (!other_extents.count(path))
+          first_dispatch_counts_[name].try_emplace(path);
       if (needs_bound_device || !reads.empty() || !layout_reads.empty() || descriptor_reads_.count(name))
         return deferred(name, *kernel, cfg);
     }
@@ -754,6 +804,7 @@ class UnifiedModule final : public aot::Module {
   std::vector<LLVM::SNodeTreeLayout> llvm_layouts_;
   std::atomic<bool> used_{false};
   std::map<std::string, std::set<std::vector<int>>> specialization_reads_;
+  std::map<std::string, std::map<std::vector<int>, std::optional<int>>> first_dispatch_counts_;
   std::map<std::string, std::set<std::vector<int>>> layout_reads_;
   std::map<std::string, std::set<std::vector<int>>> descriptor_reads_;
   std::map<std::tuple<std::string, Facts, LayoutWords>, std::unique_ptr<aot::Kernel>> specialized_;
