@@ -20,6 +20,7 @@ from .._static_values import static_key
 
 
 _MISSING_PLAN_VALUE = object()
+_VULKAN_COMPACT_CHUNK_LIMIT = 64
 
 
 def _declare_argument(arguments, name, schema):
@@ -533,16 +534,24 @@ class GraphBuilder:
         lowering_mode="auto",
         name="while",
     ):
-        """Record an exact CPU/CUDA loop using the existing native Plan executor."""
+        """Record exact CPU/CUDA control or a bounded Vulkan compact masked region."""
         self.package._check()
-        if self.package.runtime.arch not in ("x64", "arm64", "cuda"):
-            raise ValueError("Package while requires a qualified CPU/CUDA control route")
+        vulkan = self.package.runtime.arch == "vulkan"
+        if self.package.runtime.arch not in ("x64", "arm64", "cuda", "vulkan"):
+            raise ValueError("Package while requires a qualified control route")
         if lowering_mode not in ("auto", "native_required"):
             raise ValueError("Package while currently requires native control")
         if type(masked_execution) is not bool or not isinstance(name, str) or not name:
             raise ValueError("Invalid package while options")
         if type(max_iterations) is not int or not 0 <= max_iterations <= 0x7FFFFFFFFFFFFFFF:
             raise ValueError("Graph while maximum iterations must be a nonnegative int64")
+        if vulkan:
+            if "vulkan_masked_while" not in self.package.runtime.execution_control_capabilities():
+                raise ValueError("Vulkan package while requires native masked control support")
+            if not masked_execution or counter is None:
+                raise ValueError("Vulkan package while requires explicit masking and a counter")
+            if max_iterations > _VULKAN_COMPACT_CHUNK_LIMIT:
+                raise ValueError(f"Vulkan package while supports at most {_VULKAN_COMPACT_CHUNK_LIMIT} iterations")
         for region in (condition, body):
             if not isinstance(region, GraphBuilder) or region._bindings is not self._bindings:
                 raise ValueError("Package while regions must belong to the same recording")
@@ -577,9 +586,10 @@ class GraphBuilder:
             condition=copy.deepcopy(condition.operations),
             body=copy.deepcopy(body.operations),
         )
+        if vulkan:
+            chunks = [dict(iterations=max_iterations, strategy="compact")] if max_iterations else []
+            operation["lowering"] = dict(kind="vulkan_structured", version=1, counter=counter.name, chunks=chunks)
         merged.operations = [operation]
-        # Native preparation admits CUDA conditional control on the actual device;
-        # neither a masked fallback nor per-iteration Host observation is inserted.
         return self.append(merged)
 
     def freeze(self):

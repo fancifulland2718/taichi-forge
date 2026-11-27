@@ -20241,6 +20241,44 @@ def test_package_graph_branch_selects_body_from_recorded_predicate(tmp_path, mon
             np.testing.assert_array_equal(owner.values.to_numpy(), expected * np.arange(1, 4))
 
 
+@test_utils.test(arch=ti.vulkan, offline_cache=False)
+def test_package_vulkan_masked_while(tmp_path, monkeypatch):
+    package = _source_package(tmp_path, monkeypatch, PACKAGE_WHILE_SOURCE)
+    manifest = ti.aot.export_package(package, tmp_path / "sdk")
+    with Runtime(manifest["target"]) as runtime, load_package(runtime, tmp_path / "sdk") as code:
+        owner = code.host.Model(5, 3, 2)
+        builder = code.graph_builder()
+        pred = builder.private_ndarray("predicate", "i32", (1,))
+        counter = builder.private_ndarray("counter", "i32", (1,))
+        condition, body = builder.create_sequential(), builder.create_sequential()
+        condition.dispatch(owner.condition, pred, counter)
+        body.dispatch(owner.advance, counter)
+        for kwargs in (dict(counter=counter), dict(masked_execution=True)):
+            with pytest.raises(ValueError, match="explicit masking and a counter"):
+                builder.while_loop(condition, body, predicate=pred, max_iterations=8, **kwargs)
+        assert not builder.operations
+        with monkeypatch.context() as old_runtime:
+            old_runtime.setattr(runtime, "execution_control_capabilities", lambda: frozenset())
+            assert not owner.control_info()[0]["device_control"]["while"]
+            with pytest.raises(ValueError, match="native masked control support"):
+                owner.graph(8)
+        for budget, limit in ((0, 1), (8, 0), (8, 1), (8, 3), (8, 8), (8, 12), (64, 64)):
+            owner = code.host.Model(5, limit, 2)
+            caps = owner.control_info()[0]["device_control"]
+            assert caps["while"] and caps["device_controlled_masking"] and caps["structured_submit"]
+            assert not caps["exact_dynamic_termination"] and not caps["stops_command_issue_after_exit"]
+            with pytest.raises(ValueError, match="at most 64"):
+                owner.graph(65)
+            graph = owner.graph(budget)
+            try:
+                with graph.bind({}) as prepared:
+                    for _ in range(2):
+                        prepared.run()
+                        np.testing.assert_array_equal(owner.values.to_numpy(), np.arange(1, 6) * 2 * min(limit, budget))
+            finally:
+                graph.close()
+
+
 @pytest.mark.parametrize("plan_value", [False, True, "scalar"])
 @test_utils.test(arch=[ti.cpu, ti.cuda], offline_cache=False)
 def test_package_while_private_arrays_are_prepared_per_invocation(tmp_path, monkeypatch, plan_value):

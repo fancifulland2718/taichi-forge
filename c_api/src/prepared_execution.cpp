@@ -3213,6 +3213,12 @@ TiFlags ti_get_execution_control_capabilities_ext(TiRuntime runtime) {
       taichi::lang::cuda::FixedGraph::conditional_control_available())
     return TI_EXECUTION_CONTROL_CAPABILITY_CUDA_CONDITIONAL_WHILE_BIT_EXT;
 #endif
+#ifdef TI_WITH_VULKAN
+  // Compact masked replay uses core Vulkan compute indirect dispatch. The
+  // prepared executor checks the specific region and control bindings.
+  if (rt.arch == taichi::Arch::vulkan && dynamic_cast<::GfxRuntime *>(&rt))
+    return TI_EXECUTION_CONTROL_CAPABILITY_VULKAN_MASKED_WHILE_BIT_EXT;
+#endif
   return 0;
   TI_CAPI_TRY_CATCH_END();
   return 0;

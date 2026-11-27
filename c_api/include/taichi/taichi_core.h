@@ -1520,6 +1520,7 @@ ti_configure_native_library_ext(TiRuntime runtime,
 typedef enum TiExecutionControlCapabilityFlagBitsExt {
   TI_EXECUTION_CONTROL_CAPABILITY_CPU_EXACT_WHILE_BIT_EXT = 1 << 0,
   TI_EXECUTION_CONTROL_CAPABILITY_CUDA_CONDITIONAL_WHILE_BIT_EXT = 1 << 1,
+  TI_EXECUTION_CONTROL_CAPABILITY_VULKAN_MASKED_WHILE_BIT_EXT = 1 << 2,
   TI_EXECUTION_CONTROL_CAPABILITY_FLAG_BITS_MAX_ENUM_EXT = 0x7fffffff,
 } TiExecutionControlCapabilityFlagBitsExt;
 

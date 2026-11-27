@@ -248,9 +248,12 @@ class _ModuleBinding:
         return np.dtype(_numpy_dtype(dtype)).type
 
     def control_capabilities(self):
+        from ._package_graph import _VULKAN_COMPACT_CHUNK_LIMIT
+
         self.package._check()
         modes = self.package.runtime.execution_control_capabilities()
         native = "cuda_conditional_while" in modes
+        masked = "vulkan_masked_while" in modes
         return dict(
             schema_version=1,
             backend=self.package.runtime.arch,
@@ -259,12 +262,15 @@ class _ModuleBinding:
             device_control={
                 "if": native,
                 "exact_conditional_graph": native,
-                "while": native,
+                "while": native or masked,
                 "exact_dynamic_termination": native,
-                "structured_submit": native,
-                "runtime_path_qualified": native,
+                "structured_submit": native or masked,
+                "runtime_path_qualified": native or masked,
+                "device_controlled_masking": masked,
+                "parallel_indirect_dispatch": masked,
+                "chunk_iteration_limit": _VULKAN_COMPACT_CHUNK_LIMIT if masked else 0,
                 "stops_command_issue_after_exit": native,
-                "per_iteration_host_observation": not native,
+                "per_iteration_host_observation": not (native or masked),
             },
         )
 
