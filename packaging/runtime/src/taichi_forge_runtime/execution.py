@@ -372,10 +372,15 @@ class ExecutionSession:
         if self._index is None:
             self._discover()
         matches = [item for item in self._index if name in item[3] and item[1] == self.arch]
-        # An explicit exported module wins over another package's retained Host
-        # dependency. Multiple exports of the same root/target remain ambiguous.
-        roots = [item for item in matches if name in item[2]]
-        matches = roots or matches
+        # A public root owns its included submodules even when another SDK
+        # retains them as dependencies. A nested public root is more specific.
+        root = name
+        while len(matches) > 1 and root:
+            owners = [item for item in matches if root in item[2]]
+            if owners:
+                matches = owners
+                break
+            root = root.rpartition(".")[0]
         if not matches:
             available = sorted({str(item[1]) for item in self._index if name in item[3]})
             raise ModuleNotFoundError(

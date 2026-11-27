@@ -14750,16 +14750,24 @@ def test_package_discovery_resolves_every_explicit_root(tmp_path, monkeypatch):
 
     joint = tmp_path / "joint"
     other = tmp_path / "other"
-    write_index(joint, [primary, secondary], [primary, "module_b", secondary])
-    write_index(other, ["module_b.flow"], ["module_b", "module_b.flow", secondary])
+    child = secondary + ".grid"
+    dependency = "shared.geometry"
+    write_index(joint, [primary, secondary], [primary, "module_b", secondary, child, dependency])
+    write_index(other, ["module_b.flow"], ["module_b", "module_b.flow", secondary, child, dependency])
     with ExecutionSession(mode="aot", arch="x64", package_paths=[tmp_path]) as session:
         import module_b
         assert session._resolve(secondary) == joint
+        assert session._resolve(child) == joint
         assert session._resolve("module_b.flow") == other
+        with pytest.raises(ValueError, match="Ambiguous AOT package"):
+            session._resolve(dependency)
         assert session.runtime is None
 
-    write_index(tmp_path / "duplicate", [secondary], [secondary])
+    nested = tmp_path / "nested"
+    write_index(nested, [child], [child])
+    write_index(tmp_path / "duplicate", [secondary], [secondary, child])
     with ExecutionSession(mode="aot", arch="x64", package_paths=[tmp_path]) as session:
+        assert session._resolve(child) == nested
         with pytest.raises(ValueError, match="Ambiguous AOT package"):
             import module_b.stress
         assert session.runtime is None
