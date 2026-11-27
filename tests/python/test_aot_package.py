@@ -30610,6 +30610,9 @@ class Model:
             self.add(self.trial, external.result)
         else:
             self.add(self.current, external.result)
+
+    def update_local(self):
+        self.add(self.current, self.trial)
 ''')
     manifest = ti.aot.export_package(package, tmp_path / 'sdk')
     with Runtime(manifest['target']) as runtime, load_package(runtime, tmp_path / 'sdk') as code:
@@ -30620,6 +30623,8 @@ class Model:
         for trial in (False, True, False):
             model.update(external, trial)
             np.testing.assert_array_equal(model.result.to_numpy(), np.array([2, 5, 4, 7, 6]) + 20 * trial)
+        model.update_local()
+        np.testing.assert_array_equal(model.result.to_numpy(), 20 + 2 * np.arange(5))
 
 
 @test_utils.test(arch=[ti.cpu, ti.cuda], offline_cache=False)

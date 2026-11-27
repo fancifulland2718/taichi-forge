@@ -313,7 +313,10 @@ class _FunctionEntry:
                 valid = False
             if valid:
                 matches.append((candidate, owner))
-        for values, paths, types, fields, context, candidate in self._input_entries[identity]:
+        # A fully bound owner path identifies the concrete resource. The
+        # independent-input ABI also accepts that field by shape and dtype.
+        input_choices = () if matches else self._input_entries[identity]
+        for values, paths, types, fields, context, candidate in input_choices:
             try:
                 valid = (all(static_key(inputs[name]) == value for name, value in values.items())
                          and all(owner_type(inputs[name]) == kind
