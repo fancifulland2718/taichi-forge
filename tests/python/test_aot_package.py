@@ -20209,6 +20209,9 @@ def test_package_graph_branch_selects_body_from_recorded_predicate(tmp_path, mon
     with Runtime(manifest["target"]) as runtime, load_package(runtime, tmp_path / "sdk") as code:
         for limit, expected in ((0, 4), (1, 2)):
             owner = code.host.Model(3, limit, 2)
+            device_control = owner.control_info()[0]["device_control"]
+            native_branch = "cuda_conditional_while" in runtime.execution_control_capabilities()
+            assert device_control["if"] == device_control["exact_conditional_graph"] == native_branch
             builder = code.graph_builder()
             predicate = builder.private_ndarray("predicate", "i32", (1,))
             counter = builder.private_ndarray("counter", "i32", (1,))

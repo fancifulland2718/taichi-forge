@@ -257,6 +257,8 @@ class _ModuleBinding:
             scope="definition_package_flat_kernel_while",
             portable={"while": "cpu_exact_host_loop" if "cpu_exact_while" in modes else "unavailable"},
             device_control={
+                "if": native,
+                "exact_conditional_graph": native,
                 "while": native,
                 "exact_dynamic_termination": native,
                 "structured_submit": native,
