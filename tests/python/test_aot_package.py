@@ -30586,6 +30586,43 @@ print('INDEPENDENT_FIELD_SOURCE_FREE_OK')
 
 
 @test_utils.test(arch=[ti.cpu, ti.cuda], offline_cache=False)
+def test_package_call_context_keeps_forwarded_owner_fields(tmp_path, monkeypatch):
+    package, _ = _resource_context_fixture(tmp_path, monkeypatch, model='''
+import taichi_forge as ti
+from resource_contexts import resource_group
+@ti.data_oriented
+class Model:
+    def __init__(self, n: int):
+        self.n = n
+        with resource_group(self, 'workspace') as fields:
+            fields.current = fields.field(ti.f32, shape=fields.dim('n'))
+            fields.trial = fields.field(ti.f32, shape=fields.dim('n'))
+        with resource_group(self, 'output') as fields:
+            fields.result = fields.field(ti.f32, shape=fields.dim('n'))
+
+    @ti.kernel
+    def add(self, local: ti.template(), other: ti.template()):
+        for i in self.result:
+            self.result[i] = local[i] + other[i % other.shape[0]]
+
+    def update(self, external: 'Model', trial: bool):
+        if trial:
+            self.add(self.trial, external.result)
+        else:
+            self.add(self.current, external.result)
+''')
+    manifest = ti.aot.export_package(package, tmp_path / 'sdk')
+    with Runtime(manifest['target']) as runtime, load_package(runtime, tmp_path / 'sdk') as code:
+        model, external = code.host.Model(5), code.host.Model(2)
+        model.current.from_numpy(np.arange(5, dtype=np.float32))
+        model.trial.from_numpy(np.arange(5, dtype=np.float32) + 20)
+        external.result.from_numpy(np.array([2, 4], dtype=np.float32))
+        for trial in (False, True, False):
+            model.update(external, trial)
+            np.testing.assert_array_equal(model.result.to_numpy(), np.array([2, 5, 4, 7, 6]) + 20 * trial)
+
+
+@test_utils.test(arch=[ti.cpu, ti.cuda], offline_cache=False)
 def test_package_independent_field_template_keeps_optional_source_admission(tmp_path, monkeypatch):
     package, _ = _resource_context_fixture(tmp_path, monkeypatch, model='''
 import taichi_forge as ti

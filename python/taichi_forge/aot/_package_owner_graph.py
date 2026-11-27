@@ -554,7 +554,7 @@ class OwnerGraph:
             return result
         raise ValueError("Independent Field template has no declared field path")
 
-    def register_call_context(self, identity, inputs, fields, node):
+    def register_call_context(self, identity, inputs, fields, node, resource_paths):
         """Compose declared input views without an application owner or constructor."""
         schema = {"_arg_" + key: dict(kind="owner_input", owner_type=value) for key, value in inputs.items()}
         schema.update({"_arg_" + key: dict(kind="ndarray", **value) for key, value in fields.items()})
@@ -565,6 +565,10 @@ class OwnerGraph:
             read_paths = self._method_input_paths.get((receiver_type, id(node), key))
             paths.setdefault('_arg_' + key, set()).update(
                 _member_paths(node, key) if read_paths is None else read_paths)
+        # A forwarded Field is read through its template parameter in the
+        # kernel. Only the call site names the Field on its owning input.
+        for slot, *member in resource_paths:
+            paths[slot].add(tuple(member))
         if identity in self.definitions:
             if self.definitions[identity][2] != schema:
                 raise ValueError("Call context changed its declared input types")
