@@ -220,7 +220,8 @@ class Kernel;
 // 103 - Retain affine array proofs through complete real-function descriptors;
 //       cached modules with the old empty proof must be regenerated.
 // 104 - Bind SPIR-V model workgroup size and shared allocations per pipeline.
-constexpr std::uint32_t kOfflineCacheSchemaVersion = 104;
+// 105 - Respect packed tensor alignment in cross-task storage and LLVM accesses.
+constexpr std::uint32_t kOfflineCacheSchemaVersion = 105;
 
 // Fast sufficient check for identical serialized configuration inputs. A
 // reordered disabled-pass list may conservatively return false; hashing still

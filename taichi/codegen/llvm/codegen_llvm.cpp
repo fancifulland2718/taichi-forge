@@ -14,6 +14,7 @@
 #include "taichi/ir/snode_hash_utils.h"
 #include "taichi/ir/statements.h"
 #include "taichi/ir/transforms.h"
+#include "taichi/ir/type_utils.h"
 #include "taichi/runtime/llvm/aot_snode_relocation.h"
 #include "taichi/runtime/llvm/function_code_cache.h"
 #include "taichi/program/extension.h"
@@ -1951,7 +1952,13 @@ void TaskCodeGenLLVM::visit(GlobalStoreStmt *stmt) {
       TI_NOT_IMPLEMENTED;
     }
   } else {
-    builder->CreateStore(llvm_val[stmt->val], llvm_val[stmt->dest]);
+    auto *store =
+        builder->CreateStore(llvm_val[stmt->val], llvm_val[stmt->dest]);
+    if (llvm_val[stmt->val]->getType()->isVectorTy()) {
+      // Taichi global storage packs tensor components, including vec3 fields
+      // and cross-task temporaries. Only scalar alignment is guaranteed.
+      store->setAlignment(llvm::Align(data_type_alignment(stmt->val->ret_type)));
+    }
   }
 }
 
@@ -1994,6 +2001,10 @@ void TaskCodeGenLLVM::create_global_load(GlobalLoadStmt *stmt,
     } else {
       llvm_val[stmt] =
           builder->CreateLoad(tlctx->get_data_type(stmt->ret_type), ptr);
+    }
+    if (auto *load = llvm::dyn_cast<llvm::LoadInst>(llvm_val[stmt]);
+        load && load->getType()->isVectorTy()) {
+      load->setAlignment(llvm::Align(data_type_alignment(stmt->ret_type)));
     }
   }
 }

@@ -561,28 +561,16 @@ class IdentifyValuesUsedInOtherOffloads : public BasicStmtVisitor {
   }
 
   std::size_t allocate_global(DataType type) {
-    auto ret = global_offset_;
-    if (type->is<TensorType>()) {
-      auto tensor_type = type->cast<TensorType>();
-      global_offset_ += tensor_type->get_num_elements() *
-                        data_type_size(tensor_type->get_element_type());
-    } else {
-      std::size_t type_size = data_type_size(type);
-      // align global_offset to a multiple of type_size
-      global_offset_ =
-          ((global_offset_ + type_size - 1) / type_size) * type_size;
-      ret = global_offset_;
-      global_offset_ += type_size;
-    }
+    // Each component of a promoted tensor is accessed with its scalar
+    // alignment, including tensors placed immediately after a byte-sized flag.
+    const auto alignment = data_type_alignment(type);
+    const auto bytes = data_type_size(type);
+    auto ret = align_up(global_offset_, alignment);
     if (arch_uses_spirv(config_.arch) && ret < spirv::kRandomStateEnd &&
-        global_offset_ > spirv::kRandomStateBegin) {
-      // A promoted tensor must remain contiguous. Move the whole allocation
-      // past the RNG word and preserve its scalar element alignment.
-      const auto bytes = global_offset_ - ret;
-      const auto alignment = data_type_size(type.get_element_type());
-      ret = ((spirv::kRandomStateEnd + alignment - 1) / alignment) * alignment;
-      global_offset_ = ret + bytes;
+        ret + bytes > spirv::kRandomStateBegin) {
+      ret = align_up(spirv::kRandomStateEnd, alignment);
     }
+    global_offset_ = ret + bytes;
     TI_ASSERT(global_offset_ < taichi_global_tmp_buffer_size);
     return ret;
   }

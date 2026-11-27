@@ -2,6 +2,28 @@ import taichi_forge as ti
 from tests import test_utils
 
 
+@test_utils.test(arch=[ti.cpu, ti.cuda], real_matrix_scalarize=False)
+def test_cross_task_tensor_after_byte_flag():
+    enabled = ti.field(ti.u8, shape=())
+    source = ti.Vector.field(3, ti.f32, shape=())
+    result = ti.field(ti.f32, shape=3)
+
+    @ti.kernel
+    def snapshot():
+        flag = enabled[None]
+        values = source[None]
+        enabled[None] = 0
+        source[None] = ti.Vector.zero(ti.f32, 3)
+        for i in range(3):
+            if flag:
+                result[i] = values[i]
+
+    enabled[None] = 1
+    source[None] = [1.25, -2.5, 4.0]
+    snapshot()
+    assert result.to_numpy().tolist() == [1.25, -2.5, 4.0]
+
+
 @test_utils.test()
 def test_offload_with_cross_block_locals():
     ret = ti.field(ti.f32)
