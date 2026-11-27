@@ -8796,7 +8796,21 @@ class Model:
         for values in ((), (3,), (1, 4, 6)):
             model = code.host.Model(values)
             model.step()
-            assert model.total[None] == sum(values[1:]) + 2 * sum(values[:1])
+            increment = sum(values[1:]) + 2 * sum(values[:1])
+            assert model.total[None] == increment
+            if len(values) > 1:
+                def cached_calls():
+                    return [
+                        call for view in model._forge_package_function_contexts.values()
+                        for call in view._forge_package_calls.values()
+                    ]
+
+                first = cached_calls()
+                assert len(first) == len(values)
+                model.step()
+                assert model.total[None] == 2 * increment
+                assert cached_calls() == first
+                assert all(call.prepared is not None for call in first)
 
 
 @test_utils.test(arch=ti.cpu, offline_cache=False)
@@ -22839,7 +22853,8 @@ class Model:
         assert base.constructors == 0
     with zipfile.ZipFile(tmp_path / "sdk/code.tcm") as archive:
         code = [item for item in archive.infolist() if item.filename.removesuffix(".b4").endswith((".ll", ".bc", ".spv"))]
-        code_count = len(code)
+        # Outlined helper definitions are dependencies shared by entry bodies.
+        entry_code_count = sum(not item.filename.startswith("code_units/") for item in code)
         assert sum(item.file_size for item in code) > 0
     expected = classes.Changed(7, 2.0).values.to_numpy()
     np.testing.assert_array_equal(expected, np.arange(7, dtype=np.float32) * 2 + 11)
@@ -22914,7 +22929,7 @@ class Model:
     )
     assert result.returncode == 0, result.stdout + result.stderr
     assert "INHERITANCE_SOURCE_FREE_OK" in result.stdout
-    assert code_count == (6 if helper_kind == "pyfunc" else 4)  # changed helper affects only step and public pyfunc
+    assert entry_code_count == (6 if helper_kind == "pyfunc" else 4)  # changed helper affects only step and public pyfunc
 
 
 @pytest.mark.parametrize(

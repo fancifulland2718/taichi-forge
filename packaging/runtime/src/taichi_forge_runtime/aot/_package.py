@@ -1581,9 +1581,11 @@ def managed_class(package, cls):
             )
             for name, item in package._manifest["owners"].get(selected_key, {}).items():
                 if item["kind"] == "host_owner_sequence":
-                    _ResourceScope(self)._owner_sequence(
+                    members = _ResourceScope(self)._owner_sequence(
                         name, getattr(self, name), borrowed=item.get("borrowed_sequence", False)
                     )
+                    if members:
+                        self.__dict__.setdefault("_forge_package_sequence_member_ids", set()).update(map(id, members))
         except BaseException:
             rollback.close()
             for value in reversed(allocated):

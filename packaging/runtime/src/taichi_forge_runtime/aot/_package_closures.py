@@ -273,7 +273,11 @@ class _FunctionEntry:
                         ):
                             raise ValueError("Template resource paths differ from the compiled resource ABI")
                     if inputs:
-                        input_choices.append((values, resources, inputs, fields, context, bound))
+                        member = None
+                        if len(inputs) == 2 and not fields:
+                            member = next(name for name in inputs if name != receiver)
+                        binding = (context, (*inputs, *fields), member)
+                        input_choices.append((values, resources, inputs, fields, binding, bound))
                     else:
                         resource_choices.append((values, resources, bound))
                 else:
@@ -321,35 +325,39 @@ class _FunctionEntry:
             except (AttributeError, ValueError, KeyError):
                 valid = False
             if valid:
-                matches.append((candidate, (context, (*types, *fields))))
+                matches.append((candidate, context))
         if len({(candidate.symbol, None if context is owner else context[0])
                 for candidate, context in matches}) != 1:
             raise ValueError("Free Kernel template inputs are outside their definition-proven domain")
         candidate, context = matches[0]
         if context is owner:
             return candidate.__get__(owner)
-        identity, types = context
-        # Keep one ordinary-call cache per receiver/function. Each Graph gets an
-        # immutable view of its actual input objects; replacing the last view
-        # never rewrites a previously prepared Graph or accumulates value cases.
+        identity, arguments, member = context
+        slot = self
+        if member is not None:
+            # Calls over a declared collection alternate among a finite set
+            # of model bindings. Keep each member's prepared call, while
+            # arbitrary external inputs continue to share one replaceable slot.
+            member_id = id(inputs[member])
+            if member_id in getattr(owner, "_forge_package_sequence_member_ids", ()):
+                slot = (self, member_id)
         with self.package._call_lock:
             contexts = getattr(owner, "_forge_package_function_contexts", None)
             if contexts is None:
                 contexts = owner._forge_package_function_contexts = {}
-            previous = contexts.get(self)
+            previous = contexts.get(slot)
             if (previous is not None and previous._forge_package_contract == identity
-                    and all(getattr(previous, "_arg_" + name) is inputs[name] for name in types)):
+                    and all(getattr(previous, "_arg_" + name) is inputs[name] for name in arguments)):
                 view = previous
             else:
-                cache = previous._forge_package_calls if previous is not None else {}
-                if previous is None:
-                    self.package._call_caches.append(cache)
-                view = SimpleNamespace(**{"_arg_" + name: inputs[name] for name in types},
+                view = SimpleNamespace(**{"_arg_" + name: inputs[name] for name in arguments},
                                        _forge_package_owner=self.package,
                                        _forge_package_contract=identity,
-                                       _forge_package_member_layouts={},
-                                       _forge_package_calls=cache)
-                contexts[self] = view
+                                       _forge_package_member_layouts={})
+                cache = getattr(previous, "_forge_package_calls", None)
+                if cache is not None:
+                    view._forge_package_calls = cache
+                contexts[slot] = view
             return candidate.__get__(view)
 
     def _field_matches(self, value, spec):
