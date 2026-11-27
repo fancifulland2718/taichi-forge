@@ -2684,7 +2684,7 @@ struct cpu_block_task_helper_context {
   RuntimeContext *context;
   BlockTask *task;
   ListManager *list;
-  int element_size;
+  int part_size;
   int element_split;
   int element_batch_size;
   std::size_t tls_buffer_size;
@@ -2723,12 +2723,10 @@ void cpu_struct_for_block_helper(void *ctx_, int thread_id, int i) {
     return;
   }
   int element_id = i / ctx->element_split;
-  int part_size = ctx->element_size / ctx->element_split;
   int part_id = i % ctx->element_split;
   auto &e = ctx->list->get<Element>(element_id);
-  int lower = e.loop_bounds[0] + part_id * part_size;
-  int upper = e.loop_bounds[0] + (part_id + 1) * part_size;
-  upper = std::min(upper, e.loop_bounds[1]);
+  int lower = e.loop_bounds[0] + part_id * ctx->part_size;
+  int upper = std::min(lower + ctx->part_size, e.loop_bounds[1]);
   auto *tls_buffer = TI_ALLOCATE_TASK_TLS(ctx->tls_buffer_size);
 
   RuntimeContext this_thread_context = *ctx->context;
@@ -2775,7 +2773,8 @@ void parallel_struct_for(RuntimeContext *context,
   ctx.context = context;
   ctx.task = task;
   ctx.list = list;
-  ctx.element_size = element_size;
+  // The last split must reach the end even for non-divisible leaf sizes.
+  ctx.part_size = 1 + (element_size - 1) / element_split;
   ctx.element_split = element_split;
   ctx.tls_buffer_size = tls_buffer_size;
   ctx.element_batch_size = 1;

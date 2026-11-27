@@ -78,6 +78,26 @@ def test_nested():
         assert y[i] == i * 2
 
 
+@test_utils.test(arch=ti.cpu, offline_cache=False)
+def test_cpu_sparse_struct_for_uneven_splits():
+    leaf_size = 512
+    values = ti.field(ti.i32)
+    # The CPU scheduler splits a 512-cell leaf into five tasks for this layout.
+    ti.root.pointer(ti.i, 125).bitmasked(ti.i, leaf_size).place(values)
+    visits = ti.field(ti.i32, shape=2 * leaf_size)
+
+    @ti.kernel
+    def visit_active():
+        for i in range(2 * leaf_size):
+            if i < leaf_size or i % 2 == 1:
+                values[i] = 1
+        for i in values:
+            visits[i] += 1
+
+    visit_active()
+    assert visits.to_numpy().tolist() == [int(i < leaf_size or i % 2 == 1) for i in range(2 * leaf_size)]
+
+
 @test_utils.test()
 def test_nested2():
     x = ti.field(ti.i32)
