@@ -981,7 +981,8 @@ class Graph:
                                        'rw_texture', 'acceleration_structure') or reusable_value(value)
                        for spec, value in zip(self.arguments.values(), values))
         reusable = reusable and all(
-            spec['kind'] not in ('value', 'dimension') or reusable_value(capture_value(owner, spec))
+            spec['kind'] not in ('value', 'dimension')
+            or reusable_value(capture_value(owner, spec), spec.get('element_shape'))
             for owner, spec in self.captures.values())
         prepared = self.bind(arguments)  # Full admission on every changed binding.
         try:

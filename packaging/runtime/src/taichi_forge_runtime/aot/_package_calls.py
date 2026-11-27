@@ -146,8 +146,18 @@ def _token(value):
     return kind, id(value)
 
 
-def reusable_value(value):
-    """Values whose complete mutable contents are represented by _token."""
+def _numpy_value_tensor(value, element_shape):
+    if not element_shape or type(value).__module__ != "numpy":
+        return False
+    import numpy as np
+
+    return type(value) is np.ndarray and value.shape == tuple(element_shape) and value.dtype.kind in "biuf"
+
+
+def reusable_value(value, element_shape=()):
+    """Values observed by argument tokens or by a fixed-shape capture guard."""
+    if _numpy_value_tensor(value, element_shape):
+        return True
     if reusable_scalar(value) or isinstance(value, HostTensor):
         return True
     if type(value) in (tuple, list):
@@ -236,6 +246,7 @@ class OwnerGuard:
             for binding in contract.get("native_storage", ()):
                 if binding["owner_path"]:
                     path((*binding["owner_path"], "_forge_package_native_storage"))
+        array_values = {}
         for spec in captures:
             if package._manifest.get("frontend_target") in spec.get("absent_devices", ()):
                 continue
@@ -248,6 +259,10 @@ class OwnerGuard:
 
                 if capture_is_absent(owner, spec):
                     continue
+                if spec["kind"] == "value" and spec.get("element_shape"):
+                    value = path_value(owner, spec.get("path", (spec["name"],)))
+                    if _numpy_value_tensor(value, spec["element_shape"]):
+                        array_values[id(value)] = value
                 prefix = tuple(spec.get("layout_owner_path", ()))
                 allocated = path_value(owner, prefix)
                 if allocated is None:
@@ -292,9 +307,13 @@ class OwnerGuard:
         versions = getattr(getattr(package, "runtime", None), "_owner_namespace_versions", None)
         self._bind_paths(owner, reachable, versions)
         self._sequence_owners = tuple(sequence_owners.values())
+        # Only a declared CPU value tensor is copied. Ndarray resource ports
+        # continue to track the binding and read device contents at execution.
+        self._array_values = tuple((v, v.shape, v.dtype, v.tobytes()) for v in array_values.values())
 
     def _bind_paths(self, owner, paths, versions):
         self._sequence_owners = ()
+        self._array_values = ()
         stamp = versions(owner) if versions and type(type(owner)) is type and len(paths) > 1 else None
         self._children = []
         if stamp is not None:
@@ -388,6 +407,9 @@ class OwnerGuard:
         return tuple(values)
 
     def matches(self, owner):
+        for value, shape, dtype, data in self._array_values:
+            if value.shape != shape or value.dtype != dtype or value.tobytes() != data:
+                return False
         if self._sequence_owners:
             from ._package_values import check_sequence_dimensions
 

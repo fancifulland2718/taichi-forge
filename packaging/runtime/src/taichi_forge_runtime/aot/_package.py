@@ -1910,7 +1910,7 @@ class entry:
                     for item, value in zip(contract["arguments"], values)
                 ) and all(
                     item["kind"] != "value" or not item.get("element_shape")
-                    or reusable_value(captured[item["name"]])
+                    or reusable_value(captured[item["name"]], item["element_shape"])
                     for item in contract["captures"]
                 )
                 if reusable:

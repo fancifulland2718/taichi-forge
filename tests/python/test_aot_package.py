@@ -20407,8 +20407,9 @@ def test_package_while_private_arrays_are_prepared_per_invocation(tmp_path, monk
     assert "PACKAGE_WHILE_OK" in result.stdout
 
 
+@pytest.mark.parametrize("numpy_capture", [False, True])
 @test_utils.test(arch=[ti.cpu, ti.cuda], offline_cache=False)
-def test_package_reuses_tensor_captures_and_implicit_graph_bindings(tmp_path, monkeypatch):
+def test_package_reuses_tensor_captures_and_implicit_graph_bindings(tmp_path, monkeypatch, numpy_capture):
     import struct
     from unittest.mock import patch
     from taichi_forge_runtime.aot import _runtime, _plan
@@ -20452,6 +20453,8 @@ class Model:
     monkeypatch.setattr(_plan.ExecutionPlan, 'prepare', graph)
     with ti.aot.borrow_runtime() as runtime, load_package(runtime, tmp_path / "sdk") as code:
         a, b = code.host.Model(7), code.host.Model(13)
+        if numpy_capture:
+            a.bias = np.array([1.0, 0.0, 2.0], np.float32)[::2]
         a.offset = np.float32(0.)
         b.offset = np.float32(0.)
         for _ in range(2):
