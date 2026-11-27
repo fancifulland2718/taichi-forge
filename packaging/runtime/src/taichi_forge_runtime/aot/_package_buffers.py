@@ -9,11 +9,12 @@ from ._runtime import NdArray
 class HostBuffers:
     """Stage disjoint explicit Host arrays, without changing device calls."""
 
-    def __init__(self, runtime, schemas, arguments):
+    def __init__(self, runtime, contract, arguments):
         self.runtime = runtime
+        self.contract = contract
         self.arguments = [runtime._adapt_package_array(value) for value in arguments]
         self.pending, self.allocated = [], []
-        for index, (schema, value) in enumerate(zip(schemas, self.arguments)):
+        for index, (schema, value) in enumerate(zip(contract["arguments"], self.arguments)):
             if schema["kind"] != "ndarray" or isinstance(value, NdArray):
                 continue
             try:
@@ -67,8 +68,20 @@ class HostBuffers:
 
     def __exit__(self, exc_type, *_):
         try:
-            if exc_type is None:
-                for array, view in self.allocated:
+            if exc_type is None and self.allocated:
+                readbacks = self.allocated
+                effects = self.contract.get("resource_effects")
+                if effects and effects["precision"] == "compiler_proven":
+                    accesses = effects["arguments"]
+                    outputs = [
+                        binding for item, binding in zip(self.pending, self.allocated)
+                        if accesses.get(str(item["index"])) not in ("read", "none")
+                    ]
+                    # A nonempty synchronous download also completes the launch.
+                    # Keep the existing completion path for input-only calls.
+                    if any(view.nbytes for _, view in outputs):
+                        readbacks = outputs
+                for array, view in readbacks:
                     array.read_into(view)
         finally:
             for array, _ in reversed(self.allocated):

@@ -22655,6 +22655,12 @@ def update(source: ti.types.ndarray(ti.f32, 1), output: ti.types.ndarray(ti.f32,
 def transform(values: ti.types.ndarray(ti.types.vector(3, ti.f32), 1)):
     for i in values:
         values[i] += ti.Vector([1, 2, 3])
+
+@ti.kernel
+def copy_even(source: ti.types.ndarray(ti.f32, 1), output: ti.types.ndarray(ti.f32, 1)):
+    for i in source:
+        if i % 2 == 0:
+            output[i] = source[i]
 """
 
 
@@ -22694,6 +22700,38 @@ def test_package_host_buffers_preserve_types_and_reject_unproved_aliases(tmp_pat
             library.host.model.update(original_data[::2], original_data[::2], 1.0)
         with pytest.raises(ValueError, match="element shape"):
             library.host.model.transform(np.zeros((7, 2), dtype=np.float32))
+        assert runtime._resources == resources
+
+        from taichi_forge_runtime.aot._runtime import NdArray
+
+        downloads = []
+        read_into = NdArray.read_into
+
+        def record_download(array, view):
+            downloads.append(view.obj)
+            return read_into(array, view)
+
+        monkeypatch.setattr(NdArray, "read_into", record_download)
+        source = np.arange(8, dtype=np.float32)
+        output = np.full_like(source, -1)
+        for offset in (1, 3):
+            source += offset
+            downloads.clear()
+            library.host.model.copy_even(source, output)
+            np.testing.assert_array_equal(output[::2], source[::2])
+            np.testing.assert_array_equal(output[1::2], -1)
+            assert len(downloads) == 1 and downloads[0] is output
+        entry = library.host.model.copy_even
+        for effects in (None, {"precision": "conservative", "arguments": {"0": "read", "1": "write"}}):
+            with monkeypatch.context() as patch:
+                patch.setitem(entry.contract, "resource_effects", effects)
+                downloads.clear()
+                source += 1
+                entry(source, output)
+                assert len(downloads) == 2
+                assert downloads[0] is source and downloads[1] is output
+                np.testing.assert_array_equal(output[::2], source[::2])
+                np.testing.assert_array_equal(output[1::2], -1)
         assert runtime._resources == resources
 
 

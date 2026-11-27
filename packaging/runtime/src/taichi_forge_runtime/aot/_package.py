@@ -1902,14 +1902,14 @@ class entry:
                     kernel = package._kernels[selected.symbol] = package._module.kernel(selected.symbol)
             from ._package_buffers import HostBuffers
 
-            buffers = HostBuffers(package.runtime, contract["arguments"], arguments)
+            buffers = HostBuffers(package.runtime, contract, arguments)
             with buffers as prepared:
                 call = kernel.bind(*prepared)
                 specialize = selected.symbol in package._specialization_entries
                 constant_args = specialization_constant_args(
                     contract, package._manifest["owners"].get(owner_type(owner), {}), package._manifest["owners"]
                 ) if specialize else ()
-                # Host arrays must upload/download on every call. Mutable
+                # Host arrays must stage the current contents on every call. Mutable
                 # tensor/scalar wrappers also require a fresh value snapshot.
                 reusable = not buffers.pending and all(
                     item["kind"] != "value" or reusable_scalar(value)
