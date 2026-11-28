@@ -3182,7 +3182,7 @@ class _Capture:
     def matches(self, component, owner, *, layouts=None):
         return self.dependency_mismatch(component, owner, layouts=layouts) is None
 
-    def dependency_mismatch(self, component, owner, *, layouts=None, allocation_updates=None):
+    def dependency_mismatch(self, component, owner, *, layouts=None, allocation_updates=None, fixed_bindings=None):
         from ._component_lexical import mismatch
 
         lexical_mismatch = mismatch(self, component)
@@ -3248,8 +3248,13 @@ class _Capture:
             # Producer definitions retain physical Field bindings. They cannot
             # run on another owner just because the deployable schema matches.
             # This binding guard never enters the semantic code identity.
-            if self.fixed_dependencies[group] != dependency:
-                return f"source binding of fixed group {group!r}"
+            if fixed_bindings is None:
+                if self.fixed_dependencies[group] != dependency:
+                    return f"source binding of fixed group {group!r}"
+            else:
+                if dependency in fixed_bindings.values():
+                    return f"aliased source binding of fixed group {group!r}"
+                fixed_bindings[group] = dependency
             for name, (member_group, paths) in self.fixed_members.items():
                 if member_group == group and members.get(name) != paths:
                     return f"fixed member {name!r} in group {group!r}"

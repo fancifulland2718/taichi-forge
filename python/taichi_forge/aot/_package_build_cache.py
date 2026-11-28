@@ -464,6 +464,14 @@ class PackageBuildCache:
         native = module._aot_builder._build_object_key(symbol, code.kernel.compiled_kernels[code.key])
         if not native:
             return
+        if code.fixed_dependencies:
+            # The emitter numbers trees in sorted source-ID order. Only group
+            # names are portable across Programs and witness generations.
+            groups = {dep[0]: group for group, dep in code.fixed_dependencies.items()}
+            trees = module._aot_builder._used_snode_tree_ids([symbol])
+            if not all(tree in groups for tree in trees):
+                return
+            facts["native_tree_groups"] = [groups[tree] for tree in trees]
         self.captures.setdefault(scope.key, {})[symbol] = self._capture_record(
             scope.key, symbol, native, module._component_entries[symbol], facts)
 
@@ -594,10 +602,18 @@ class PackageBuildCache:
                 if facts["field_inputs"] != scope.field_inputs(code):
                     continue
                 allocation_updates = {} if compilation.portable else None
+                fixed_bindings = {} if code.fixed_groups else None
                 if not matches(code, facts, entry["contract"], self.capture_syntax, component, owner,
                                signature, resources, layouts,
-                               portable=compilation.portable, allocation_updates=allocation_updates):
+                               portable=compilation.portable, allocation_updates=allocation_updates,
+                               fixed_bindings=fixed_bindings):
                     continue
+                tree_ids = []
+                if fixed_bindings is not None:
+                    code.fixed_dependencies = fixed_bindings
+                    tree_ids = [fixed_bindings[group][0] for group in facts["native_tree_groups"]]
+                    if tree_ids != sorted(set(tree_ids)):
+                        continue
                 code.validate_bindings(component, owner)
                 declarations = component.declarations
                 if code.workspaces:
@@ -628,7 +644,8 @@ class PackageBuildCache:
                     record = self._capture_record(scope.key, symbol, native, entry, facts)
             except (KeyError, AttributeError, OSError, ValueError, TypeError, zlib.error, TaichiCompilationError):
                 continue
-            if not module._aot_builder._restore_build_object(symbol, native):
+            restore = module._aot_builder._restore_build_object
+            if not (restore(symbol, native, tree_ids) if tree_ids else restore(symbol, native)):
                 continue
             identity = kernel, key
             module._component_entries[symbol] = entry
@@ -639,6 +656,29 @@ class PackageBuildCache:
             self.captures.setdefault(scope.key, {})[symbol] = record
             return code
         return None
+
+    def export_storage_accessor(self, module, symbol, kernel, args, tree, operand):
+        # Generated accessors use one declared tree and a Forge-owned kernel.
+        # The selector distinguishes same-typed members in the same layout.
+        key = _declaration_digest(("storage_accessor", self.object_context, symbol,
+                                   kernel.__module__, kernel.__qualname__, operand))
+        records = self.previous.get("objects")
+        record = records.get(key) if isinstance(records, dict) else None
+        builder = module._aot_builder
+        if isinstance(record, dict):
+            native = record.get("native")
+            if (isinstance(native, str) and record.get("digest") == value_digest((key, native))
+                    and builder._restore_build_object(symbol, native, [tree])):
+                module._exported_kernels[symbol] = key
+                module._content.append("kernel:" + symbol)
+                self.objects[key] = record
+                return
+        module.add_kernel(kernel, name=symbol, template_args=args)
+        if builder._used_snode_tree_ids([symbol]) == [tree]:
+            native = builder._build_object_key(symbol, module._exported_kernels[symbol])
+            if native:
+                self.objects[key] = dict(native=native, digest=value_digest((key, native)))
+        builder._seal_kernel_export(symbol)
 
     def record_object(self, key, native, entry, module):
         payload = (native, entry, module._component_entries[entry["symbol"]])

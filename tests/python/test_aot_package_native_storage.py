@@ -1,6 +1,9 @@
 """Compile symbolic sparse placement and exercise the original public Field semantics."""
 
 from contextlib import closing
+import importlib
+import json
+import sys
 
 import numpy as np
 import pytest
@@ -118,6 +121,35 @@ def test_pointer_bitmasked_groups_preserve_optional_placement_and_field_io(tmp_p
         assert models[1].sum_active() == 29.
         models[1].clear()
         assert models[1].sum_active() == 0.
+
+
+@test_utils.test(arch=ti.cpu, offline_cache=False)
+def test_incremental_sparse_storage_reuses_only_matching_layouts(tmp_path, monkeypatch):
+    path = tmp_path / "sparse_edits.py"
+    monkeypatch.syspath_prepend(str(tmp_path))
+    changed = _GRID.replace("scope.extra = scope.field(ti.f32", "scope.extra = scope.field(ti.f64")
+    # Reload the updated module even on filesystems with coarse timestamps.
+    monkeypatch.setattr(sys, "dont_write_bytecode", True)
+    for label, source in (("seed", _GRID), ("repeat", _GRID), ("edited", changed), ("clean", changed)):
+        path.write_text(source, encoding="utf8")
+        definitions = importlib.import_module(path.stem)
+        cache = tmp_path / ("fresh" if label == "clean" else "cache")
+        try:
+            ti.aot.export_package(definitions, tmp_path / label, arch=ti.cpu,
+                                  artifact_format="unified-bc-library", build_cache=cache)
+        finally:
+            sys.modules.pop(path.stem)
+        counts = json.loads((cache / "unified/latest.json").read_bytes())["produce"]
+        if label == "repeat":
+            assert counts["unified_root_emissions"] == 0
+            assert counts["unified_capture_restores"] > 0
+        elif label == "edited":
+            assert counts["unified_root_emissions"] > 0
+            assert counts["unified_capture_restores"] > 0
+    assert (tmp_path / "seed/code.tcm").read_bytes() != (tmp_path / "edited/code.tcm").read_bytes()
+    for left, right in (("seed", "repeat"), ("edited", "clean")):
+        for name in ("code.tcm", "package.json"):
+            assert (tmp_path / left / name).read_bytes() == (tmp_path / right / name).read_bytes()
 
 
 @test_utils.test(arch=ti.cpu, offline_cache=False)

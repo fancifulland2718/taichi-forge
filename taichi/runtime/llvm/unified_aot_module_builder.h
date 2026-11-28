@@ -20,6 +20,8 @@ void set_unified_build_directory(AotModuleBuilder &builder,
 std::string unified_build_object(AotModuleBuilder &builder, const std::string &name);
 bool restore_unified_build_object(AotModuleBuilder &builder, const std::string &name,
                                   const std::string &record);
+bool restore_unified_storage_build_object(AotModuleBuilder &builder, const std::string &name,
+                                          const std::string &record, const std::vector<int> &trees);
 std::unique_ptr<AotModuleBuilder> make_unified_aot_module_builder(
     const CompileConfig &config,
     const DeviceCapabilityConfig &caps);

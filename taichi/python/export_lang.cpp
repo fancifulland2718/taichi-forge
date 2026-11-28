@@ -6027,6 +6027,7 @@ void export_lang(py::module &m) {
         return false;
       })
 #if TI_WITH_LLVM
+      .def("_restore_build_object", &LLVM::restore_unified_storage_build_object)
       .def("_set_unified_build_directory", &LLVM::set_unified_build_directory)
       .def("_declare_unified_storage", &LLVM::declare_unified_storage,
            py::arg("root"), py::arg("parameters"), py::arg("binding_key") = "")

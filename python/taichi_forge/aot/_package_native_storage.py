@@ -112,20 +112,6 @@ def register_tree(module, builder, chain, construction, witness_scope, group, gu
     owner_type = package + "." + owner_name
     key = json.dumps([owner_type, list(path), group, sorted(guards.items())], separators=(",", ":"))
     slot = module._aot_builder._declare_unified_storage(root, parameters, key)
-    deactivation = {}
-    for attribute, node in nodes.items():
-        symbols = []
-
-        class Deactivations:
-            def dispatch(self, kernel, *, template_args):
-                symbol = f"storage_{slot}_clear_{attribute}_{len(symbols)}"
-                if symbol not in module._exported_kernels:
-                    module.add_kernel(kernel, name=symbol, template_args=template_args)
-                    module._aot_builder._seal_kernel_export(symbol)
-                symbols.append(symbol)
-
-        node.deactivate_all(builder=Deactivations())
-        deactivation[attribute] = symbols
     paths = {}
 
     def visit(node, path):
@@ -134,6 +120,35 @@ def register_tree(module, builder, chain, construction, witness_scope, group, gu
             visit(node.get_ch(child), [*path, child])
 
     visit(root, [])
+    cache = getattr(module, "_package_storage_cache", None)
+
+    def export(symbol, kernel, args, member=None):
+        if symbol in module._exported_kernels:
+            return
+        if cache is None:
+            module.add_kernel(kernel, name=symbol, template_args=args)
+            module._aot_builder._seal_kernel_export(symbol)
+            return
+        if member is None:
+            operand = {name: paths[value.ptr.id] for name, value in args.items()}
+        else:
+            field = args["mat"] if "mat" in args else args["tensor"]
+            operand = (member["places"], member["element_shape"], str(field.dtype),
+                       len(field.shape), list(field.snode.ptr.offset))
+        cache.export_storage_accessor(module, symbol, kernel, args, tree_id, operand)
+
+    deactivation = {}
+    for attribute, node in nodes.items():
+        symbols = []
+
+        class Deactivations:
+            def dispatch(self, kernel, *, template_args):
+                symbol = f"storage_{slot}_clear_{attribute}_{len(symbols)}"
+                export(symbol, kernel, template_args)
+                symbols.append(symbol)
+
+        node.deactivate_all(builder=Deactivations())
+        deactivation[attribute] = symbols
     members, arrays = {}, {}
     for name, field in fields.items():
         named = field.field_dict.items() if hasattr(field, "field_dict") else [(None, field)]
@@ -153,9 +168,7 @@ def register_tree(module, builder, chain, construction, witness_scope, group, gu
                 ("write", _kernels.ext_arr_to_matrix if matrix else _kernels.ext_arr_to_tensor),
             ):
                 symbol = f"storage_{slot}_{operation}_{len(members)}"
-                if symbol not in module._exported_kernels:
-                    module.add_kernel(kernel, name=symbol, template_args=args)
-                    module._aot_builder._seal_kernel_export(symbol)
+                export(symbol, kernel, args, record)
                 record[operation] = symbol
             members[member] = record
     registry[tree_id] = dict(slot=slot, owner_type=owner_type, owner_path=list(path), group=group,

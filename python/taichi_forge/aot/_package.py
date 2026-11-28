@@ -2082,6 +2082,8 @@ def _export_package(output, declarations, source_root, caps, artifact_format, co
     compilation.attach(module, function_library=portable_ir)
     if cache is not None and cache.objects_enabled:
         compilation.capture_cache = cache
+        if compilation.portable:
+            module._package_storage_cache = cache
     from ._package_owner_graph import OwnerGraph, owner_bindings, layout_owner
 
     owner_graph = OwnerGraph(sources, imported_modules, module, field_trees=compilation.field_trees, build_cache=cache)

@@ -47,6 +47,12 @@ class UnifiedAotModuleBuilder final : public AotModuleBuilder {
                 (named != named_slots_.end() && named->second != slot),
                 "Unified storage declarations disagree on an existing binding");
     node_ordinals_.insert(members.begin(), members.end());
+    if (cache_captures_) {
+      auto &nodes = tree_nodes_[id];
+      nodes.resize(members.size());
+      for (const auto &[node, ordinal] : members)
+        nodes.at(ordinal) = node;
+    }
     schemas_.try_emplace(hash, std::move(json));
     if (!binding_key.empty())
       named_slots_.emplace(binding_key, slot);
@@ -81,7 +87,7 @@ class UnifiedAotModuleBuilder final : public AotModuleBuilder {
             {"unified_capture_restores", restored_}, {"unified_referenced_units", referenced_units_}};
   }
   std::string build_object(const std::string &name) const {
-    if (!cache_captures_ || !kernel_snode_tree_ids(name).empty())
+    if (!cache_captures_)
       return {};
     using namespace liong::json;
     BuildObject object;
@@ -90,13 +96,29 @@ class UnifiedAotModuleBuilder final : public AotModuleBuilder {
       object.imports = it->second;
     object.signature = entry_signatures_.at(name);
     object.effects = kernel_resource_effects(name);
+    const auto &trees = kernel_snode_tree_ids(name);
+    for (int id : trees)
+      object.tree_layouts.push_back(layouts_.at(tree_bindings_.at(id)));
+    // The bitcode addresses a local tree ordinal and a node ordinal. Persist
+    // the same coordinates for effects instead of this Program's SNode IDs.
+    for (auto &effect : object.effects.effects) {
+      if (effect.resource_kind != "snode")
+        continue;
+      auto tree = std::find(trees.begin(), trees.end(), effect.snode_tree_id);
+      auto node = node_ordinals_.find(effect.snode_id);
+      if (tree == trees.end() || node == node_ordinals_.end())
+        return {};
+      effect.snode_tree_id = static_cast<int>(tree - trees.begin());
+      effect.snode_id = node->second;
+    }
     if (auto it = value_parameters_.find(name); it != value_parameters_.end())
       object.values = print(serialize(aot::make_value_parameter_artifact({*it})));
     if (auto it = argument_origins_.find(name); it != argument_origins_.end())
       object.origins = print(serialize(aot::make_argument_origin_artifact({*it})));
     return print(serialize(object));
   }
-  bool restore_object(const std::string &name, const std::string &record) {
+  bool restore_object(const std::string &name, const std::string &record,
+                      const std::vector<int> &trees) {
     if (!cache_captures_ || entries_.count(name))
       return false;
     using namespace liong::json;
@@ -105,6 +127,22 @@ class UnifiedAotModuleBuilder final : public AotModuleBuilder {
     aot::NamedArgumentOrigins origins;
     try {
       deserialize(parse_complete(record), object, true);
+      if (object.tree_layouts.size() != trees.size())
+        return false;
+      std::set<int> slots;
+      for (size_t i = 0; i < trees.size(); ++i) {
+        auto slot = tree_bindings_.find(trees[i]);
+        if (slot == tree_bindings_.end() || !slots.insert(slot->second).second ||
+            layouts_.at(slot->second) != object.tree_layouts[i])
+          return false;
+      }
+      for (auto &effect : object.effects.effects) {
+        if (effect.resource_kind != "snode")
+          continue;
+        int tree = trees.at(effect.snode_tree_id);
+        effect.snode_id = tree_nodes_.at(tree).at(effect.snode_id);
+        effect.snode_tree_id = tree;
+      }
       if (!object.values.empty()) {
         values = aot::parse_value_parameter_artifact(parse_complete(object.values));
         if (values.size() != 1 || !values.count(name))
@@ -151,6 +189,8 @@ class UnifiedAotModuleBuilder final : public AotModuleBuilder {
     entry_signatures_.emplace(name, std::move(object.signature));
     if (!object.imports.empty())
       imports_.try_emplace(object.unit, std::move(object.imports));
+    if (!trees.empty())
+      entry_trees_.emplace(name, trees);
     entries_.emplace(name, std::move(object.unit));
     value_parameters_.merge(values);
     argument_origins_.merge(origins);
@@ -232,9 +272,9 @@ class UnifiedAotModuleBuilder final : public AotModuleBuilder {
   std::map<std::string, std::string> signatures_, entry_signatures_;
   struct BuildObject {
     std::string unit, signature, values, origins;
-    std::vector<std::string> imports;
+    std::vector<std::string> imports, tree_layouts;
     GraphKernelMetadata effects;
-    TI_IO_DEF(unit, signature, values, origins, imports, effects);
+    TI_IO_DEF(unit, signature, values, origins, imports, effects, tree_layouts);
   };
   std::map<std::string, std::vector<std::string>> imports_;
   bool cache_captures_{false};
@@ -255,6 +295,7 @@ class UnifiedAotModuleBuilder final : public AotModuleBuilder {
   uint64_t unit_end_{0};
   std::map<std::string, std::pair<uint64_t, uint64_t>> written_units_;
   std::map<int, int> tree_bindings_, node_ordinals_;
+  std::map<int, std::vector<int>> tree_nodes_;
   std::map<std::string, int> named_slots_;
   std::map<std::string, std::string> schemas_;
   std::vector<std::string> layouts_;
@@ -437,8 +478,13 @@ std::string unified_build_object(AotModuleBuilder &builder, const std::string &n
 
 bool restore_unified_build_object(AotModuleBuilder &builder, const std::string &name,
                                   const std::string &record) {
+  return restore_unified_storage_build_object(builder, name, record, {});
+}
+
+bool restore_unified_storage_build_object(AotModuleBuilder &builder, const std::string &name,
+                                          const std::string &record, const std::vector<int> &trees) {
   auto *unified = dynamic_cast<UnifiedAotModuleBuilder *>(&builder);
-  return unified && unified->restore_object(name, record);
+  return unified && unified->restore_object(name, record, trees);
 }
 
 void set_unified_build_directory(AotModuleBuilder &builder,

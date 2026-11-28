@@ -271,7 +271,7 @@ _LEXICAL_MAPS = ("functions", "constants", "struct_types")
 
 
 def _freeze_inputs(code, memo, component, owner, portable):
-    if code.fixed_groups or code.lexical:
+    if (code.fixed_groups and not portable) or code.lexical:
         raise Unavailable("physical storage or lexical binding")
     maps = {name: list(getattr(code, name).items()) for name in _MAPS}
     maps["capture_paths"] = [(name, component._paths[name]) for name in code.used]
@@ -297,7 +297,7 @@ def freeze_missing(context, memo, *, portable):
 
     # The prefix has no completed kernel or workspace ABI. Only replay it when
     # the ordinary dependency matcher covers everything observed before failure.
-    if context.model_static_ranges or context.shared_arrays:
+    if context.model_static_ranges or context.shared_arrays or context.fixed_groups:
         raise Unavailable("task-local lowering")
     # A private local tensor's extents size storage at prepare. The source
     # matcher covers its construction, including the dtype, while the owner
@@ -355,6 +355,8 @@ def thaw(facts, kernel, key, entry):
     code.capture_source_paths = {name: _tuples(path) for name, path in facts["maps"]["capture_source_paths"]}
     code.dynamic = tuple(facts["dynamic"])
     contract = entry["contract"]
+    code.fixed_groups = contract.get("fixed_groups", {})
+    code.fixed_members = {name: _tuples(member) for name, member in contract.get("fixed_members", {}).items()}
     code.model_static_ranges = tuple(map(_tuples, contract.get("model_static_ranges", ())))
     code.workspaces = contract.get("local_tensor_workspaces", {})
     code._function_states = {}
@@ -375,7 +377,7 @@ def matches_variant(variant, signature, resources, layouts):
 
 
 def matches(code, facts, contract, memo, component, owner, signature, resources, layouts, *, portable=False,
-            allocation_updates=None):
+            allocation_updates=None, fixed_bindings=None):
     from ._component import _Capture, _extent_invariant_compact_member, _used_template_signature
 
     if (code.call_signature != _used_template_signature(signature, code.static_templates)
@@ -383,7 +385,7 @@ def matches(code, facts, contract, memo, component, owner, signature, resources,
             or any(component._paths.get(name) != path for name, path in code.capture_paths.items())
             or not layouts.matches_static(code)
             or _Capture.dependency_mismatch(code, component, owner, layouts=layouts,
-                                            allocation_updates=allocation_updates) is not None):
+                                            allocation_updates=allocation_updates, fixed_bindings=fixed_bindings) is not None):
         return False
     if facts["sources"] != _source_facts(code.kernel, code, memo, component, owner, portable=portable):
         return False
