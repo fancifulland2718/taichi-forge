@@ -2093,7 +2093,8 @@ def _export_package(output, declarations, source_root, caps, artifact_format, co
         from ._package_static import StaticPreparation
 
         compilation.static_preparation = StaticPreparation(
-            sources, method_implementations=owner_graph.method_implementations, portable=compilation.portable)
+            sources, method_implementations=owner_graph.method_implementations,
+            portable=compilation.portable, imported_modules=imported_modules)
     manifest = dict(
         version=(
             3

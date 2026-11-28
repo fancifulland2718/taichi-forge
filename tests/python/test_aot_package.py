@@ -4781,6 +4781,43 @@ def step(self):
     assert proof.entry_uses('model.step')['flag'] != {'prepare_condition'}
 
 
+@pytest.mark.parametrize('case,projected', [
+    ('final', True), ('ordinary', False), ('non_numeric', False),
+    ('parameter', False), ('rebound', False), ('static_rebind', False), ('closure', False),
+])
+def test_package_numeric_final_local_condition(case, projected):
+    from types import ModuleType
+    from typing import Final
+
+    from taichi_forge.aot._package_static import StaticPreparation
+    from taichi_forge.tools._compiled_host import decorator_resolver
+
+    module = ModuleType('model')
+    module.START = 'state' if case == 'non_numeric' else 0
+    module.Final = Final
+    module.__annotations__ = {} if case == 'ordinary' else {'START': 'Final[int]'}
+    source = '''@ti.func
+def evaluate(self):
+    state = START
+    if ti.static(self.enabled):
+        state = OTHER
+    return state
+'''
+    if case == 'parameter':
+        source = source.replace('evaluate(self)', 'evaluate(self, START)')
+    if case == 'rebound':
+        source = source.replace('    state = START', '    START = self.source\n    state = START')
+    if case == 'static_rebind':
+        source = source.replace('    return state', '    state = ti.static(OTHER)\n    return state')
+    if case == 'closure':
+        source = 'def factory(START):\n' + textwrap.indent(source, '    ')
+    source = 'import taichi_forge as ti\nOTHER = 1\n' + source
+    tree = ast.parse(source)
+    proof = StaticPreparation([('model', None, None, source, tree, decorator_resolver(tree), None, None)],
+                              imported_modules={'model': module})
+    assert (proof.entry_uses('model.evaluate')['enabled'] == {'prepare_condition'}) == projected
+
+
 @pytest.mark.parametrize('body', [
     'dtype = ti.f32 if self.flag else ti.i32\n    out = ti.cast(1, dtype)',
     'if ti.static(self.flag):\n        dtype = ti.f32\n        out = ti.cast(1, dtype)',

@@ -26,7 +26,7 @@ def _receiver_path(expression, receiver):
 
 
 class StaticPreparation:
-    def __init__(self, sources, *, method_implementations=None, portable=False):
+    def __init__(self, sources, *, method_implementations=None, portable=False, imported_modules=None):
         self._portable = portable
         self._method_implementations = method_implementations or {}
         self.uses = {}
@@ -42,8 +42,14 @@ class StaticPreparation:
         self._ambiguous_method_names = set()
         self._task_context_cache = {}
         self._task_context_methods = set()
+        from ._component import _module_final
+
         functions = []
+        function_globals = {}
         for module, _, _, _, tree, kind, _, _ in sources:
+            namespace = vars(imported_modules[module]) if imported_modules and module in imported_modules else {}
+            numeric_finals = {name for name, value in namespace.items()
+                              if type(value) in (bool, int, float) and _module_final(namespace, name)}
             tree_nodes = tuple(ast.walk(tree))
             tree_parents = {id(child): node for node in tree_nodes for child in ast.iter_child_nodes(node)}
             for function in tree_nodes:
@@ -71,6 +77,10 @@ class StaticPreparation:
                     self._ambiguous_names.add(function.name)
                     self._ambiguous_method_names.add(function.name)
                     continue
+                # A nested factory may capture a different value with the same name.
+                parent = tree_parents.get(id(function))
+                if parent is tree or isinstance(parent, ast.ClassDef) and tree_parents.get(id(parent)) is tree:
+                    function_globals[id(function)] = numeric_finals
                 names, ancestor = [function.name], function
                 while (ancestor := tree_parents.get(id(ancestor))) is not None:
                     if isinstance(ancestor, ast.ClassDef):
@@ -109,7 +119,8 @@ class StaticPreparation:
                    for node in nodes):
                 aliases.clear()
             self._local_values[id(function)] = reads, stores, aliases
-            self._numeric_locals[id(function)] = self._numeric_assignments(function, parents, kind, stores, nodes=nodes)
+            self._numeric_locals[id(function)] = self._numeric_assignments(
+                function, parents, kind, stores, nodes=nodes, numeric_finals=function_globals.get(id(function), ()))
         # A call name qualifies only when every definition with that name in
         # the source closure is a proven inline schedule. Recursive/unresolved
         # groups never bootstrap themselves into this set.
@@ -397,7 +408,7 @@ class StaticPreparation:
         return result
 
     @staticmethod
-    def _numeric_assignments(function, parents, kind, stores, *, nodes=None):
+    def _numeric_assignments(function, parents, kind, stores, *, nodes=None, numeric_finals=()):
         """Locals already materialized as DSL values, never Python aliases."""
         parameters = {arg.arg for arg in (*function.args.posonlyargs, *function.args.args,
                                          *function.args.kwonlyargs)}
@@ -416,6 +427,10 @@ class StaticPreparation:
                 continue
             name, value = statement.targets[0].id, statement.value
             numeric = isinstance(value, ast.Constant) and type(value.value) in (bool, int, float)
+            if isinstance(value, ast.Name) and value.id in numeric_finals:
+                from ._package_constants import locally_bound
+
+                numeric = not locally_bound(function, value.id)
             if isinstance(value, ast.Call) and kind(value.func) == 'cast':
                 cast_root = value.func
                 while isinstance(cast_root, ast.Attribute):
