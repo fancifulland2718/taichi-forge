@@ -201,6 +201,12 @@ class UnitWriter final : public IRVisitor {
   std::unordered_map<const Stmt *, llvm::Value *> values_;
   std::unordered_map<const Stmt *, llvm::Value *> indices_;
   std::vector<std::pair<llvm::BasicBlock *, llvm::BasicBlock *>> loops_;
+  // Values in the root call frame are fixed for this invocation. Keep reuse
+  // local to a block so prepare can form independent offloads from ranges.
+  llvm::BasicBlock *argument_block_{nullptr};
+  using ArgumentKey = std::tuple<std::vector<int>, bool, llvm::Type *>;
+  std::map<ArgumentKey, llvm::Value *> root_args_;
+  std::map<std::pair<std::string, uint64_t>, llvm::Value *> device_queries_;
   unsigned shared_allocations_{0};
   const Stmt *current_{nullptr};
   using IRVisitor::visit;
@@ -247,13 +253,32 @@ class UnitWriter final : public IRVisitor {
     return llvm::StructType::get(ctx_, types);
   }
 
-  llvm::Value *array_descriptor(const std::vector<int> &path) {
-    if (!callee_) {
-      std::vector<llvm::Value *> indices{entry_->getArg(0), b_.getInt32(0)};
-      for (int slot : path)
-        indices.push_back(b_.getInt32(slot));
-      return operation("arg.address", b_.getPtrTy(), indices);
+  llvm::Value *root_argument(const std::vector<int> &path,
+                             int depth,
+                             bool load,
+                             llvm::Type *result) {
+    llvm::Value **slot = nullptr;
+    if (simplify_ && depth == 0) {
+      if (argument_block_ != b_.GetInsertBlock()) {
+        root_args_.clear();
+        argument_block_ = b_.GetInsertBlock();
+      }
+      slot = &root_args_[{path, load, result}];
+      if (*slot)
+        return *slot;
     }
+    std::vector<llvm::Value *> indices{entry_->getArg(0), b_.getInt32(depth)};
+    for (int index : path)
+      indices.push_back(b_.getInt32(index));
+    auto *argument = operation(load ? "arg" : "arg.address", result, indices);
+    if (slot)
+      *slot = argument;
+    return argument;
+  }
+
+  llvm::Value *array_descriptor(const std::vector<int> &path) {
+    if (!callee_)
+      return root_argument(path, 0, false, b_.getPtrTy());
     TI_ERROR_IF(path.size() != 1 || callee_->parameter_list.at(path[0]).ptype !=
                                         ParameterType::kNdarray,
                 "Invalid unified LLVM helper array descriptor");
@@ -321,13 +346,9 @@ class UnitWriter final : public IRVisitor {
               : address;
       return;
     }
-    std::vector<llvm::Value *> path{entry_->getArg(0),
-                                    b_.getInt32(s->arg_depth)};
-    for (auto slot : s->arg_id)
-      path.push_back(b_.getInt32(slot));
     auto *ret =
         s->is_ptr || !s->create_load ? b_.getPtrTy() : type(s->ret_type);
-    values_[s] = operation(s->create_load ? "arg" : "arg.address", ret, path);
+    values_[s] = root_argument(s->arg_id, s->arg_depth, s->create_load, ret);
   }
   void visit(AllocaStmt *s) override {
     auto *t = type(s->ret_type.ptr_removed());
@@ -455,6 +476,23 @@ class UnitWriter final : public IRVisitor {
       args.push_back(entry_->getArg(0));
     for (const auto *arg : s->args)
       args.push_back(value(arg));
+    if (simplify_ && args.size() == 1 &&
+        (s->func_name == "unified_target_matches" ||
+         s->func_name == "unified_has_device_capability" ||
+         s->func_name == "unified_has_extension")) {
+      if (auto *id = llvm::dyn_cast<llvm::ConstantInt>(args.front())) {
+        auto &predicate = device_queries_[{s->func_name, id->getZExtValue()}];
+        if (!predicate) {
+          // Prepare folds these literal queries before reconstructing tasks.
+          llvm::IRBuilderBase::InsertPointGuard restore(b_);
+          auto &entry = entry_->getEntryBlock();
+          b_.SetInsertPoint(&entry, entry.begin());
+          predicate = operation("builtin." + s->func_name, type(s->ret_type), args);
+        }
+        values_[s] = predicate;
+        return;
+      }
+    }
     auto *call = llvm::cast<llvm::CallInst>(
         operation("builtin." + s->func_name, type(s->ret_type), args));
     if (s->ret_type->is<StructType>()) {
@@ -822,10 +860,18 @@ class UnitWriter final : public IRVisitor {
     }
   }
   void visit(IfStmt *s) override {
-    auto *yes = llvm::BasicBlock::Create(ctx_, "then", entry_);
-    auto *no = llvm::BasicBlock::Create(ctx_, "else", entry_);
+    auto needs_arm = [&](const std::unique_ptr<Block> &block) {
+      return !simplify_ || (block && !block->statements.empty());
+    };
+    bool has_true = needs_arm(s->true_statements);
+    bool has_false = needs_arm(s->false_statements);
+    if (!has_true && !has_false)
+      return;
+    auto *yes = has_true ? llvm::BasicBlock::Create(ctx_, "then", entry_) : nullptr;
+    auto *no = has_false ? llvm::BasicBlock::Create(ctx_, "else", entry_) : nullptr;
     auto *join = llvm::BasicBlock::Create(ctx_, "join", entry_);
-    b_.CreateCondBr(b_.CreateIsNotNull(value(s->cond)), yes, no);
+    b_.CreateCondBr(b_.CreateIsNotNull(value(s->cond)), yes ? yes : join,
+                    no ? no : join);
     auto arm = [&](llvm::BasicBlock *bb, Block *block) {
       b_.SetInsertPoint(bb);
       if (block)
@@ -833,8 +879,10 @@ class UnitWriter final : public IRVisitor {
       if (!bb_terminated())
         b_.CreateBr(join);
     };
-    arm(yes, s->true_statements.get());
-    arm(no, s->false_statements.get());
+    if (yes)
+      arm(yes, s->true_statements.get());
+    if (no)
+      arm(no, s->false_statements.get());
     b_.SetInsertPoint(join);
   }
   bool bb_terminated() const {
