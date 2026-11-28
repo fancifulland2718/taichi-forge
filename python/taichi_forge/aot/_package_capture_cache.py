@@ -297,8 +297,15 @@ def freeze_missing(context, memo, *, portable):
 
     # The prefix has no completed kernel or workspace ABI. Only replay it when
     # the ordinary dependency matcher covers everything observed before failure.
-    if context.workspaces or context.model_static_ranges or context.shared_arrays:
+    if context.model_static_ranges or context.shared_arrays:
         raise Unavailable("task-local lowering")
+    # A private local tensor's extents size storage at prepare. The source
+    # matcher covers its construction, including the dtype, while the owner
+    # matcher must cover every input to the lane count and element shape.
+    if context.workspaces and (not portable or any(
+            not extent_dependencies(axis).issubset(context.used)
+            for spec in context.workspaces.values() for axis in spec["shape"])):
+        raise Unavailable("untracked local tensor workspace")
     # Unified block width is a launch annotation resolved by prepare. It
     # cannot select a different frontend path to the missing resource. Replay
     # only when the normal matcher covers every input to the annotation.
@@ -310,6 +317,8 @@ def freeze_missing(context, memo, *, portable):
     facts["signature"] = _used_template_signature(context.call_signature, context.static_templates)
     contract = dict(declaration_sources={name: component._sources[name] for name in context.used
                                          if name in component._sources}, dense_access=list(context.dense_access.items()))
+    if context.workspaces:
+        contract["workspace_names"] = list(context.workspaces)
     return facts, contract
 
 

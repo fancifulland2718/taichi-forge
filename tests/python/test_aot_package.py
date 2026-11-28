@@ -13190,8 +13190,9 @@ class Model:
             assert model.output[None] == expected
 
 
+@pytest.mark.parametrize("workspace", [False, True], ids=["block", "local_tensor"])
 @test_utils.test(arch=ti.cpu, offline_cache=False)
-def test_unified_missing_resource_after_model_block_tracks_helper(tmp_path, monkeypatch):
+def test_unified_missing_resource_after_model_block_tracks_helper(tmp_path, monkeypatch, workspace):
     source = """import taichi_forge as ti
 @ti.data_oriented
 class Model:
@@ -13215,6 +13216,10 @@ class Model:
         for i in range(1):
             self.out[None] = self.value()
 """
+    if workspace:
+        source = source.replace("self.out[None] = self.value()", """scratch = ti.Vector.zero(ti.i32, self.block)
+            scratch[0] = self.value()
+            self.out[None] = scratch[0]""")
     cache = tmp_path / "cache"
     module_path = tmp_path / "block_rejection.py"
     monkeypatch.syspath_prepend(str(tmp_path))
@@ -13230,6 +13235,9 @@ class Model:
         index = json.loads((cache / "portable/declarations/latest.json").read_bytes())
         assert bool(index["rejections"]) == (not edited)
         with ti.aot.borrow_runtime() as runtime, load_package(runtime, output) as sdk:
+            present = sdk.host.Model(True, 1, 16)
+            present.step()
+            assert present.out[None] == (7 if edited else 3)
             model = sdk.host.Model(False, 1, 32)
             if edited:
                 model.step()

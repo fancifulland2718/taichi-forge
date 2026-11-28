@@ -512,6 +512,10 @@ class PackageBuildCache:
                 if digest != _capture_digest(scope.key, "missing", compressed):
                     continue
                 name, facts, contract = json.loads(zlib.decompress(compressed))
+                # A new owner declaration may conflict with a hidden tensor
+                # slot before control reaches the previously missing resource.
+                if not component.declarations.keys().isdisjoint(contract.get("workspace_names", ())):
+                    continue
                 facts = _map_layout_facts(facts, self._load_layout)
                 observed = thaw_missing(facts, kernel)
                 if facts["field_inputs"] != scope.field_inputs(observed) or not matches(
