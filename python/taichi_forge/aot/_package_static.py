@@ -25,6 +25,31 @@ def _receiver_path(expression, receiver):
     return None
 
 
+def _local_guard_fields(node, receiver, parents, kind):
+    """Identify a direct conditional read of this owner's Dense ports."""
+    call = parents.get(id(node))
+    branch = parents.get(id(call))
+    if not (receiver and isinstance(node.value, ast.Name) and node.value.id == receiver
+            and isinstance(call, ast.Call) and kind(call.func) == 'static' and call.args == [node]
+            and isinstance(branch, ast.If) and branch.test is call and not branch.orelse):
+        return {'*'}
+    fields = set()
+    for stmt in branch.body:
+        if not isinstance(stmt, (ast.AugAssign, ast.Assign)):
+            return {'*'}
+        targets = stmt.targets if isinstance(stmt, ast.Assign) else [stmt.target]
+        if not all(isinstance(target, ast.Name) for target in targets):
+            return {'*'}
+        for part in ast.walk(stmt.value):
+            if isinstance(part, ast.Call):
+                return {'*'}
+            if isinstance(part, ast.Attribute):
+                if not isinstance(part.value, ast.Name) or part.value.id != receiver:
+                    return {'*'}
+                fields.add(part.attr)
+    return fields or {'*'}
+
+
 class StaticPreparation:
     def __init__(self, sources, *, method_implementations=None, portable=False, imported_modules=None):
         self._portable = portable
@@ -44,6 +69,9 @@ class StaticPreparation:
         self._task_context_methods = set()
         from ._component import _module_final
 
+        dense_guards = {flag for _, _, _, _, _, _, schemas, _ in sources
+                        for schema in schemas.values() for item in schema.values()
+                        if item['kind'] == 'dense_field' for flag in item.get('conditions', ())} if portable else set()
         functions = []
         function_globals = {}
         for module, _, _, _, tree, kind, _, _ in sources:
@@ -250,6 +278,10 @@ class StaticPreparation:
                             reasons = self._use(node, parents, kind, threaded) if key != '*' else {'reflective_use'}
                             context.setdefault(key, set()).update(reasons)
                 if isinstance(node, ast.Attribute) and isinstance(node.ctx, ast.Load):
+                    if node.attr in dense_guards:
+                        fields = _local_guard_fields(node, receiver, parents, kind)
+                        for context in uses.values():
+                            context.setdefault('guard_fields:' + node.attr, set()).update(fields)
                     for threaded, context in uses.items():
                         context.setdefault(node.attr, set()).update(self._use(node, parents, kind, threaded))
             self._functions[identity] = uses, edges
@@ -795,9 +827,11 @@ class StaticPreparation:
 
         # Query input eligibility depends on this entry's numeric predicates.
         # Producer-only configuration must not force query presence variants.
-        if any(item["kind"] == "owner_input" for item in schema.values()):
+        borrowed = any(item["kind"] == "owner_input" for item in schema.values())
+        if borrowed:
             project_query_groups(result, projected, uses)
             project_owned_records(result, projected, borrowed=True, uses=uses)
-            project_nested_query_records(result, projected, uses, query_paths=query_paths)
+        if borrowed or (self._portable and query_paths is not None):
+            project_nested_query_records(result, projected, uses, query_paths=query_paths, local_fields=self._portable)
         self._contexts[key] = result, projected, facts
         return result, projected, facts

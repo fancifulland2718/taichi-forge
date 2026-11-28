@@ -370,7 +370,7 @@ def ordered_presence_conditions(schema, paths, conditions):
     return ordered
 
 
-def project_nested_query_records(environment, schema, uses, *, query_paths=None):
+def project_nested_query_records(environment, schema, uses, *, query_paths=None, local_fields=False):
     """Project a joint presence closure, without changing the source layout.
 
     Dynamic guards qualify together inside their finite outer layout. The
@@ -423,6 +423,24 @@ def project_nested_query_records(environment, schema, uses, *, query_paths=None)
         for key in (dependencies & device_keys) - required:
             required.add(key)
             pending.append(key)
+    # The owner keeps its allocation schema. An entry can borrow its own
+    # conditional Dense fields through the same ports as a borrowed query.
+    # Unknown child reads stay in the closure above; an escaped root cannot
+    # establish which of its local members the entry actually needs.
+    local_guards = set()
+    if local_fields and query_paths is not None and () not in query_paths[1]:
+        members_by_guard = {}
+        for key in required:
+            for flag in schema[key].get('conditions', {}):
+                members_by_guard.setdefault(flag, []).append(key)
+        local_guards = {
+            flag for flag, members in members_by_guard.items()
+            if len(paths[flag]) == 1 and not schema[flag].get('conditions')
+            and uses.get(paths[flag][-1]) == {'prepare_condition'}
+            and uses.get('guard_fields:' + paths[flag][-1], {'*'}) <= {paths[key][-1] for key in members}
+            and all(len(paths[key]) == 1 and schema[key]['kind'] == 'dense_field'
+                    and schema[key].get('conditions') == {flag: True} for key in members)
+        }
     candidates = {key for key, item in schema.items()
                   if key in required and item['kind'] == 'static'
                   and not guards_caller_storage(schema, key, uses)
@@ -430,7 +448,8 @@ def project_nested_query_records(environment, schema, uses, *, query_paths=None)
                   # Existing nullable query schedules retain their guarded
                   # parallel lowering. Type/alias/early-return uses do not.
                   and uses.get(paths[key][-1], {'prepare_condition'}) <= {'prepare_condition', 'parallel_structure'}
-                  and (any(len(paths[key]) > len(prefix) and paths[key][:len(prefix)] == prefix for prefix in inputs)
+                  and (key in local_guards
+                       or any(len(paths[key]) > len(prefix) and paths[key][:len(prefix)] == prefix for prefix in inputs)
                        or any(item['kind'] == 'owner_input' and key in item.get('conditions', {})
                               for item in schema.values()))
                   and any(key in member.get('conditions', {}) for member in schema.values())}

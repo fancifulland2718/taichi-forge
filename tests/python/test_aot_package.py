@@ -658,6 +658,67 @@ def test_build_cache_toolchain_digest_reuses_only_unchanged_files(tmp_path, monk
     assert len(reads) == 2
 
 
+@test_utils.test(arch=ti.cpu, offline_cache=False)
+def test_unified_owner_borrows_its_guarded_dense_field(tmp_path, monkeypatch):
+    from taichi_forge_runtime.aot._unified_library import select_manifest
+
+    source = """
+import taichi_forge as ti
+@ti.data_oriented
+class Model:
+    def __init__(self, n: int, enabled: bool, history: bool):
+        self.n = n
+        self.enabled = enabled
+        self.history = history
+        scope = ti.experimental.ResourceScope(self)
+        scope.static("enabled", choices=(False, True))
+        scope.static("history", choices=(False, True))
+        self.saved = None
+        if self.history:
+            scope.saved = scope.field(ti.f32, shape=scope.dim("n"))
+        scope.out = scope.field(ti.f32, shape=scope.dim("n"))
+        self.force = None
+        if self.enabled:
+            scope.force = scope.vector_field(3, ti.f32, shape=scope.dim("n"))
+    @ti.kernel
+    def step(self):
+        for i in range(self.n):
+            value = 1.0
+            if ti.static(self.enabled):
+                value += self.force[i][1]
+            self.out[i] = value
+    @ti.kernel
+    def finish(self):
+        for i in range(self.n):
+            value = 0.0
+            if ti.static(self.enabled):
+                value += self.force[i][1]
+            if ti.static(self.enabled or self.history):
+                value += self.saved[i]
+            self.out[i] = value
+"""
+    package = _source_package(tmp_path, monkeypatch, source)
+    output = tmp_path / "sdk"
+    document = ti.aot.export_package(package, output, artifact_format="unified-bc-library")
+    manifest = select_manifest(document, "x64")
+    assert sum(entry["definition"].endswith("Model.step") for entry in manifest["entries"].values()) == 1
+    ti.reset()
+    with Runtime("x64") as runtime, load_package(runtime, output) as code:
+        off, on = code.host.Model(5, False, False), code.host.Model(4, True, True)
+        assert off.force is None and off.saved is None
+        for value in (2.0, -3.0):
+            on.force.from_numpy(np.full((4, 3), value, dtype=np.float32))
+            on.step()
+            off.step()
+            np.testing.assert_array_equal(on.out.to_numpy(), np.full(4, 1 + value))
+            np.testing.assert_array_equal(off.out.to_numpy(), np.ones(5))
+        on.saved.from_numpy(np.full(4, 8.0, np.float32))
+        on.finish()
+        off.finish()
+        np.testing.assert_array_equal(on.out.to_numpy(), np.full(4, 5.0))
+        np.testing.assert_array_equal(off.out.to_numpy(), np.zeros(5))
+
+
 @test_utils.test(arch=ti.cuda, offline_cache=False)
 def test_package_query_borrows_conditional_fields_from_shared_tree(tmp_path, monkeypatch):
     source = '''
