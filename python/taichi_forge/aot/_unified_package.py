@@ -136,7 +136,7 @@ def _worker(request):
     if cache_dir:
         cache = PackageBuildCache(Path(cache_dir) / "portable" / "declarations", files, modules,
                                   packages, (), "unified-bc-library", discovery=discovery, assets=assets)
-        previous = _restore_leaf_cache(Path(cache_dir) / "unified", directory.parent, cache.object_context)
+        previous = _restore_leaf_cache(Path(cache_dir) / "unified", directory.parent, cache)
     declarations = _preflight_package(roots, inputs=inputs, build_cache=cache, portable=True)
     preflight = time.perf_counter()
     del inputs, files, modules
@@ -165,7 +165,8 @@ def _worker(request):
     if cache is not None and cache.object_context is not None:
         from taichi_forge_runtime.aot._entry_blocks import RUNTIME_REQUIREMENT
         (directory.parent / "portable-statistics.json").write_bytes(_bytes(dict(
-            version=3, context=cache.object_context, produce=counts, link_inputs=projection.link_inputs,
+            version=3, context=cache.object_context, native_context=cache.native_context,
+            produce=counts, link_inputs=projection.link_inputs,
             entry_blocks=RUNTIME_REQUIREMENT in manifest.get("runtime_requirements", ()))))
     (directory / "view.json").write_bytes(_bytes(manifest))
 
@@ -331,12 +332,15 @@ def _pin_baseline(archive, expected, workspace):
     return False
 
 
-def _restore_leaf_cache(directory, workspace, context):
-    if context is None:
+def _restore_leaf_cache(directory, workspace, cache):
+    if cache.object_context is None:
         return
     try:
         record = json.loads((directory / "latest.json").read_bytes())
-        if not isinstance(record, dict) or record.get("version") != 3 or record.get("context") != context:
+        if not isinstance(record, dict) or record.get("version") != 3:
+            return
+        same_producer = record.get("context") == cache.object_context
+        if not same_producer and record.get("native_context") != cache.native_context:
             return
         archive = Path(record["output"]) / "code.tcm"
         if not zipfile.is_zipfile(archive):
@@ -355,7 +359,8 @@ def _restore_leaf_cache(directory, workspace, context):
                 (bodies / filename).write_bytes(catalog)
         if not _pin_baseline(archive, record.get("tcm_sha256"), workspace):
             (bodies / "baseline-path").write_bytes(os.fsencode(archive))
-        return record
+        # A change to the frontend or linker still requires a fresh archive.
+        return record if same_producer else None
     except (OSError, ValueError, TypeError, KeyError):
         return
 

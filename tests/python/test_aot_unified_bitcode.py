@@ -428,6 +428,63 @@ class Sampler:
                 np.testing.assert_array_equal(np.frombuffer(result.read(), np.float32), [6 if bright else 3] * 4)
 
 
+def test_unified_incremental_cache_keys_follow_compiler_stages(tmp_path, monkeypatch):
+    import taichi_forge_runtime
+    from taichi_forge.aot._package_build_cache import PackageBuildCache
+    from taichi_forge.aot._unified_package import _restore_leaf_cache
+
+    # Exercise source hashing on private compiler trees without modifying an
+    # installed producer. The native runtime and the shim are the loaded ones.
+    ti.init(arch=ti.cpu, enable_fallback=False)
+    for module in (ti, taichi_forge_runtime):
+        root = tmp_path / module.__name__
+        (root / "aot").mkdir(parents=True)
+        monkeypatch.setattr(module, "__file__", str(root / "__init__.py"))
+    sources = tmp_path / ti.__name__ / "aot"
+    projection = sources / "_package_resources.py"
+    frontend = sources / "_component.py"
+    projection.write_text("# projection", encoding="utf8")
+    frontend.write_text("# numerical frontend", encoding="utf8")
+    try:
+        def keys():
+            cache = PackageBuildCache(tmp_path / "declarations", [], {}, (), (), "unified-bc-library")
+            assert cache.object_context and cache.native_context
+            return cache
+
+        first = keys()
+        projection.write_text("# new projection", encoding="utf8")
+        projected = keys()
+        assert projected.object_context == first.object_context
+        frontend.write_text("# new numerical frontend", encoding="utf8")
+        captured = keys()
+        assert captured.object_context != first.object_context
+        assert captured.native_context == first.native_context
+
+        with zipfile.ZipFile(tmp_path / "code.tcm", "w") as archive:
+            archive.writestr("unit", b"body")
+        catalog = b"catalog"
+        digest = hashlib.sha256(catalog).hexdigest()
+        (tmp_path / (digest + ".tcb")).write_bytes(catalog)
+        receipt = dict(version=3, context=first.object_context, native_context=first.native_context,
+                       output=str(tmp_path), catalog=digest)
+        (tmp_path / "latest.json").write_text(json.dumps(receipt), encoding="utf8")
+        work = tmp_path / "recapture"
+        work.mkdir()
+        assert _restore_leaf_cache(tmp_path, work, captured) is None
+        assert (work / "bodies/roots.tcb").read_bytes() == catalog
+
+        # Older receipts only establish compatibility for the original producer.
+        del receipt["native_context"]
+        (tmp_path / "latest.json").write_text(json.dumps(receipt), encoding="utf8")
+        work = tmp_path / "legacy"
+        work.mkdir()
+        assert _restore_leaf_cache(tmp_path, work, captured) is None
+        assert not (work / "bodies").exists()
+        assert _restore_leaf_cache(tmp_path, work, first) == receipt
+    finally:
+        ti.reset()
+
+
 def test_unified_incremental_capture_preserves_helper_closures(tmp_path, monkeypatch):
     import pytest
     from taichi_forge_runtime.aot import load_package

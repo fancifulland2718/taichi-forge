@@ -258,6 +258,10 @@ def _producer_inputs(previous, current, *, unified):
             # code. These two binding implementations execute only on consumption.
             if unified and module is taichi_forge_runtime and name in {"aot/_package.py", "aot/_package_closures.py"}:
                 continue
+            # Unified preflight reruns resource projection. Capture keys contain
+            # the resulting declaration domain and the layouts of accessed fields.
+            if unified and module is taichi_forge and name == "aot/_package_resources.py":
+                continue
             files[name] = unchanged_file_digest(path, previous, current)
         result[module.__name__] = value_digest(files)
     native = getattr(utils, "_loaded_native_runtime_path", None)
@@ -294,6 +298,7 @@ class PackageBuildCache:
         self.syntax_records = {}
         self.capture_syntax = {}
         self.object_context = None
+        self.native_context = None
         self.toolchain_files = {}
         try:
             self.previous = json.loads((self.directory / "latest.json").read_text(encoding="utf8"))
@@ -350,6 +355,12 @@ class PackageBuildCache:
         )
         context = dict(producer=producer, **self.build_settings)
         self.object_context = value_digest(context)
+        if self.build_settings["artifact_format"] == "unified-bc-library":
+            # Native leaf lookup has its own key over the newly captured AST
+            # and callable ABI. Frontend edits still invalidate early capture.
+            native = {key: value for key, value in producer.items()
+                      if key not in ("taichi_forge", "taichi_forge_runtime")}
+            self.native_context = value_digest(dict(producer=native, **self.build_settings))
         return context
 
     def scalar_object_key(self, kernel):
