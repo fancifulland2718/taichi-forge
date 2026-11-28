@@ -428,6 +428,99 @@ class Sampler:
                 np.testing.assert_array_equal(np.frombuffer(result.read(), np.float32), [6 if bright else 3] * 4)
 
 
+@test_utils.test(arch=ti.cpu, offline_cache=False)
+def test_grouped_unified_roots_verify_the_requested_lane(tmp_path):
+    import pytest
+    from taichi_forge.aot._unified_unit_blocks import block_name, stripe_units
+    from taichi_forge_runtime.aot import Runtime
+
+    @ti.kernel
+    def first() -> ti.i32:
+        return 11
+
+    @ti.kernel
+    def second() -> ti.i32:
+        return 29
+
+    builder = ti.aot.Module(artifact_format="unified-bc-library")
+    builder.add_kernel(first)
+    builder.add_kernel(second)
+    direct = tmp_path / "direct.tcm"
+    builder.archive(str(direct))
+    damaged = tmp_path / "damaged.tcm"
+    with zipfile.ZipFile(direct) as source, zipfile.ZipFile(damaged, "w") as target:
+        entries = {row["key"]: row["value"] for row in json.loads(source.read("unified_llvm.json"))}
+        units = [source.read("code_units/" + entries[name] + ".bc") for name in ("first", "second")]
+        group = [(entries[name], len(unit)) for name, unit in zip(("first", "second"), units)]
+        units[1] = units[1][:-1] + bytes([units[1][-1] ^ 1])
+        target.writestr(block_name(group), stripe_units(units))
+        members = {}
+        for name in source.namelist():
+            if name == "unified_llvm.json" or name.startswith("code_units/"):
+                continue
+            data = source.read(name)
+            physical = "records/" + hashlib.sha256(data).hexdigest()
+            if physical not in target.NameToInfo:
+                target.writestr(physical, data)
+            members[name] = physical
+        target.writestr("unified_llvm.json", json.dumps(dict(version=3, entries=entries,
+                                                              members=members, unit_blocks=[group])))
+    ti.reset()
+    with Runtime("cpu") as runtime, runtime.load_module(damaged) as module:
+        assert module.kernel("first").bind().run() == 11
+        with pytest.raises(RuntimeError, match="Changed unified LLVM numerical unit"):
+            module.kernel("second")
+
+
+def test_grouped_unified_units_relink_only_changed_blocks(tmp_path):
+    from contextlib import nullcontext
+    from random import Random
+    from taichi_forge.aot._unified_package import _CompressedMembers, _write_member, _write_units
+    from taichi_forge.aot._unified_unit_blocks import BLOCK_LIMIT, block_name, unpack_units
+
+    # Several non-identical variants share incompressible bytes with their siblings.
+    common = Random(13).randbytes(8100)
+    bodies = {str(i): b"BC\xc0\xde" + common + bytes([i]) * (100 + i) for i in range(8)}
+    bodies["large"] = b"BC\xc0\xde" + bytes(BLOCK_LIMIT)
+    manifest = {"entries": {name: {"definition": "fixture.variant"} for name in bodies}}
+
+    def link(name, baseline_path=None, changed=()):
+        path = tmp_path / name
+        roots = {key: hashlib.sha256(body).hexdigest() for key, body in bodies.items()}
+        with (tmp_path / "units.bin").open("wb") as stream, (tmp_path / "units.index").open("w") as index:
+            for key, body in bodies.items():
+                if baseline_path and key not in changed:
+                    index.write(f"{roots[key]} baseline\n")
+                else:
+                    index.write(f"{roots[key]} {stream.tell()} {len(body)}\n")
+                    stream.write(body)
+        prior = zipfile.ZipFile(baseline_path) if baseline_path else nullcontext(None)
+        with prior as source, zipfile.ZipFile(path, "w") as target:
+            baseline = _CompressedMembers(source)
+            if source:
+                read_unit = baseline.read_unit
+
+                def read_edited_group(digest):
+                    # The second group's compressed ZIP record can transfer verbatim.
+                    assert digest not in {roots[str(i)] for i in range(4, 8)}
+                    return read_unit(digest)
+
+                baseline.read_unit = read_edited_group
+            groups = _write_units(target, tmp_path, baseline, roots, manifest)
+            assert len(groups) == 2
+            _write_member(target, "unified_llvm.json", json.dumps(dict(version=3, unit_blocks=groups)).encode())
+        with zipfile.ZipFile(path) as archive:
+            decoded = {roots["large"]: archive.read("code_units/" + roots["large"] + ".bc")}
+            for group in groups:
+                decoded.update(unpack_units(group, archive.read(block_name(group))))
+        assert all(decoded[roots[key]] == body for key, body in bodies.items())
+        return path
+
+    seed = link("initial.tcm")
+    bodies["0"] = bodies["0"][:-1] + b"x"
+    assert link("incremental.tcm", seed, {"0"}).read_bytes() == link("clean.tcm").read_bytes()
+
+
 def test_unified_incremental_cache_keys_follow_compiler_stages(tmp_path, monkeypatch):
     import taichi_forge_runtime
     from taichi_forge.aot._package_build_cache import PackageBuildCache

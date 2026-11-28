@@ -2,10 +2,12 @@
 
 import errno
 import hashlib
+import io
 import json
 import os
 from contextlib import nullcontext
 from copy import copy
+from functools import cached_property
 from pathlib import Path
 import shutil
 import subprocess
@@ -45,7 +47,9 @@ def _link_inputs(directory, module, manifest):
     # shared references written by the entry encoder.
     entries = [(name, hashlib.sha256(_bytes(contract)).hexdigest())
                for name, contract in sorted(module._component_entries.items())]
-    return hashlib.sha256(_bytes([sorted(native.items()), units, entries, _ordered_entries(manifest)])).hexdigest()
+    # A definition rename can change block membership without changing symbol order.
+    families = [(name, manifest["entries"][name]["definition"]) for name in _ordered_entries(manifest)]
+    return hashlib.sha256(_bytes([sorted(native.items()), units, entries, families])).hexdigest()
 
 
 def _reuse_archive(record, inputs, snapshot, destination):
@@ -160,8 +164,10 @@ def _worker(request):
         with prior as source, zipfile.ZipFile(projection.staging / "code.tcm", "w") as archive:
             baseline = _CompressedMembers(source)
             index = _collect(directory / "module", archive, baseline, manifest, documents)
-            _write_units(archive, directory.parent / "bodies", baseline)
-            _write_member(archive, "unified_llvm.json", _bytes(dict(version=2, **index)))
+            blocks = _write_units(archive, directory.parent / "bodies", baseline, index["entries"], manifest)
+            if blocks:
+                index["unit_blocks"] = blocks
+            _write_member(archive, "unified_llvm.json", _bytes(dict(version=3 if blocks else 2, **index)))
     if cache is not None and cache.object_context is not None:
         from taichi_forge_runtime.aot._entry_blocks import RUNTIME_REQUIREMENT
         (directory.parent / "portable-statistics.json").write_bytes(_bytes(dict(
@@ -233,6 +239,27 @@ class _CompressedMembers:
                 self.spans[info.filename] = (info, end - info.header_offset)
                 end = info.header_offset
 
+    @cached_property
+    def packed_units(self):
+        from ._unified_unit_blocks import index_blocks
+
+        if not any(name.startswith("unit_blocks/") for name in self.spans):
+            return {}
+        return index_blocks(self.source, json.loads(self.source.read("unified_llvm.json")))
+
+    def read_unit(self, digest):
+        from ._unified_unit_blocks import block_name, unpack_units
+
+        if digest not in self.packed_units:
+            return self.source.read("code_units/" + digest + ".bc")
+        group, _ = self.packed_units[digest]
+        # A partial relink can split or merge an old group. Retain just the
+        # last decoded block; unchanged groups transfer their compressed bytes.
+        if group != getattr(self, "_decoded_group", None):
+            self._decoded = unpack_units(group, self.source.read(block_name(group)))
+            self._decoded_group = group
+        return self._decoded[digest]
+
     def copy_to(self, target, name):
         member = self.spans.get(name)
         if member is None:
@@ -276,21 +303,60 @@ def _collect(module, archive, baseline, manifest, documents):
     return {"entries": roots, "members": members}
 
 
-def _write_units(archive, directory, baseline):
-    with (directory / "units.bin").open("rb") as stream, (directory / "units.index").open(encoding="ascii") as index:
+def _write_units(archive, directory, baseline, roots, manifest):
+    from ._unified_unit_blocks import block_candidates, block_name, deflate_size, stripe_units, verify_unit
+
+    offsets, sizes = {}, {}
+    with (directory / "units.index").open(encoding="ascii") as index:
         for row in index:
             digest, *span = row.split()
-            member = "code_units/" + digest + ".bc"
-            if span == ["baseline"]:
-                if not baseline.copy_to(archive, member):
+            if span != ["baseline"]:
+                offsets[digest], sizes[digest] = map(int, span)
+            elif digest in baseline.packed_units:
+                sizes[digest] = baseline.packed_units[digest][1]
+            else:
+                member = baseline.spans.get("code_units/" + digest + ".bc")
+                if member is None:
                     raise ValueError(f"Missing referenced unified LLVM unit: {digest}")
-                continue
-            offset, size = span
-            stream.seek(int(offset))
-            data = stream.read(int(size))
-            if hashlib.sha256(data).hexdigest() != digest or not data.startswith(b"BC\xc0\xde"):
-                raise ValueError(f"Invalid unified LLVM unit: {digest}")
-            _write_member(archive, member, data)
+                sizes[digest] = member[0].file_size
+
+    packed = set()
+    groups = []
+    with (directory / "units.bin").open("rb") as stream:
+        def read(digest):
+            if digest in offsets:
+                stream.seek(offsets[digest])
+                data = stream.read(sizes[digest])
+            else:
+                data = baseline.read_unit(digest)
+            return verify_unit(digest, data)
+
+        for group in block_candidates(manifest["entries"], roots, sizes):
+            name = block_name(group)
+            first = group[0][0]
+            if first in baseline.packed_units and baseline.packed_units[first][0] == group:
+                baseline.copy_to(archive, name)
+            else:
+                units = [read(digest) for digest, _ in group]
+                # Charge the full (uncompressed) extra index rows. Compare
+                # actual compressed data and keep the winning ZIP record.
+                separate = 0
+                for (digest, _), unit in zip(group, units):
+                    cached = baseline.spans.get("code_units/" + digest + ".bc")
+                    separate += cached[0].compress_size if cached else deflate_size(unit, _COMPRESSION_LEVEL)
+                with zipfile.ZipFile(io.BytesIO(), "w") as trial:
+                    _write_member(trial, name, stripe_units(units))
+                    if trial.getinfo(name).compress_size + len(_bytes(group)) >= separate:
+                        continue
+                    _CompressedMembers(trial).copy_to(archive, name)
+            groups.append(group)
+            packed.update(digest for digest, _ in group)
+
+        for digest in sorted(sizes.keys() - packed):
+            name = "code_units/" + digest + ".bc"
+            if not baseline.copy_to(archive, name):
+                _write_member(archive, name, read(digest))
+    return groups
 
 
 def _init_options():
@@ -323,9 +389,13 @@ def _pin_baseline(archive, expected, workspace):
         if digest.hexdigest() == expected:
             with zipfile.ZipFile(snapshot) as previous:
                 members = [name for name in previous.namelist() if name.startswith(("code_units/", "records/"))]
+                if any(name.startswith("unit_blocks/") for name in previous.namelist()):
+                    from ._unified_unit_blocks import index_blocks
+                    packed = index_blocks(previous, json.loads(previous.read("unified_llvm.json")))
+                    members.extend("code_units/" + digest + ".bc" for digest in packed)
             (workspace / "bodies" / "baseline-members.index").write_text("\n".join(members), encoding="ascii")
             return True
-    except (OSError, zipfile.BadZipFile):
+    except (OSError, KeyError, TypeError, ValueError, zipfile.BadZipFile):
         pass
     (workspace / "bodies" / "baseline-members.index").unlink(missing_ok=True)
     snapshot.unlink(missing_ok=True)

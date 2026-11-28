@@ -50,7 +50,7 @@ def _document_reader(path, *, module=None):
                     from ._unified_library import select_records
 
                     index = json.loads(load("unified_llvm.json"))
-                    if isinstance(index, dict) and index.get("version") == 2:
+                    if isinstance(index, dict) and index.get("version") in (2, 3):
                         members = index["members"]
                     elif isinstance(index, dict):
                         arch = module._runtime.arch

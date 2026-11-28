@@ -31,6 +31,8 @@ ti.aot.export_package(
 
 For a **device-specific** build, use `arch="cuda", artifact_format="bc-library"`, `arch="x64"`, or `arch="vulkan"` in place of the unified format. In the **unified** format, passing `arch` restricts the allowed consumers. The archive carries portable numerical code and compatible shared helpers. Prepare lowers that code for the selected device. Device-specific operations still require the corresponding capabilities and providers.
 
+A unified archive can store variants of one definition in a shared compressed block. Archives using these blocks require a Forge Runtime that reads unified LLVM index version 3. The runtime decompresses the block on demand when it first needs the code for an entry. Each variant keeps its own content hash.
+
 Distribute the whole output directory. `code.tcm` holds numerical code and execution contracts, `host/` holds readable Python for construction and scheduling, and `package.json` maps imports to entries and records payload identity. Include any assets emitted by the exporter. Install the compatible Forge runtime separately. For incremental development, keep the previous output and reuse `build_cache` with a new destination. Eligible entries can reuse captured or compiled work after a local edit. The producer cache stays on the build machine.
 
 **Prepare and perform.** Start a fresh process in the project directory with the exported package available. Select hybrid mode before importing the library if the calling script also uses Forge JIT.

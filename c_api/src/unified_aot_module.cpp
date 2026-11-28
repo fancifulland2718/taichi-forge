@@ -2,6 +2,7 @@
 
 #include <optional>
 #include <set>
+#include <unordered_map>
 
 #include "taichi_core_impl.h"
 #include "argument_binding.h"
@@ -105,14 +106,16 @@ class SelectedDirectory final : public VirtualDir {
       }
     } else {
       const int version = int(index["version"]);
-      if (version != 1 && version != 2)
+      if (version < 1 || version > 3)
         throw aot::ArtifactLoadError("Unsupported unified LLVM index");
-      const auto &base = version == 2 ? index : index["base"];
+      const auto &base = version >= 2 ? index : index["base"];
       for (auto name : {"entries", "members"}) {
         auto &table = std::string(name) == "entries" ? entries : members_;
         for (const auto &[key, value] : base[name].fields())
           table.emplace(key, string_value(value));
       }
+      if (version == 3)
+        index_unit_blocks(index["unit_blocks"]);
       if (version == 1)
         apply_legacy_changes(index["targets"][arch_name(arch).c_str()]);
     }
@@ -146,6 +149,47 @@ class SelectedDirectory final : public VirtualDir {
   }
 
  private:
+  // V3 groups up to four roots, interleaved in 1 KiB stripes so Deflate
+  // can share its window. Decode just the selected block during prepare.
+  static constexpr size_t kUnitStripeSize = 1024;
+  struct UnitBlock {
+    std::string file;
+    std::vector<size_t> sizes;
+    size_t total{0};
+  };
+  struct UnitLocation {
+    size_t block;
+    size_t lane;
+  };
+  std::vector<UnitBlock> blocks_;
+  std::unordered_map<std::string, UnitLocation> packed_units_;
+
+  void index_unit_blocks(const liong::json::JsonValue &groups) {
+    if (!groups.is_arr())
+      throw aot::ArtifactLoadError("Invalid unified LLVM unit block table");
+    for (const auto &group : groups.elems()) {
+      if (!group.is_arr() || group.size() < 2 || group.size() > 4)
+        throw aot::ArtifactLoadError("Invalid unified LLVM unit block width");
+      UnitBlock block;
+      for (const auto &row : group.elems()) {
+        if (!row.is_arr() || row.size() != 2)
+          throw aot::ArtifactLoadError("Invalid unified LLVM unit block member");
+        auto digest = string_value(row[size_t(0)]);
+        const auto &size = row[size_t(1)];
+        if (!is_digest(digest) || size.ty != liong::json::L_JSON_INT ||
+            size.num_int <= 0 ||
+            static_cast<size_t>(size.num_int) > 512 * 1024 - block.total ||
+            !packed_units_.emplace(digest, UnitLocation{blocks_.size(), block.sizes.size()}).second)
+          throw aot::ArtifactLoadError("Invalid unified LLVM unit block layout");
+        if (block.sizes.empty())
+          block.file = "unit_blocks/" + digest + ".bin";
+        block.sizes.push_back(static_cast<size_t>(size.num_int));
+        block.total += static_cast<size_t>(size.num_int);
+      }
+      blocks_.push_back(std::move(block));
+    }
+  }
+
   void apply_legacy_changes(const liong::json::JsonValue &changes) {
     for (const auto &change : changes.elems()) {
       const auto &path = change[size_t(0)];
@@ -188,7 +232,31 @@ class SelectedDirectory final : public VirtualDir {
   }
   bool is_immutable() const override { return archive_->is_immutable(); }
   std::string unit(const std::string &digest) const {
-    return read(*archive_, "code_units/" + digest + ".bc");
+    auto found = packed_units_.find(digest);
+    if (found == packed_units_.end())
+      return read(*archive_, "code_units/" + digest + ".bc");
+    const auto &location = found->second;
+    const auto &block = blocks_[location.block];
+    size_t size;
+    if (!archive_->get_file_size(block.file, size) || size != block.total)
+      throw aot::ArtifactLoadError("Invalid unified LLVM unit block size");
+    std::string bytes(size, '\0');
+    if (archive_->load_file(block.file, bytes.data(), size) != size)
+      throw aot::ArtifactLoadError("Incomplete unified LLVM unit block");
+    std::string result;
+    result.reserve(block.sizes[location.lane]);
+    size_t cursor = 0;
+    for (size_t offset = 0; cursor < size; offset += kUnitStripeSize) {
+      for (size_t lane = 0; lane < block.sizes.size(); ++lane) {
+        if (offset >= block.sizes[lane])
+          continue;
+        size_t span = std::min(kUnitStripeSize, block.sizes[lane] - offset);
+        if (lane == location.lane)
+          result.append(bytes, cursor, span);
+        cursor += span;
+      }
+    }
+    return result;
   }
   // Imported helpers are verified by the LLVM reader against their call target.
   std::string root_unit(const std::string &digest) const {
