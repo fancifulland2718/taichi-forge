@@ -21,6 +21,7 @@
 #include "llvm/Transforms/Utils/PromoteMemToReg.h"
 #include "llvm/Support/MemoryBufferRef.h"
 
+#include "taichi/aot/module_loader.h"
 #include "taichi/ir/statements.h"
 #include "taichi/codegen/spirv/kernel_utils.h"
 #include "taichi/ir/type_system.h"
@@ -252,7 +253,8 @@ void import_helpers(llvm::Module &module, llvm::Function &entry,
                         digest.find_first_not_of("0123456789abcdef") != std::string::npos,
                     "Missing unified LLVM helper {}", name);
         auto bytes = loader(digest);
-        TI_ERROR_IF(aot_artifact_sha256(bytes) != digest, "Changed unified LLVM helper {}", digest);
+        if (aot_artifact_sha256(bytes) != digest)
+          throw aot::ArtifactLoadError("Changed unified LLVM helper " + digest);
         auto body = llvm::parseBitcodeFile(llvm::MemoryBufferRef(bytes, name), module.getContext());
         if (!body)
           TI_ERROR("Invalid unified LLVM helper: {}", llvm::toString(body.takeError()));

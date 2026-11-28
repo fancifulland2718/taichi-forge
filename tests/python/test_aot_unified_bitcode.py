@@ -710,6 +710,39 @@ class Model:
                 assert model.host_value == (2 if label == "initial" else 17)
 
 
+@test_utils.test(arch=ti.cpu, offline_cache=False)
+def test_unified_lookup_rejects_changed_helper(tmp_path):
+    import pytest
+    from taichi_forge_runtime.aot import AotError
+
+    @ti.real_func
+    def advance(x: ti.i32) -> ti.i32:
+        return x + 1
+
+    @ti.kernel
+    def step(x: ti.i32) -> ti.i32:
+        return advance(x)
+
+    producer = ti.aot.Module(artifact_format="unified-bc-library")
+    producer.add_kernel(step)
+    path = tmp_path / "source.tcm"
+    producer.archive(str(path))
+    damaged = tmp_path / "changed-helper.tcm"
+    with zipfile.ZipFile(path) as source, zipfile.ZipFile(damaged, "w") as dest:
+        root, = json.loads(source.read("unified_llvm.json"))
+        root_path = f'code_units/{root["value"]}.bc'
+        helper, = (p for p in source.namelist() if p.startswith("code_units/") and p != root_path)
+        for member in source.namelist():
+            # Valid bitcode and ZIP CRC, but the caller names the original digest.
+            data = source.read(root_path if member == helper else member)
+            dest.writestr(member, data)
+
+    with ti.aot.borrow_runtime() as runtime, runtime.load_module(damaged) as module:
+        with pytest.raises(AotError, match="Changed unified LLVM helper") as error:
+            module.kernel("step")
+        assert error.value.code == -2  # TI_ERROR_CORRUPTED_DATA
+
+
 @test_utils.test(arch=[ti.cpu, ti.cuda, ti.vulkan], offline_cache=False)
 def test_unified_prepare_forwards_runtime_arrays_through_helpers(tmp_path):
     import numpy as np

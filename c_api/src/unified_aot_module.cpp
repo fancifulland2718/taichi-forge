@@ -76,10 +76,13 @@ const std::string &string_value(const liong::json::JsonValue &v) {
 }
 
 std::string read(const VirtualDir &source, const std::string &path) {
-  std::vector<char> bytes;
-  if (!source.load_file(path, bytes))
+  size_t size;
+  if (!source.get_file_size(path, size))
     throw aot::ArtifactLoadError("Missing unified LLVM library member " + path);
-  return std::string(bytes.begin(), bytes.end());
+  std::string bytes(size, '\0');
+  if (source.load_file(path, bytes.data(), size) != size)
+    throw aot::ArtifactLoadError("Incomplete unified LLVM library member " + path);
+  return bytes;
 }
 
 bool is_digest(const std::string &value) {
@@ -185,7 +188,11 @@ class SelectedDirectory final : public VirtualDir {
   }
   bool is_immutable() const override { return archive_->is_immutable(); }
   std::string unit(const std::string &digest) const {
-    auto bytes = read(*archive_, "code_units/" + digest + ".bc");
+    return read(*archive_, "code_units/" + digest + ".bc");
+  }
+  // Imported helpers are verified by the LLVM reader against their call target.
+  std::string root_unit(const std::string &digest) const {
+    auto bytes = unit(digest);
     if (LLVM::aot_artifact_sha256(bytes) != digest)
       throw aot::ArtifactLoadError("Changed unified LLVM numerical unit " + digest);
     return bytes;
@@ -543,7 +550,7 @@ class UnifiedModule final : public aot::Module {
     auto &program = runtime_.get_unified_compiler();
     auto signature = directory_.signature(name);
     const auto &caps = runtime_.get().get_caps();
-    auto kernel = LLVM::read_unified_kernel(program, name, directory_.unit(directory_.entries.at(name)),
+    auto kernel = LLVM::read_unified_kernel(program, name, directory_.root_unit(directory_.entries.at(name)),
         signature, {}, caps, [this](const std::string &hash) { return directory_.unit(hash); }, storage(name), directory_.absent_inputs(name));
     return program.compile_kernel_execution_handle(cfg, caps, *kernel);
   }
@@ -611,7 +618,7 @@ class UnifiedModule final : public aot::Module {
       const auto &target_caps = runtime_.get().get_caps();
       const auto signature = directory_.signature(name);
       bool needs_binding = false;
-      auto generic = LLVM::read_unified_kernel(program, name, directory_.unit(directory_.entries.at(name)),
+      auto generic = LLVM::read_unified_kernel(program, name, directory_.root_unit(directory_.entries.at(name)),
           signature, {}, target_caps, [this](const std::string &digest) { return directory_.unit(digest); },
           storage(name), directory_.absent_inputs(name), &needs_binding);
       return program.unified_kernel_affine_arguments(cfg, target_caps, *generic);
@@ -679,7 +686,7 @@ class UnifiedModule final : public aot::Module {
     const auto trees = storage(name);
     cfg.llvm_aot_relocatable_roots = !trees.empty();
     auto read_source = [&] {
-      return LLVM::read_unified_kernel(program, name, directory_.unit(digest),
+      return LLVM::read_unified_kernel(program, name, directory_.root_unit(digest),
           signature, facts, caps, [this](const std::string &hash) { return directory_.unit(hash); }, trees,
           absent, unbound ? &needs_bound_device : nullptr);
     };
