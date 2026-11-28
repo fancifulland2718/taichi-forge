@@ -3553,6 +3553,10 @@ std::size_t Program::collect_unused_kernel_definitions(bool force) {
 }
 
 Program::Program(Arch desired_arch)
+    : Program(desired_arch, /*compile_only=*/false) {
+}
+
+Program::Program(Arch desired_arch, bool compile_only)
     : snode_rw_accessors_bank_(this),
       lifetime_token_(std::make_shared<ProgramLifetimeToken>(this)),
       runtime_completion_domain_(allocate_runtime_resource_domain()),
@@ -3624,7 +3628,8 @@ Program::Program(Arch desired_arch)
   if (arch_uses_llvm(config.arch)) {
 #ifdef TI_WITH_LLVM
     if (config.arch != Arch::dx12) {
-      program_impl_ = std::make_unique<LlvmProgramImpl>(config, profiler.get());
+      program_impl_ = std::make_unique<LlvmProgramImpl>(config, profiler.get(),
+                                                        compile_only);
     } else {
       // NOTE: use Dx12ProgramImpl to avoid using LlvmRuntimeExecutor for dx12.
 #ifdef TI_WITH_DX12

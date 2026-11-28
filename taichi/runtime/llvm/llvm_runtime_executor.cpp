@@ -68,6 +68,12 @@ std::size_t direct_ambient_size(SNodeType type,
 
 LlvmRuntimeExecutor::LlvmRuntimeExecutor(CompileConfig &config,
                                          KernelProfilerBase *profiler)
+    : LlvmRuntimeExecutor(config, profiler, /*compile_only=*/false) {
+}
+
+LlvmRuntimeExecutor::LlvmRuntimeExecutor(CompileConfig &config,
+                                         KernelProfilerBase *profiler,
+                                         bool compile_only)
     : config_(config), host_memory_pool_(std::make_shared<HostMemoryPool>()) {
   if (config.arch == Arch::cuda) {
 #if defined(TI_WITH_CUDA)
@@ -213,7 +219,9 @@ LlvmRuntimeExecutor::LlvmRuntimeExecutor(CompileConfig &config,
   llvm_context_ = std::make_unique<TaichiLLVMContext>(
       config_, arch_is_cpu(config.arch) ? host_arch() : config.arch);
   jit_session_ = JITSession::create(llvm_context_.get(), config, config.arch);
-  init_runtime_jit_module(llvm_context_->clone_runtime_module());
+  if (!compile_only) {
+    init_runtime_jit_module(llvm_context_->clone_runtime_module());
+  }
 }
 
 TaichiLLVMContext *LlvmRuntimeExecutor::get_llvm_context() {
@@ -1817,6 +1825,10 @@ void LlvmRuntimeExecutor::preallocate_runtime_memory(
 
 void LlvmRuntimeExecutor::materialize_runtime(KernelProfilerBase *profiler,
                                               uint64 **result_buffer_ptr) {
+  // A compile-only executor may subsequently be used for execution.
+  if (!runtime_jit_module_) {
+    init_runtime_jit_module(llvm_context_->clone_runtime_module());
+  }
   // Starting random state for the program calculated using the random seed.
   // The seed is multiplied by 1048391 so that two programs with different seeds
   // will not have overlapping random states in any thread.

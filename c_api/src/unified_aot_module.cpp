@@ -35,7 +35,8 @@ using taichi::lang::Program;
 
 Program &Runtime::get_unified_compiler() {
   if (!unified_compiler) {
-    unified_compiler = std::make_shared<Program>(arch);
+    // Prepared kernels launch on this Runtime's executor.
+    unified_compiler = std::make_shared<Program>(arch, /*compile_only=*/true);
   }
   return *unified_compiler;
 }

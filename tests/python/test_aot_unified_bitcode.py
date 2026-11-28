@@ -127,6 +127,35 @@ def test_unified_native_sparse_iteration_and_instance_isolation(tmp_path):
             assert active(second) == [1, 140]
 
 
+@test_utils.test(arch=ti.cuda, offline_cache=False)
+def test_standalone_unified_compiler_uses_existing_cuda_runtime(tmp_path):
+    from array import array
+    from contextlib import closing
+    from taichi_forge_runtime.aot import Runtime
+
+    @ti.kernel
+    def fill(data: ti.types.ndarray(ti.i32, 1)):
+        for i in range(data.shape[0]):
+            data[i] = data.shape[0] + i
+
+    producer = ti.aot.Module(artifact_format="unified-bc-library")
+    producer.add_kernel(fill)
+    path = tmp_path / "fill.tcm"
+    producer.archive(str(path))
+    ti.reset()
+
+    with Runtime("cuda") as runtime, runtime.load_module(path) as library:
+        with ti.compile_profile() as profile:
+            kernel = library.kernel("fill")
+        stages = {row["path"].split("/")[-1] for row in profile.records(include_python=False)}
+        assert "cpp.unified.prepare.read_kernel" in stages
+        assert "cuda_driver_module_load" not in stages
+        with closing(runtime.ndarray("i32", (4,))) as data:
+            with kernel.bind(data).prepare(specialize=True) as call:
+                call.submit().wait()
+            assert array("i", data.read()).tolist() == [4, 5, 6, 7]
+
+
 @test_utils.test(arch=ti.cpu, offline_cache=False)
 def test_unified_cpu_reuses_varying_dispatch_extents(tmp_path):
     from array import array

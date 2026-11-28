@@ -37,6 +37,9 @@ class CpuDevice;
 class LlvmProgramImpl : public ProgramImpl {
  public:
   LlvmProgramImpl(CompileConfig &config, KernelProfilerBase *profiler);
+  LlvmProgramImpl(CompileConfig &config,
+                  KernelProfilerBase *profiler,
+                  bool compile_only);
 
   /* ------------------------------------ */
   /* ---- JIT-Compilation Interfaces ---- */

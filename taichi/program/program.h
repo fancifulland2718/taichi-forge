@@ -579,6 +579,9 @@ class TI_DLL_EXPORT Program {
   }
 
   explicit Program(Arch arch);
+  // A standalone AOT consumer can compile kernels here and launch them on
+  // its existing runtime. Defer LLVM runtime code until materialize_runtime().
+  Program(Arch arch, bool compile_only);
 
   ~Program();
 

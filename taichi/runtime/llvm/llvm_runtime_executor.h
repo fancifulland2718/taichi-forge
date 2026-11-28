@@ -53,6 +53,9 @@ class LlvmRuntimeExecutor {
   };
 
   LlvmRuntimeExecutor(CompileConfig &config, KernelProfilerBase *profiler);
+  LlvmRuntimeExecutor(CompileConfig &config,
+                      KernelProfilerBase *profiler,
+                      bool compile_only);
   virtual ~LlvmRuntimeExecutor();
   /**
    * Initializes the runtime system for LLVM based backends.
