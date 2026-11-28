@@ -301,9 +301,20 @@ def project_query_groups(environment, schema, uses):
 
     declarations = environment.declarations
     inputs = [tuple(item.get("path", (key,))) for key, item in schema.items() if item["kind"] == "owner_input"]
+    if not inputs:
+        return
+    # Projection changes bindings, but never the conditions or layout guards.
+    # Index names so later predicates still see the current projected members.
+    members_by_flag = {}
+    layout_guards = set()
+    for key, item in schema.items():
+        for flag in item.get("conditions", ()):
+            members_by_flag.setdefault(flag, []).append(key)
+        for guards in ("choice_guards", "shape_guards", "dtype_guards", "source_guards"):
+            layout_guards.update(item.get(guards, ()))
     for flag, predicate in list(schema.items()):
-        if predicate["kind"] != "static":
-            continue  # Host sequences have no numerical capture path.
+        if predicate["kind"] != "static" or flag not in members_by_flag or flag in layout_guards:
+            continue
         path = environment._paths[flag]
         if (predicate.get("dynamic_storage_condition")
                 or guards_caller_storage(schema, flag, uses)
@@ -315,16 +326,14 @@ def project_query_groups(environment, schema, uses):
         if any(schema[key]["kind"] != "static" or schema[key].get("dynamic_storage_condition") for key in parents):
             continue
         conditions = {**parents, flag: True}
-        members = {key: item for key, item in schema.items() if flag in item.get("conditions", {})}
+        members = {key: schema[key] for key in members_by_flag[flag]}
         storage = {key: item for key, item in members.items() if item["kind"] == "dense_field"}
         axes = {key for key, item in members.items() if item["kind"] == "dimension"}
         if (not storage or any(item["kind"] not in ("dimension", "dense_field")
                                or item.get("conditions") != conditions for item in members.values())
                 or any(item.get("struct_field") or item["element"].get("model_tensor")
                        or not isinstance(declarations[key], DenseField) for key, item in storage.items())
-                or any(flag in item.get(guards, {}) for item in schema.values()
-                       for guards in ("choice_guards", "shape_guards", "dtype_guards", "source_guards"))
-                or any(key not in members and (
+                or axes and any(key not in members and (
                     axes.intersection(item.get("shape", ()))
                     or axes.intersection(extent_dependencies(item["expression"]) if item.get("expression") else ())
                     or any(axes.intersection(extent_dependencies(axis)) for axis in item.get("shape_expressions", ())))
