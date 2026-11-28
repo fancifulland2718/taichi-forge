@@ -865,6 +865,40 @@ class Model:
         assert model.reader.result[None] == 4
 
 
+@test_utils.test(arch=ti.cpu, offline_cache=False)
+def test_package_typed_borrow_owner_choice_keeps_one_port(tmp_path, monkeypatch):
+    source = """
+import taichi_forge as ti
+
+@ti.data_oriented
+class Model:
+    def __init__(self, values, external):
+        scope = ti.experimental.ResourceScope(self)
+        scope.borrow("values", values, external=external, source_scope=not external,
+                     dtype=ti.f32, shape=(2,))
+        scope.result = scope.field(ti.f32, shape=())
+
+    @ti.kernel
+    def read(self):
+        self.result[None] = self.values[1]
+"""
+    module = _source_package(tmp_path, monkeypatch, source)
+    output = tmp_path / "sdk"
+    manifest = ti.aot.export_package(module, output, arch=[ti.x64], artifact_format="unified-bc-library")
+    entries = manifest["base"]["entries"].values()
+    assert sum(entry["definition"].endswith(".Model.read") for entry in entries) == 1
+    ti.reset()
+    with Runtime("x64") as runtime, load_package(runtime, output) as code:
+        values = runtime.ndarray("f32", (2,))
+        values.from_numpy(np.array([3, 7], np.float32))
+        for external in (True, False):
+            reader = code.host.Model(values, external)
+            reader.read()
+            assert reader.result[None] == 7
+        with pytest.raises(ValueError, match="Typed external resource"):
+            code.host.Model(values, 1)
+
+
 @test_utils.test(arch=ti.cuda, offline_cache=False)
 def test_package_nested_external_query_preserves_parent_guard(tmp_path, monkeypatch):
     source = '''

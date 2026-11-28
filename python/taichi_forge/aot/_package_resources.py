@@ -2127,7 +2127,15 @@ def scope_declarations(
 
             keywords = {keyword.arg: keyword.value for keyword in call.keywords}
             if "dtype" in keywords or "shape" in keywords:
-                mode = keywords.get("external", keywords.get("source_scope"))
+                # A Component may choose who owns the input at construction. Both
+                # ownership modes project to the same typed definition-package port.
+                external, source = keywords.get("external"), keywords.get("source_scope")
+                paired_modes = (
+                    isinstance(external, ast.Name)
+                    and isinstance(source, ast.UnaryOp) and isinstance(source.op, ast.Not)
+                    and isinstance(source.operand, ast.Name) and source.operand.id == external.id
+                )
+                mode = external if external is not None else source
                 if (
                     len(call.args) != 2
                     or not isinstance(call.args[0], ast.Constant)
@@ -2136,12 +2144,22 @@ def scope_declarations(
                     or len(keywords) != len(call.keywords)
                     or set(keywords) - {"external", "source_scope", "dtype", "shape", "optional"}
                     or not {"dtype", "shape"} <= keywords.keys()
-                    or len({"external", "source_scope"} & keywords.keys()) != 1
-                    or not isinstance(mode, ast.Constant)
-                    or mode.value is not True
+                    or not (paired_modes or (
+                        len({"external", "source_scope"} & keywords.keys()) == 1
+                        and isinstance(mode, ast.Constant) and mode.value is True
+                    ))
                 ):
                     fail(module, call, "Typed borrow requires a name, dtype, shape and external=True or source_scope=True")
-                if "source_scope" in keywords:
+                if paired_modes:
+                    # Keep the live API's exact-bool check. Invalid inputs are
+                    # rejected by Runtime.borrow's normal external-port validation.
+                    call.keywords = [keyword for keyword in call.keywords if keyword.arg != "source_scope"]
+                    for keyword in call.keywords:
+                        if keyword.arg == "external":
+                            keyword.value = ast.BoolOp(ast.Or(), [
+                                ast.Compare(external, [ast.Is()], [ast.Constant(flag)]) for flag in (True, False)
+                            ])
+                elif "source_scope" in keywords:
                     # A typed source link keeps its original allocation in a live Component.
                     # Definition packages admit the same zero-copy member through its typed port.
                     for keyword in call.keywords:
