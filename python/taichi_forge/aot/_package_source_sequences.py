@@ -156,6 +156,9 @@ class SourceSequences:
     def value(self, node, environment, namespace, active=()):
         if isinstance(node, ast.Constant) and type(node.value) in (str, int, float, bool, type(None)):
             return copy.deepcopy(node)
+        if (isinstance(node, ast.UnaryOp) and isinstance(node.op, (ast.UAdd, ast.USub))
+                and isinstance(node.operand, ast.Constant) and type(node.operand.value) in (int, float)):
+            return ast.copy_location(ast.Constant(ast.literal_eval(node)), node)
         if self.inventory and isinstance(node, (ast.Name, ast.Attribute)):
             root = node
             while isinstance(root, ast.Attribute):

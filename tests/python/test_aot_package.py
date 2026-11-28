@@ -9717,8 +9717,8 @@ class Directed:
         builder.append(region)
 
 def append_step(solver, builder):
-    Directed(solver, solver.step, 1).record(builder)
-    Directed(solver, solver.step, 3).record(builder)
+    Directed(solver, solver.step, -1).record(builder)
+    Directed(solver, solver.step, 5).record(builder)
 '''
     source = CYCLIC_WRITE_INVENTORY_SOURCE.replace(
         'def append_step(solver, builder):\n    builder.dispatch(solver.step)', recipe)
