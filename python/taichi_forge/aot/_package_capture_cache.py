@@ -292,12 +292,19 @@ def freeze(code, memo, component, owner, *, portable):
 
 
 def freeze_missing(context, memo, *, portable):
+    from taichi_forge_runtime._dimensions import extent_dependencies
     from ._component import _used_template_signature
 
     # The prefix has no completed kernel or workspace ABI. Only replay it when
     # the ordinary dependency matcher covers everything observed before failure.
-    if context.workspaces or context.model_blocks or context.model_static_ranges or context.shared_arrays:
+    if context.workspaces or context.model_static_ranges or context.shared_arrays:
         raise Unavailable("task-local lowering")
+    # Unified block width is a launch annotation resolved by prepare. It
+    # cannot select a different frontend path to the missing resource. Replay
+    # only when the normal matcher covers every input to the annotation.
+    if context.model_blocks and (not portable or any(
+            not extent_dependencies(expr).issubset(context.used) for expr in context.model_blocks)):
+        raise Unavailable("untracked model block")
     component = context.component
     facts = _freeze_inputs(context, memo, component, context.owner, portable)
     facts["signature"] = _used_template_signature(context.call_signature, context.static_templates)

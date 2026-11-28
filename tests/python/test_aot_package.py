@@ -13190,6 +13190,55 @@ class Model:
             assert model.output[None] == expected
 
 
+@test_utils.test(arch=ti.cpu, offline_cache=False)
+def test_unified_missing_resource_after_model_block_tracks_helper(tmp_path, monkeypatch):
+    source = """import taichi_forge as ti
+@ti.data_oriented
+class Model:
+    def __init__(self, enabled: bool, passes: int, block: int):
+        self.enabled, self.passes, self.block = enabled, passes, block
+        scope = ti.experimental.ResourceScope(self)
+        scope.dim('block')
+        scope.static('enabled', choices=(False, True))
+        scope.static('passes', choices=(0, 1))
+        scope.out = scope.field(ti.i32, shape=())
+        scope.extra = scope.field(ti.i32, shape=()) if self.enabled else None
+    @ti.func
+    def value(self):
+        result = 11
+        for _ in ti.static(range(self.passes)):
+            result = self.extra[None] + 3
+        return result
+    @ti.kernel
+    def step(self):
+        ti.loop_config(block_dim=self.block)
+        for i in range(1):
+            self.out[None] = self.value()
+"""
+    cache = tmp_path / "cache"
+    module_path = tmp_path / "block_rejection.py"
+    monkeypatch.syspath_prepend(str(tmp_path))
+    for label in ("seed", "warm", "edited"):
+        edited = label == "edited"
+        module_path.write_text(source.replace("self.extra[None] + 3", "7") if edited else source, encoding="utf8")
+        module = importlib.import_module(module_path.stem)
+        output = tmp_path / label
+        try:
+            ti.aot.export_package(module, output, arch=ti.cpu, artifact_format="unified-bc-library", build_cache=cache)
+        finally:
+            sys.modules.pop(module_path.stem)
+        index = json.loads((cache / "portable/declarations/latest.json").read_bytes())
+        assert bool(index["rejections"]) == (not edited)
+        with ti.aot.borrow_runtime() as runtime, load_package(runtime, output) as sdk:
+            model = sdk.host.Model(False, 1, 32)
+            if edited:
+                model.step()
+                assert model.out[None] == 7
+            else:
+                with pytest.raises(ValueError, match="configuration|variant|selection"):
+                    model.step()
+
+
 def _optional_record_source():
     source = RECORD_RESOURCES_SOURCE.replace(
         "record = scope.record('layout', layout)",
